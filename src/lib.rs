@@ -1,14 +1,26 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+#![forbid(unsafe_code)]
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Rusk mid-level intermediate representation (MIR).
+pub mod mir;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+/// Source text span utilities used by the front-end.
+pub mod source;
+
+mod ast;
+mod lexer;
+mod parser;
+mod typeck;
+
+/// Script front-end: parses and compiles Rusk source to MIR.
+pub mod compiler;
+
+/// Garbage collection (GC) abstraction and implementations.
+pub mod gc;
+
+/// A small interpreter for executing Rusk MIR.
+pub mod interpreter;
+
+/// Standard-library host functions used by the compiler desugarings.
+pub mod stdlib;
+
+pub use interpreter::{Interpreter, RuntimeError, Value};

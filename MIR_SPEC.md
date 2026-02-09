@@ -1,281 +1,492 @@
-# Rusk MIR Specification (v0.1 Draft)
+# Rusk MIR Specification (v0.2 Draft)
 
 This document defines a mid-level intermediate representation (MIR) for Rusk.
-MIR is a control-flow graph (CFG) with explicit effect handling and tail-call
-friendly structure. It is designed to be easy to interpret or compile while
-preserving high-level language constructs (match, effects, containers).
+MIR is a control-flow graph (CFG) with explicit basic blocks and explicit effect
+handling (`push_handler` / `perform` / `resume`). The design goal for v0.2 is:
+
+- **Self-contained and precise**: every instruction and terminator has defined
+  operational semantics, including traps.
+- **Interpreter-friendly**: the IR can be executed directly with a small runtime.
+- **Lowering-friendly**: it is straightforward to lower Rusk constructs
+  (`match`, effects, loops) into MIR.
+
+This spec focuses on **dynamic interpretation semantics**. Implementations are
+free to add static checking/verification (types, move tracking, dominance, …) as
+an additional layer.
 
 ---
 
 ## 1. Goals
 
 - **Structured CFG**: explicit basic blocks and terminators for fast execution.
-- **Effect-aware**: handlers and perform/resume are first-class IR operations.
-- **Low-overhead loops**: no per-iteration closure allocations required.
-- **Language-aligned**: direct lowering from Rusk syntax.
+- **Effect-aware**: handlers and `perform`/`resume` are first-class IR ops.
+- **Low-overhead loops**: no implicit closure allocations for loops.
+- **Language-aligned**: direct lowering from Rusk syntax and semantics.
 
 ---
 
-## 2. Program Structure
+## 2. Conventions
 
-### 2.1 Module
+### 2.1 Determinism
+
+MIR execution is deterministic given:
+- the initial arguments to the entry function, and
+- deterministic host functions.
+
+All instructions evaluate operands **left-to-right**.
+
+### 2.2 Identifiers
+
+MIR uses the following identifier forms in its canonical textual format
+(non-normative but recommended):
+
+- **Function name**: `<ident>` (e.g. `main`, `process_data`)
+- **Block label**: `<ident>` (e.g. `block0`, `block_log`)
+- **Local**: `%<ident>` (e.g. `%0`, `%msg`, `%k`)
+- **Interface method**: `<Interface>.<method>` (e.g. `Logger.log`)
+
+An implementation may intern these names.
+
+---
+
+## 3. Program Structure
+
+### 3.1 Module
 
 A module contains:
-- type declarations (optional)
-- function bodies
-- interface metadata (optional)
+- functions (required)
+- optional interface/type metadata (optional, for tooling/validation/optimization)
+- optional method-resolution metadata (optional, for `vcall`)
 
-### 2.2 Function
+### 3.2 Function
 
-Each function is a CFG of basic blocks:
+A function body is a CFG of basic blocks:
 
-```
-fn <name>(<params>) -> <ret> {
-  block0:
-    ...
-    <terminator>
-  block1:
-    ...
+```text
+fn <name>(<params...>) -> <ret> {
+  <block>...
 }
 ```
 
-### 2.3 Basic Block
+The **entry block** is the first block defined in the function body (by textual
+order). By convention, it is named `block0`.
 
-A basic block is a sequence of instructions ending in one terminator:
-- `br <block>`
-- `cond_br <value> <then_block> <else_block>`
-- `switch <value> [<pat> -> <block>]* <default_block>`
-- `return <value>`
-- `trap <message>`
+Parameters are locals plus optional mutability/type info:
+
+```text
+fn f(readonly %x: int, %y: array) -> unit { ... }
+```
+
+### 3.3 Basic Block
+
+A basic block has:
+- a label (block name)
+- an optional parameter list (block arguments)
+- a list of instructions
+- a single terminator
+
+```text
+block1(%x, %y):
+  %z = copy %x
+  return %z
+```
+
+Block parameters are assigned when control transfers into the block.
 
 ---
 
-## 3. Values and Locals
+## 4. Values, Locals, and Mutability
 
-MIR uses local slots (SSA-like without phi) and explicit moves/copies.
+### 4.1 Runtime Value Model
 
-- Locals: `%0`, `%1`, ...
-- Each instruction writes to a destination local.
-- A local is either **moved** or **copied**.
+MIR values are dynamically typed at runtime. v0.2 requires support for:
 
-### 3.1 Copy vs Move
+- `unit`
+- `bool`
+- `int` (signed 64-bit, two's complement)
+- `float` (IEEE-754 binary64)
+- `string` (UTF-8)
+- `bytes` (opaque byte vector)
+- reference values:
+  - `struct` instances
+  - `enum` instances
+  - `array` instances
+- `fn` references (for `icall`)
+- continuation tokens (for `resume`)
 
-- **Copy**: for primitive/value types (int/float/bool/string/bytes/unit).
-- **Move**: for reference types (struct/enum/array/object).
+Reference values have **identity** (two references may point to the same object).
 
-Implementations may track moves dynamically or statically.
+### 4.2 Locals
+
+Locals are per-function slots. Each slot may be:
+- **uninitialized**
+- **initialized** with a value
+
+Reading an uninitialized local is a trap.
+
+### 4.3 Copy vs Move
+
+MIR has explicit `copy` and `move`.
+
+- `copy` reads a source local and clones the value into the destination.
+  - For reference values, `copy` creates a **new reference** to the same object
+    (it does not deep-clone the object).
+- `move` reads a source local, writes it to the destination, and leaves the
+  source local **uninitialized**.
+
+Implementations may add additional dynamic or static diagnostics (e.g.
+use-after-move), but the operational semantics above are normative.
+
+### 4.4 Readonly Views
+
+Rusk supports `readonly` bindings as a **view restriction** (not necessarily a
+deep freeze). MIR models this by allowing references to be tagged as readonly.
+
+- Any write through a readonly reference traps.
+- Readonly is **per reference view**; other aliases may still be mutable.
+
+MIR provides `as_readonly` to create a readonly view.
 
 ---
 
-## 4. Types (Optional)
+## 5. Types (Optional)
 
 MIR may carry types for optimization/debugging:
-- `int`, `float`, `bool`, `string`, `bytes`, `unit`
-- `struct`, `enum`, `array`, `fn`, `interface`
 
-Type checking is optional; MIR can be interpreted dynamically.
+- primitives: `int`, `float`, `bool`, `string`, `bytes`, `unit`
+- composite: `struct`, `enum`, `array`
+- callable: `fn`
+- effects: `interface`
 
-### 4.1 Host-registered Primitive Types (FFI)
-
-The host may register additional **primitive/value types** (e.g., `Point`) via FFI.
-These types behave like built-in primitives:
-- **Copy semantics**: `copy` is allowed and does not change identity.
-- **By-value passing**: arguments are passed by value in `call/vcall`.
-- **No implicit heap identity**: values are treated as plain data.
-
-Construction and literals for such types are host-defined (e.g., via FFI functions).
+Type checking is optional; a conforming interpreter executes dynamically.
 
 ---
 
-## 5. Instructions
+## 6. Operands, Literals, and Patterns
 
-### 5.1 Constants and Binding
+### 6.1 Operands
 
-- `const <dst> <literal>`
-- `copy <dst> <src>`
-- `move <dst> <src>`
+An operand is either:
+- a local: `%x`
+- a literal: e.g. `unit`, `true`, `123`, `"text"`, `[1, 2, 3]`
 
-### 5.2 Data and Fields
+### 6.2 Literals
 
-- `make_struct <dst> <Type> { field: <val>, ... }`
-- `get_field <dst> <obj> <field>`
-- `set_field <obj> <field> <val>`
-- `index_get <dst> <arr> <idx>`
-- `index_set <arr> <idx> <val>`
-- `len <dst> <arr>`
+Literals may be nested:
+- array literal: `[<lit>, ...]`
+- struct literal: `Type { field: <lit>, ... }`
+- enum literal: `Enum::Variant(<lit>, ...)`
 
-### 5.3 Calls
+Composite literals allocate fresh reference values when evaluated.
 
-- `call <dst> <fn> (<args...>)`
-- `vcall <dst> <obj> <method> (<args...>)`
-- `icall <dst> <fnptr> (<args...>)`
+### 6.3 Patterns (for `switch` and handler clauses)
 
-### 5.4 Control Helpers
+Patterns are a restricted subset of Rusk patterns.
 
-- `phi` is **not** used; explicit temporaries and block arguments should be used.
-- Block arguments are allowed:
-  `block1(%x, %y): ...`
+Supported forms:
+- `_` (wildcard)
+- `bind` (a binding site; textual form uses a local, e.g. `%msg`)
+- literals: `unit`, `true`, `123`, `"s"`, `b\"...\"`
+- enum destructuring: `Enum::Variant(<pat>, ...)`
+- struct destructuring: `Type { field: <pat>, ... }`
+- array prefix: `[<pat>, <pat>, ..]`
+
+Pattern matching is structural on composite values. For struct patterns:
+- missing field traps **at match time** (treated as non-match is allowed by
+  implementations, but v0.2 recommends trap to surface invalid MIR early).
+
+Binding order is **left-to-right, depth-first**.
+
+Determinism rules for map-like constructs:
+- For struct patterns, fields are processed in the **textual order** they appear
+  in the pattern.
+
+When a pattern is used in `switch` or a handler clause:
+- the sequence of bound values (in binding order) is passed as block arguments
+  to the selected target block
+- the target block must declare exactly that number of block parameters
+  (names are for readability; arity is normative)
 
 ---
 
-## 6. Effect System in MIR
+## 7. Instructions
 
-### 6.1 Handler Stack
+Instructions are written in assignment form:
 
-MIR maintains an implicit handler stack during execution.
+```text
+%dst = <op> ...
+```
 
-- `push_handler <handler_id> { <effect_sig> -> <block> }`
-- `pop_handler`
+Some instructions are statement-like and produce no value.
 
-`effect_sig` is `Interface.method(arg_types) -> ret_type`.
+### 7.1 Constants and Binding
 
-### 6.2 Perform
+- `const`:
+  - Syntax: `%dst = const <literal>`
+  - Semantics: evaluate literal, write to `%dst`.
 
-- `perform <dst> <Interface.method> (<args...>)`
+- `copy`:
+  - Syntax: `%dst = copy %src`
+  - Semantics: read `%src`, clone, write to `%dst`.
+  - Trap: `%src` is uninitialized.
+
+- `move`:
+  - Syntax: `%dst = move %src`
+  - Semantics: read `%src`, write to `%dst`, set `%src` to uninitialized.
+  - Trap: `%src` is uninitialized.
+
+- `as_readonly`:
+  - Syntax: `%dst = as_readonly %src`
+  - Semantics: if `%src` is a reference, create a readonly view; otherwise copy.
+  - Trap: `%src` is uninitialized.
+
+### 7.2 Data and Fields
+
+- `make_struct`:
+  - Syntax: `%dst = make_struct <Type> { field: <op>, ... }`
+  - Semantics: allocate a struct instance and write a reference into `%dst`.
+  - Operand evaluation order: field operands are evaluated **left-to-right in
+    textual field order**.
+
+- `make_array`:
+  - Syntax: `%dst = make_array [ <op>, <op>, ... ]`
+  - Semantics: allocate an array instance and write a reference into `%dst`.
+  - Operand evaluation order: elements are evaluated **left-to-right**.
+
+- `make_enum`:
+  - Syntax: `%dst = make_enum <Enum>::<Variant>(<op>, <op>, ...)`
+  - Semantics: allocate an enum instance and write a reference into `%dst`.
+  - Operand evaluation order: fields are evaluated **left-to-right**.
+
+- `get_field`:
+  - Syntax: `%dst = get_field <op_obj> <field>`
+  - Trap: non-struct, missing field.
+
+- `set_field`:
+  - Syntax: `set_field <op_obj> <field> <op_val>`
+  - Trap: readonly reference, non-struct, missing field.
+
+- `index_get`:
+  - Syntax: `%dst = index_get <op_arr> <op_idx>`
+  - Trap: non-array, non-int index, out-of-bounds.
+
+- `index_set`:
+  - Syntax: `index_set <op_arr> <op_idx> <op_val>`
+  - Trap: readonly reference, non-array, non-int index, out-of-bounds.
+
+- `len`:
+  - Syntax: `%dst = len <op_arr>`
+  - Trap: non-array.
+
+### 7.3 Calls
+
+- `call` (direct):
+  - Syntax: `%dst = call <fn_name> (<op_args...>)`
+  - Semantics: call a MIR function or a host function by name.
+  - Convention: `%dst` may be written as `_` to indicate the return value is
+    ignored.
+
+- `icall` (indirect):
+  - Syntax: `%dst = icall <op_fnptr> (<op_args...>)`
+  - Trap: operand is not a function reference.
+
+- `vcall` (virtual):
+  - Syntax: `%dst = vcall <op_obj> <method> (<op_args...>)`
+  - Semantics: method resolution is module/host-defined.
+  - Trap: missing method resolution.
+
+Argument passing respects Rusk’s value/reference semantics:
+- primitives and other value types are cloned
+- reference values are passed by reference (cloned reference)
+- readonly parameters create readonly views in the callee
+
+---
+
+## 8. Terminators (Control Flow)
+
+Every basic block ends with exactly one terminator.
+
+- `br`:
+  - Syntax: `br <block>(<op_args...>)`
+  - Semantics: evaluate args and enter target block, assigning block params.
+  - Trap: invalid MIR where arg count != target block param count.
+
+- `cond_br`:
+  - Syntax: `cond_br <op_cond> <then_block>(<args...>) <else_block>(<args...>)`
+  - Trap: condition is not `bool`.
+  - Trap: invalid MIR where arg count != target block param count.
+
+- `switch`:
+  - Syntax:
+    ```text
+    switch <op_value> [
+      <pattern> -> <block>,
+      ...
+    ] <default_block>
+    ```
+  - Semantics:
+    - evaluate the scrutinee
+    - try cases in order
+    - on first match, enter the target block, passing pattern bindings as block args
+  - Trap: invalid MIR where target block param count != binding count.
+
+- `return`:
+  - Syntax: `return <op_value>`
+
+- `trap`:
+  - Syntax: `trap <message>`
+  - Semantics: terminate execution with a runtime error.
+
+---
+
+## 9. Effect System in MIR
+
+### 9.1 Handler Stack
+
+MIR maintains an implicit **handler stack** during execution.
+
+- `push_handler`:
+  - Syntax:
+    ```text
+    push_handler <handler_id> {
+      <Interface.method>(<pat_args...>) -> <block>,
+      ...
+    }
+    ```
+  - Semantics: push a handler entry owned by the current frame.
+  - Trap: invalid MIR where a handler target block does not have
+    `binding_count + 1` parameters (the final parameter receives the
+    continuation token).
+
+- `pop_handler`:
+  - Syntax: `pop_handler`
+  - Semantics: pop the most-recent handler.
+  - Trap: mismatched pop (top handler not owned by current frame).
+
+### 9.2 `perform`
+
+- Syntax:
+  ```text
+  %dst = perform <Interface.method>(<op_args...>)
+  ```
 
 Semantics:
-1. Walk the handler stack from top to bottom.
-2. Select the first handler that matches `Interface.method` and arguments.
-3. Suspend at this perform site and jump to the handler block with:
-   - effect arguments
-   - an opaque **continuation token** `k` (first-class value)
+1. Evaluate arguments.
+2. Walk the handler stack from top to bottom.
+3. For each handler entry, try its clauses in order:
+   - clause matches if the interface/method matches and all patterns match args.
+4. On the first match:
+   - capture the current execution state as a **one-shot continuation token** `k`
+     - the captured computation is **delimited** by the selected handler’s owning frame:
+       frames below that owning frame are not part of the captured stack
+   - unwind to the owning frame of the selected handler
+   - transfer control to the handler block with:
+     - the clause’s bound values (in binding order)
+     - `k` as the final block argument
+5. If no handler matches, trap `"unhandled effect"`.
 
-If no handler matches, `trap "unhandled effect"`.
+### 9.3 Continuations and `resume`
 
-### 6.3 Resume
-
-- `resume <dst> <k> <value>`
+- Syntax:
+  ```text
+  %dst = resume <op_k> <op_value>
+  ```
 
 Semantics:
-- `resume` continues the suspended computation at the original perform site.
-- `resume` may be invoked **outside** the original handler (first-class continuation).
-- Resuming switches to the captured continuation stack; control does not return to
-  the caller until the continuation completes.
-- `resume` returns the final value of that continuation into `<dst>`.
-- `resume` is **one-shot**; multiple calls are runtime errors.
+- `resume` consumes the continuation token `k` (one-shot).
+- `resume` switches execution to the captured execution stack, injecting
+  `<op_value>` as the result of the suspended `perform`.
+- Execution proceeds until that captured computation terminates by returning from
+  its bottom-most frame.
+- The final returned value becomes the result of `resume` and is written to `%dst`.
 
-### 6.4 Handler Return
+Traps:
+- resuming an already-resumed token
+- resuming a non-continuation value
 
-A handler block may:
-- call `resume`, or
-- return a value directly (treated as the perform result and **discarding** the
-  captured continuation).
+### 9.4 Abandoning a Continuation
+
+If a captured continuation token `k` is **never resumed** and becomes
+unreachable (dropped), then the captured computation will never run.
+
+Not resuming immediately is allowed: a handler may store or return `k` and
+resume it later (first-class continuations). Returning from a handler without
+resuming is therefore the MIR-level mechanism behind both:
+- “abort” behaviors (drop `k`), and
+- “delayed continuation” behaviors (resume `k` later).
 
 ---
 
-## 7. Lowering Rules (High-Level to MIR)
+## 10. Calling Convention
 
-### 7.1 match with Effect Branches
+The v0.2 interpreter model uses a normal call stack:
+
+- `call` pushes a new frame and starts executing at the callee’s entry block.
+- `return` pops the current frame and returns to the caller.
+- tail-call optimization is not required by this spec, but MIR is structured so
+  it is straightforward to add.
+
+---
+
+## 11. Errors and Traps
+
+MIR uses `trap <message>` and implicit traps for runtime errors such as:
+
+- unhandled effect
+- invalid `resume` (non-continuation / already resumed)
+- illegal write through a readonly reference
+- out-of-bounds array index
+- missing field / wrong type for an operation
+- reading an uninitialized local
+
+Implementations may map traps to language-level errors.
+
+---
+
+## 12. Lowering Guidelines (Rusk → MIR)
+
+### 12.1 `match` with Effect Branches
 
 Rusk:
 
-```
+```rust
 match expr {
   () => a,
   @Logger.log(msg) => { print(msg); resume(()) }
 }
 ```
 
-MIR sketch:
+MIR sketch (illustrative):
 
-```
+```text
 block0:
-  push_handler H0 { Logger.log -> block_log }
+  push_handler H0 { Logger.log(%msg) -> block_log }
   %v = <eval expr>
   pop_handler
   switch %v [unit -> block_done] block_default
 
 block_log(%msg, %k):
-  call _ = print(%msg)
-  resume %r %k unit
+  _ = call print(%msg)
+  %r = resume %k unit
   return %r
 ```
 
 Notes:
-- The handler is active only during evaluation of `expr`.
-- Effect branches do not participate in value matching.
+- The handler is active only during evaluation of `expr` (between push/pop).
+- Effect branches do not participate in the final value `switch` of `match`.
+- To make `resume` return at a useful boundary, lowering may wrap the handled
+  region into a helper function and `call` it from the surrounding code.
 
-### 7.2 Loop
+### 12.2 Loops
 
-`while cond { body }` lowers to `cond_br` + backedge.
-
----
-
-## 8. Variables and Mutability
-
-- `let` maps to a local slot.
-- Assignment `x = expr` becomes `move`/`copy` into that slot.
-- `readonly` restrictions are enforced at runtime (or checked earlier).
+`while cond { body }` lowers to `cond_br` with a backedge.
 
 ---
 
-## 9. Calling Convention
+## 13. Versioning
 
-Arguments are passed as:
-- **by value** for primitives
-- **by reference** for complex types
-
-MIR is responsible for respecting this rule in `call/vcall`.
-
----
-
-## 10. Errors and Traps
-
-MIR uses `trap <message>` for:
-- unhandled effect
-- invalid `resume`
-- illegal write to `readonly`
-- out-of-bounds index
-
-Implementations may map traps to language-level errors.
-
----
-
-## 11. Example MIR (Complete)
-
-Rusk:
-
-```
-fn main() {
-  let data = [1, 2, 3];
-  match process_data(data) {
-    () => print("Done"),
-    @Logger.log(msg) => { print(msg); resume(()) }
-  }
-}
-```
-
-MIR sketch:
-
-```
-fn main() -> unit {
-block0:
-  %0 = const [1, 2, 3]
-  push_handler H0 { Logger.log -> block_log }
-  %1 = call process_data(%0)
-  pop_handler
-  switch %1 [unit -> block_done] block_default
-
-block_log(%msg, %k):
-  call _ = print(%msg)
-  resume %r %k unit
-  return %r
-
-block_done:
-  call _ = print("Done")
-  return unit
-
-block_default:
-  trap "non-exhaustive match"
-}
-```
-
----
-
-## 12. Versioning
-
-MIR is intentionally minimal in v0.1. Future extensions may add:
-- explicit allocations
-- optimized pattern matching tables
-- typed references or borrow metadata
+MIR is intentionally minimal in v0.2. Future extensions may add:
+- explicit heap allocation instructions and GC metadata
+- optimized decision trees for `switch`
+- richer value categories and typed references
 - multi-shot continuations

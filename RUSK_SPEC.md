@@ -1,388 +1,866 @@
-这是 **Rusk (暂定名) 语言规范**。
+# Rusk Language Specification (v0.4)
 
-这份规范旨在定义一个**内核极简、扩展性极强**的现代嵌入式语言。它保留了传统的循环关键字以确保即时性能，同时将大量语法糖（Effect, Async, Generators, Resource Management）统一到了**接口（Interface）**与**模式匹配（Match）**的机制中。
+本文件是 **Rusk 语言规范**（Rusk Language Spec）。
+
+Rusk 的目标是：在语法上接近 Rust（块表达式、`match`、显式可变性控制），在工程体验上接近 TypeScript（类型推断、泛型、接口驱动的抽象），并以 **代数效果（Algebraic Effects）** 作为一等机制统一异常/异步/生成器等控制流扩展。
+
+本仓库的实现是一个“脚本 → MIR → 解释执行”的参考实现：
+
+- `RUSK_SPEC.md` 定义源语言（本文件）。
+- `MIR_SPEC.md` 定义中间表示 MIR。
+- 解释器执行 MIR，并提供宿主函数（host functions）作为“标准库”实现。
+
+本规范以 **可实现** 为前提：规范中出现的语法与语义都必须能完整编译到当前版本的 MIR 并在解释器中运行（不允许“未来再实现”的占位条款）。
 
 ---
 
-# Rusk Language Specification (v0.3 Draft)
+## 0. Notation
 
-## 1. 核心哲学 (Core Philosophy)
-
-* **统一性 (Unification)**：副作用（Effect）即接口（Interface），处理（Handle）即匹配（Match）。
-* **库优先 (Library First)**：语言只提供机制，并发 (`scope`)、模块 (`import`)、元编程 (`quote`) 下放到标准库。
-* **值/引用语义 (Value/Reference Semantics)**：基础类型按值传递，复杂类型按引用传递；默认可变，`const/readonly` 可标记只读。
-* **性能务实 (Pragmatic Performance)**：保留 `loop`/`while` 等原语，避免过度依赖编译器的高级优化（如 TCO）。
+- `unit` means the unit value `()`.
+- “Trap” means a runtime error (MIR `trap`).
+- “Host function” means an externally provided function callable from MIR via `call`.
 
 ---
 
-## 2. 词法与语法 (Lexical & Syntax)
+## 1. Source Text
 
-### 2.1 关键字 (Keywords)
+### 1.1 Encoding
 
-为了保持内核极简，我们只保留了以下必要的关键字：
+Source files are UTF-8.
 
-| 类别 | 关键字 | 说明 |
-| --- | --- | --- |
-| **定义** | `fn`, `let`, `struct`, `enum`, `interface`, `impl` | 基础类型与函数定义 |
-| **流程** | `if`, `else`, `match`, `return`, `loop`, `while`, `for`, `in`, `break`, `continue` | **保留循环原语**以保证基础性能 |
-| **限定** | `const`, `readonly` | 只读绑定与只读视图 |
+### 1.2 Whitespace and Comments
 
-*(注：已移除 `effect`, `perform`, `resume`, `mut`, `ref`, `take`, `async`, `await`, `yield`, `try`, `catch`, `throw`, `with`, `class`)*
+- Whitespace separates tokens but is otherwise insignificant (except inside string/bytes literals).
+- Line comments: `// ...` until end-of-line.
+- Block comments: `/* ... */` may nest.
 
-### 2.2 核心语法糖
+---
 
-* **Trailing Lambda (尾随闭包)**：
-```rust
-// 允许 func(arg) { code } 形式
-std.concurrency.scope { ... } 
+## 2. Lexical Tokens
 
-// 带参数的闭包
-std.array.map(items, |x| { x + 1 });
+### 2.1 Identifiers
+
+Identifiers match:
+
+- first character: `_` or Unicode XID_Start
+- subsequent characters: Unicode XID_Continue
+
+Rusk treats keywords as reserved and they cannot be used as identifiers.
+
+### 2.2 Keywords
+
+Items and declarations:
+
+`fn`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
+
+Control flow:
+
+`if`, `else`, `match`, `return`, `loop`, `while`, `for`, `in`, `break`, `continue`
+
+### 2.3 Operators and Delimiters
+
+Delimiters:
+
+`(` `)` `{` `}` `[` `]` `,` `:` `;` `.` `::` `=>`
+
+Operators:
+
+`=` `+` `-` `*` `/` `%`
+
+`==` `!=` `<` `<=` `>` `>=`
+
+`&&` `||` `!`
+
+Effect marker:
+
+`@`
+
+> Note: Operators are syntactic sugar; they lower to standard-library function calls.
+
+---
+
+## 3. Grammar (EBNF)
+
+The grammar below is descriptive and intended to be unambiguous for implementation.
+
+### 3.1 Program
 
 ```
+Program        := Item* ;
 
+Item           := FnItem | StructItem | EnumItem | InterfaceItem | ImplItem ;
+```
 
-* **Name Binding Expression (参数绑定)**：
+### 3.2 Items
+
+#### 3.2.1 Functions
+
+```
+FnItem         := "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? Block ;
+ParamList      := Param ("," Param)* (",")? ;
+Param          := ParamMut? Ident ":" Type ;
+ParamMut       := "readonly" ;
+ReturnType     := "->" Type ;
+```
+
+Notes:
+- Parameters are immutable bindings; mutability in Rusk refers to *object mutability* (heap objects), not rebinding.
+- `readonly` on a parameter means the parameter is a readonly view (attempting to mutate through it traps).
+
+#### 3.2.2 Structs
+
+```
+StructItem     := "struct" Ident GenericParams? "{" FieldList? "}" ;
+FieldList      := Field ("," Field)* (",")? ;
+Field          := Ident ":" Type ;
+```
+
+Struct values are heap-allocated objects with named fields.
+
+#### 3.2.3 Enums
+
+```
+EnumItem       := "enum" Ident GenericParams? "{" VariantList? "}" ;
+VariantList    := Variant ("," Variant)* (",")? ;
+Variant        := Ident TupleFields? ;
+TupleFields    := "(" TypeList? ")" ;
+TypeList       := Type ("," Type)* (",")? ;
+```
+
+Enum values are heap-allocated tagged unions.
+
+#### 3.2.4 Interfaces
+
+Interfaces define:
+- (1) method signatures for static dispatch (compile-time resolved calls), and
+- (2) effect signatures for `@Interface.method(...)`.
+
+```
+InterfaceItem  := "interface" Ident GenericParams? "{" InterfaceMember* "}" ;
+InterfaceMember:= "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? ";" ;
+```
+
+#### 3.2.5 Implementations
+
+```
+ImplItem       := "impl" ImplHeader "{" ImplMember* "}" ;
+ImplHeader     := Ident GenericArgs?                    // inherent impl: impl Type { ... }
+               | Ident GenericArgs? "for" Ident GenericArgs? ; // interface impl: impl Interface for Type { ... }
+
+ImplMember     := FnItem ;
+```
+
+### 3.3 Generics
+
+Rusk supports higher-kinded type parameters (HKTs) in a limited, implementable form.
+
+Kinds in v0.4 are restricted to:
+- `Type` (arity 0), written `T`
+- type constructors of arity `n >= 1`, written `F<_, _, ...>` with `n` underscores
+
+```
+GenericParams  := "<" GenericParam ("," GenericParam)* (",")? ">" ;
+GenericParam   := Ident | Ident "<" ("_"
+                                  | "_" ("," "_")+
+                                  ) ">" ;
+
+GenericArgs    := "<" Type ("," Type)* (",")? ">" ;
+```
+
+Examples:
+
 ```rust
-// 允许在参数位置进行求值和重命名
-send(m = msg);
-open(f = file.open());
+fn id<T>(x: T) -> T { x }
 
-// 与尾随闭包搭配时，绑定进入闭包作用域
-std.resource.with(file = File.open("log.txt")) {
-    write_line(file, "hello");
+// F is a unary type constructor (kind Type -> Type)
+fn map<F<_>, A, B>(f: fn(A) -> B, xs: F<A>) -> F<B> { ... }
+```
+
+### 3.4 Types
+
+```
+Type           := ("readonly")? TypeAtom ;
+
+TypeAtom       := PrimType
+               | "[" Type "]"                      // dynamic array type
+               | "fn" "(" TypeList? ")" "->" Type  // function type
+               | PathType ;
+
+PrimType       := "unit" | "bool" | "int" | "float" | "string" | "bytes" ;
+
+PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
+```
+
+Notes:
+- `PathType` is used for nominal types (structs/enums/interfaces) and associated names.
+- For this implementation, generic type arguments are **erased at runtime** (they do not affect runtime representation).
+- `readonly T` is a *view type* for reference-like values (arrays/structs/enums). Writing through a `readonly` view is a compile-time error and also traps at runtime.
+
+### 3.5 Statements and Blocks
+
+```
+Block          := "{" Stmt* Expr? "}" ;
+
+Stmt           := LetStmt
+               | ConstStmt
+               | ReadonlyStmt
+               | ReturnStmt
+               | BreakStmt
+               | ContinueStmt
+               | ExprStmt ;
+
+LetStmt        := "let" Ident (":" Type)? ("=" Expr)? ";" ;
+ConstStmt      := "const" Ident (":" Type)? "=" Expr ";" ;
+ReadonlyStmt   := "readonly" Ident (":" Type)? "=" Expr ";" ;
+
+ReturnStmt     := "return" Expr? ";" ;
+BreakStmt      := "break" ";" ;
+ContinueStmt   := "continue" ";" ;
+
+ExprStmt       := Expr ";" ;
+```
+
+Notes:
+- `let x;` declares an uninitialized local (reading it before assignment is a runtime error).
+- `let x = e;` initializes `x`.
+- `const x = e;` prevents rebinding of `x` (but does not deep-freeze referenced objects).
+- `readonly x = e;` is equivalent to `const x = e;` plus a readonly view: it prevents rebinding and forbids mutation through `x`.
+
+### 3.6 Expressions
+
+Rusk expressions are Rust-like: blocks, `if`, and `match` are expressions.
+
+Precedence (high → low):
+
+1. postfix: call, field, index
+2. unary: `!` `-`
+3. multiplicative: `*` `/` `%`
+4. additive: `+` `-`
+5. comparison: `<` `<=` `>` `>=`
+6. equality: `==` `!=`
+7. logical and: `&&`
+8. logical or: `||`
+9. assignment: `=`
+
+```
+Expr           := AssignExpr ;
+
+AssignExpr     := OrExpr ( "=" AssignExpr )? ;
+OrExpr         := AndExpr ( "||" AndExpr )* ;
+AndExpr        := EqExpr ( "&&" EqExpr )* ;
+EqExpr         := CmpExpr ( ( "==" | "!=" ) CmpExpr )* ;
+CmpExpr        := AddExpr ( ( "<" | "<=" | ">" | ">=" ) AddExpr )* ;
+AddExpr        := MulExpr ( ( "+" | "-" ) MulExpr )* ;
+MulExpr        := UnaryExpr ( ( "*" | "/" | "%" ) UnaryExpr )* ;
+UnaryExpr      := ( "!" | "-" ) UnaryExpr | PostfixExpr ;
+
+PostfixExpr    := PrimaryExpr Postfix* ;
+Postfix        := Call | Field | Index ;
+
+Call           := "(" ArgList? ")" ;
+ArgList        := Expr ("," Expr)* (",")? ;
+Field          := "." Ident ;
+Index          := "[" Expr "]" ;
+
+PrimaryExpr    := Literal
+               | PathExpr
+               | ArrayLit
+               | StructLit
+               | EnumLit
+               | EffectCall
+               | Lambda
+               | IfExpr
+               | MatchExpr
+               | LoopExpr
+               | WhileExpr
+               | ForExpr
+               | Block
+               | "(" Expr ")" ;
+
+PathExpr       := Ident ("::" Ident)* ;
+
+EffectCall     := "@" PathExpr "." Ident "(" ArgList? ")" ;
+```
+
+#### 3.6.1 Literals
+
+```
+Literal        := "()" | BoolLit | IntLit | FloatLit | StringLit | BytesLit | FStringLit ;
+BoolLit        := "true" | "false" ;
+IntLit         := DecIntLit | HexIntLit | OctIntLit | BinIntLit ;
+DecIntLit      := Digit (Digit | "_")* ;
+HexIntLit      := "0x" HexDigit (HexDigit | "_")* ;
+OctIntLit      := "0o" OctDigit (OctDigit | "_")* ;
+BinIntLit      := "0b" BinDigit (BinDigit | "_")* ;
+
+FloatLit       := DecIntLit "." DecIntLit (ExponentPart)? | DecIntLit ExponentPart ;
+ExponentPart   := ("e" | "E") ("+" | "-")? DecIntLit ;
+
+// StringLit / BytesLit / FStringLit are lexical tokens with escapes (see below).
+
+Digit          := "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+HexDigit       := Digit | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" ;
+OctDigit       := "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" ;
+BinDigit       := "0" | "1" ;
+```
+
+String literals (`StringLit`):
+
+- Written as `"..."`.
+- Represent UTF-8 strings.
+- Support escapes:
+  - `\\`, `\"`
+  - `\n`, `\r`, `\t`, `\0`
+  - `\u{...}` (1+ hex digits, Unicode scalar value)
+
+Byte string literals (`BytesLit`):
+
+- Written as `b"..."`.
+- Represent raw `bytes`.
+- Support escapes:
+  - `\\`, `\"`
+  - `\n`, `\r`, `\t`, `\0`
+  - `\xHH` (exactly two hex digits)
+- Unescaped characters must be ASCII (0x20..=0x7E excluding `"` and `\`).
+
+Formatted strings:
+- `f"..."` supports interpolation via `{ Expr }` segments.
+- `{{` and `}}` encode literal `{` and `}` respectively.
+- Desugaring is defined in §9.3.
+
+#### 3.6.2 Array, Struct, Enum literals
+
+```
+ArrayLit       := "[" (Expr ("," Expr)*)? (",")? "]" ;
+
+StructLit      := Ident "{" (StructFieldInit ("," StructFieldInit)*)? (",")? "}" ;
+StructFieldInit:= Ident ":" Expr ;
+
+EnumLit        := Ident "::" Ident "(" (Expr ("," Expr)*)? (",")? ")" ;
+```
+
+#### 3.6.3 Lambdas
+
+```
+Lambda         := "|" LambdaParams? "|" Block ;
+LambdaParams   := LambdaParam ("," LambdaParam)* (",")? ;
+LambdaParam    := Ident (":" Type)? ;
+```
+
+Lambda parameter types may be inferred from context; if they cannot be inferred,
+they must be explicitly annotated.
+
+#### 3.6.4 If
+
+```
+IfExpr         := "if" Expr Block ("else" (IfExpr | Block))? ;
+```
+
+Parsing note (struct literals vs blocks):
+
+Because `{ ... }` is used for both blocks and struct literals (`Type { field: expr, ... }`),
+in positions where a block follows immediately (`if` / `while` conditions, `for` iterables,
+`match` scrutinees), a struct literal must be parenthesized to disambiguate:
+
+```rust
+// ok
+if (Point { x: 1, y: 2 }).x == 1 { ... }
+
+// also ok
+match (Point { x: 1, y: 2 }) { ... }
+```
+
+#### 3.6.5 Match
+
+Match arms can be value arms or effect arms (see §7).
+
+```
+MatchExpr      := "match" Expr "{" MatchArm* "}" ;
+MatchArm       := (EffectPat | ValuePat) "=>" BlockOrExpr ","? ;
+BlockOrExpr    := Block | Expr ;
+ValuePat       := Pattern ;
+EffectPat      := "@" PathExpr "." Ident "(" PatList? ")" ;
+PatList        := Pattern ("," Pattern)* (",")? ;
+```
+
+#### 3.6.6 Loops
+
+```
+LoopExpr       := "loop" Block ;
+WhileExpr      := "while" Expr Block ;
+```
+
+`for` is provided as syntax:
+
+```
+ForExpr        := "for" Ident "in" Expr Block ;
+```
+
+and desugars (in the type system and compiler) to a `while` loop over an iterator
+protocol in the standard library (see §9.4).
+
+### 3.7 Patterns
+
+Patterns are used in `match` value arms and in effect arms’ parameter patterns.
+
+```
+Pattern        := "_"                       // wildcard
+               | Ident                     // binding
+               | LiteralPat
+               | EnumPat
+               | StructPat
+               | ArrayPrefixPat ;
+
+LiteralPat     := "()" | BoolLit | IntLit | FloatLit | StringLit | BytesLit ;
+
+EnumPat        := Ident "::" Ident "(" (Pattern ("," Pattern)*)? (",")? ")" ;
+StructPat      := Ident "{" (StructPatField ("," StructPatField)*)? (",")? "}" ;
+StructPatField := Ident ":" Pattern ;
+
+ArrayPrefixPat := "[" (Pattern ("," Pattern)*)? (",")? (".." )? "]" ;
+```
+
+Notes:
+- `Ident` in a pattern always binds (there are no “constant patterns” for names).
+- Array prefix patterns match `[p1, p2, ..]` (prefix) and `[p1, p2]` (exact length).
+
+---
+
+## 4. Runtime Model
+
+### 4.1 Values
+
+Runtime values are:
+
+- `unit`, `bool`, `int`, `float`, `string`, `bytes`
+- heap references: structs, enums, arrays (shared references)
+- function values (first-class, referring to a named function)
+- continuation tokens (captured by effects)
+
+### 4.2 Heap Objects and Sharing
+
+Structs/enums/arrays are heap-allocated and passed by reference. Copying a reference
+creates an alias; mutations are observable through all aliases.
+
+### 4.3 Readonly Views
+
+`readonly` does **not** deep-freeze an object graph. It creates a *view* that forbids
+mutation **through that particular binding/reference**.
+
+- Mutating through a readonly view traps at runtime.
+- Mutating through a non-readonly alias remains allowed and is observable.
+
+This matches MIR’s `as_readonly` behavior.
+
+### 4.4 Uninitialized Locals
+
+`let x;` introduces an uninitialized local. Reading `x` before it is initialized is
+a runtime error (trap).
+
+### 4.5 Evaluation Order
+
+Evaluation is left-to-right:
+
+- function call arguments
+- struct field initializers
+- array elements
+- binary operator operands
+- match scrutinee evaluation
+
+This is a **semantic guarantee** (not merely an implementation detail).
+
+### 4.6 Assignment (Lvalues)
+
+Assignment is an expression but yields `unit` (Rust-like).
+
+The left-hand side of `=` must be one of:
+
+- a local name: `x = expr` (only if `x` was declared with `let`, not `const`/`readonly`)
+- a struct field: `obj.field = expr`
+- an array slot: `arr[index] = expr`
+
+Evaluation order is left-to-right:
+
+- `x = expr`: evaluate `expr`, then assign.
+- `obj.field = expr`: evaluate `obj`, then evaluate `expr`, then mutate the field.
+- `arr[index] = expr`: evaluate `arr`, then `index`, then `expr`, then mutate the slot.
+
+If the target is a readonly view (`readonly T`), the mutation is rejected by the type
+checker and also traps at runtime if reached.
+
+---
+
+## 5. Control Flow Semantics
+
+### 5.1 Blocks
+
+`{ s1; s2; expr }` evaluates statements in order, and yields the value of the final
+expression if present; otherwise it yields `unit`.
+
+### 5.2 If
+
+`if cond { a } else { b }` evaluates `cond`; if true evaluates and yields `a`,
+otherwise evaluates and yields `b`. `else` is required unless the `if` is used in a
+statement position (ends with `;`), in which case missing `else` yields `unit`.
+
+### 5.3 While / Loop / For
+
+- `loop { ... }` repeats forever until a `break`.
+- `while cond { ... }` repeats while `cond` evaluates to true.
+- `break` exits the innermost loop and yields `unit` for that loop expression.
+- `continue` jumps to the next iteration of the innermost loop.
+
+`for x in iter { body }` desugars via §9.4.
+
+### 5.4 Return
+
+`return expr;` exits the current function with value `expr`. `return;` returns `unit`.
+
+---
+
+## 6. Interfaces and Methods
+
+Rusk uses `interface` + `impl` similarly to Rust traits, but also reuses interfaces
+as effect namespaces (see §7).
+
+### 6.1 Interface Methods (non-effect calls)
+
+Interface methods are called using explicit qualification:
+
+```rust
+Logger::log(console, "hello");
+```
+
+This is always statically resolved by the compiler based on the selected `impl`.
+
+Method-call sugar is allowed:
+
+```rust
+console.log("hello")
+```
+
+and is equivalent to `Logger::log(console, "hello")` **only if** the call is
+unambiguous (exactly one interface method named `log` is applicable). Otherwise,
+the compiler reports an ambiguity error and requires explicit qualification.
+
+> Rationale: this keeps “TypeScript-like ergonomics” while maintaining “Rust-like”
+> explicitness where it matters.
+
+### 6.2 Inherent Methods
+
+Inherent methods are defined with `impl Type { ... }` and called as:
+
+```rust
+Point::new(1, 2)
+point.len()
+```
+
+Resolution rules:
+
+1. Inherent methods on the receiver’s nominal type
+2. Interface methods (if unambiguous)
+3. Otherwise: error
+
+### 6.3 Overloading
+
+There is no ad-hoc overloading by argument types. A name resolves to at most one
+call target after the method resolution rules above are applied.
+
+---
+
+## 7. Effects and Handlers
+
+### 7.1 Effect Calls
+
+An effect call is written:
+
+```rust
+@Logger.log("msg")
+```
+
+and is distinct from a normal interface method call.
+
+Semantics:
+
+- At runtime, the interpreter searches the dynamic handler stack (installed by
+  `match` effect arms; §7.2) for a matching handler clause.
+- If none is found, the program traps with an “unhandled effect” error.
+
+### 7.2 Match as an Effect Handler
+
+`match` has two roles:
+
+1. it pattern-matches the produced value of its scrutinee expression (value arms),
+2. it installs effect handlers while evaluating the scrutinee (effect arms).
+
+Example:
+
+```rust
+match compute() {
+  @Logger.log(msg) => { print(msg); resume(()) }
+  0 => 1
+  n => n + 1
 }
-
-```
-*(注：当不与尾随闭包配合使用时，该语法仅等价于普通参数求值与传递，不会引入新的作用域或绑定效果。)*
-
-* **Effect Marker (显式 Effect 标记)**：
-```rust
-// 使用 @ 前缀显式触发 Effect
-@Logger.log("msg");
 ```
 
-### 2.3 属性 (Attributes)
+Rules:
 
-属性采用 Rust 风格语法，用于标注 item（函数、结构、接口、impl 等）：
+- Effect arms are active **only while evaluating the scrutinee expression**.
+- Effect arms do not participate in the final value pattern matching.
+- Multiple effect arms are tried in source order; the first whose parameter
+  patterns match the effect arguments is selected.
 
-```rust
-#[rusk_export]
-fn foo() { ... }
+### 7.3 `resume`
+
+Inside an effect arm, a special identifier `resume` is in scope (it cannot be
+redefined). It behaves like a function:
+
+```
+resume(value_for_effect_call) -> handled_result
 ```
 
-### 2.4 字面量与基础表达式 (Literals & Basics)
+Where:
 
-* **数字**：`123`, `3.14`
-* **字符串**：`"text"`（UTF-8）
-* **格式化字符串**：`f"Hello {name}"`
-* **字节串**：`b"raw"`（bytes）
-* **数组/列表**：`[1, 2, 3]`
-* **结构体字面量**：`Point { x: 1, y: 2 }`
-* **枚举变体**：`Result::Ok(val)`
-* **单元值**：`()`（对应 `unit`）
-* **注释**：`//` 行注释，`/* ... */` 块注释
+- `value_for_effect_call` becomes the return value of the suspended effect call.
+- `handled_result` is the final result of evaluating the *handled region*
+  (i.e., the entire `match` expression) after resuming: the resumed scrutinee
+  evaluation *followed by* value-arm matching.
 
-`if`/`match`/`loop` 等均为表达式，可产生值。
-表达式求值顺序为从左到右。
+`resume` is **one-shot**: calling it more than once traps.
 
-### 2.5 作用域与闭包 (Scopes & Closures)
+If an effect arm completes without calling `resume`, the captured continuation is
+abandoned and the effect arm’s value becomes the result of the whole `match`
+expression.
 
-* `{ ... }` 引入新的词法作用域；`let`/`const`/`readonly` 为块级作用域。
-* 闭包通过 `|args| { ... }` 表达，捕获外部变量为共享引用（遵循其 `const/readonly` 约束）。
-* `return` 结束当前函数；`break/continue` 作用于最近的循环。
+### 7.4 Delimitation Guarantee
 
-### 2.6 模块与元编程 (Library-level)
+Rusk specifies that effect handlers created by `match` are *delimited* to the
+scrutinee evaluation.
 
-* 模块系统与元编程（如 `import`/`quote`）不属于核心语法，交由标准库或宿主实现。
-* 具体语法与加载策略由宿主决定（例如文件系统、内存模块或嵌入式资源）。
+The MIR runtime captures a **delimited** continuation: resuming a continuation
+returns when the selected handler’s *owning frame* returns (see `MIR_SPEC.md`).
 
+Therefore, the compiler must ensure that a `match` expression with effect arms
+creates an owning frame for the handled region. The reference implementation does
+this by lowering such `match` expressions into a helper function (so the helper
+frame becomes the handler owner), ensuring `resume(...)` returns to the `match`
+boundary rather than unwinding to an outer function.
 
+This is a semantic requirement of the source language.
 
 ---
 
-## 3. 类型系统 (Type System)
+## 8. Type System
 
-### 3.1 统一接口模型 (The Unified Interface Model)
+Rusk has a static type system with global checking at compile time. Types are erased
+at runtime.
 
-**这是 Rusk 最核心的创新。** `interface` 关键字承载了三种语义，取决于调用方式：
+### 8.1 Design Goals
 
-1. **动态分派 (Dynamic Dispatch)**：`instance.method()`
-* 对具体的对象实例调用。
-* 通过 VTable 查找实现。
+- Soundness-first: no implicit `any`.
+- TypeScript-like inference where possible (locals and generic arguments).
+- Rust-like explicitness at public boundaries (items must have types).
+- First-class generics with limited HKTs.
 
+### 8.2 Required Type Annotations
 
-2. **静态/关联方法 (Static/Associated Method)**：`Interface::method()`
-* 对接口类型进行静态调用（类似静态函数或工厂）。
+The following must be fully annotated:
 
-3. **代数效果 (Algebraic Effect)**：`@Interface.method()`
-* 显式触发 Effect 调用。
-* 通过调用栈（Call Stack）查找 Handler。
-* **无需 `effect` 或 `perform` 关键字，但必须使用 `@` 显式标记。**
+- all `fn` item parameters and return types
+- all `struct` field types
+- all `enum` variant field types
+- all `interface` method parameter and return types
 
-*(注：`Interface.method()` 形式为语法错误；Effect 使用 `@Interface.method()`，静态方法使用 `Interface::method()`。)*
+Local `let` bindings may omit types (inferred).
 
-**实现语法 (Impl Syntax)**：
+### 8.3 Type Forms
+
+Nominal types:
+
+- primitives: `unit`, `bool`, `int`, `float`, `string`, `bytes`
+- arrays: `[T]`
+- structs: `Name<...>`
+- enums: `Name<...>`
+- functions: `fn(T1, T2, ...) -> R`
+- interfaces: `Interface<...>`
+- readonly views: `readonly T` (only meaningful when `T` is an array/struct/enum; it forbids mutation through that reference)
+
+### 8.4 Generics and Kinds
+
+Each generic parameter has a kind:
+
+- `T` has kind `Type`
+- `F<_...>` has kind `Type^n -> Type` where `n` is the number of underscores
+
+Kind checking rules:
+
+- A type constructor `F` of arity `n` must be applied to exactly `n` type arguments.
+- All type arguments must have kind `Type`.
+- The result of any type application has kind `Type`.
+
+This is sufficient to express common HKTs such as `Functor<F<_>>` and `Monad<M<_>>`.
+
+### 8.5 Type Inference (Overview)
+
+Rusk uses a deliberately implementable form of local type inference:
+
+- Each expression is assigned a type, using unification-based constraints.
+- Local `let` bindings are **monomorphic** (they do not implicitly introduce `forall`).
+  Polymorphism is introduced only by explicit generic parameters on items (`fn`, `struct`,
+  `enum`, `interface`).
+- Generic arguments in function calls are inferred by unifying argument types with the
+  callee’s parameter types (TypeScript-like “generic argument inference”).
+- Lambda parameter types may be inferred from an expected function type; otherwise they
+  must be annotated.
+
+Where inference cannot determine a unique type, an explicit annotation is required.
+
+### 8.6 Interfaces as Constraints
+
+An `interface` can be used as a constraint in a generic parameter list:
 
 ```rust
-impl Logger for Console {
-    fn log(msg: string) -> unit { ... }
-}
-
-impl Console {
-    fn new() -> Console { ... }
-}
+fn log_all<T: Logger>(xs: [T]) -> unit { ... }
 ```
 
-* `impl Interface for Type` 提供接口实现，用于动态分派与类型检查。
-* `impl Type` 提供该类型的固有方法（inherent methods）。
-* 若固有方法与接口方法同名，固有方法优先；仍存在二义性时为语义错误。
+Constraint satisfaction is based on the existence of an `impl Logger for T`.
 
+### 8.7 Effects Typing
 
-
-### 3.2 数据类型
-
-* **Primitives**: `int`, `float`, `bool`, `string`, `bytes`, `unit`.
-* **字符串/字节串**：作为值类型，操作产生新值，不支持原地修改。
-* **ADTs**: `enum` (带数据的枚举) 是核心逻辑载体。
-* **Struct**: 数据聚合。
-* **Array/List**: `[T]` 动态数组/列表，支持 `len()` 与索引访问 `arr[i]`。
-* **Function**: `fn(T) -> U`（用于接口方法签名与类型标注）。
-* **Std ADTs**: `Option<T>`, `Result<T, E>` 由标准库提供。
-
-*(注：映射/字典等集合类型由标准库提供。)*
-*(注：未来允许宿主通过 FFI 注册新的原生值类型，具体机制待定。)*
-
-### 3.3 类型标注 (Type Annotations)
-
-* 类型标注用于接口、结构体字段、函数签名以及可选的局部变量声明。
-* 省略标注时，解释器以动态类型运行；静态类型检查属于可选特性。
-
-### 3.4 结构体与枚举语法 (Struct & Enum)
+For an interface method declared as:
 
 ```rust
-struct Point { x: int, y: int }
-
-enum Option<T> {
-    Some(T),
-    None
-}
-```
-
----
-
-## 4. 内存管理 (Memory Management)
-
-### 4.1 基础模型
-
-* 单线程运行时，自动内存管理（引用计数或 tracing GC 属于实现细节）。
-* 无生存期标注 (No Lifetimes)。
-
-### 4.2 可变性与传参 (Mutability & Passing)
-
-参数传递遵循按值/按引用的简单规则：**基础类型按值传递，复杂类型按引用传递**。对象默认可变，除非使用 `const`/`readonly` 标记。
-绑定语法使用 `let`（可变）、`const`（绑定不可变）或 `readonly`（只读视图）。
-
-```rust
-fn sum(readonly items: [int]) -> int { ... } // 只读视图（不可修改 items）
-fn push(items: [int], v: int) { ... }        // 通过引用修改共享对象
-fn inc(x: int) -> int { x + 1 }              // 基础类型按值传递
-
-const pi = 3.14;
-readonly data = [1, 2, 3];
-```
-
-* **按值 (by value)**：仅适用于基础类型（`int`/`float`/`bool`/`string`/`bytes`/`unit`），传参时复制值。
-* **按引用 (by reference)**：适用于结构体、枚举、数组、映射等复杂类型，传参时共享同一对象。
-* **实现细节**：对 `string/bytes` 等值类型可采用拷贝优化（如 copy-on-write），不改变语义。
-* **默认可变**：对象在引用语义下可被就地修改。
-* **`let` 绑定**：默认可重新赋值。
-* **`const` 绑定**：禁止重新赋值该变量（绑定不可变）。
-* **`readonly` 视图**：可用于局部绑定或函数参数；通过该绑定禁止修改对象（只读），尝试修改会在运行时报错；不保证全局深度冻结。
-* **可见性**：对引用类型的修改会被所有别名观察到（共享语义）。
-* **赋值与修改**：`x = expr` 重新绑定变量；`obj.field = v` / `arr[i] = v` 修改对象本体（若目标为 `readonly` 则报错）。
-
----
-
-## 5. 控制流与副作用 (Control Flow & Effects)
-
-### 5.1 广义模式匹配 (Generalized Match)
-
-`match` 是唯一的分发中心。它可以匹配**数据返回值**，也可以拦截**接口调用（Effect）**。
-
-**语法结构：**
-
-```rust
-match <expression> {
-    // 1. 值模式 (Value Pattern)
-    <pattern> => <logic>,
-
-    // 2. 接口模式 (Interface/Effect Pattern)
-    // 语法：@InterfaceName.Method(args...)
-    @InterfaceName.Method(arg1, arg2) => {
-        // 在此块内，'resume' 是一个自动注入的函数
-        // 调用 resume(val) 将值返回给触发点
-        resume(result);
-    }
-}
-
-```
-
-**模式形式 (Patterns)**：
-
-* `_` 通配
-* 字面量（`1`, `"a"`, `true`, `()`）
-* 绑定（`name`）
-* 枚举变体：`Enum::Variant(p1, p2)`
-* 结构体：`Type { field: p }`
-* 数组前缀：`[p1, p2, ..]`
-
-**语义规则：**
-
-1. `match` 在求值 `<expression>` 时建立一个 **Effect Handler 作用域**，所有 `@Interface.method(...)` 分支在该作用域内生效。
-2. 当 `<expression>` 内触发 `@Interface.method(...)` 时，运行时向上查找最近的 `match`，并按分支顺序寻找匹配的 Effect 分支；参数模式匹配成功即选中该分支。
-3. 在 Effect 分支内自动注入 `resume`：  
-   * `resume(v)` 会恢复**被挂起的调用点**，并继续执行其后续计算。  
-   * `resume` 返回该 continuation 的最终结果，允许 handler 做后处理。  
-   * `resume` **至多调用一次**；重复调用为运行时错误。  
-   * 若分支结束且未调用 `resume`，则该分支的返回值直接作为该 Effect 调用的结果。
-   * `v` 的类型必须符合该接口方法的返回类型。
-   * continuation 可被实现为一等值；允许通过库 API 保存并在其他位置 `resume`，恢复时切换到捕获的执行栈。
-4. 当 `<expression>` 正常结束后，`match` 只对**值模式**进行匹配；Effect 分支不参与最终值匹配。
-5. 若 Effect 调用未被任何 `match` 处理，将向外传播；若到达顶层仍无人处理，则触发运行时错误。
-
-*(注：`resume` 不是关键字，只在 Effect 分支中作为预定义标识符存在，且不可被重定义。)*
-
-### 5.2 标准库 Effect 映射
-
-语言不再内置 `async/generator`，而是通过标准库接口实现：
-
-* **Async**: 定义为 `interface Suspend { fn await(id: u64); }`。
-* **Generator**: 定义为 `interface Yield<T> { fn emit(val: T); }`。
-* **Error**: 定义为 `interface Failure<E> { fn raise(err: E); }`。
-
-*(注：未被处理的 `@Failure.raise` 将导致运行时错误；可通过 `match` 拦截实现 try/catch 等语义。)*
-
----
-
-## 6. 并发 (Concurrency)
-
-并发能力完全下放给标准库。语言默认单线程执行，通过库提供的容器（Container）与通道（Channel）实现隔离式并发。
-
-```rust
-// scope 是一个普通函数，内部 Handle 了 Spawn 接口
-std.concurrency.scope {
-    // launch 只是调用了 @Spawn.task() 接口
-    std.concurrency.launch {
-        task_logic();
-    }
-} // 函数返回前自动等待所有任务
-
-```
-
-### 6.1 容器与通道 (Container & Channel)
-
-* **容器 (Container)**：脚本运行在隔离的单线程容器中。容器之间不共享内存与对象。
-* **通道 (Channel)**：容器之间通过二进制 blob 通道通信，消息会被序列化/反序列化。
-* **宿主与库**：
-  * 宿主可创建多个容器并建立通道。
-  * 标准库可提供 `std.container.spawn()` 等 API 允许脚本创建新容器。
-
-### 6.2 可发送类型 (Sendable)
-
-只有实现可序列化接口的类型可跨容器发送，且**不保留对象身份**（identity），不保证共享结构。
-
-```rust
-interface Serialize {
-    fn serialize(self) -> bytes;
-}
-
-interface Deserialize {
-    fn deserialize(bytes: bytes) -> Self;
-}
-```
-
-* **Sendable 约束**：`T: Serialize + Deserialize` 的类型才能通过通道发送/接收。
-* **资源类型**（文件句柄、socket、FFI 指针等）默认不可发送，除非提供显式代理或序列化策略。
-* **示例**：`int`/`float`/`bool`/`string`/`bytes` 以及由它们构成的结构体或数组，可通过库提供的默认实现或手写实现成为 Sendable。对象图的共享关系与身份不保留，由序列化逻辑自行决定如何展开。
-
-```rust
-struct Point { x: int, y: int }
-
-impl Serialize for Point { fn serialize(self) -> bytes { ... } }
-impl Deserialize for Point { fn deserialize(bytes: bytes) -> Self { ... } }
-
-std.channel.send(Point { x: 1, y: 2 });
-let p = std.channel.recv<Point>();
-```
-
----
-
-## 7. 循环与迭代 (Loops)
-
-为了保证解释器性能，保留原生循环关键字。
-
-* `loop { ... }`: 无限循环。
-* `while cond { ... }`: 条件循环。
-* `for x in iter { ... }`: 语法糖，等价于 `loop + match Option` 的迭代展开。
-* `break` / `continue`: 跳转控制。
-* **迭代器**: 通过 `next()` 返回 `Option<T>` 约定（由标准库提供）。
-* **返回值**: `loop/while/for` 默认返回 `unit`。
-
----
-
-## 8. 互操作性 (FFI)
-
-* **Rust -> Rusk**: `#[rusk_export]` 宏导出函数。Rust 的 `Future` 自动映射为 Rusk 的 `Suspend` 接口调用。
-* **Rusk -> Rust**: 调用 Rust 函数时，Rust 端会收到 `&mut Context`，允许 Rust 代码“反向”调用 Rusk 接口（触发 Effect）。
-
----
-
-## 9. 完整代码示例
-
-这段代码展示了 Spec v0.3 的所有核心特性：**统一接口、广义匹配、显式 Effect 标记、以及保留的原生循环**。
-
-```rust
-// 1. 定义一个作为 Effect 使用的接口
 interface Logger {
-    fn log(msg: string) -> unit;
+  fn log(msg: string) -> unit;
 }
-
-// 2. 业务逻辑 (无感知 Effect，像调用静态方法)
-fn process_data(items: [int]) {
-    let i = 0;
-    // 保留的原生 while 循环，高性能
-    while i < items.len() {
-        let item = items[i];
-        // 触发 Effect：直接调用接口
-        @Logger.log(f"Processing: {item}");
-        i = i + 1;
-    }
-}
-
-// 3. 主程序
-fn main() {
-    let data = [1, 2, 3];
-
-    // match: 同时处理逻辑返回值和副作用拦截
-    match process_data(data) {
-        // 正常结束
-        () => print("Done"),
-
-        // 拦截 Logger 接口调用
-        @Logger.log(msg) => {
-            print(f"[System Log]: {msg}");
-            resume(()); // 恢复执行
-        }
-    }
-}
-
 ```
 
-### 总结
+Then:
 
-1. **极简内核**：去掉了几乎所有“特权”关键字（effect, async, try, etc.）。
-2. **高性能基础**：保留 `loop/while` 确保了在没有 JIT/TCO 的情况下依然有可靠的性能。
-3. **高度统一**：将 Effect 系统无缝融入 Interface 和 Match 语法中，并通过 `@` 显式标记消除歧义。
-4. **值/引用语义**：基础类型按值传递、复杂类型按引用传递，默认可变，`const/readonly` 限制修改。
-5. **隔离并发**：默认单线程容器 + 序列化通道模型，避免共享内存的复杂性。
+- `@Logger.log(e)` has type `unit` and requires `e: string`.
+- An effect arm `@Logger.log(pat) => body` is well-typed if the patterns bind values
+  of the declared argument types, and if `resume` is used consistently:
+  - `resume(v)` requires `v: unit` (the declared return type of the effect).
+
+The type of the overall `match` expression is determined by the value arms and
+effect arms collectively (all arms must unify to a single result type).
+
+### 8.8 General Recursion and Fixpoints
+
+Rusk is a general-purpose language and allows **general recursion**: a `fn` item may
+refer to itself by name.
+
+Because recursion is available, users can implement fixpoint combinators (Y/Z-style)
+as ordinary library code, and the generic type system must be able to type-check
+them. A canonical “fix” helper is:
+
+```rust
+fn fix<A, B>(f: fn(fn(A) -> B) -> fn(A) -> B) -> fn(A) -> B {
+    |x: A| {
+        let g = fix(f);
+        let h = f(g);
+        h(x)
+    }
+}
+```
+
+This is not required to be optimized by the compiler; it is provided as a
+type-system capability and a definitional example.
+
+---
+
+## 9. Desugarings and Required Standard Library Surface
+
+Rusk core syntax includes operators and `for`, but they desugar to ordinary calls
+to names in the `std` module.
+
+The compiler **must** emit these calls, and the runtime **must** provide them as
+host functions.
+
+### 9.1 Numeric Operators
+
+For `int`:
+
+- `a + b` lowers to `std::int_add(a, b)`
+- `a - b` lowers to `std::int_sub(a, b)`
+- `a * b` lowers to `std::int_mul(a, b)`
+- `a / b` lowers to `std::int_div(a, b)`
+- `a % b` lowers to `std::int_mod(a, b)`
+
+Comparisons:
+
+- `a < b` lowers to `std::int_lt(a, b)` (returns `bool`)
+- `a <= b` lowers to `std::int_le(a, b)` etc
+- `a == b` lowers to `std::int_eq(a, b)` etc (for primitive equality)
+
+Similarly for `float` via `std::float_*`.
+
+Other primitive equality:
+
+- `bool`: `std::bool_eq`, `std::bool_ne`
+- `string`: `std::string_eq`, `std::string_ne`
+- `bytes`: `std::bytes_eq`, `std::bytes_ne`
+- `unit`: `std::unit_eq`, `std::unit_ne`
+
+### 9.2 Boolean Operators
+
+- `!x` lowers to `std::bool_not(x)`
+- `a && b` lowers to short-circuiting `if a { b } else { false }`
+- `a || b` lowers to short-circuiting `if a { true } else { b }`
+
+### 9.3 Formatted Strings
+
+`f"prefix {e1} middle {e2} suffix"` lowers to:
+
+1. evaluate `e1`, `e2` left-to-right
+2. convert each to `string` via `std::to_string`
+3. concatenate via `std::string_concat`
+
+### 9.4 `for` Desugaring (Iterator Protocol)
+
+`for x in iter { body }` desugars to:
+
+```rust
+let it = std::into_iter(iter);
+loop {
+  match std::next(it) {
+    Option::Some(x) => { body; }
+    Option::None(()) => break;
+  }
+}
+```
+
+Required std functions and types:
+
+- `struct std::ArrayIter<T> { arr: [T], idx: int }` (iterator state object)
+- `std::into_iter<T>([T]) -> std::ArrayIter<T>`
+- `std::next<T>(std::ArrayIter<T>) -> Option<T>`
+- `enum Option<T> { Some(T), None(unit) }`
+
+---
+
+## 10. Compilation to MIR (Normative)
+
+The compiler lowers Rusk to MIR as defined in `MIR_SPEC.md`.
+
+Key requirements:
+
+- Preserve left-to-right evaluation order.
+- Compile heap aggregates (arrays/structs/enums) to MIR heap allocations.
+- Compile `readonly` bindings to MIR `as_readonly`.
+- Compile `match` value arms to MIR `switch` with patterns.
+- Compile effect arms to MIR `push_handler`/`perform`/`resume` following the delimitation
+  rule in §7.4.
+
+---
+
+## 11. Program Entry
+
+A runnable program must define:
+
+```rust
+fn main() -> unit { ... }
+```
+
+The CLI tool compiles the program to MIR, installs the required `std::*` host
+functions, runs `main`, and treats any trap as a non-zero process exit.

@@ -1,0 +1,1541 @@
+use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
+use crate::mir::{
+    BasicBlock, BlockId, ConstValue, EffectId, Function, HandlerClause, Instruction, Local, Module,
+    Mutability, Operand, Pattern, SwitchCase, Terminator,
+};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::rc::Rc;
+use std::{cell::RefCell, mem};
+
+/// A runtime value produced by the MIR interpreter.
+#[derive(Clone)]
+pub enum Value {
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Ref(RefValue),
+    Function(String),
+    Continuation(ContinuationToken),
+}
+
+impl Value {
+    fn kind(&self) -> ValueKind {
+        match self {
+            Value::Unit => ValueKind::Unit,
+            Value::Bool(_) => ValueKind::Bool,
+            Value::Int(_) => ValueKind::Int,
+            Value::Float(_) => ValueKind::Float,
+            Value::String(_) => ValueKind::String,
+            Value::Bytes(_) => ValueKind::Bytes,
+            Value::Ref(_) => ValueKind::Ref,
+            Value::Function(_) => ValueKind::Function,
+            Value::Continuation(_) => ValueKind::Continuation,
+        }
+    }
+
+    pub fn into_readonly_view(self) -> Self {
+        match self {
+            Value::Ref(r) => Value::Ref(r.as_readonly()),
+            other => other,
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Unit => write!(f, "unit"),
+            Value::Bool(v) => write!(f, "{v}"),
+            Value::Int(v) => write!(f, "{v}"),
+            Value::Float(v) => write!(f, "{v}"),
+            Value::String(v) => write!(f, "{v:?}"),
+            Value::Bytes(v) => write!(f, "bytes(len={})", v.len()),
+            Value::Ref(r) => {
+                let ro = if r.readonly { ", readonly" } else { "" };
+                write!(
+                    f,
+                    "ref(index={}, gen={}{})",
+                    r.handle.index, r.handle.generation, ro
+                )
+            }
+            Value::Function(name) => write!(f, "fn({name})"),
+            Value::Continuation(_) => write!(f, "continuation(..)"),
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Function(a), Value::Function(b)) => a == b,
+            (Value::Continuation(a), Value::Continuation(b)) => a.ptr_eq(b),
+            (Value::Ref(a), Value::Ref(b)) => a.ptr_eq(b) && a.readonly == b.readonly,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueKind {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Ref,
+    Function,
+    Continuation,
+}
+
+/// A reference value (struct/enum/array) with an optional readonly view tag.
+#[derive(Clone)]
+pub struct RefValue {
+    readonly: bool,
+    handle: GcRef,
+}
+
+impl RefValue {
+    fn new(handle: GcRef) -> Self {
+        Self {
+            readonly: false,
+            handle,
+        }
+    }
+
+    fn as_readonly(&self) -> Self {
+        Self {
+            readonly: true,
+            handle: self.handle,
+        }
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        self.readonly
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+/// A heap-allocated object.
+#[derive(Clone, Debug)]
+pub enum HeapValue {
+    Struct {
+        type_name: String,
+        fields: BTreeMap<String, Value>,
+    },
+    Array(Vec<Value>),
+    Enum {
+        enum_name: String,
+        variant: String,
+        fields: Vec<Value>,
+    },
+}
+
+/// A one-shot continuation token.
+#[derive(Clone)]
+pub struct ContinuationToken(Rc<RefCell<ContinuationInner>>);
+
+impl ContinuationToken {
+    fn new(state: ContinuationState) -> Self {
+        Self(Rc::new(RefCell::new(ContinuationInner {
+            state: Some(state),
+        })))
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn take_state(&self) -> Option<ContinuationState> {
+        self.0.borrow_mut().state.take()
+    }
+}
+
+#[derive(Clone)]
+struct ContinuationInner {
+    state: Option<ContinuationState>,
+}
+
+#[derive(Clone)]
+struct ContinuationState {
+    stack: Vec<Frame>,
+    handlers: Vec<HandlerEntry>,
+    perform_dst: Option<Local>,
+}
+
+/// A runtime error raised by the MIR interpreter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeError {
+    Trap {
+        message: String,
+    },
+    UnknownFunction {
+        name: String,
+    },
+    InvalidLocal {
+        local: Local,
+        locals: usize,
+    },
+    UninitializedLocal {
+        local: Local,
+    },
+    InvalidBlock {
+        block: BlockId,
+        blocks: usize,
+    },
+    InvalidBlockArgs {
+        target: BlockId,
+        expected: usize,
+        got: usize,
+    },
+    TypeError {
+        op: &'static str,
+        expected: &'static str,
+        got: ValueKind,
+    },
+    MissingField {
+        field: String,
+    },
+    DanglingRef {
+        handle: GcRef,
+    },
+    ReadonlyWrite,
+    IndexOutOfBounds {
+        index: i64,
+        len: usize,
+    },
+    UnhandledEffect {
+        interface: String,
+        method: String,
+    },
+    MismatchedPopHandler,
+    InvalidResume,
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuntimeError::Trap { message } => write!(f, "trap: {message}"),
+            RuntimeError::UnknownFunction { name } => write!(f, "unknown function: {name}"),
+            RuntimeError::InvalidLocal { local, locals } => {
+                write!(f, "invalid local {:?} (locals={locals})", local.0)
+            }
+            RuntimeError::UninitializedLocal { local } => {
+                write!(f, "uninitialized local %{id}", id = local.0)
+            }
+            RuntimeError::InvalidBlock { block, blocks } => {
+                write!(f, "invalid block {:?} (blocks={blocks})", block.0)
+            }
+            RuntimeError::InvalidBlockArgs {
+                target,
+                expected,
+                got,
+            } => write!(
+                f,
+                "invalid block args for block {:?}: expected {expected}, got {got}",
+                target.0
+            ),
+            RuntimeError::TypeError { op, expected, got } => {
+                write!(f, "type error in {op}: expected {expected}, got {got:?}")
+            }
+            RuntimeError::MissingField { field } => write!(f, "missing field: {field}"),
+            RuntimeError::DanglingRef { handle } => write!(
+                f,
+                "dangling heap reference: index={}, gen={}",
+                handle.index, handle.generation
+            ),
+            RuntimeError::ReadonlyWrite => write!(f, "illegal write through readonly reference"),
+            RuntimeError::IndexOutOfBounds { index, len } => {
+                write!(f, "index out of bounds: index={index}, len={len}")
+            }
+            RuntimeError::UnhandledEffect { interface, method } => {
+                write!(f, "unhandled effect: {interface}.{method}")
+            }
+            RuntimeError::MismatchedPopHandler => write!(f, "mismatched pop_handler"),
+            RuntimeError::InvalidResume => write!(f, "invalid resume"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+type HostFunction<GC> =
+    Rc<dyn Fn(&mut InterpreterImpl<GC>, &[Value]) -> Result<Value, RuntimeError> + 'static>;
+
+/// A handle to a value rooted in an [`InterpreterImpl`] instance.
+///
+/// Rooted values are treated as GC roots, which allows host code to keep
+/// heap references alive across interpreter execution and garbage collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RootHandle {
+    index: u32,
+    generation: u32,
+}
+
+impl RootHandle {
+    fn new(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+}
+
+#[derive(Debug)]
+struct RootSlot {
+    generation: u32,
+    value: Option<Value>,
+}
+
+/// A small, single-threaded interpreter for executing Rusk MIR.
+pub type Interpreter = InterpreterImpl<MarkSweepHeap>;
+
+/// A small, single-threaded interpreter for executing Rusk MIR.
+///
+/// This type is generic over the GC heap implementation to allow swapping
+/// collectors. Most users should use the `Interpreter` type alias, which uses
+/// `MarkSweepHeap`.
+pub struct InterpreterImpl<GC: GcHeap> {
+    module: Module,
+    host_functions: BTreeMap<String, HostFunction<GC>>,
+    stack: Vec<Frame>,
+    handlers: Vec<HandlerEntry>,
+    heap: GC,
+    roots: Vec<RootSlot>,
+    free_roots: Vec<u32>,
+    gc_threshold: usize,
+    allocations_since_gc: usize,
+}
+
+impl<GC: GcHeap + Default> InterpreterImpl<GC> {
+    /// Creates a new interpreter instance for the given MIR module.
+    pub fn new(module: Module) -> Self {
+        Self::with_heap(module, GC::default())
+    }
+}
+
+impl<GC: GcHeap> InterpreterImpl<GC> {
+    const DEFAULT_GC_THRESHOLD: usize = 10_000;
+
+    /// Creates a new interpreter instance using an explicit GC heap implementation.
+    pub fn with_heap(module: Module, heap: GC) -> Self {
+        Self {
+            module,
+            host_functions: BTreeMap::new(),
+            stack: Vec::new(),
+            handlers: Vec::new(),
+            heap,
+            roots: Vec::new(),
+            free_roots: Vec::new(),
+            gc_threshold: Self::DEFAULT_GC_THRESHOLD,
+            allocations_since_gc: 0,
+        }
+    }
+
+    /// Pins `value` as an external GC root.
+    ///
+    /// This is useful when embedding the interpreter, because `Value::Ref`
+    /// handles can become dangling if GC runs while the host still holds them.
+    pub fn root_value(&mut self, value: Value) -> RootHandle {
+        if let Some(index) = self.free_roots.pop() {
+            let slot = &mut self.roots[index as usize];
+            debug_assert!(slot.value.is_none(), "free list points at live root slot");
+            slot.value = Some(value);
+            return RootHandle::new(index, slot.generation);
+        }
+
+        let index: u32 = self
+            .roots
+            .len()
+            .try_into()
+            .expect("root table index overflow");
+        self.roots.push(RootSlot {
+            generation: 0,
+            value: Some(value),
+        });
+        RootHandle::new(index, 0)
+    }
+
+    /// Removes a previously-rooted value, returning it if `handle` is still valid.
+    pub fn unroot_value(&mut self, handle: RootHandle) -> Option<Value> {
+        let slot = self.roots.get_mut(handle.index as usize)?;
+        if slot.generation != handle.generation {
+            return None;
+        }
+        let value = slot.value.take()?;
+        slot.generation = slot.generation.wrapping_add(1);
+        self.free_roots.push(handle.index);
+        Some(value)
+    }
+
+    /// Returns the number of currently live heap objects.
+    pub fn heap_live_objects(&self) -> usize {
+        self.heap.live_objects()
+    }
+
+    /// Sets the allocation threshold (in number of heap allocations) between
+    /// GC runs.
+    pub fn set_gc_threshold(&mut self, threshold: usize) {
+        self.gc_threshold = threshold;
+    }
+
+    /// Forces a garbage collection using the current interpreter roots.
+    pub fn collect_garbage_now(&mut self) {
+        self.allocations_since_gc = 0;
+        let roots = InterpreterRoots {
+            stack: &self.stack,
+            roots: &self.roots,
+        };
+        self.heap.collect_garbage(&roots);
+    }
+
+    /// Registers a host function callable via `call <name>(...)`.
+    pub fn register_host_fn<F>(&mut self, name: impl Into<String>, f: F)
+    where
+        F: Fn(&mut Self, &[Value]) -> Result<Value, RuntimeError> + 'static,
+    {
+        self.host_functions.insert(name.into(), Rc::new(f));
+    }
+
+    /// Allocates a heap array and returns it as a value.
+    pub fn alloc_array(&mut self, items: Vec<Value>) -> Value {
+        let handle = self.alloc_heap(HeapValue::Array(items));
+        Value::Ref(RefValue::new(handle))
+    }
+
+    /// Allocates a heap struct with named fields and returns it as a value.
+    pub fn alloc_struct(
+        &mut self,
+        type_name: impl Into<String>,
+        fields: BTreeMap<String, Value>,
+    ) -> Value {
+        let handle = self.alloc_heap(HeapValue::Struct {
+            type_name: type_name.into(),
+            fields,
+        });
+        Value::Ref(RefValue::new(handle))
+    }
+
+    /// Allocates a heap enum value and returns it as a value.
+    pub fn alloc_enum(
+        &mut self,
+        enum_name: impl Into<String>,
+        variant: impl Into<String>,
+        fields: Vec<Value>,
+    ) -> Value {
+        let handle = self.alloc_heap(HeapValue::Enum {
+            enum_name: enum_name.into(),
+            variant: variant.into(),
+            fields,
+        });
+        Value::Ref(RefValue::new(handle))
+    }
+
+    /// Returns the heap value referenced by `r`.
+    pub fn heap_value(&self, r: &RefValue) -> Result<&HeapValue, RuntimeError> {
+        self.heap_get(r.handle)
+    }
+
+    /// Returns the heap value referenced by `r` mutably.
+    pub fn heap_value_mut(&mut self, r: &RefValue) -> Result<&mut HeapValue, RuntimeError> {
+        self.heap_get_mut(r.handle)
+    }
+
+    /// Executes `fn_name` as an entry function.
+    pub fn run_function(&mut self, fn_name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.stack.clear();
+        self.handlers.clear();
+
+        let function = self
+            .module
+            .functions
+            .get(fn_name)
+            .ok_or_else(|| RuntimeError::UnknownFunction {
+                name: fn_name.to_string(),
+            })?
+            .clone();
+
+        let mut frame = Frame::new(function, None);
+        self.init_params(&mut frame, &args)?;
+        self.stack.push(frame);
+        self.run_loop()
+    }
+
+    /// Resumes a previously captured continuation token, injecting `value` as the result of the
+    /// suspended `perform`.
+    ///
+    /// This is the host-side equivalent of the MIR `resume` instruction and is useful for tests
+    /// and embedding (FFI).
+    pub fn resume_continuation(
+        &mut self,
+        token: ContinuationToken,
+        value: Value,
+    ) -> Result<Value, RuntimeError> {
+        let Some(mut cont) = token.take_state() else {
+            return Err(RuntimeError::InvalidResume);
+        };
+
+        if let Some(perform_dst) = cont.perform_dst {
+            let top_index = cont.stack.len().saturating_sub(1);
+            let top_frame = cont
+                .stack
+                .get_mut(top_index)
+                .ok_or(RuntimeError::InvalidResume)?;
+            top_frame.write_local(perform_dst, value)?;
+        }
+
+        let saved_stack = mem::take(&mut self.stack);
+        let saved_handlers = mem::take(&mut self.handlers);
+
+        self.stack = cont.stack;
+        self.handlers = cont.handlers;
+        let result = self.run_loop();
+
+        self.stack = saved_stack;
+        self.handlers = saved_handlers;
+
+        result
+    }
+
+    /// Returns an immutable view of the loaded MIR module.
+    pub fn module(&self) -> &Module {
+        &self.module
+    }
+
+    fn init_params(&self, frame: &mut Frame, args: &[Value]) -> Result<(), RuntimeError> {
+        let function = self.function(&frame.func)?;
+        if args.len() != function.params.len() {
+            return Err(RuntimeError::Trap {
+                message: format!(
+                    "argument arity mismatch for {}: expected {}, got {}",
+                    function.name,
+                    function.params.len(),
+                    args.len()
+                ),
+            });
+        }
+
+        for (param, arg) in function.params.iter().zip(args.iter()) {
+            let value = match param.mutability {
+                Mutability::Mutable => arg.clone(),
+                Mutability::Readonly => arg.clone().into_readonly_view(),
+            };
+            frame.write_local(param.local, value)?;
+        }
+        Ok(())
+    }
+
+    fn run_loop(&mut self) -> Result<Value, RuntimeError> {
+        loop {
+            let Some(frame_index) = self.stack.len().checked_sub(1) else {
+                return Err(RuntimeError::Trap {
+                    message: "empty stack without return value".to_string(),
+                });
+            };
+
+            let (func_name, block_id, ip) = {
+                let frame = &self.stack[frame_index];
+                (frame.func.clone(), frame.block, frame.ip)
+            };
+
+            let function = self.function(&func_name)?;
+            let block = self.block(function, block_id)?;
+
+            if ip < block.instructions.len() {
+                let instr = block.instructions[ip].clone();
+                // Advance before executing so calls/perform capture the "after" PC.
+                self.stack[frame_index].ip += 1;
+                self.execute_instruction(frame_index, instr)?;
+                self.maybe_collect_garbage();
+                continue;
+            }
+
+            let term = block.terminator.clone();
+            if let Some(final_value) = self.execute_terminator(frame_index, term)? {
+                return Ok(final_value);
+            }
+        }
+    }
+
+    fn function(&self, name: &str) -> Result<&Function, RuntimeError> {
+        self.module
+            .functions
+            .get(name)
+            .ok_or_else(|| RuntimeError::UnknownFunction {
+                name: name.to_string(),
+            })
+    }
+
+    fn block<'f>(
+        &self,
+        function: &'f Function,
+        block: BlockId,
+    ) -> Result<&'f BasicBlock, RuntimeError> {
+        function
+            .blocks
+            .get(block.0)
+            .ok_or(RuntimeError::InvalidBlock {
+                block,
+                blocks: function.blocks.len(),
+            })
+    }
+
+    fn heap_get(&self, handle: GcRef) -> Result<&HeapValue, RuntimeError> {
+        self.heap
+            .get(handle)
+            .ok_or(RuntimeError::DanglingRef { handle })
+    }
+
+    fn heap_get_mut(&mut self, handle: GcRef) -> Result<&mut HeapValue, RuntimeError> {
+        self.heap
+            .get_mut(handle)
+            .ok_or(RuntimeError::DanglingRef { handle })
+    }
+
+    fn alloc_heap(&mut self, value: HeapValue) -> GcRef {
+        self.allocations_since_gc = self.allocations_since_gc.saturating_add(1);
+        self.heap.alloc(value)
+    }
+
+    fn maybe_collect_garbage(&mut self) {
+        if self.allocations_since_gc < self.gc_threshold {
+            return;
+        }
+        self.collect_garbage_now();
+    }
+
+    fn eval_operand(&mut self, frame_index: usize, op: &Operand) -> Result<Value, RuntimeError> {
+        match op {
+            Operand::Local(local) => self.stack[frame_index].read_local(*local),
+            Operand::Literal(lit) => Ok(self.eval_const(lit)),
+        }
+    }
+
+    fn eval_const(&mut self, lit: &ConstValue) -> Value {
+        match lit {
+            ConstValue::Unit => Value::Unit,
+            ConstValue::Bool(v) => Value::Bool(*v),
+            ConstValue::Int(v) => Value::Int(*v),
+            ConstValue::Float(v) => Value::Float(*v),
+            ConstValue::String(v) => Value::String(v.clone()),
+            ConstValue::Bytes(v) => Value::Bytes(v.clone()),
+            ConstValue::Function(name) => Value::Function(name.clone()),
+            ConstValue::Array(items) => {
+                let values = items.iter().map(|x| self.eval_const(x)).collect();
+                let handle = self.alloc_heap(HeapValue::Array(values));
+                Value::Ref(RefValue::new(handle))
+            }
+            ConstValue::Struct { type_name, fields } => {
+                let mut values = BTreeMap::new();
+                for (k, v) in fields {
+                    values.insert(k.clone(), self.eval_const(v));
+                }
+                let handle = self.alloc_heap(HeapValue::Struct {
+                    type_name: type_name.clone(),
+                    fields: values,
+                });
+                Value::Ref(RefValue::new(handle))
+            }
+            ConstValue::Enum {
+                enum_name,
+                variant,
+                fields,
+            } => {
+                let vals = fields.iter().map(|x| self.eval_const(x)).collect();
+                let handle = self.alloc_heap(HeapValue::Enum {
+                    enum_name: enum_name.clone(),
+                    variant: variant.clone(),
+                    fields: vals,
+                });
+                Value::Ref(RefValue::new(handle))
+            }
+        }
+    }
+
+    fn execute_instruction(
+        &mut self,
+        frame_index: usize,
+        instr: Instruction,
+    ) -> Result<(), RuntimeError> {
+        match instr {
+            Instruction::Const { dst, value } => {
+                let v = self.eval_const(&value);
+                self.stack[frame_index].write_local(dst, v)?;
+            }
+            Instruction::Copy { dst, src } => {
+                let v = self.stack[frame_index].read_local(src)?;
+                self.stack[frame_index].write_local(dst, v)?;
+            }
+            Instruction::Move { dst, src } => {
+                let v = self.stack[frame_index].take_local(src)?;
+                self.stack[frame_index].write_local(dst, v)?;
+            }
+            Instruction::AsReadonly { dst, src } => {
+                let v = self.stack[frame_index]
+                    .read_local(src)?
+                    .into_readonly_view();
+                self.stack[frame_index].write_local(dst, v)?;
+            }
+
+            Instruction::MakeStruct {
+                dst,
+                type_name,
+                fields,
+            } => {
+                let mut map = BTreeMap::new();
+                for (k, op) in fields {
+                    let v = self.eval_operand(frame_index, &op)?;
+                    map.insert(k, v);
+                }
+                let obj = HeapValue::Struct {
+                    type_name,
+                    fields: map,
+                };
+                let handle = self.alloc_heap(obj);
+                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+            }
+            Instruction::MakeArray { dst, items } => {
+                let mut values = Vec::with_capacity(items.len());
+                for op in items {
+                    values.push(self.eval_operand(frame_index, &op)?);
+                }
+                let handle = self.alloc_heap(HeapValue::Array(values));
+                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+            }
+            Instruction::MakeEnum {
+                dst,
+                enum_name,
+                variant,
+                fields,
+            } => {
+                let mut values = Vec::with_capacity(fields.len());
+                for op in fields {
+                    values.push(self.eval_operand(frame_index, &op)?);
+                }
+                let handle = self.alloc_heap(HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    fields: values,
+                });
+                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+            }
+            Instruction::GetField { dst, obj, field } => {
+                let v = self.eval_operand(frame_index, &obj)?;
+                let Value::Ref(r) = v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "get_field",
+                        expected: "ref(struct)",
+                        got: v.kind(),
+                    });
+                };
+                let value = match self.heap_get(r.handle)? {
+                    HeapValue::Struct { fields, .. } => fields
+                        .get(&field)
+                        .cloned()
+                        .ok_or(RuntimeError::MissingField { field })?,
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "get_field",
+                            expected: "struct",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+                self.stack[frame_index].write_local(dst, value)?;
+            }
+            Instruction::SetField { obj, field, value } => {
+                let obj_v = self.eval_operand(frame_index, &obj)?;
+                let Value::Ref(r) = obj_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "set_field",
+                        expected: "ref(struct)",
+                        got: obj_v.kind(),
+                    });
+                };
+                if r.readonly {
+                    return Err(RuntimeError::ReadonlyWrite);
+                }
+                let val = self.eval_operand(frame_index, &value)?;
+                let HeapValue::Struct { fields, .. } = self.heap_get_mut(r.handle)? else {
+                    return Err(RuntimeError::TypeError {
+                        op: "set_field",
+                        expected: "struct",
+                        got: ValueKind::Ref,
+                    });
+                };
+                if !fields.contains_key(&field) {
+                    return Err(RuntimeError::MissingField { field });
+                }
+                fields.insert(field, val);
+            }
+
+            Instruction::IndexGet { dst, arr, idx } => {
+                let arr_v = self.eval_operand(frame_index, &arr)?;
+                let Value::Ref(r) = arr_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "index_get",
+                        expected: "ref(array)",
+                        got: arr_v.kind(),
+                    });
+                };
+                let idx_v = self.eval_operand(frame_index, &idx)?;
+                let Value::Int(i) = idx_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "index_get",
+                        expected: "int index",
+                        got: idx_v.kind(),
+                    });
+                };
+                let element = match self.heap_get(r.handle)? {
+                    HeapValue::Array(items) => {
+                        let Some(v) = items.get(i as usize) else {
+                            return Err(RuntimeError::IndexOutOfBounds {
+                                index: i,
+                                len: items.len(),
+                            });
+                        };
+                        v.clone()
+                    }
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "index_get",
+                            expected: "array",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+                self.stack[frame_index].write_local(dst, element)?;
+            }
+            Instruction::IndexSet { arr, idx, value } => {
+                let arr_v = self.eval_operand(frame_index, &arr)?;
+                let Value::Ref(r) = arr_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "index_set",
+                        expected: "ref(array)",
+                        got: arr_v.kind(),
+                    });
+                };
+                if r.readonly {
+                    return Err(RuntimeError::ReadonlyWrite);
+                }
+                let idx_v = self.eval_operand(frame_index, &idx)?;
+                let Value::Int(i) = idx_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "index_set",
+                        expected: "int index",
+                        got: idx_v.kind(),
+                    });
+                };
+                let val = self.eval_operand(frame_index, &value)?;
+                let HeapValue::Array(items) = self.heap_get_mut(r.handle)? else {
+                    return Err(RuntimeError::TypeError {
+                        op: "index_set",
+                        expected: "array",
+                        got: ValueKind::Ref,
+                    });
+                };
+                let idx_usize: usize =
+                    i.try_into().map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: i,
+                        len: items.len(),
+                    })?;
+                if idx_usize >= items.len() {
+                    return Err(RuntimeError::IndexOutOfBounds {
+                        index: i,
+                        len: items.len(),
+                    });
+                }
+                items[idx_usize] = val;
+            }
+            Instruction::Len { dst, arr } => {
+                let arr_v = self.eval_operand(frame_index, &arr)?;
+                let Value::Ref(r) = arr_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "len",
+                        expected: "ref(array)",
+                        got: arr_v.kind(),
+                    });
+                };
+                let len = match self.heap_get(r.handle)? {
+                    HeapValue::Array(items) => items.len(),
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "len",
+                            expected: "array",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+                self.stack[frame_index].write_local(dst, Value::Int(len as i64))?;
+            }
+
+            Instruction::Call { dst, func, args } => {
+                let arg_values = self.eval_args(frame_index, &args)?;
+                self.call_function(frame_index, dst, &func, arg_values)?;
+            }
+            Instruction::ICall { dst, fnptr, args } => {
+                let fn_value = self.eval_operand(frame_index, &fnptr)?;
+                let Value::Function(name) = fn_value else {
+                    return Err(RuntimeError::TypeError {
+                        op: "icall",
+                        expected: "fn reference",
+                        got: fn_value.kind(),
+                    });
+                };
+                let arg_values = self.eval_args(frame_index, &args)?;
+                self.call_function(frame_index, dst, &name, arg_values)?;
+            }
+            Instruction::VCall {
+                dst,
+                obj,
+                method,
+                args,
+            } => {
+                let recv = self.eval_operand(frame_index, &obj)?;
+                let Value::Ref(r) = &recv else {
+                    return Err(RuntimeError::TypeError {
+                        op: "vcall",
+                        expected: "ref(struct)",
+                        got: recv.kind(),
+                    });
+                };
+                let type_name = match self.heap_get(r.handle)? {
+                    HeapValue::Struct { type_name, .. } => type_name.clone(),
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "vcall",
+                            expected: "struct",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+                let Some(fn_name) = self.module.methods.get(&(type_name, method.clone())) else {
+                    return Err(RuntimeError::Trap {
+                        message: format!("unresolved vcall method: {method}"),
+                    });
+                };
+                let fn_name = fn_name.clone();
+                let mut arg_values = Vec::with_capacity(args.len() + 1);
+                arg_values.push(recv);
+                arg_values.extend(self.eval_args(frame_index, &args)?);
+                self.call_function(frame_index, dst, &fn_name, arg_values)?;
+            }
+
+            Instruction::PushHandler {
+                handler_id: _,
+                clauses,
+            } => {
+                let owner_depth = frame_index;
+                // Validate handler blocks have `binds + 1` params.
+                let function = self.function(&self.stack[frame_index].func)?.clone();
+                for clause in &clauses {
+                    let bind_count = count_binds_in_patterns(&clause.arg_patterns);
+                    let block = self.block(&function, clause.target)?;
+                    let expected = bind_count + 1;
+                    let got = block.params.len();
+                    if expected != got {
+                        return Err(RuntimeError::Trap {
+                            message: format!(
+                                "invalid handler target params for {}.{}: expected {expected}, got {got}",
+                                clause.effect.interface, clause.effect.method
+                            ),
+                        });
+                    }
+                }
+                self.handlers.push(HandlerEntry {
+                    owner_depth,
+                    clauses,
+                });
+            }
+            Instruction::PopHandler => {
+                let Some(top) = self.handlers.last() else {
+                    return Err(RuntimeError::MismatchedPopHandler);
+                };
+                if top.owner_depth != frame_index {
+                    return Err(RuntimeError::MismatchedPopHandler);
+                }
+                self.handlers.pop();
+            }
+
+            Instruction::Perform { dst, effect, args } => {
+                let arg_values = self.eval_args(frame_index, &args)?;
+                self.perform_effect(frame_index, dst, effect, arg_values)?;
+            }
+            Instruction::Resume { dst, k, value } => {
+                let k_value = self.eval_operand(frame_index, &k)?;
+                let Value::Continuation(token) = k_value else {
+                    return Err(RuntimeError::InvalidResume);
+                };
+                let v = self.eval_operand(frame_index, &value)?;
+                let Some(mut cont) = token.take_state() else {
+                    return Err(RuntimeError::InvalidResume);
+                };
+
+                if let Some(perform_dst) = cont.perform_dst {
+                    let top_index = cont.stack.len().saturating_sub(1);
+                    let top_frame = cont
+                        .stack
+                        .get_mut(top_index)
+                        .ok_or(RuntimeError::InvalidResume)?;
+                    top_frame.write_local(perform_dst, v)?;
+                }
+
+                let saved_stack = mem::take(&mut self.stack);
+                let saved_handlers = mem::take(&mut self.handlers);
+
+                self.stack = cont.stack;
+                self.handlers = cont.handlers;
+                let result = self.run_loop();
+
+                self.stack = saved_stack;
+                self.handlers = saved_handlers;
+
+                let final_value = result?;
+                if let Some(dst_local) = dst {
+                    self.stack[frame_index].write_local(dst_local, final_value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn eval_args(
+        &mut self,
+        frame_index: usize,
+        args: &[Operand],
+    ) -> Result<Vec<Value>, RuntimeError> {
+        let mut out = Vec::with_capacity(args.len());
+        for op in args {
+            out.push(self.eval_operand(frame_index, op)?);
+        }
+        Ok(out)
+    }
+
+    fn call_function(
+        &mut self,
+        frame_index: usize,
+        dst: Option<Local>,
+        func: &str,
+        args: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        let host = self.host_functions.get(func).cloned();
+        if let Some(host) = host {
+            let value = host(self, &args)?;
+            if let Some(dst_local) = dst {
+                self.stack[frame_index].write_local(dst_local, value)?;
+            }
+            return Ok(());
+        }
+
+        let callee = self.function(func)?.clone();
+        let mut new_frame = Frame::new(callee, dst);
+        self.init_params(&mut new_frame, &args)?;
+        self.stack.push(new_frame);
+        Ok(())
+    }
+
+    fn perform_effect(
+        &mut self,
+        _frame_index: usize,
+        dst: Option<Local>,
+        effect: EffectId,
+        args: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        let Some((handler_index, clause_index, binds)) =
+            self.find_handler_for_effect(&effect, &args)?
+        else {
+            return Err(RuntimeError::UnhandledEffect {
+                interface: effect.interface,
+                method: effect.method,
+            });
+        };
+
+        let handler_owner_depth = self.handlers[handler_index].owner_depth;
+
+        // Capture a delimited continuation: the owning frame of the selected handler becomes
+        // the bottom-most frame of the captured computation. This makes `resume` return when
+        // that owning frame returns, rather than when the entire original program returns.
+        //
+        // This is essential to compile source-level effect handlers that are scoped to an
+        // expression (e.g. Rusk `match` effect arms).
+        let mut captured_stack = self.stack[handler_owner_depth..].to_vec();
+        let captured_handlers = self
+            .handlers
+            .iter()
+            .filter_map(|entry| {
+                let owner_depth = entry.owner_depth.checked_sub(handler_owner_depth)?;
+                Some(HandlerEntry {
+                    owner_depth,
+                    clauses: entry.clauses.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(dst_local) = dst {
+            // Ensure the destination is uninitialized in the captured state until resume injects it.
+            let top = captured_stack
+                .last_mut()
+                .ok_or(RuntimeError::UnhandledEffect {
+                    interface: effect.interface.clone(),
+                    method: effect.method.clone(),
+                })?;
+            top.clear_local(dst_local)?;
+        }
+
+        let token = ContinuationToken::new(ContinuationState {
+            stack: captured_stack,
+            handlers: captured_handlers,
+            perform_dst: dst,
+        });
+
+        // Unwind frames to the handler's owning frame.
+        self.stack.truncate(handler_owner_depth + 1);
+        // Unwind handlers to the selected handler entry.
+        self.handlers.truncate(handler_index + 1);
+
+        // Transfer control to handler block in the now-top frame.
+        let handler_frame_index = self.stack.len() - 1;
+        let handler_func_name = self.stack[handler_frame_index].func.clone();
+        let function = self.function(&handler_func_name)?.clone();
+        let clause = self.handlers[handler_index].clauses[clause_index].clone();
+        let handler_block = self.block(&function, clause.target)?;
+        let expected_params = binds.len() + 1;
+        let got_params = handler_block.params.len();
+        if expected_params != got_params {
+            return Err(RuntimeError::InvalidBlockArgs {
+                target: clause.target,
+                expected: expected_params,
+                got: got_params,
+            });
+        }
+
+        let mut block_args = binds;
+        block_args.push(Value::Continuation(token));
+        self.enter_block(handler_frame_index, clause.target, block_args)?;
+        Ok(())
+    }
+
+    fn find_handler_for_effect(
+        &self,
+        effect: &EffectId,
+        args: &[Value],
+    ) -> Result<Option<(usize, usize, Vec<Value>)>, RuntimeError> {
+        for (handler_index, handler) in self.handlers.iter().enumerate().rev() {
+            for (clause_index, clause) in handler.clauses.iter().enumerate() {
+                if &clause.effect != effect {
+                    continue;
+                }
+                if clause.arg_patterns.len() != args.len() {
+                    continue;
+                }
+                let mut binds = Vec::new();
+                let mut ok = true;
+                for (pat, arg) in clause.arg_patterns.iter().zip(args.iter()) {
+                    if !match_pattern(&self.heap, pat, arg, &mut binds)? {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    return Ok(Some((handler_index, clause_index, binds)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn enter_block(
+        &mut self,
+        frame_index: usize,
+        target: BlockId,
+        args: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        let func_name = self.stack[frame_index].func.clone();
+        let function = self.function(&func_name)?.clone();
+        let block = self.block(&function, target)?;
+
+        if args.len() != block.params.len() {
+            return Err(RuntimeError::InvalidBlockArgs {
+                target,
+                expected: block.params.len(),
+                got: args.len(),
+            });
+        }
+
+        for (param, value) in block.params.iter().copied().zip(args.into_iter()) {
+            self.stack[frame_index].write_local(param, value)?;
+        }
+
+        self.stack[frame_index].block = target;
+        self.stack[frame_index].ip = 0;
+        Ok(())
+    }
+
+    fn execute_terminator(
+        &mut self,
+        frame_index: usize,
+        term: Terminator,
+    ) -> Result<Option<Value>, RuntimeError> {
+        match term {
+            Terminator::Br { target, args } => {
+                let vals = self.eval_args(frame_index, &args)?;
+                self.enter_block(frame_index, target, vals)?;
+                Ok(None)
+            }
+            Terminator::CondBr {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+            } => {
+                let c = self.eval_operand(frame_index, &cond)?;
+                let Value::Bool(flag) = c else {
+                    return Err(RuntimeError::TypeError {
+                        op: "cond_br",
+                        expected: "bool",
+                        got: c.kind(),
+                    });
+                };
+                let (target, args) = if flag {
+                    (then_target, then_args)
+                } else {
+                    (else_target, else_args)
+                };
+                let vals = self.eval_args(frame_index, &args)?;
+                self.enter_block(frame_index, target, vals)?;
+                Ok(None)
+            }
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
+                let scrutinee = self.eval_operand(frame_index, &value)?;
+                for SwitchCase { pattern, target } in cases {
+                    let mut binds = Vec::new();
+                    if match_pattern(&self.heap, &pattern, &scrutinee, &mut binds)? {
+                        self.enter_block(frame_index, target, binds)?;
+                        return Ok(None);
+                    }
+                }
+                self.enter_block(frame_index, default, Vec::new())?;
+                Ok(None)
+            }
+            Terminator::Return { value } => {
+                let v = self.eval_operand(frame_index, &value)?;
+                let returning = self
+                    .stack
+                    .pop()
+                    .expect("frame_index points at the top frame");
+                self.unwind_handlers_to_stack_len(self.stack.len());
+
+                let Some(caller) = self.stack.last_mut() else {
+                    return Ok(Some(v));
+                };
+                if let Some(dst_local) = returning.return_dst {
+                    caller.write_local(dst_local, v)?;
+                }
+                Ok(None)
+            }
+            Terminator::Trap { message } => Err(RuntimeError::Trap { message }),
+        }
+    }
+
+    fn unwind_handlers_to_stack_len(&mut self, new_len: usize) {
+        while self
+            .handlers
+            .last()
+            .is_some_and(|h| h.owner_depth >= new_len)
+        {
+            self.handlers.pop();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Frame {
+    func: String,
+    block: BlockId,
+    ip: usize,
+    locals: Vec<Option<Value>>,
+    return_dst: Option<Local>,
+}
+
+impl Frame {
+    fn new(function: Function, return_dst: Option<Local>) -> Self {
+        let locals = vec![None; function.locals];
+        Self {
+            func: function.name,
+            block: BlockId(0),
+            ip: 0,
+            locals,
+            return_dst,
+        }
+    }
+
+    fn read_local(&self, local: Local) -> Result<Value, RuntimeError> {
+        let Some(slot) = self.locals.get(local.0) else {
+            return Err(RuntimeError::InvalidLocal {
+                local,
+                locals: self.locals.len(),
+            });
+        };
+        slot.clone()
+            .ok_or(RuntimeError::UninitializedLocal { local })
+    }
+
+    fn take_local(&mut self, local: Local) -> Result<Value, RuntimeError> {
+        let Some(slot) = self.locals.get_mut(local.0) else {
+            return Err(RuntimeError::InvalidLocal {
+                local,
+                locals: self.locals.len(),
+            });
+        };
+        slot.take()
+            .ok_or(RuntimeError::UninitializedLocal { local })
+    }
+
+    fn clear_local(&mut self, local: Local) -> Result<(), RuntimeError> {
+        let Some(slot) = self.locals.get_mut(local.0) else {
+            return Err(RuntimeError::InvalidLocal {
+                local,
+                locals: self.locals.len(),
+            });
+        };
+        *slot = None;
+        Ok(())
+    }
+
+    fn write_local(&mut self, local: Local, value: Value) -> Result<(), RuntimeError> {
+        let Some(slot) = self.locals.get_mut(local.0) else {
+            return Err(RuntimeError::InvalidLocal {
+                local,
+                locals: self.locals.len(),
+            });
+        };
+        *slot = Some(value);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct HandlerEntry {
+    owner_depth: usize,
+    clauses: Vec<HandlerClause>,
+}
+
+struct InterpreterRoots<'a> {
+    stack: &'a [Frame],
+    roots: &'a [RootSlot],
+}
+
+impl Trace for InterpreterRoots<'_> {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        for frame in self.stack {
+            frame.trace(tracer);
+        }
+        for slot in self.roots {
+            if let Some(value) = slot.value.as_ref() {
+                value.trace(tracer);
+            }
+        }
+    }
+}
+
+impl Trace for Frame {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        for value in self.locals.iter().flatten() {
+            value.trace(tracer);
+        }
+    }
+}
+
+impl Trace for Value {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        match self {
+            Value::Ref(r) => tracer.mark(r.handle),
+            Value::Continuation(k) => k.trace(tracer),
+            Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::String(_)
+            | Value::Bytes(_)
+            | Value::Function(_) => {}
+        }
+    }
+}
+
+impl Trace for HeapValue {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        match self {
+            HeapValue::Struct { fields, .. } => {
+                for value in fields.values() {
+                    value.trace(tracer);
+                }
+            }
+            HeapValue::Array(items) => {
+                for value in items {
+                    value.trace(tracer);
+                }
+            }
+            HeapValue::Enum { fields, .. } => {
+                for value in fields {
+                    value.trace(tracer);
+                }
+            }
+        }
+    }
+}
+
+impl Trace for ContinuationToken {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        let guard = self.0.borrow();
+        let Some(state) = guard.state.as_ref() else {
+            return;
+        };
+        state.trace(tracer);
+    }
+}
+
+impl Trace for ContinuationState {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        for frame in &self.stack {
+            frame.trace(tracer);
+        }
+    }
+}
+
+fn count_binds_in_patterns(patterns: &[Pattern]) -> usize {
+    patterns.iter().map(count_binds_in_pattern).sum()
+}
+
+fn count_binds_in_pattern(p: &Pattern) -> usize {
+    match p {
+        Pattern::Wildcard => 0,
+        Pattern::Bind => 1,
+        Pattern::Literal(_) => 0,
+        Pattern::Enum { fields, .. } => fields.iter().map(count_binds_in_pattern).sum(),
+        Pattern::Struct { fields, .. } => {
+            fields.iter().map(|(_, p)| count_binds_in_pattern(p)).sum()
+        }
+        Pattern::ArrayPrefix { items, .. } => items.iter().map(count_binds_in_pattern).sum(),
+    }
+}
+
+fn match_pattern<GC: GcHeap>(
+    heap: &GC,
+    pat: &Pattern,
+    value: &Value,
+    binds: &mut Vec<Value>,
+) -> Result<bool, RuntimeError> {
+    match pat {
+        Pattern::Wildcard => Ok(true),
+        Pattern::Bind => {
+            binds.push(value.clone());
+            Ok(true)
+        }
+        Pattern::Literal(lit) => Ok(match (lit, value) {
+            (ConstValue::Unit, Value::Unit) => true,
+            (ConstValue::Bool(a), Value::Bool(b)) => a == b,
+            (ConstValue::Int(a), Value::Int(b)) => a == b,
+            (ConstValue::Float(a), Value::Float(b)) => a == b,
+            (ConstValue::String(a), Value::String(b)) => a == b,
+            (ConstValue::Bytes(a), Value::Bytes(b)) => a == b,
+            (ConstValue::Function(a), Value::Function(b)) => a == b,
+            _ => false,
+        }),
+        Pattern::Enum {
+            enum_name,
+            variant,
+            fields,
+        } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let HeapValue::Enum {
+                enum_name: e,
+                variant: v,
+                fields: actual_fields,
+            } = heap
+                .get(r.handle)
+                .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
+            else {
+                return Ok(false);
+            };
+            if e != enum_name || v != variant || actual_fields.len() != fields.len() {
+                return Ok(false);
+            }
+            for (p, actual) in fields.iter().zip(actual_fields.iter()) {
+                if !match_pattern(heap, p, actual, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Struct { type_name, fields } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let HeapValue::Struct {
+                type_name: actual_ty,
+                fields: actual_fields,
+            } = heap
+                .get(r.handle)
+                .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
+            else {
+                return Ok(false);
+            };
+            if actual_ty != type_name {
+                return Ok(false);
+            }
+            for (field_name, field_pat) in fields.iter() {
+                let Some(field_value) = actual_fields.get(field_name) else {
+                    return Err(RuntimeError::MissingField {
+                        field: field_name.clone(),
+                    });
+                };
+                if !match_pattern(heap, field_pat, field_value, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::ArrayPrefix { items, has_rest } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let HeapValue::Array(actual_items) = heap
+                .get(r.handle)
+                .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
+            else {
+                return Ok(false);
+            };
+            if actual_items.len() < items.len() {
+                return Ok(false);
+            }
+            if !*has_rest && actual_items.len() != items.len() {
+                return Ok(false);
+            }
+            for (p, actual) in items.iter().zip(actual_items.iter()) {
+                if !match_pattern(heap, p, actual, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+}

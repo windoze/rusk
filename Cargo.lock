@@ -5,3 +5,12 @@ version = 4
 [[package]]
 name = "rusk"
 version = "0.1.0"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "537dd038a89878be9b64dd4bd1b260315c1bb94f4d784956b81e27a088d9a09e"

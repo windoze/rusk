@@ -1,0 +1,284 @@
+use std::collections::BTreeMap;
+
+/// A local slot index within a MIR function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Local(pub usize);
+
+/// A basic block index within a MIR function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockId(pub usize);
+
+/// A MIR module: a set of functions plus optional method-resolution metadata.
+#[derive(Clone, Debug, Default)]
+pub struct Module {
+    /// MIR functions by name.
+    pub functions: BTreeMap<String, Function>,
+
+    /// Optional virtual-call resolution: `(type_name, method_name) -> function_name`.
+    pub methods: BTreeMap<(String, String), String>,
+}
+
+/// A MIR function body.
+#[derive(Clone, Debug)]
+pub struct Function {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret_type: Option<Type>,
+    /// The number of local slots in this function.
+    pub locals: usize,
+    /// Basic blocks in textual order; `blocks[0]` is the entry block.
+    pub blocks: Vec<BasicBlock>,
+}
+
+impl Function {
+    /// Returns the entry block id (`blocks[0]`).
+    pub fn entry_block(&self) -> BlockId {
+        BlockId(0)
+    }
+}
+
+/// A function parameter.
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub local: Local,
+    pub mutability: Mutability,
+    pub ty: Option<Type>,
+}
+
+/// Parameter / binding mutability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mutability {
+    Mutable,
+    Readonly,
+}
+
+/// Optional type annotation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Type {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Array,
+    Struct(String),
+    Enum(String),
+    Fn,
+    Interface(String),
+}
+
+/// A basic block: params, instructions, and a terminator.
+#[derive(Clone, Debug)]
+pub struct BasicBlock {
+    pub label: String,
+    pub params: Vec<Local>,
+    pub instructions: Vec<Instruction>,
+    pub terminator: Terminator,
+}
+
+/// An operand: a local or a literal.
+#[derive(Clone, Debug)]
+pub enum Operand {
+    Local(Local),
+    Literal(ConstValue),
+}
+
+/// A literal value embedded in MIR.
+///
+/// Composite literals allocate fresh runtime objects when evaluated.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstValue {
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    /// A first-class reference to a named MIR function.
+    Function(String),
+    Array(Vec<ConstValue>),
+    Struct {
+        type_name: String,
+        /// Fields in source/textual order.
+        fields: Vec<(String, ConstValue)>,
+    },
+    Enum {
+        enum_name: String,
+        variant: String,
+        fields: Vec<ConstValue>,
+    },
+}
+
+/// A pattern for `switch` and effect handler clauses.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    /// `_`
+    Wildcard,
+    /// A binding site (textual MIR typically writes this as a local, e.g. `%msg`).
+    Bind,
+    /// A primitive literal match (unit/bool/int/float/string/bytes).
+    Literal(ConstValue),
+    /// `Enum::Variant(p1, p2, ...)`
+    Enum {
+        enum_name: String,
+        variant: String,
+        fields: Vec<Pattern>,
+    },
+    /// `Type { field: pat, ... }`
+    Struct {
+        type_name: String,
+        /// Fields in source/textual order.
+        fields: Vec<(String, Pattern)>,
+    },
+    /// `[p1, p2, ..]` (prefix match; if `has_rest` is false, length must match exactly).
+    ArrayPrefix { items: Vec<Pattern>, has_rest: bool },
+}
+
+/// An interface method effect identifier.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EffectId {
+    pub interface: String,
+    pub method: String,
+}
+
+/// A handler clause for a single effect.
+#[derive(Clone, Debug)]
+pub struct HandlerClause {
+    pub effect: EffectId,
+    pub arg_patterns: Vec<Pattern>,
+    pub target: BlockId,
+}
+
+/// A MIR instruction.
+#[derive(Clone, Debug)]
+pub enum Instruction {
+    Const {
+        dst: Local,
+        value: ConstValue,
+    },
+    Copy {
+        dst: Local,
+        src: Local,
+    },
+    Move {
+        dst: Local,
+        src: Local,
+    },
+    AsReadonly {
+        dst: Local,
+        src: Local,
+    },
+
+    MakeStruct {
+        dst: Local,
+        type_name: String,
+        /// Fields in source/textual order.
+        fields: Vec<(String, Operand)>,
+    },
+    MakeArray {
+        dst: Local,
+        /// Elements in source/textual order.
+        items: Vec<Operand>,
+    },
+    MakeEnum {
+        dst: Local,
+        enum_name: String,
+        variant: String,
+        /// Fields in source/textual order.
+        fields: Vec<Operand>,
+    },
+    GetField {
+        dst: Local,
+        obj: Operand,
+        field: String,
+    },
+    SetField {
+        obj: Operand,
+        field: String,
+        value: Operand,
+    },
+
+    IndexGet {
+        dst: Local,
+        arr: Operand,
+        idx: Operand,
+    },
+    IndexSet {
+        arr: Operand,
+        idx: Operand,
+        value: Operand,
+    },
+    Len {
+        dst: Local,
+        arr: Operand,
+    },
+
+    Call {
+        dst: Option<Local>,
+        func: String,
+        args: Vec<Operand>,
+    },
+    VCall {
+        dst: Option<Local>,
+        obj: Operand,
+        method: String,
+        args: Vec<Operand>,
+    },
+    ICall {
+        dst: Option<Local>,
+        fnptr: Operand,
+        args: Vec<Operand>,
+    },
+
+    PushHandler {
+        handler_id: String,
+        clauses: Vec<HandlerClause>,
+    },
+    PopHandler,
+
+    Perform {
+        dst: Option<Local>,
+        effect: EffectId,
+        args: Vec<Operand>,
+    },
+    Resume {
+        dst: Option<Local>,
+        k: Operand,
+        value: Operand,
+    },
+}
+
+/// A terminator instruction.
+#[derive(Clone, Debug)]
+pub enum Terminator {
+    Br {
+        target: BlockId,
+        args: Vec<Operand>,
+    },
+    CondBr {
+        cond: Operand,
+        then_target: BlockId,
+        then_args: Vec<Operand>,
+        else_target: BlockId,
+        else_args: Vec<Operand>,
+    },
+    Switch {
+        value: Operand,
+        cases: Vec<SwitchCase>,
+        default: BlockId,
+    },
+    Return {
+        value: Operand,
+    },
+    Trap {
+        message: String,
+    },
+}
+
+/// A single `switch` case.
+#[derive(Clone, Debug)]
+pub struct SwitchCase {
+    pub pattern: Pattern,
+    pub target: BlockId,
+}
