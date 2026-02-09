@@ -34,8 +34,9 @@ This is vital feature for implementing advanced control flow features like async
         // Now `cont` is the continuation it self, can be called like a normal function, itself is not necessarily a function, just reuse the function call syntax for convenience
         ...
         /// You can store `cont` somewhere for later use
-        /// The continuation will **not** be abandoned after this handler returns if you store it
+        /// The continuation will **not** be abandoned after this handler returns if you store it without calling it
         /// And you can resume it from anywhere later
+        /// Calling the continuation will resume the computation from the point where it was captured, and it will **consume** the continuation, make it invalid after calling (one-shot)
         // someplace.store(cont);  // store the continuation for later invocation
         ...
         /// Or you can call it to resume the continuation immediately

@@ -38,6 +38,10 @@ pub(crate) enum Ty {
         params: Vec<Ty>,
         ret: Box<Ty>,
     },
+    Cont {
+        param: Box<Ty>,
+        ret: Box<Ty>,
+    },
     Readonly(Box<Ty>),
     App(TyCon, Vec<Ty>),
 
@@ -94,6 +98,7 @@ impl fmt::Display for Ty {
                 }
                 write!(f, ") -> {ret}")
             }
+            Ty::Cont { param, ret } => write!(f, "cont({param}) -> {ret}"),
             Ty::Readonly(inner) => write!(f, "readonly {inner}"),
             Ty::App(con, args) => {
                 write!(f, "{con}")?;
@@ -1076,6 +1081,10 @@ impl InferCtx {
                 params: params.into_iter().map(|p| self.resolve_ty(p)).collect(),
                 ret: Box::new(self.resolve_ty(*ret)),
             },
+            Ty::Cont { param, ret } => Ty::Cont {
+                param: Box::new(self.resolve_ty(*param)),
+                ret: Box::new(self.resolve_ty(*ret)),
+            },
             Ty::Readonly(inner) => Ty::Readonly(Box::new(self.resolve_ty(*inner))),
             Ty::App(con, args) => Ty::App(
                 self.resolve_con(con),
@@ -1106,6 +1115,9 @@ impl InferCtx {
             Ty::Array(elem) | Ty::Readonly(elem) => self.occurs_in(var, elem.as_ref()),
             Ty::Fn { params, ret } => {
                 params.iter().any(|p| self.occurs_in(var, p)) || self.occurs_in(var, ret.as_ref())
+            }
+            Ty::Cont { param, ret } => {
+                self.occurs_in(var, param.as_ref()) || self.occurs_in(var, ret.as_ref())
             }
             Ty::App(_, args) => args.iter().any(|a| self.occurs_in(var, a)),
             _ => false,
@@ -1165,6 +1177,14 @@ impl InferCtx {
                 let ret = self.unify(*ar, *br, span)?;
                 Ok(Ty::Fn {
                     params,
+                    ret: Box::new(ret),
+                })
+            }
+            (Ty::Cont { param: ap, ret: ar }, Ty::Cont { param: bp, ret: br }) => {
+                let param = self.unify(*ap, *bp, span)?;
+                let ret = self.unify(*ar, *br, span)?;
+                Ok(Ty::Cont {
+                    param: Box::new(param),
                     ret: Box::new(ret),
                 })
             }
@@ -1260,6 +1280,10 @@ fn subst_ty(ty: Ty, ty_subst: &HashMap<GenId, Ty>, con_subst: &HashMap<GenId, Ty
                 .into_iter()
                 .map(|p| subst_ty(p, ty_subst, con_subst))
                 .collect(),
+            ret: Box::new(subst_ty(*ret, ty_subst, con_subst)),
+        },
+        Ty::Cont { param, ret } => Ty::Cont {
+            param: Box::new(subst_ty(*param, ty_subst, con_subst)),
             ret: Box::new(subst_ty(*ret, ty_subst, con_subst)),
         },
         Ty::Readonly(inner) => Ty::Readonly(Box::new(subst_ty(*inner, ty_subst, con_subst))),
@@ -2061,19 +2085,37 @@ impl<'a> FnTypechecker<'a> {
                             },
                         )?;
                     }
-                    // `resume: fn(effect_ret) -> match_result`.
-                    let resume_ty = Ty::Fn {
-                        params: vec![msig.ret.clone()],
+                    let cont_name = effect_pat
+                        .cont
+                        .as_ref()
+                        .map(|c| c.name.as_str())
+                        .unwrap_or("resume");
+                    let cont_span = effect_pat
+                        .cont
+                        .as_ref()
+                        .map(|c| c.span)
+                        .unwrap_or(effect_pat.span);
+                    // `cont: cont(effect_ret) -> match_result` (defaults to `resume`).
+                    let cont_ty = Ty::Cont {
+                        param: Box::new(msig.ret.clone()),
                         ret: Box::new(result_ty.clone()),
                     };
-                    self.bind_reserved_local(
-                        "resume",
-                        LocalInfo {
-                            ty: resume_ty,
-                            kind: BindingKind::Const,
-                            span: effect_pat.span,
-                        },
-                    )?;
+                    let cont_info = LocalInfo {
+                        ty: cont_ty,
+                        kind: BindingKind::Const,
+                        span: cont_span,
+                    };
+                    if cont_name == "resume" {
+                        self.bind_reserved_local("resume", cont_info)?;
+                    } else {
+                        self.bind_local(
+                            &crate::ast::Ident {
+                                name: cont_name.to_string(),
+                                span: cont_span,
+                            },
+                            cont_info,
+                        )?;
+                    }
 
                     let body_ty = self.typecheck_expr(&arm.body, ExprUse::Value)?;
                     self.infer.unify(result_ty.clone(), body_ty, arm.span)?;
@@ -2289,11 +2331,17 @@ impl<'a> FnTypechecker<'a> {
         span: Span,
     ) -> Result<Ty, TypeError> {
         // Direct call by path.
-        if let Expr::Path { path, .. } = callee {
+        if let Expr::Path {
+            path,
+            span: callee_span,
+        } = callee
+        {
             if path.segments.len() == 1 {
                 let local_name = path.segments[0].name.as_str();
                 if let Some(local) = self.lookup_local(local_name) {
-                    return self.typecheck_call_via_fn_value(local.ty.clone(), args, span);
+                    let local_ty = local.ty.clone();
+                    self.expr_types.insert(*callee_span, local_ty.clone());
+                    return self.typecheck_call_via_fn_value(local_ty, args, span);
                 }
             }
 
@@ -2362,27 +2410,40 @@ impl<'a> FnTypechecker<'a> {
         span: Span,
     ) -> Result<Ty, TypeError> {
         let callee_ty = self.infer.resolve_ty(callee_ty);
-        let Ty::Fn { params, ret } = callee_ty else {
-            return Err(TypeError {
-                message: format!("attempted to call a non-function value of type `{callee_ty}`"),
+        match callee_ty {
+            Ty::Fn { params, ret } => {
+                if args.len() != params.len() {
+                    return Err(TypeError {
+                        message: format!(
+                            "arity mismatch: expected {}, got {}",
+                            params.len(),
+                            args.len()
+                        ),
+                        span,
+                    });
+                }
+                for (arg, expected) in args.iter().zip(params.iter()) {
+                    let got = self.typecheck_expr(arg, ExprUse::Value)?;
+                    self.infer.unify(expected.clone(), got, arg.span())?;
+                }
+                Ok(*ret)
+            }
+            Ty::Cont { param, ret } => {
+                if args.len() != 1 {
+                    return Err(TypeError {
+                        message: format!("arity mismatch: expected 1, got {}", args.len()),
+                        span,
+                    });
+                }
+                let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                self.infer.unify(*param, got, args[0].span())?;
+                Ok(*ret)
+            }
+            other => Err(TypeError {
+                message: format!("attempted to call a non-function value of type `{other}`"),
                 span,
-            });
-        };
-        if args.len() != params.len() {
-            return Err(TypeError {
-                message: format!(
-                    "arity mismatch: expected {}, got {}",
-                    params.len(),
-                    args.len()
-                ),
-                span,
-            });
+            }),
         }
-        for (arg, expected) in args.iter().zip(params.iter()) {
-            let got = self.typecheck_expr(arg, ExprUse::Value)?;
-            self.infer.unify(expected.clone(), got, arg.span())?;
-        }
-        Ok(*ret)
     }
 
     fn typecheck_interface_method_call(
@@ -2846,6 +2907,7 @@ fn contains_infer_vars(ty: &Ty) -> bool {
         Ty::Fn { params, ret } => {
             params.iter().any(contains_infer_vars) || contains_infer_vars(ret)
         }
+        Ty::Cont { param, ret } => contains_infer_vars(param) || contains_infer_vars(ret),
         Ty::App(con, args) => matches!(con, TyCon::Var(_)) || args.iter().any(contains_infer_vars),
         _ => false,
     }

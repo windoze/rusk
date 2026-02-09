@@ -1189,11 +1189,20 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let end = self.expect(TokenKind::RParen)?.span.end;
+        let mut end = self.expect(TokenKind::RParen)?.span.end;
+        let cont = if matches!(self.lookahead.kind, TokenKind::Arrow) {
+            self.bump()?;
+            let name = self.expect_ident()?;
+            end = name.span.end;
+            Some(name)
+        } else {
+            None
+        };
         Ok(EffectPattern {
             interface,
             method,
             args,
+            cont,
             span: Span::new(start, end),
         })
     }

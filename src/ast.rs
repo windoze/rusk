@@ -415,6 +415,11 @@ pub struct EffectPattern {
     pub interface: Path,
     pub method: Ident,
     pub args: Vec<Pattern>,
+    /// Optional binder name for the captured continuation (effect handler context).
+    ///
+    /// If absent, the continuation is bound to the predefined name `resume` for
+    /// backwards compatibility.
+    pub cont: Option<Ident>,
     pub span: Span,
 }
 

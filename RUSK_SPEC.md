@@ -379,7 +379,7 @@ MatchExpr      := "match" Expr "{" MatchArm* "}" ;
 MatchArm       := (EffectPat | ValuePat) "=>" BlockOrExpr ","? ;
 BlockOrExpr    := Block | Expr ;
 ValuePat       := Pattern ;
-EffectPat      := "@" PathExpr "." Ident "(" PatList? ")" ;
+EffectPat      := "@" PathExpr "." Ident "(" PatList? ")" ("->" Ident)? ;
 PatList        := Pattern ("," Pattern)* (",")? ;
 ```
 
@@ -597,7 +597,7 @@ Example:
 
 ```rust
 match compute() {
-  @Logger.log(msg) => { print(msg); resume(()) }
+  @Logger.log(msg) -> k => { print(msg); k(()) }
   0 => 1
   n => n + 1
 }
@@ -610,13 +610,29 @@ Rules:
 - Multiple effect arms are tried in source order; the first whose parameter
   patterns match the effect arguments is selected.
 
-### 7.3 `resume`
+### 7.3 Continuations and `resume`
 
-Inside an effect arm, a special identifier `resume` is in scope (it cannot be
-redefined). It behaves like a function:
+When an effect arm handles an effect call, it receives a **captured continuation**
+as a value.
+
+Syntax:
+
+- Explicit binder:
+  ```rust
+  @Interface.method(pats...) -> k => body
+  ```
+- Omitted binder (backwards compatible): the continuation is bound to the
+  predefined name `resume`:
+  ```rust
+  @Interface.method(pats...) => body   // implicitly: `-> resume`
+  ```
+
+The binder name cannot be redefined within the same function.
+
+Calling a continuation uses normal call syntax:
 
 ```
-resume(value_for_effect_call) -> handled_result
+k(value_for_effect_call) -> handled_result
 ```
 
 Where:
@@ -626,11 +642,15 @@ Where:
   (i.e., the entire `match` expression) after resuming: the resumed scrutinee
   evaluation *followed by* value-arm matching.
 
-`resume` is **one-shot**: calling it more than once traps.
+Continuations are **one-shot**: calling the same continuation more than once
+traps (including calling `resume(...)` more than once).
 
-If an effect arm completes without calling `resume`, the captured continuation is
-abandoned and the effect arm’s value becomes the result of the whole `match`
-expression.
+If an effect arm completes without calling its continuation, the effect arm’s
+value becomes the result of the whole `match` expression.
+
+The captured continuation value may be stored (e.g. in a struct/array) or
+returned from the handler to be resumed later. If it is not stored and becomes
+unreachable, it is effectively abandoned and will never run.
 
 ### 7.4 Delimitation Guarantee
 
@@ -682,6 +702,7 @@ Nominal types:
 - structs: `Name<...>`
 - enums: `Name<...>`
 - functions: `fn(T1, T2, ...) -> R`
+- continuations: `cont(T) -> R` (introduced by effect handlers; not currently expressible as a type annotation in v0.4)
 - interfaces: `Interface<...>`
 - readonly views: `readonly T` (only meaningful when `T` is an array/struct/enum; it forbids mutation through that reference)
 
@@ -738,9 +759,10 @@ interface Logger {
 Then:
 
 - `@Logger.log(e)` has type `unit` and requires `e: string`.
-- An effect arm `@Logger.log(pat) => body` is well-typed if the patterns bind values
-  of the declared argument types, and if `resume` is used consistently:
-  - `resume(v)` requires `v: unit` (the declared return type of the effect).
+- An effect arm `@Logger.log(pat) -> k => body` (or `@Logger.log(pat) => body` with the
+  implicit binder `resume`) is well-typed if the patterns bind values of the declared
+  argument types, and if the continuation is called consistently:
+  - `k(v)` requires `v: unit` (the declared return type of the effect).
 
 The type of the overall `match` expression is determined by the value arms and
 effect arms collectively (all arms must unify to a single result type).

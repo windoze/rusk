@@ -295,6 +295,76 @@ fn resume_is_one_shot() {
 }
 
 #[test]
+fn can_store_and_resume_a_captured_continuation_later() {
+    let src = r#"
+        struct Cell<T> { v: T }
+
+        interface E { fn boom() -> int; }
+
+        fn test_default_binder() -> int {
+            let cell = Cell { v: Option::None(()) };
+            match @E.boom() {
+                @E.boom() => { cell.v = Option::Some(resume); 0 }
+                x => x
+            };
+            match cell.v {
+                Option::Some(k) => k(41)
+                Option::None(_) => 0
+            }
+        }
+
+        fn test_explicit_binder() -> int {
+            let cell = Cell { v: Option::None(()) };
+            match @E.boom() {
+                @E.boom() -> k => { cell.v = Option::Some(k); 0 }
+                x => x
+            };
+            match cell.v {
+                Option::Some(k) => k(42)
+                Option::None(_) => 0
+            }
+        }
+    "#;
+
+    assert_eq!(
+        run0(src, "test_default_binder").expect("run"),
+        Value::Int(41)
+    );
+    assert_eq!(
+        run0(src, "test_explicit_binder").expect("run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn calling_a_continuation_value_is_one_shot() {
+    let src = r#"
+        struct Cell<T> { v: T }
+
+        interface E { fn boom() -> int; }
+
+        fn bad() -> unit {
+            let cell = Cell { v: Option::None(()) };
+            match @E.boom() {
+                @E.boom() -> k => { cell.v = Option::Some(k); 0 }
+                x => x
+            };
+            match cell.v {
+                Option::Some(k) => {
+                    k(1);
+                    k(2);
+                    ()
+                }
+                Option::None(_) => ()
+            }
+        }
+    "#;
+
+    let err = run0(src, "bad").expect_err("should error");
+    assert!(matches!(err, RuntimeError::InvalidResume), "{err:?}");
+}
+
+#[test]
 fn evaluation_order_is_left_to_right_for_array_literals() {
     let src = r#"
         interface Tick { fn tick(n: int) -> unit; }

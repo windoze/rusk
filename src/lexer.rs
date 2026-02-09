@@ -1015,11 +1015,25 @@ fn digit_value(ch: char, base: u32) -> Option<u32> {
 }
 
 fn is_ident_start(ch: char) -> bool {
-    ch == '_' || unicode_ident::is_xid_start(ch)
+    #[cfg(feature = "unicode")]
+    {
+        ch == '_' || unicode_ident::is_xid_start(ch)
+    }
+    #[cfg(not(feature = "unicode"))]
+    {
+        ch == '_' || ch.is_ascii_alphabetic()
+    }
 }
 
 fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || unicode_ident::is_xid_continue(ch)
+    #[cfg(feature = "unicode")]
+    {
+        ch == '_' || unicode_ident::is_xid_continue(ch)
+    }
+    #[cfg(not(feature = "unicode"))]
+    {
+        ch == '_' || ch.is_ascii_alphanumeric()
+    }
 }
 
 use std::mem;

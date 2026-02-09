@@ -397,7 +397,6 @@ struct FunctionLowerer<'a> {
     next_local: usize,
     scopes: Vec<BTreeMap<String, VarInfo>>,
     loop_stack: Vec<LoopTargets>,
-    resume_token: Option<Local>,
 }
 
 impl<'a> FunctionLowerer<'a> {
@@ -417,7 +416,6 @@ impl<'a> FunctionLowerer<'a> {
             next_local: 0,
             scopes: vec![BTreeMap::new()],
             loop_stack: Vec::new(),
-            resume_token: None,
         }
     }
 
@@ -1103,17 +1101,6 @@ impl<'a> FunctionLowerer<'a> {
         path: &crate::ast::Path,
         span: Span,
     ) -> Result<Local, CompileError> {
-        // `resume` is a special identifier only valid in effect arm call position.
-        if path.segments.len() == 1
-            && path.segments[0].name == "resume"
-            && self.resume_token.is_some()
-        {
-            return Err(CompileError {
-                message: "`resume` can only be called".to_string(),
-                span,
-            });
-        }
-
         // Local bindings.
         if path.segments.len() == 1 {
             let name = &path.segments[0].name;
@@ -1690,17 +1677,15 @@ impl<'a> FunctionLowerer<'a> {
         args: &[Expr],
         span: Span,
     ) -> Result<Local, CompileError> {
-        // `resume(x)` in an effect arm.
-        if let (Some(k_local), Expr::Path { path, .. }) = (self.resume_token, callee)
-            && path.segments.len() == 1
-            && path.segments[0].name == "resume"
-        {
+        // First-class continuation call: `cont(value_for_effect_call)`.
+        if matches!(self.expr_ty(callee), Some(Ty::Cont { .. })) {
             if args.len() != 1 {
                 return Err(CompileError {
-                    message: "`resume` takes exactly one argument".to_string(),
+                    message: "continuation call takes exactly one argument".to_string(),
                     span,
                 });
             }
+            let k_local = self.lower_expr(callee)?;
             let v = self.lower_expr(&args[0])?;
             let control = self.alloc_local();
             self.emit(Instruction::Resume {
@@ -2134,10 +2119,19 @@ impl<'a> FunctionLowerer<'a> {
                     },
                 );
             }
-            let saved_resume = self.resume_token;
-            self.resume_token = Some(k_local);
+            let cont_name = effect_pat
+                .cont
+                .as_ref()
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "resume".to_string());
+            self.bind_var(
+                &cont_name,
+                VarInfo {
+                    local: k_local,
+                    kind: BindingKind::Const,
+                },
+            );
             let value_local = self.lower_expr(body)?;
-            self.resume_token = saved_resume;
             self.pop_scope();
 
             if !self.is_current_terminated() {
