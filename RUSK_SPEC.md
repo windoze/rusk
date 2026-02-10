@@ -51,7 +51,7 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`fn`, `cont`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
+`pub`, `use`, `mod`, `as`, `fn`, `cont`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
 
 Control flow:
 
@@ -88,7 +88,9 @@ The grammar below is descriptive and intended to be unambiguous for implementati
 ```
 Program        := Item* ;
 
-Item           := FnItem | StructItem | EnumItem | InterfaceItem | ImplItem ;
+Item           := Visibility? (FnItem | StructItem | EnumItem | InterfaceItem | ImplItem | ModItem | UseItem) ;
+
+Visibility     := "pub" ;
 ```
 
 ### 3.2 Items
@@ -150,6 +152,47 @@ ImplHeader     := Ident GenericArgs?                    // inherent impl: impl T
 
 ImplMember     := FnItem ;
 ```
+
+#### 3.2.6 Modules
+
+Rusk modules are Rust-like and form a tree rooted at the implicit crate root module `crate`.
+
+```
+ModItem        := "mod" Ident ";"          // file/directory module (loaded by the module loader)
+               | "mod" Ident "{" Item* "}" // inline module
+               ;
+```
+
+Notes:
+
+- `mod name { ... }` defines an inline submodule.
+- `mod name;` declares a file/directory submodule. Before parsing/typechecking, the module loader
+  must replace it by an inline module whose contents are loaded from disk:
+  - file module: `<dir>/<name>.rusk`
+  - directory module: `<dir>/<name>/mod.rusk`
+  where `<dir>` is the directory of the current module file.
+  It is an error if both exist or if neither exists.
+- Module names `core` and `std` are reserved.
+
+#### 3.2.7 Imports and Re-exports (`use`)
+
+```
+UseItem        := "use" Path ("as" Ident)? ";" ;
+```
+
+Notes:
+
+- Rusk follows Rust’s **separate namespaces**: module namespace, type namespace, value namespace.
+  A `use` may introduce a binding in one or more namespaces depending on what the path resolves to.
+- `pub use ...;` is a public re-export. A public re-export requires the target item to already be
+  public.
+- Paths may use Rust-like module anchors at the beginning:
+  - `crate::...` is absolute from the crate root.
+  - `self::...` is relative to the current module.
+  - `super::...` is relative to the parent module (multiple `super::super::...` are allowed).
+- The built-in module `core` is always available as `core::...`.
+- `core::prelude` is automatically imported into every module (like Rust’s prelude). In v0.4, it
+  contains `panic`.
 
 ### 3.3 Generics
 
@@ -852,10 +895,10 @@ type-system capability and a definitional example.
 
 ---
 
-## 9. Desugarings and Required Standard Library Surface
+## 9. Desugarings and Required Core Library Surface
 
 Rusk core syntax includes operators and `for`, but they desugar to ordinary calls
-to names in the `std` module.
+to names in the built-in `core::intrinsics` module.
 
 The compiler **must** emit these calls, and the runtime **must** provide them as
 host functions.
@@ -864,30 +907,30 @@ host functions.
 
 For `int`:
 
-- `a + b` lowers to `std::int_add(a, b)`
-- `a - b` lowers to `std::int_sub(a, b)`
-- `a * b` lowers to `std::int_mul(a, b)`
-- `a / b` lowers to `std::int_div(a, b)`
-- `a % b` lowers to `std::int_mod(a, b)`
+- `a + b` lowers to `core::intrinsics::int_add(a, b)`
+- `a - b` lowers to `core::intrinsics::int_sub(a, b)`
+- `a * b` lowers to `core::intrinsics::int_mul(a, b)`
+- `a / b` lowers to `core::intrinsics::int_div(a, b)`
+- `a % b` lowers to `core::intrinsics::int_mod(a, b)`
 
 Comparisons:
 
-- `a < b` lowers to `std::int_lt(a, b)` (returns `bool`)
-- `a <= b` lowers to `std::int_le(a, b)` etc
-- `a == b` lowers to `std::int_eq(a, b)` etc (for primitive equality)
+- `a < b` lowers to `core::intrinsics::int_lt(a, b)` (returns `bool`)
+- `a <= b` lowers to `core::intrinsics::int_le(a, b)` etc
+- `a == b` lowers to `core::intrinsics::int_eq(a, b)` etc (for primitive equality)
 
-Similarly for `float` via `std::float_*`.
+Similarly for `float` via `core::intrinsics::float_*`.
 
 Other primitive equality:
 
-- `bool`: `std::bool_eq`, `std::bool_ne`
-- `string`: `std::string_eq`, `std::string_ne`
-- `bytes`: `std::bytes_eq`, `std::bytes_ne`
-- `unit`: `std::unit_eq`, `std::unit_ne`
+- `bool`: `core::intrinsics::bool_eq`, `core::intrinsics::bool_ne`
+- `string`: `core::intrinsics::string_eq`, `core::intrinsics::string_ne`
+- `bytes`: `core::intrinsics::bytes_eq`, `core::intrinsics::bytes_ne`
+- `unit`: `core::intrinsics::unit_eq`, `core::intrinsics::unit_ne`
 
 ### 9.2 Boolean Operators
 
-- `!x` lowers to `std::bool_not(x)`
+- `!x` lowers to `core::intrinsics::bool_not(x)`
 - `a && b` lowers to short-circuiting `if a { b } else { false }`
 - `a || b` lowers to short-circuiting `if a { true } else { b }`
 
@@ -896,29 +939,38 @@ Other primitive equality:
 `f"prefix {e1} middle {e2} suffix"` lowers to:
 
 1. evaluate `e1`, `e2` left-to-right
-2. convert each to `string` via `std::to_string`
-3. concatenate via `std::string_concat`
+2. convert each to `string` via `core::intrinsics::to_string`
+3. concatenate via `core::intrinsics::string_concat`
 
 ### 9.4 `for` Desugaring (Iterator Protocol)
 
 `for x in iter { body }` desugars to:
 
 ```rust
-let it = std::into_iter(iter);
+let it = core::intrinsics::into_iter(iter);
 loop {
-  match std::next(it) {
+  match core::intrinsics::next(it) {
     Option::Some(x) => { body; }
     Option::None(()) => break;
   }
 }
 ```
 
-Required std functions and types:
+Required core intrinsics functions and types:
 
-- `struct std::ArrayIter<T> { arr: [T], idx: int }` (iterator state object)
-- `std::into_iter<T>([T]) -> std::ArrayIter<T>`
-- `std::next<T>(std::ArrayIter<T>) -> Option<T>`
+- `struct core::intrinsics::ArrayIter<T> { arr: [T], idx: int }` (iterator state object)
+- `core::intrinsics::into_iter<T>([T]) -> core::intrinsics::ArrayIter<T>`
+- `core::intrinsics::next<T>(core::intrinsics::ArrayIter<T>) -> Option<T>`
 - `enum Option<T> { Some(T), None(unit) }`
+
+### 9.5 Panic
+
+Rusk provides a minimal panic surface as an intrinsic host function:
+
+- `core::intrinsics::panic<T>(msg: string) -> T` traps with a panic message.
+
+`core::prelude` is automatically imported into every module and (in v0.4) re-exports `panic`,
+so `panic("...")` is available unqualified.
 
 ---
 
@@ -945,5 +997,5 @@ A runnable program must define:
 fn main() -> unit { ... }
 ```
 
-The CLI tool compiles the program to MIR, installs the required `std::*` host
+The CLI tool compiles the program to MIR, installs the required `core::intrinsics::*` host
 functions, runs `main`, and treats any trap as a non-zero process exit.

@@ -19,6 +19,10 @@ pub enum TokenKind {
     FString(Vec<FStringPart>),
 
     // Keywords.
+    KwPub,
+    KwUse,
+    KwMod,
+    KwAs,
     KwFn,
     KwCont,
     KwLet,
@@ -324,6 +328,10 @@ impl<'a> Lexer<'a> {
         }
         let text = &self.src[start..self.pos];
         let kind = match text {
+            "pub" => TokenKind::KwPub,
+            "use" => TokenKind::KwUse,
+            "mod" => TokenKind::KwMod,
+            "as" => TokenKind::KwAs,
             "fn" => TokenKind::KwFn,
             "cont" => TokenKind::KwCont,
             "let" => TokenKind::KwLet,

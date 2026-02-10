@@ -1,8 +1,8 @@
-use rusk::compiler::compile_to_mir;
-use rusk::stdlib::register_std_host_fns;
+use rusk::compiler::compile_file_to_mir;
+use rusk::corelib::register_core_host_fns;
 use rusk::{Interpreter, Value};
 use std::env;
-use std::fs;
+use std::path::Path;
 use std::process;
 
 fn main() {
@@ -16,15 +16,7 @@ fn main() {
         process::exit(2);
     }
 
-    let source = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: failed to read `{path}`: {e}");
-            process::exit(2);
-        }
-    };
-
-    let module = match compile_to_mir(&source) {
+    let module = match compile_file_to_mir(Path::new(&path)) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("compile error: {e}");
@@ -33,7 +25,7 @@ fn main() {
     };
 
     let mut interp = Interpreter::new(module);
-    register_std_host_fns(&mut interp);
+    register_core_host_fns(&mut interp);
 
     match interp.run_function("main", vec![]) {
         Ok(Value::Unit) => {}

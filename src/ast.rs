@@ -5,6 +5,18 @@ pub struct Program {
     pub items: Vec<Item>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Visibility {
+    Private,
+    Public { span: Span },
+}
+
+impl Visibility {
+    pub fn is_public(&self) -> bool {
+        matches!(self, Visibility::Public { .. })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Function(FnItem),
@@ -12,6 +24,8 @@ pub enum Item {
     Enum(EnumItem),
     Interface(InterfaceItem),
     Impl(ImplItem),
+    Mod(ModItem),
+    Use(UseItem),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +57,7 @@ pub struct Path {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnItem {
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
@@ -60,6 +75,7 @@ pub struct Param {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructItem {
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDecl>,
@@ -75,6 +91,7 @@ pub struct FieldDecl {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumItem {
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub variants: Vec<EnumVariant>,
@@ -90,9 +107,34 @@ pub struct EnumVariant {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceItem {
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub members: Vec<InterfaceMember>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModItem {
+    pub vis: Visibility,
+    pub name: Ident,
+    pub kind: ModKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModKind {
+    /// Inline module: `mod foo { ... }`.
+    Inline { items: Vec<Item> },
+    /// File or directory module: `mod foo;` (loaded by the module loader).
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseItem {
+    pub vis: Visibility,
+    pub path: Path,
+    pub alias: Option<Ident>,
     pub span: Span,
 }
 
@@ -287,7 +329,7 @@ pub enum Expr {
         span: Span,
     },
     StructLit {
-        type_name: Ident,
+        type_path: Path,
         fields: Vec<(Ident, Expr)>,
         span: Span,
     },
@@ -474,13 +516,13 @@ pub enum Pattern {
         span: Span,
     },
     Enum {
-        enum_name: Ident,
+        enum_path: Path,
         variant: Ident,
         fields: Vec<Pattern>,
         span: Span,
     },
     Struct {
-        type_name: Ident,
+        type_path: Path,
         fields: Vec<(Ident, Pattern)>,
         has_rest: bool,
         span: Span,

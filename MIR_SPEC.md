@@ -157,7 +157,7 @@ MIR may carry types for optimization/debugging:
 - primitives: `int`, `float`, `bool`, `string`, `bytes`, `unit`
 - composite: `struct`, `enum`, `array`, `tuple`
 - callable: `fn`
-- continuations: `cont`
+- continuations: `cont(<param>) -> <ret>` (the value passed to `resume` and the value produced by `resume`)
 - effects: `interface`
 
 Type checking is optional; a conforming interpreter executes dynamically.

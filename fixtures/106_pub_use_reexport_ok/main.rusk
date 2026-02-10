@@ -1,0 +1,9 @@
+// expect: ok int 42
+
+mod a;
+pub use a::answer;
+
+fn main() -> int {
+    answer()
+}
+

@@ -1,0 +1,7 @@
+// expect: runtime_error panic: boom
+
+fn main() -> unit {
+    panic("boom");
+    ()
+}
+

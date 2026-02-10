@@ -1,0 +1,4 @@
+pub fn add1(x: int) -> int {
+    x + 1
+}
+

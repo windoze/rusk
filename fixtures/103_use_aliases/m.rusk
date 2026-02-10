@@ -1,0 +1,10 @@
+pub struct Wrap { v: int }
+
+pub fn wrap(n: int) -> Wrap {
+    Wrap { v: n }
+}
+
+pub fn answer() -> int {
+    7
+}
+

@@ -63,17 +63,33 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
+        let vis = self.parse_visibility()?;
         match self.lookahead.kind {
-            TokenKind::KwFn => Ok(Item::Function(self.parse_fn_item()?)),
-            TokenKind::KwStruct => Ok(Item::Struct(self.parse_struct_item()?)),
-            TokenKind::KwEnum => Ok(Item::Enum(self.parse_enum_item()?)),
-            TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface_item()?)),
-            TokenKind::KwImpl => Ok(Item::Impl(self.parse_impl_item()?)),
+            TokenKind::KwFn => Ok(Item::Function(self.parse_fn_item(vis)?)),
+            TokenKind::KwStruct => Ok(Item::Struct(self.parse_struct_item(vis)?)),
+            TokenKind::KwEnum => Ok(Item::Enum(self.parse_enum_item(vis)?)),
+            TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface_item(vis)?)),
+            TokenKind::KwMod => Ok(Item::Mod(self.parse_mod_item(vis)?)),
+            TokenKind::KwUse => Ok(Item::Use(self.parse_use_item(vis)?)),
+            TokenKind::KwImpl => {
+                if vis.is_public() {
+                    return Err(self.error_here("`impl` items cannot be `pub`"));
+                }
+                Ok(Item::Impl(self.parse_impl_item()?))
+            }
             _ => Err(self.error_here("expected item")),
         }
     }
 
-    fn parse_fn_item(&mut self) -> Result<FnItem, ParseError> {
+    fn parse_visibility(&mut self) -> Result<Visibility, ParseError> {
+        if matches!(self.lookahead.kind, TokenKind::KwPub) {
+            let tok = self.bump()?;
+            return Ok(Visibility::Public { span: tok.span });
+        }
+        Ok(Visibility::Private)
+    }
+
+    fn parse_fn_item(&mut self, vis: Visibility) -> Result<FnItem, ParseError> {
         let start = self.expect(TokenKind::KwFn)?.span.start;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -94,6 +110,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_block()?;
         let end = body.span.end;
         Ok(FnItem {
+            vis,
             name,
             generics,
             params,
@@ -103,7 +120,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_struct_item(&mut self) -> Result<StructItem, ParseError> {
+    fn parse_struct_item(&mut self, vis: Visibility) -> Result<StructItem, ParseError> {
         let start = self.expect(TokenKind::KwStruct)?.span.start;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -127,6 +144,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(StructItem {
+            vis,
             name,
             generics,
             fields,
@@ -134,7 +152,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_enum_item(&mut self) -> Result<EnumItem, ParseError> {
+    fn parse_enum_item(&mut self, vis: Visibility) -> Result<EnumItem, ParseError> {
         let start = self.expect(TokenKind::KwEnum)?.span.start;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -176,6 +194,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(EnumItem {
+            vis,
             name,
             generics,
             variants,
@@ -183,7 +202,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_interface_item(&mut self) -> Result<InterfaceItem, ParseError> {
+    fn parse_interface_item(&mut self, vis: Visibility) -> Result<InterfaceItem, ParseError> {
         let start = self.expect(TokenKind::KwInterface)?.span.start;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
@@ -217,9 +236,58 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(InterfaceItem {
+            vis,
             name,
             generics,
             members,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_mod_item(&mut self, vis: Visibility) -> Result<ModItem, ParseError> {
+        let start = self.expect(TokenKind::KwMod)?.span.start;
+        let name = self.expect_ident()?;
+        if matches!(self.lookahead.kind, TokenKind::Semi) {
+            let end = self.bump()?.span.end;
+            return Ok(ModItem {
+                vis,
+                name,
+                kind: ModKind::File,
+                span: Span::new(start, end),
+            });
+        }
+        if matches!(self.lookahead.kind, TokenKind::LBrace) {
+            self.bump()?;
+            let mut items = Vec::new();
+            while !matches!(self.lookahead.kind, TokenKind::RBrace) {
+                items.push(self.parse_item()?);
+            }
+            let end = self.expect(TokenKind::RBrace)?.span.end;
+            return Ok(ModItem {
+                vis,
+                name,
+                kind: ModKind::Inline { items },
+                span: Span::new(start, end),
+            });
+        }
+
+        Err(self.error_here("expected `;` or `{` after module name"))
+    }
+
+    fn parse_use_item(&mut self, vis: Visibility) -> Result<UseItem, ParseError> {
+        let start = self.expect(TokenKind::KwUse)?.span.start;
+        let path = self.parse_path_expr()?;
+        let alias = if matches!(self.lookahead.kind, TokenKind::KwAs) {
+            self.bump()?;
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        let end = self.expect(TokenKind::Semi)?.span.end;
+        Ok(UseItem {
+            vis,
+            path,
+            alias,
             span: Span::new(start, end),
         })
     }
@@ -246,7 +314,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace)?;
         let mut members = Vec::new();
         while !matches!(self.lookahead.kind, TokenKind::RBrace) {
-            members.push(self.parse_fn_item()?);
+            let vis = self.parse_visibility()?;
+            if !matches!(self.lookahead.kind, TokenKind::KwFn) {
+                return Err(self.error_here("expected `fn` in `impl` body"));
+            }
+            members.push(self.parse_fn_item(vis)?);
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(ImplItem {
@@ -1254,13 +1326,24 @@ impl<'a> Parser<'a> {
 
     fn parse_path_or_struct_lit(&mut self, allow_struct_lit: bool) -> Result<Expr, ParseError> {
         let start = self.lookahead.span.start;
-        let head = self.expect_ident()?;
+
+        // Parse a path first: `A` or `A::B::C`.
+        let mut segments = vec![self.expect_ident()?];
+        while matches!(self.lookahead.kind, TokenKind::ColonColon) {
+            self.bump()?;
+            segments.push(self.expect_ident()?);
+        }
+        let path_end = segments.last().map(|s| s.span.end).unwrap_or(start);
+        let path = Path {
+            segments,
+            span: Span::new(start, path_end),
+        };
 
         // Struct literal: `Type { field: expr, ... }`
-        let looks_like_type_name = head
-            .name
-            .chars()
-            .next()
+        let looks_like_type_name = path
+            .segments
+            .last()
+            .and_then(|seg| seg.name.chars().next())
             .is_some_and(|ch| ch.is_ascii_uppercase());
         if allow_struct_lit
             && looks_like_type_name
@@ -1281,36 +1364,15 @@ impl<'a> Parser<'a> {
             }
             let end = self.expect(TokenKind::RBrace)?.span.end;
             return Ok(Expr::StructLit {
-                type_name: head,
+                type_path: path,
                 fields,
                 span: Span::new(start, end),
             });
         }
 
-        if matches!(self.lookahead.kind, TokenKind::ColonColon) {
-            // Path expression: `A::B::C...`
-            let mut segments = vec![head];
-            while matches!(self.lookahead.kind, TokenKind::ColonColon) {
-                self.bump()?;
-                segments.push(self.expect_ident()?);
-            }
-            let end = segments.last().map(|s| s.span.end).unwrap_or(start);
-            return Ok(Expr::Path {
-                span: Span::new(start, end),
-                path: Path {
-                    segments,
-                    span: Span::new(start, end),
-                },
-            });
-        }
-
-        let end = head.span.end;
         Ok(Expr::Path {
-            span: Span::new(start, end),
-            path: Path {
-                segments: vec![head],
-                span: Span::new(start, end),
-            },
+            span: path.span,
+            path,
         })
     }
 
@@ -1741,12 +1803,24 @@ impl<'a> Parser<'a> {
 
     fn parse_bind_or_ctor_pat(&mut self) -> Result<Pattern, ParseError> {
         let start = self.lookahead.span.start;
-        let head = self.expect_ident()?;
-
-        // Enum pattern: `Enum::Variant(...)`
-        if matches!(self.lookahead.kind, TokenKind::ColonColon) {
+        let mut segments = vec![self.expect_ident()?];
+        while matches!(self.lookahead.kind, TokenKind::ColonColon) {
             self.bump()?;
-            let variant = self.expect_ident()?;
+            segments.push(self.expect_ident()?);
+        }
+
+        // Enum pattern: `EnumPath::Variant(...)` (note that `EnumPath` itself may be qualified).
+        if matches!(self.lookahead.kind, TokenKind::LParen) {
+            if segments.len() < 2 {
+                return Err(self.error_here("expected `Enum::Variant(...)` pattern"));
+            }
+            let variant = segments.pop().expect("len >= 2");
+            let enum_end = segments.last().map(|s| s.span.end).unwrap_or(start);
+            let enum_path = Path {
+                segments,
+                span: Span::new(start, enum_end),
+            };
+
             self.expect(TokenKind::LParen)?;
             let mut fields = Vec::new();
             if !matches!(self.lookahead.kind, TokenKind::RParen) {
@@ -1764,15 +1838,21 @@ impl<'a> Parser<'a> {
             }
             let end = self.expect(TokenKind::RParen)?.span.end;
             return Ok(Pattern::Enum {
-                enum_name: head,
+                enum_path,
                 variant,
                 fields,
                 span: Span::new(start, end),
             });
         }
 
-        // Struct pattern: `Type { field, field: pat, .. }`
+        // Struct pattern: `TypePath { field, field: pat, .. }` (TypePath may be qualified).
         if matches!(self.lookahead.kind, TokenKind::LBrace) {
+            let type_end = segments.last().map(|s| s.span.end).unwrap_or(start);
+            let type_path = Path {
+                segments,
+                span: Span::new(start, type_end),
+            };
+
             self.bump()?;
             let mut fields = Vec::new();
             let mut has_rest = false;
@@ -1807,14 +1887,19 @@ impl<'a> Parser<'a> {
             }
             let end = self.expect(TokenKind::RBrace)?.span.end;
             return Ok(Pattern::Struct {
-                type_name: head,
+                type_path,
                 fields,
                 has_rest,
                 span: Span::new(start, end),
             });
         }
 
+        if segments.len() != 1 {
+            return Err(self.error_here("expected `(` or `{` after pattern path"));
+        }
+
         // Otherwise: binding.
+        let head = segments.pop().expect("len == 1");
         Ok(Pattern::Bind {
             name: head.clone(),
             span: Span::new(start, head.span.end),
@@ -1829,16 +1914,18 @@ impl<'a> Parser<'a> {
                     let lit = Expr::String { value: text, span };
                     expr = Some(match expr {
                         None => lit,
-                        Some(acc) => self.std_call2(span, "string_concat", acc, lit),
+                        Some(acc) => self.core_intrinsic_call2(span, "string_concat", acc, lit),
                     });
                 }
                 FStringPart::Expr { src, base_offset } => {
                     let mut nested = Parser::with_base_offset(&src, base_offset)?;
                     let value_expr = nested.parse_expr_eof()?;
-                    let to_string = self.std_call1(span, "to_string", value_expr);
+                    let to_string = self.core_intrinsic_call1(span, "to_string", value_expr);
                     expr = Some(match expr {
                         None => to_string,
-                        Some(acc) => self.std_call2(span, "string_concat", acc, to_string),
+                        Some(acc) => {
+                            self.core_intrinsic_call2(span, "string_concat", acc, to_string)
+                        }
                     });
                 }
             }
@@ -1849,8 +1936,8 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn std_call1(&self, span: Span, name: &str, arg: Expr) -> Expr {
-        let callee = self.std_path_expr(span, name);
+    fn core_intrinsic_call1(&self, span: Span, name: &str, arg: Expr) -> Expr {
+        let callee = self.core_intrinsic_path_expr(span, name);
         Expr::Call {
             callee: Box::new(callee),
             args: vec![arg],
@@ -1858,8 +1945,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn std_call2(&self, span: Span, name: &str, a: Expr, b: Expr) -> Expr {
-        let callee = self.std_path_expr(span, name);
+    fn core_intrinsic_call2(&self, span: Span, name: &str, a: Expr, b: Expr) -> Expr {
+        let callee = self.core_intrinsic_path_expr(span, name);
         Expr::Call {
             callee: Box::new(callee),
             args: vec![a, b],
@@ -1867,9 +1954,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn std_path_expr(&self, span: Span, name: &str) -> Expr {
-        let std = Ident {
-            name: "std".to_string(),
+    fn core_intrinsic_path_expr(&self, span: Span, name: &str) -> Expr {
+        let core = Ident {
+            name: "core".to_string(),
+            span,
+        };
+        let intrinsics = Ident {
+            name: "intrinsics".to_string(),
             span,
         };
         let func = Ident {
@@ -1878,7 +1969,7 @@ impl<'a> Parser<'a> {
         };
         Expr::Path {
             path: Path {
-                segments: vec![std, func],
+                segments: vec![core, intrinsics, func],
                 span,
             },
             span,

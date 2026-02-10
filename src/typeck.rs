@@ -1,8 +1,9 @@
 use crate::ast::{
     BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, GenericParam, Ident,
     ImplHeader, ImplItem, InterfaceItem, Item, MatchArm, MatchPat, PatLiteral, Pattern, PrimType,
-    Program, StructItem, TypeExpr, UnaryOp,
+    Program, StructItem, TypeExpr, UnaryOp, Visibility,
 };
+use crate::modules::{ModulePath, ModuleResolver};
 use crate::source::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -186,6 +187,8 @@ pub(crate) struct InterfaceDef {
 #[derive(Clone, Debug)]
 pub(crate) struct FnSig {
     pub(crate) name: String,
+    pub(crate) vis: Visibility,
+    pub(crate) defining_module: ModulePath,
     pub(crate) generics: Vec<GenericParamInfo>,
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
@@ -194,6 +197,7 @@ pub(crate) struct FnSig {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProgramEnv {
+    pub(crate) modules: ModuleResolver,
     pub(crate) structs: BTreeMap<String, StructDef>,
     pub(crate) enums: BTreeMap<String, EnumDef>,
     pub(crate) interfaces: BTreeMap<String, InterfaceDef>,
@@ -203,7 +207,7 @@ pub(crate) struct ProgramEnv {
     /// Keys include:
     /// - top-level functions: `main`
     /// - inherent methods: `Type::method`
-    /// - std host functions: `std::int_add`
+    /// - core intrinsics: `core::intrinsics::int_add`
     pub(crate) functions: BTreeMap<String, FnSig>,
 
     /// Interface impl method table: `(type_name, interface_name, method_name) -> function_name`.
@@ -218,44 +222,90 @@ pub(crate) struct TypeInfo {
 }
 
 pub(crate) fn build_env(program: &Program) -> Result<ProgramEnv, TypeError> {
-    let mut env = ProgramEnv::default();
+    let modules = ModuleResolver::build(program).map_err(|e| TypeError {
+        message: e.message,
+        span: e.span,
+    })?;
+
+    let mut env = ProgramEnv {
+        modules,
+        ..Default::default()
+    };
     add_prelude(&mut env);
 
     // First pass: declare nominal types.
-    for item in &program.items {
-        match item {
-            Item::Struct(s) => declare_struct(&mut env, s)?,
-            Item::Enum(e) => declare_enum(&mut env, e)?,
-            Item::Interface(i) => declare_interface(&mut env, i)?,
-            Item::Function(_) | Item::Impl(_) => {}
-        }
-    }
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
+            Item::Struct(s) => declare_struct(&mut env, module, s),
+            Item::Enum(e) => declare_enum(&mut env, module, e),
+            Item::Interface(i) => declare_interface(&mut env, module, i),
+            _ => Ok(()),
+        },
+    )?;
 
-    // Second pass: declare function signatures (top-level only for now).
-    for item in &program.items {
-        if let Item::Function(f) = item {
-            declare_function_sig(&mut env, f, None)?;
-        }
-    }
+    // Second pass: declare function signatures.
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
+            Item::Function(f) => {
+                let full_name = module.qualify(&f.name.name);
+                declare_function_sig(&mut env, module, f, Some(full_name))
+            }
+            _ => Ok(()),
+        },
+    )?;
 
     // Third pass: fill type members (fields/variants/methods).
-    for item in &program.items {
-        match item {
-            Item::Struct(s) => fill_struct(&mut env, s)?,
-            Item::Enum(e) => fill_enum(&mut env, e)?,
-            Item::Interface(i) => fill_interface(&mut env, i)?,
-            Item::Function(_) | Item::Impl(_) => {}
-        }
-    }
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
+            Item::Struct(s) => fill_struct(&mut env, module, s),
+            Item::Enum(e) => fill_enum(&mut env, module, e),
+            Item::Interface(i) => fill_interface(&mut env, module, i),
+            _ => Ok(()),
+        },
+    )?;
 
     // Fourth pass: process impl items (declare method signatures + interface method table).
-    for item in &program.items {
-        if let Item::Impl(imp) = item {
-            process_impl_item(&mut env, imp)?;
-        }
-    }
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
+            Item::Impl(imp) => process_impl_item(&mut env, module, imp),
+            _ => Ok(()),
+        },
+    )?;
 
     Ok(env)
+}
+
+fn walk_module_items(
+    items: &[Item],
+    module: &ModulePath,
+    visit: &mut impl FnMut(&ModulePath, &Item) -> Result<(), TypeError>,
+) -> Result<(), TypeError> {
+    for item in items {
+        visit(module, item)?;
+        if let Item::Mod(m) = item {
+            let child = module.child(&m.name.name);
+            match &m.kind {
+                crate::ast::ModKind::Inline { items } => {
+                    walk_module_items(items, &child, visit)?;
+                }
+                crate::ast::ModKind::File => {
+                    return Err(TypeError {
+                        message: "file modules must be loaded before typechecking".to_string(),
+                        span: m.span,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn add_prelude(env: &mut ProgramEnv) {
@@ -279,9 +329,9 @@ fn add_prelude(env: &mut ProgramEnv) {
 
     // Built-in iterator struct used by `for` desugaring.
     env.structs.insert(
-        "std::ArrayIter".to_string(),
+        "core::intrinsics::ArrayIter".to_string(),
         StructDef {
-            name: "std::ArrayIter".to_string(),
+            name: "core::intrinsics::ArrayIter".to_string(),
             generics: vec![GenericParamInfo {
                 name: "T".to_string(),
                 arity: 0,
@@ -300,6 +350,10 @@ fn add_prelude(env: &mut ProgramEnv) {
             name.to_string(),
             FnSig {
                 name: name.to_string(),
+                vis: Visibility::Public {
+                    span: Span::new(0, 0),
+                },
+                defining_module: ModulePath::root(),
                 generics,
                 params,
                 ret,
@@ -310,13 +364,13 @@ fn add_prelude(env: &mut ProgramEnv) {
 
     // f"..." desugaring helpers.
     add_fn(
-        "std::string_concat",
+        "core::intrinsics::string_concat",
         Vec::new(),
         vec![Ty::String, Ty::String],
         Ty::String,
     );
     add_fn(
-        "std::to_string",
+        "core::intrinsics::to_string",
         vec![GenericParamInfo {
             name: "T".to_string(),
             arity: 0,
@@ -327,16 +381,34 @@ fn add_prelude(env: &mut ProgramEnv) {
         Ty::String,
     );
 
-    // Boolean.
-    add_fn("std::bool_not", Vec::new(), vec![Ty::Bool], Ty::Bool);
+    // Panic (diverging) intrinsic.
     add_fn(
-        "std::bool_eq",
+        "core::intrinsics::panic",
+        vec![GenericParamInfo {
+            name: "T".to_string(),
+            arity: 0,
+            constraint: None,
+            span: Span::new(0, 0),
+        }],
+        vec![Ty::String],
+        Ty::Gen(0),
+    );
+
+    // Boolean.
+    add_fn(
+        "core::intrinsics::bool_not",
+        Vec::new(),
+        vec![Ty::Bool],
+        Ty::Bool,
+    );
+    add_fn(
+        "core::intrinsics::bool_eq",
         Vec::new(),
         vec![Ty::Bool, Ty::Bool],
         Ty::Bool,
     );
     add_fn(
-        "std::bool_ne",
+        "core::intrinsics::bool_ne",
         Vec::new(),
         vec![Ty::Bool, Ty::Bool],
         Ty::Bool,
@@ -344,46 +416,46 @@ fn add_prelude(env: &mut ProgramEnv) {
 
     // Integer arithmetic & comparisons.
     for (name, ret) in [
-        ("std::int_add", Ty::Int),
-        ("std::int_sub", Ty::Int),
-        ("std::int_mul", Ty::Int),
-        ("std::int_div", Ty::Int),
-        ("std::int_mod", Ty::Int),
-        ("std::int_eq", Ty::Bool),
-        ("std::int_ne", Ty::Bool),
-        ("std::int_lt", Ty::Bool),
-        ("std::int_le", Ty::Bool),
-        ("std::int_gt", Ty::Bool),
-        ("std::int_ge", Ty::Bool),
+        ("core::intrinsics::int_add", Ty::Int),
+        ("core::intrinsics::int_sub", Ty::Int),
+        ("core::intrinsics::int_mul", Ty::Int),
+        ("core::intrinsics::int_div", Ty::Int),
+        ("core::intrinsics::int_mod", Ty::Int),
+        ("core::intrinsics::int_eq", Ty::Bool),
+        ("core::intrinsics::int_ne", Ty::Bool),
+        ("core::intrinsics::int_lt", Ty::Bool),
+        ("core::intrinsics::int_le", Ty::Bool),
+        ("core::intrinsics::int_gt", Ty::Bool),
+        ("core::intrinsics::int_ge", Ty::Bool),
     ] {
         add_fn(name, Vec::new(), vec![Ty::Int, Ty::Int], ret);
     }
 
     // Float arithmetic & comparisons.
     for (name, ret) in [
-        ("std::float_add", Ty::Float),
-        ("std::float_sub", Ty::Float),
-        ("std::float_mul", Ty::Float),
-        ("std::float_div", Ty::Float),
-        ("std::float_mod", Ty::Float),
-        ("std::float_eq", Ty::Bool),
-        ("std::float_ne", Ty::Bool),
-        ("std::float_lt", Ty::Bool),
-        ("std::float_le", Ty::Bool),
-        ("std::float_gt", Ty::Bool),
-        ("std::float_ge", Ty::Bool),
+        ("core::intrinsics::float_add", Ty::Float),
+        ("core::intrinsics::float_sub", Ty::Float),
+        ("core::intrinsics::float_mul", Ty::Float),
+        ("core::intrinsics::float_div", Ty::Float),
+        ("core::intrinsics::float_mod", Ty::Float),
+        ("core::intrinsics::float_eq", Ty::Bool),
+        ("core::intrinsics::float_ne", Ty::Bool),
+        ("core::intrinsics::float_lt", Ty::Bool),
+        ("core::intrinsics::float_le", Ty::Bool),
+        ("core::intrinsics::float_gt", Ty::Bool),
+        ("core::intrinsics::float_ge", Ty::Bool),
     ] {
         add_fn(name, Vec::new(), vec![Ty::Float, Ty::Float], ret);
     }
 
     // Primitive equality helpers.
     for (name, ty) in [
-        ("std::string_eq", Ty::String),
-        ("std::string_ne", Ty::String),
-        ("std::bytes_eq", Ty::Bytes),
-        ("std::bytes_ne", Ty::Bytes),
-        ("std::unit_eq", Ty::Unit),
-        ("std::unit_ne", Ty::Unit),
+        ("core::intrinsics::string_eq", Ty::String),
+        ("core::intrinsics::string_ne", Ty::String),
+        ("core::intrinsics::bytes_eq", Ty::Bytes),
+        ("core::intrinsics::bytes_ne", Ty::Bytes),
+        ("core::intrinsics::unit_eq", Ty::Unit),
+        ("core::intrinsics::unit_ne", Ty::Unit),
     ] {
         add_fn(name, Vec::new(), vec![ty.clone(), ty.clone()], Ty::Bool);
     }
@@ -396,24 +468,31 @@ fn add_prelude(env: &mut ProgramEnv) {
         span: Span::new(0, 0),
     }];
     add_fn(
-        "std::into_iter",
+        "core::intrinsics::into_iter",
         iter_generics.clone(),
         vec![Ty::Array(Box::new(Ty::Gen(0)))],
-        Ty::App(TyCon::Named("std::ArrayIter".to_string()), vec![Ty::Gen(0)]),
+        Ty::App(
+            TyCon::Named("core::intrinsics::ArrayIter".to_string()),
+            vec![Ty::Gen(0)],
+        ),
     );
     add_fn(
-        "std::next",
+        "core::intrinsics::next",
         iter_generics.clone(),
         vec![Ty::App(
-            TyCon::Named("std::ArrayIter".to_string()),
+            TyCon::Named("core::intrinsics::ArrayIter".to_string()),
             vec![Ty::Gen(0)],
         )],
         Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
     );
 }
 
-fn declare_struct(env: &mut ProgramEnv, item: &StructItem) -> Result<(), TypeError> {
-    let name = item.name.name.clone();
+fn declare_struct(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &StructItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&item.name.name);
     if env.structs.contains_key(&name)
         || env.enums.contains_key(&name)
         || env.interfaces.contains_key(&name)
@@ -423,13 +502,13 @@ fn declare_struct(env: &mut ProgramEnv, item: &StructItem) -> Result<(), TypeErr
             span: item.name.span,
         });
     }
-    if name == "Option" {
+    if item.name.name == "Option" {
         return Err(TypeError {
             message: "cannot redefine built-in type `Option`".to_string(),
             span: item.name.span,
         });
     }
-    let generics = lower_generic_params(&item.generics)?;
+    let generics = lower_generic_params(env, module, &item.generics)?;
     if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
             message: "higher-kinded generics on structs are not supported in v0.4".to_string(),
@@ -447,8 +526,12 @@ fn declare_struct(env: &mut ProgramEnv, item: &StructItem) -> Result<(), TypeErr
     Ok(())
 }
 
-fn declare_enum(env: &mut ProgramEnv, item: &EnumItem) -> Result<(), TypeError> {
-    let name = item.name.name.clone();
+fn declare_enum(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &EnumItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&item.name.name);
     if env.structs.contains_key(&name)
         || env.enums.contains_key(&name)
         || env.interfaces.contains_key(&name)
@@ -458,13 +541,13 @@ fn declare_enum(env: &mut ProgramEnv, item: &EnumItem) -> Result<(), TypeError> 
             span: item.name.span,
         });
     }
-    if name == "Option" {
+    if item.name.name == "Option" {
         return Err(TypeError {
             message: "cannot redefine built-in type `Option`".to_string(),
             span: item.name.span,
         });
     }
-    let generics = lower_generic_params(&item.generics)?;
+    let generics = lower_generic_params(env, module, &item.generics)?;
     if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
             message: "higher-kinded generics on enums are not supported in v0.4".to_string(),
@@ -482,8 +565,12 @@ fn declare_enum(env: &mut ProgramEnv, item: &EnumItem) -> Result<(), TypeError> 
     Ok(())
 }
 
-fn declare_interface(env: &mut ProgramEnv, item: &InterfaceItem) -> Result<(), TypeError> {
-    let name = item.name.name.clone();
+fn declare_interface(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &InterfaceItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&item.name.name);
     if env.structs.contains_key(&name)
         || env.enums.contains_key(&name)
         || env.interfaces.contains_key(&name)
@@ -497,7 +584,7 @@ fn declare_interface(env: &mut ProgramEnv, item: &InterfaceItem) -> Result<(), T
         name.clone(),
         InterfaceDef {
             name,
-            generics: lower_generic_params(&item.generics)?,
+            generics: lower_generic_params(env, module, &item.generics)?,
             methods: BTreeMap::new(),
         },
     );
@@ -506,6 +593,7 @@ fn declare_interface(env: &mut ProgramEnv, item: &InterfaceItem) -> Result<(), T
 
 fn declare_function_sig(
     env: &mut ProgramEnv,
+    module: &ModulePath,
     func: &FnItem,
     name_override: Option<String>,
 ) -> Result<(), TypeError> {
@@ -517,19 +605,21 @@ fn declare_function_sig(
         });
     }
 
-    let generics = lower_generic_params(&func.generics)?;
+    let generics = lower_generic_params(env, module, &func.generics)?;
     let scope = GenericScope::new(&generics)?;
     let params = func
         .params
         .iter()
-        .map(|p| lower_type_expr(env, &scope, &p.ty))
+        .map(|p| lower_type_expr(env, module, &scope, &p.ty))
         .collect::<Result<Vec<_>, _>>()?;
-    let ret = lower_type_expr(env, &scope, &func.ret)?;
+    let ret = lower_type_expr(env, module, &scope, &func.ret)?;
 
     env.functions.insert(
         name.clone(),
         FnSig {
             name,
+            vis: func.vis,
+            defining_module: module.clone(),
             generics,
             params,
             ret,
@@ -539,14 +629,19 @@ fn declare_function_sig(
     Ok(())
 }
 
-fn fill_struct(env: &mut ProgramEnv, item: &StructItem) -> Result<(), TypeError> {
+fn fill_struct(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &StructItem,
+) -> Result<(), TypeError> {
+    let full_name = module.qualify(&item.name.name);
     let generics = env
         .structs
-        .get(&item.name.name)
+        .get(&full_name)
         .expect("declared in first pass")
         .generics
         .clone();
-    let struct_name = item.name.name.clone();
+    let struct_name = full_name.clone();
     let scope = GenericScope::new(&generics)?;
     let mut seen = BTreeSet::new();
     let mut fields = Vec::with_capacity(item.fields.len());
@@ -561,24 +656,25 @@ fn fill_struct(env: &mut ProgramEnv, item: &StructItem) -> Result<(), TypeError>
                 span: field.name.span,
             });
         }
-        let ty = lower_type_expr(env, &scope, &field.ty)?;
+        let ty = lower_type_expr(env, module, &scope, &field.ty)?;
         fields.push((field_name, ty));
     }
     env.structs
-        .get_mut(&item.name.name)
+        .get_mut(&full_name)
         .expect("declared in first pass")
         .fields = fields;
     Ok(())
 }
 
-fn fill_enum(env: &mut ProgramEnv, item: &EnumItem) -> Result<(), TypeError> {
+fn fill_enum(env: &mut ProgramEnv, module: &ModulePath, item: &EnumItem) -> Result<(), TypeError> {
+    let full_name = module.qualify(&item.name.name);
     let generics = env
         .enums
-        .get(&item.name.name)
+        .get(&full_name)
         .expect("declared in first pass")
         .generics
         .clone();
-    let enum_name = item.name.name.clone();
+    let enum_name = full_name.clone();
     let scope = GenericScope::new(&generics)?;
 
     let mut variants = BTreeMap::new();
@@ -593,21 +689,26 @@ fn fill_enum(env: &mut ProgramEnv, item: &EnumItem) -> Result<(), TypeError> {
         let fields = variant
             .fields
             .iter()
-            .map(|t| lower_type_expr(env, &scope, t))
+            .map(|t| lower_type_expr(env, module, &scope, t))
             .collect::<Result<Vec<_>, _>>()?;
         variants.insert(vname, fields);
     }
     env.enums
-        .get_mut(&item.name.name)
+        .get_mut(&full_name)
         .expect("declared in first pass")
         .variants = variants;
     Ok(())
 }
 
-fn fill_interface(env: &mut ProgramEnv, item: &InterfaceItem) -> Result<(), TypeError> {
+fn fill_interface(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &InterfaceItem,
+) -> Result<(), TypeError> {
+    let full_name = module.qualify(&item.name.name);
     let generics = env
         .interfaces
-        .get(&item.name.name)
+        .get(&full_name)
         .expect("declared in first pass")
         .generics
         .clone();
@@ -639,25 +740,29 @@ fn fill_interface(env: &mut ProgramEnv, item: &InterfaceItem) -> Result<(), Type
         let params = member
             .params
             .iter()
-            .map(|p| lower_type_expr(env, &scope, &p.ty))
+            .map(|p| lower_type_expr(env, module, &scope, &p.ty))
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = lower_type_expr(env, &scope, &member.ret)?;
+        let ret = lower_type_expr(env, module, &scope, &member.ret)?;
         methods.insert(mname.clone(), InterfaceMethodSig { params, ret });
     }
     env.interfaces
-        .get_mut(&item.name.name)
+        .get_mut(&full_name)
         .expect("declared in first pass")
         .methods = methods;
     Ok(())
 }
 
-fn process_impl_item(env: &mut ProgramEnv, item: &ImplItem) -> Result<(), TypeError> {
-    let impl_generics = lower_generic_params(&item.generics)?;
+fn process_impl_item(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &ImplItem,
+) -> Result<(), TypeError> {
+    let impl_generics = lower_generic_params(env, module, &item.generics)?;
     let impl_scope = GenericScope::new(&impl_generics)?;
 
     match &item.header {
         ImplHeader::Inherent { ty, span: _ } => {
-            let ty = lower_path_type(env, &impl_scope, ty)?;
+            let ty = lower_path_type(env, module, &impl_scope, ty)?;
             let (type_name, type_args) = match ty {
                 Ty::App(TyCon::Named(name), args) => (name, args),
                 other => {
@@ -679,7 +784,7 @@ fn process_impl_item(env: &mut ProgramEnv, item: &ImplItem) -> Result<(), TypeEr
 
             for method in &item.members {
                 let qual_name = format!("{type_name}::{}", method.name.name);
-                declare_function_sig(env, method, Some(qual_name))?;
+                declare_function_sig(env, module, method, Some(qual_name))?;
             }
         }
         ImplHeader::InterfaceForType {
@@ -687,7 +792,7 @@ fn process_impl_item(env: &mut ProgramEnv, item: &ImplItem) -> Result<(), TypeEr
             ty,
             span: _,
         } => {
-            let iface_ty = lower_path_type(env, &impl_scope, interface)?;
+            let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
             let iface_name = match iface_ty {
                 Ty::App(TyCon::Named(name), args) => {
                     if !args.is_empty() {
@@ -722,7 +827,7 @@ fn process_impl_item(env: &mut ProgramEnv, item: &ImplItem) -> Result<(), TypeEr
             let iface_methods = iface_def.methods.clone();
             let iface_def_name = iface_def.name.clone();
 
-            let ty = lower_path_type(env, &impl_scope, ty)?;
+            let ty = lower_path_type(env, module, &impl_scope, ty)?;
             let (type_name, type_args) = match ty {
                 Ty::App(TyCon::Named(name), args) => (name, args),
                 other => {
@@ -783,7 +888,7 @@ fn process_impl_item(env: &mut ProgramEnv, item: &ImplItem) -> Result<(), TypeEr
 
                 // Declare the implementing function with a stable internal name.
                 let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                declare_function_sig(env, method, Some(impl_fn_name.clone()))?;
+                declare_function_sig(env, module, method, Some(impl_fn_name.clone()))?;
                 env.interface_methods.insert(
                     (type_name.clone(), iface_name.clone(), mname.clone()),
                     impl_fn_name,
@@ -853,7 +958,11 @@ fn enforce_erased_impl_args(
     Ok(())
 }
 
-fn lower_generic_params(params: &[GenericParam]) -> Result<Vec<GenericParamInfo>, TypeError> {
+fn lower_generic_params(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    params: &[GenericParam],
+) -> Result<Vec<GenericParamInfo>, TypeError> {
     let mut out = Vec::with_capacity(params.len());
     let mut seen = BTreeSet::new();
     for p in params {
@@ -875,13 +984,22 @@ fn lower_generic_params(params: &[GenericParam]) -> Result<Vec<GenericParamInfo>
                         span: path.span,
                     });
                 }
-                Some(
-                    path.segments
-                        .iter()
-                        .map(|s| s.name.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("::"),
-                )
+                let segments: Vec<String> =
+                    path.segments.iter().map(|s| s.name.name.clone()).collect();
+                let (kind, fqn) = env
+                    .modules
+                    .resolve_type_fqn(module, &segments, path.span)
+                    .map_err(|e| TypeError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != crate::modules::DefKind::Interface {
+                    return Err(TypeError {
+                        message: format!("generic constraint must be an interface, got `{fqn}`"),
+                        span: path.span,
+                    });
+                }
+                Some(fqn)
             }
         };
 
@@ -923,11 +1041,16 @@ impl GenericScope {
     }
 }
 
-fn lower_type_expr(env: &ProgramEnv, scope: &GenericScope, ty: &TypeExpr) -> Result<Ty, TypeError> {
+fn lower_type_expr(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    scope: &GenericScope,
+    ty: &TypeExpr,
+) -> Result<Ty, TypeError> {
     match ty {
-        TypeExpr::Readonly { inner, .. } => {
-            Ok(Ty::Readonly(Box::new(lower_type_expr(env, scope, inner)?)))
-        }
+        TypeExpr::Readonly { inner, .. } => Ok(Ty::Readonly(Box::new(lower_type_expr(
+            env, module, scope, inner,
+        )?))),
         TypeExpr::Prim { prim, .. } => Ok(match prim {
             PrimType::Unit => Ty::Unit,
             PrimType::Bool => Ty::Bool,
@@ -936,11 +1059,13 @@ fn lower_type_expr(env: &ProgramEnv, scope: &GenericScope, ty: &TypeExpr) -> Res
             PrimType::String => Ty::String,
             PrimType::Bytes => Ty::Bytes,
         }),
-        TypeExpr::Array { elem, .. } => Ok(Ty::Array(Box::new(lower_type_expr(env, scope, elem)?))),
+        TypeExpr::Array { elem, .. } => Ok(Ty::Array(Box::new(lower_type_expr(
+            env, module, scope, elem,
+        )?))),
         TypeExpr::Tuple { items, .. } => {
             let items = items
                 .iter()
-                .map(|t| lower_type_expr(env, scope, t))
+                .map(|t| lower_type_expr(env, module, scope, t))
                 .collect::<Result<Vec<_>, _>>()?;
             if items.is_empty() {
                 Ok(Ty::Unit)
@@ -951,24 +1076,25 @@ fn lower_type_expr(env: &ProgramEnv, scope: &GenericScope, ty: &TypeExpr) -> Res
         TypeExpr::Fn { params, ret, .. } => {
             let params = params
                 .iter()
-                .map(|p| lower_type_expr(env, scope, p))
+                .map(|p| lower_type_expr(env, module, scope, p))
                 .collect::<Result<Vec<_>, _>>()?;
-            let ret = lower_type_expr(env, scope, ret)?;
+            let ret = lower_type_expr(env, module, scope, ret)?;
             Ok(Ty::Fn {
                 params,
                 ret: Box::new(ret),
             })
         }
         TypeExpr::Cont { param, ret, .. } => Ok(Ty::Cont {
-            param: Box::new(lower_type_expr(env, scope, param)?),
-            ret: Box::new(lower_type_expr(env, scope, ret)?),
+            param: Box::new(lower_type_expr(env, module, scope, param)?),
+            ret: Box::new(lower_type_expr(env, module, scope, ret)?),
         }),
-        TypeExpr::Path(path) => lower_path_type(env, scope, path),
+        TypeExpr::Path(path) => lower_path_type(env, module, scope, path),
     }
 }
 
 fn lower_path_type(
     env: &ProgramEnv,
+    module: &ModulePath,
     scope: &GenericScope,
     path: &crate::ast::PathType,
 ) -> Result<Ty, TypeError> {
@@ -990,25 +1116,23 @@ fn lower_path_type(
     }
 
     let last = path.segments.last().expect("non-empty");
-    let name = path
-        .segments
-        .iter()
-        .map(|s| s.name.name.as_str())
-        .collect::<Vec<_>>()
-        .join("::");
+    let raw_segments: Vec<String> = path.segments.iter().map(|s| s.name.name.clone()).collect();
     let args = last
         .args
         .iter()
-        .map(|a| lower_type_expr(env, scope, a))
+        .map(|a| lower_type_expr(env, module, scope, a))
         .collect::<Result<Vec<_>, _>>()?;
 
-    if path.segments.len() == 1
-        && let Some((gen_id, arity)) = scope.lookup(&name)
+    if raw_segments.len() == 1
+        && let Some((gen_id, arity)) = scope.lookup(&raw_segments[0])
     {
         if arity == 0 {
             if !args.is_empty() {
                 return Err(TypeError {
-                    message: format!("type parameter `{name}` does not take type arguments"),
+                    message: format!(
+                        "type parameter `{}` does not take type arguments",
+                        raw_segments[0]
+                    ),
                     span: path.span,
                 });
             }
@@ -1017,7 +1141,8 @@ fn lower_path_type(
         if args.len() != arity {
             return Err(TypeError {
                 message: format!(
-                    "type constructor `{name}` expects {arity} type argument(s), got {}",
+                    "type constructor `{}` expects {arity} type argument(s), got {}",
+                    raw_segments[0],
                     args.len()
                 ),
                 span: path.span,
@@ -1026,17 +1151,20 @@ fn lower_path_type(
         return Ok(Ty::App(TyCon::Gen(gen_id), args));
     }
 
-    let arity = if env.structs.contains_key(&name) {
-        env.structs.get(&name).expect("checked").generics.len()
-    } else if env.enums.contains_key(&name) {
-        env.enums.get(&name).expect("checked").generics.len()
-    } else if env.interfaces.contains_key(&name) {
-        env.interfaces.get(&name).expect("checked").generics.len()
-    } else {
-        return Err(TypeError {
-            message: format!("unknown type `{name}`"),
-            span: path.span,
-        });
+    let (kind, name) = env
+        .modules
+        .resolve_type_fqn(module, &raw_segments, path.span)
+        .map_err(|e| TypeError {
+            message: e.message,
+            span: e.span,
+        })?;
+
+    let arity = match kind {
+        crate::modules::DefKind::Struct => env.structs.get(&name).expect("declared").generics.len(),
+        crate::modules::DefKind::Enum => env.enums.get(&name).expect("declared").generics.len(),
+        crate::modules::DefKind::Interface => {
+            env.interfaces.get(&name).expect("declared").generics.len()
+        }
     };
 
     if args.len() != arity {
@@ -1373,56 +1501,83 @@ pub(crate) fn typecheck_program(
     env: &ProgramEnv,
 ) -> Result<TypeInfo, TypeError> {
     let mut info = TypeInfo::default();
-    for item in &program.items {
-        match item {
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
             Item::Function(func) => {
-                let sig = env.functions.get(&func.name.name).expect("declared");
-                let fn_info = typecheck_function_body(env, sig, func)?;
+                let fn_name = module.qualify(&func.name.name);
+                let sig = env.functions.get(&fn_name).expect("declared");
+                let fn_info = typecheck_function_body(env, module, sig, func)?;
                 info.expr_types.extend(fn_info.expr_types);
+                Ok(())
             }
             Item::Impl(imp) => {
-                let fn_info = typecheck_impl_item(env, imp)?;
+                let fn_info = typecheck_impl_item(env, module, imp)?;
                 info.expr_types.extend(fn_info.expr_types);
+                Ok(())
             }
-            Item::Struct(_) | Item::Enum(_) | Item::Interface(_) => {}
-        }
-    }
+            _ => Ok(()),
+        },
+    )?;
     Ok(info)
 }
 
-fn typecheck_impl_item(env: &ProgramEnv, item: &ImplItem) -> Result<TypeInfo, TypeError> {
+fn typecheck_impl_item(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    item: &ImplItem,
+) -> Result<TypeInfo, TypeError> {
     let mut info = TypeInfo::default();
+    let impl_generics = lower_generic_params(env, module, &item.generics)?;
+    let impl_scope = GenericScope::new(&impl_generics)?;
     match &item.header {
         ImplHeader::Inherent { ty, .. } => {
-            let type_name = ty
-                .segments
-                .iter()
-                .map(|s| s.name.name.as_str())
-                .collect::<Vec<_>>()
-                .join("::");
+            let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            let type_name = match ty {
+                Ty::App(TyCon::Named(name), _args) => name,
+                other => {
+                    return Err(TypeError {
+                        message: format!(
+                            "inherent impl target must be a nominal type, got `{other}`"
+                        ),
+                        span: item.span,
+                    });
+                }
+            };
             for method in &item.members {
                 let fn_name = format!("{type_name}::{}", method.name.name);
                 let sig = env.functions.get(&fn_name).ok_or(TypeError {
                     message: format!("internal error: missing method signature for `{fn_name}`"),
                     span: method.name.span,
                 })?;
-                let fn_info = typecheck_function_body(env, sig, method)?;
+                let fn_info = typecheck_function_body(env, module, sig, method)?;
                 info.expr_types.extend(fn_info.expr_types);
             }
         }
         ImplHeader::InterfaceForType { interface, ty, .. } => {
-            let iface_name = interface
-                .segments
-                .iter()
-                .map(|s| s.name.name.as_str())
-                .collect::<Vec<_>>()
-                .join("::");
-            let type_name = ty
-                .segments
-                .iter()
-                .map(|s| s.name.name.as_str())
-                .collect::<Vec<_>>()
-                .join("::");
+            let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
+            let iface_name = match iface_ty {
+                Ty::App(TyCon::Named(name), _args) => name,
+                other => {
+                    return Err(TypeError {
+                        message: format!(
+                            "impl interface must be a nominal interface type, got `{other}`"
+                        ),
+                        span: item.span,
+                    });
+                }
+            };
+            let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            let type_name = match ty {
+                Ty::App(TyCon::Named(name), _args) => name,
+                other => {
+                    return Err(TypeError {
+                        message: format!("impl target must be a nominal type, got `{other}`"),
+                        span: item.span,
+                    });
+                }
+            };
 
             for method in &item.members {
                 let mname = &method.name.name;
@@ -1431,7 +1586,7 @@ fn typecheck_impl_item(env: &ProgramEnv, item: &ImplItem) -> Result<TypeInfo, Ty
                     message: format!("internal error: missing method signature for `{fn_name}`"),
                     span: method.name.span,
                 })?;
-                let fn_info = typecheck_function_body(env, sig, method)?;
+                let fn_info = typecheck_function_body(env, module, sig, method)?;
                 info.expr_types.extend(fn_info.expr_types);
             }
         }
@@ -1441,10 +1596,11 @@ fn typecheck_impl_item(env: &ProgramEnv, item: &ImplItem) -> Result<TypeInfo, Ty
 
 fn typecheck_function_body(
     env: &ProgramEnv,
+    module: &ModulePath,
     sig: &FnSig,
     func: &FnItem,
 ) -> Result<TypeInfo, TypeError> {
-    let mut tc = FnTypechecker::new(env, sig);
+    let mut tc = FnTypechecker::new(env, module.clone(), sig);
 
     // Parameters are immutable bindings.
     for (param, ty) in func.params.iter().zip(sig.params.iter()) {
@@ -1480,6 +1636,7 @@ fn typecheck_function_body(
 
 struct FnTypechecker<'a> {
     env: &'a ProgramEnv,
+    module: ModulePath,
     sig: &'a FnSig,
     return_ty: Ty,
     infer: InferCtx,
@@ -1491,9 +1648,10 @@ struct FnTypechecker<'a> {
 }
 
 impl<'a> FnTypechecker<'a> {
-    fn new(env: &'a ProgramEnv, sig: &'a FnSig) -> Self {
+    fn new(env: &'a ProgramEnv, module: ModulePath, sig: &'a FnSig) -> Self {
         Self {
             env,
+            module,
             sig,
             return_ty: sig.ret.clone(),
             infer: InferCtx::new(),
@@ -1616,7 +1774,7 @@ impl<'a> FnTypechecker<'a> {
             } => {
                 let declared = if let Some(ty_expr) = ty {
                     let scope = GenericScope::new(&self.sig.generics)?;
-                    Some(lower_type_expr(self.env, &scope, ty_expr)?)
+                    Some(lower_type_expr(self.env, &self.module, &scope, ty_expr)?)
                 } else {
                     None
                 };
@@ -1721,10 +1879,10 @@ impl<'a> FnTypechecker<'a> {
                 }
             }
             Expr::StructLit {
-                type_name,
+                type_path,
                 fields,
                 span,
-            } => self.typecheck_struct_lit(type_name, fields, *span)?,
+            } => self.typecheck_struct_lit(type_path, fields, *span)?,
             Expr::EffectCall {
                 interface,
                 method,
@@ -1793,30 +1951,67 @@ impl<'a> FnTypechecker<'a> {
         path: &crate::ast::Path,
         span: Span,
     ) -> Result<Ty, TypeError> {
-        let name = path
-            .segments
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>()
-            .join("::");
-
         if path.segments.len() == 1
-            && let Some(local) = self.lookup_local(&name)
+            && let Some(local) = self.lookup_local(path.segments[0].name.as_str())
         {
             return Ok(local.ty.clone());
         }
 
+        let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+        let mut func_name: Option<String> = None;
+
+        // Allow taking an inherent method as a value: `Type::method`.
+        if segments.len() >= 2 {
+            let prefix = &segments[..segments.len() - 1];
+            let last = segments.last().expect("len >= 2");
+            let prefix_ty = self
+                .env
+                .modules
+                .try_resolve_type_fqn(&self.module, prefix, span)
+                .map_err(|e| TypeError {
+                    message: e.message,
+                    span: e.span,
+                })?;
+            if let Some((kind, type_fqn)) = prefix_ty
+                && kind != crate::modules::DefKind::Interface
+            {
+                let candidate = format!("{type_fqn}::{last}");
+                if self.env.functions.contains_key(&candidate) {
+                    func_name = Some(candidate);
+                }
+            }
+        }
+
+        let func_name = match func_name {
+            Some(name) => name,
+            None => self
+                .env
+                .modules
+                .resolve_value_fqn(&self.module, &segments, span)
+                .map_err(|e| TypeError {
+                    message: e.message,
+                    span: e.span,
+                })?,
+        };
+
         // Function item used as a value.
-        let Some(sig) = self.env.functions.get(&name) else {
+        let Some(sig) = self.env.functions.get(&func_name) else {
             return Err(TypeError {
-                message: format!("unknown name `{name}`"),
+                message: format!("unknown function `{func_name}`"),
                 span,
             });
         };
+        if !sig.vis.is_public() && !self.module.is_descendant_of(&sig.defining_module) {
+            return Err(TypeError {
+                message: format!("function `{}` is private", sig.name),
+                span,
+            });
+        }
         if !sig.generics.is_empty() {
             return Err(TypeError {
                 message: format!(
-                    "cannot use generic function `{name}` as a value without an expected type"
+                    "cannot use generic function `{}` as a value without an expected type",
+                    sig.name
                 ),
                 span,
             });
@@ -1829,14 +2024,29 @@ impl<'a> FnTypechecker<'a> {
 
     fn typecheck_struct_lit(
         &mut self,
-        type_name: &Ident,
+        type_path: &crate::ast::Path,
         fields: &[(Ident, Expr)],
         span: Span,
     ) -> Result<Ty, TypeError> {
-        let Some(def) = self.env.structs.get(&type_name.name) else {
+        let segments: Vec<String> = type_path.segments.iter().map(|s| s.name.clone()).collect();
+        let (kind, struct_name) = self
+            .env
+            .modules
+            .resolve_type_fqn(&self.module, &segments, type_path.span)
+            .map_err(|e| TypeError {
+                message: e.message,
+                span: e.span,
+            })?;
+        if kind != crate::modules::DefKind::Struct {
             return Err(TypeError {
-                message: format!("unknown struct `{}`", type_name.name),
-                span: type_name.span,
+                message: format!("expected a struct type, got `{struct_name}`"),
+                span: type_path.span,
+            });
+        }
+        let Some(def) = self.env.structs.get(&struct_name) else {
+            return Err(TypeError {
+                message: format!("unknown struct `{struct_name}`"),
+                span: type_path.span,
             });
         };
         if def.generics.iter().any(|g| g.arity != 0) {
@@ -1896,15 +2106,15 @@ impl<'a> FnTypechecker<'a> {
 
     fn typecheck_enum_lit(
         &mut self,
-        enum_name: &Ident,
+        enum_name: &str,
         variant: &Ident,
         fields: &[Expr],
         span: Span,
     ) -> Result<Ty, TypeError> {
-        let Some(def) = self.env.enums.get(&enum_name.name) else {
+        let Some(def) = self.env.enums.get(enum_name) else {
             return Err(TypeError {
-                message: format!("unknown enum `{}`", enum_name.name),
-                span: enum_name.span,
+                message: format!("unknown enum `{enum_name}`"),
+                span,
             });
         };
         if def.generics.iter().any(|g| g.arity != 0) {
@@ -1957,12 +2167,22 @@ impl<'a> FnTypechecker<'a> {
         args: &[Expr],
         span: Span,
     ) -> Result<Ty, TypeError> {
-        let iface_name = interface
-            .segments
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>()
-            .join("::");
+        let segments: Vec<String> = interface.segments.iter().map(|s| s.name.clone()).collect();
+        let (kind, iface_name) = self
+            .env
+            .modules
+            .resolve_type_fqn(&self.module, &segments, interface.span)
+            .map_err(|e| TypeError {
+                message: e.message,
+                span: e.span,
+            })?;
+        if kind != crate::modules::DefKind::Interface {
+            return Err(TypeError {
+                message: format!("expected an interface, got `{iface_name}`"),
+                span: interface.span,
+            });
+        }
+
         let Some(iface) = self.env.interfaces.get(&iface_name) else {
             return Err(TypeError {
                 message: format!("unknown interface `{iface_name}`"),
@@ -2015,7 +2235,7 @@ impl<'a> FnTypechecker<'a> {
         self.push_scope();
         for p in params {
             let ty = if let Some(ty_expr) = &p.ty {
-                lower_type_expr(self.env, &scope, ty_expr)?
+                lower_type_expr(self.env, &self.module, &scope, ty_expr)?
             } else {
                 self.infer.fresh_type_var()
             };
@@ -2107,13 +2327,26 @@ impl<'a> FnTypechecker<'a> {
                     self.pop_scope();
                 }
                 MatchPat::Effect(effect_pat) => {
-                    let iface_name = effect_pat
+                    let iface_segments: Vec<String> = effect_pat
                         .interface
                         .segments
                         .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("::");
+                        .map(|s| s.name.clone())
+                        .collect();
+                    let (kind, iface_name) = self
+                        .env
+                        .modules
+                        .resolve_type_fqn(&self.module, &iface_segments, effect_pat.interface.span)
+                        .map_err(|e| TypeError {
+                            message: e.message,
+                            span: e.span,
+                        })?;
+                    if kind != crate::modules::DefKind::Interface {
+                        return Err(TypeError {
+                            message: format!("expected an interface, got `{iface_name}`"),
+                            span: effect_pat.interface.span,
+                        });
+                    }
                     let Some(iface) = self.env.interfaces.get(&iface_name) else {
                         return Err(TypeError {
                             message: format!("unknown interface `{iface_name}`"),
@@ -2395,15 +2628,31 @@ impl<'a> FnTypechecker<'a> {
                 Ok(binds)
             }
             Pattern::Struct {
-                type_name,
+                type_path,
                 fields,
                 has_rest,
                 span,
             } => {
-                let Some(def) = self.env.structs.get(&type_name.name) else {
+                let segments: Vec<String> =
+                    type_path.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, struct_name) = self
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, type_path.span)
+                    .map_err(|e| TypeError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != crate::modules::DefKind::Struct {
                     return Err(TypeError {
-                        message: format!("unknown struct `{}`", type_name.name),
-                        span: type_name.span,
+                        message: format!("expected a struct type, got `{struct_name}`"),
+                        span: type_path.span,
+                    });
+                }
+                let Some(def) = self.env.structs.get(&struct_name) else {
+                    return Err(TypeError {
+                        message: format!("unknown struct `{struct_name}`"),
+                        span: type_path.span,
                     });
                 };
 
@@ -2469,15 +2718,31 @@ impl<'a> FnTypechecker<'a> {
                 Ok(binds)
             }
             Pattern::Enum {
-                enum_name,
+                enum_path,
                 variant,
                 fields,
                 span,
             } => {
-                let Some(def) = self.env.enums.get(&enum_name.name) else {
+                let segments: Vec<String> =
+                    enum_path.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, enum_name) = self
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, enum_path.span)
+                    .map_err(|e| TypeError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != crate::modules::DefKind::Enum {
                     return Err(TypeError {
-                        message: format!("unknown enum `{}`", enum_name.name),
-                        span: enum_name.span,
+                        message: format!("expected an enum type, got `{enum_name}`"),
+                        span: enum_path.span,
+                    });
+                }
+                let Some(def) = self.env.enums.get(&enum_name) else {
+                    return Err(TypeError {
+                        message: format!("unknown enum `{enum_name}`"),
+                        span: enum_path.span,
                     });
                 };
                 let Some(variant_fields) = def.variants.get(&variant.name) else {
@@ -2550,42 +2815,82 @@ impl<'a> FnTypechecker<'a> {
                 }
             }
 
-            let name = path
-                .segments
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join("::");
+            let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+            let mut func_name: Option<String> = None;
 
-            // Enum constructor call: `Enum::Variant(args...)`.
-            if path.segments.len() == 2
-                && self.env.enums.contains_key(path.segments[0].name.as_str())
-            {
-                return self.typecheck_enum_lit(&path.segments[0], &path.segments[1], args, span);
-            }
+            if segments.len() >= 2 {
+                let prefix = &segments[..segments.len() - 1];
+                let last = segments.last().expect("len >= 2");
+                let last_ident = path.segments.last().expect("len >= 2");
 
-            // Interface method call: Interface::method(receiver, args...)
-            if path.segments.len() == 2
-                && self
+                if let Some((kind, type_fqn)) = self
                     .env
-                    .interfaces
-                    .contains_key(path.segments[0].name.as_str())
-            {
-                return self.typecheck_interface_method_call(path, args, span);
+                    .modules
+                    .try_resolve_type_fqn(&self.module, prefix, span)
+                    .map_err(|e| TypeError {
+                        message: e.message,
+                        span: e.span,
+                    })?
+                {
+                    match kind {
+                        crate::modules::DefKind::Enum => {
+                            if let Some(def) = self.env.enums.get(&type_fqn)
+                                && def.variants.contains_key(last)
+                            {
+                                return self.typecheck_enum_lit(&type_fqn, last_ident, args, span);
+                            }
+
+                            // Not a variant: allow inherent enum methods via `Enum::method(...)`.
+                            let candidate = format!("{type_fqn}::{last}");
+                            if self.env.functions.contains_key(&candidate) {
+                                func_name = Some(candidate);
+                            }
+                        }
+                        crate::modules::DefKind::Interface => {
+                            return self.typecheck_interface_method_call(
+                                &type_fqn, last_ident, args, span,
+                            );
+                        }
+                        crate::modules::DefKind::Struct => {
+                            let candidate = format!("{type_fqn}::{last}");
+                            if self.env.functions.contains_key(&candidate) {
+                                func_name = Some(candidate);
+                            }
+                        }
+                    }
+                }
             }
 
-            let Some(sig) = self.env.functions.get(&name) else {
+            let func_name = match func_name {
+                Some(name) => name,
+                None => self
+                    .env
+                    .modules
+                    .resolve_value_fqn(&self.module, &segments, span)
+                    .map_err(|e| TypeError {
+                        message: e.message,
+                        span: e.span,
+                    })?,
+            };
+
+            let Some(sig) = self.env.functions.get(&func_name) else {
                 return Err(TypeError {
-                    message: format!("unknown function `{name}`"),
+                    message: format!("unknown function `{func_name}`"),
                     span,
                 });
             };
+            if !sig.vis.is_public() && !self.module.is_descendant_of(&sig.defining_module) {
+                return Err(TypeError {
+                    message: format!("function `{}` is private", sig.name),
+                    span,
+                });
+            }
             let inst = instantiate_fn(sig, &mut self.infer);
             if args.len() != inst.params.len() {
                 return Err(TypeError {
                     message: format!(
                         "arity mismatch for `{}`: expected {}, got {}",
-                        name,
+                        sig.name,
                         inst.params.len(),
                         args.len()
                     ),
@@ -2658,19 +2963,19 @@ impl<'a> FnTypechecker<'a> {
 
     fn typecheck_interface_method_call(
         &mut self,
-        path: &crate::ast::Path,
+        iface_name: &str,
+        method: &Ident,
         args: &[Expr],
         span: Span,
     ) -> Result<Ty, TypeError> {
-        let iface_name = path.segments[0].name.clone();
-        let method_name = path.segments[1].name.clone();
-        let Some(iface) = self.env.interfaces.get(&iface_name) else {
+        let method_name = method.name.as_str();
+        let Some(iface) = self.env.interfaces.get(iface_name) else {
             return Err(TypeError {
                 message: format!("unknown interface `{iface_name}`"),
                 span,
             });
         };
-        let Some(msig) = iface.methods.get(&method_name) else {
+        let Some(msig) = iface.methods.get(method_name) else {
             return Err(TypeError {
                 message: format!("unknown interface method `{iface_name}::{method_name}`"),
                 span,
@@ -2696,7 +3001,7 @@ impl<'a> FnTypechecker<'a> {
         }
 
         let recv_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
-        self.ensure_implements_interface(&recv_ty, &iface_name, args[0].span())?;
+        self.ensure_implements_interface(&recv_ty, iface_name, args[0].span())?;
 
         for (arg, expected) in args[1..].iter().zip(msig.params.iter()) {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
@@ -2726,6 +3031,12 @@ impl<'a> FnTypechecker<'a> {
         // Inherent method wins.
         let inherent_name = format!("{type_name}::{}", method.name);
         if let Some(sig) = self.env.functions.get(&inherent_name) {
+            if !sig.vis.is_public() && !self.module.is_descendant_of(&sig.defining_module) {
+                return Err(TypeError {
+                    message: format!("method `{inherent_name}` is private"),
+                    span: method.span,
+                });
+            }
             let inst = instantiate_fn(sig, &mut self.infer);
             if inst.params.is_empty() {
                 return Err(TypeError {
@@ -2756,6 +3067,12 @@ impl<'a> FnTypechecker<'a> {
         // Otherwise, try interface methods (must be unambiguous).
         let mut candidates = Vec::new();
         for (iface_name, iface) in &self.env.interfaces {
+            if let Some(def) = self.env.modules.def(iface_name)
+                && !def.vis.is_public()
+                && !self.module.is_descendant_of(&def.defining_module)
+            {
+                continue;
+            }
             if iface.methods.contains_key(&method.name)
                 && self.type_implements_interface(&recv_ty_resolved, iface_name)
             {

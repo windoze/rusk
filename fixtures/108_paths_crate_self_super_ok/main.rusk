@@ -1,0 +1,12 @@
+// expect: ok int 13
+
+fn root() -> int {
+    10
+}
+
+mod a;
+
+fn main() -> int {
+    a::b::calc()
+}
+

@@ -1,0 +1,8 @@
+// expect: compile_error module name `core` is reserved
+
+mod core {}
+
+fn main() -> unit {
+    ()
+}
+

@@ -1,0 +1,13 @@
+// expect: ok int 7
+
+mod m;
+
+use m as mm;
+use m::answer as ans;
+use m::Wrap as W;
+
+fn main() -> int {
+    let _w: W = mm::wrap(ans());
+    mm::answer()
+}
+

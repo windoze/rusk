@@ -1,16 +1,18 @@
 use crate::ast::{
     BinaryOp, BindingKind, Block, Expr, FnItem, ImplHeader, ImplItem, Item, MatchArm, MatchPat,
-    PatLiteral, Pattern as AstPattern, Program, Stmt, TypeExpr, UnaryOp,
+    PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
 };
 use crate::mir::{
     BasicBlock, BlockId, ConstValue, EffectId, Function, HandlerClause, Instruction, Local, Module,
     Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type,
 };
+use crate::modules::{DefKind, ModuleLoader, ModulePath};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
 use crate::typeck::{self, ProgramEnv, Ty, TypeError as TypeckError, TypeInfo};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 const INTERNAL_CELL_STRUCT: &str = "$Cell";
 const CELL_FIELD_SET: &str = "set";
@@ -62,15 +64,35 @@ impl From<TypeckError> for CompileError {
     }
 }
 
+impl From<crate::modules::LoadError> for CompileError {
+    fn from(err: crate::modules::LoadError) -> Self {
+        Self {
+            message: err.message,
+            span: err.span,
+        }
+    }
+}
+
 /// Compiles a single Rusk source file into MIR.
 ///
 /// This is the front-end entrypoint used by tests and the CLI.
 pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
     let mut parser = Parser::new(source)?;
     let program = parser.parse_program()?;
-    let env = typeck::build_env(&program)?;
-    let types = typeck::typecheck_program(&program, &env)?;
-    Compiler::new(env, types).compile_program(&program)
+    compile_program_to_mir(&program)
+}
+
+/// Compiles an entry file (and its `mod foo;` dependencies) into MIR.
+pub fn compile_file_to_mir(entry_path: &Path) -> Result<Module, CompileError> {
+    let mut loader = ModuleLoader::new();
+    let program = loader.load_program_from_file(entry_path)?;
+    compile_program_to_mir(&program)
+}
+
+fn compile_program_to_mir(program: &Program) -> Result<Module, CompileError> {
+    let env = typeck::build_env(program)?;
+    let types = typeck::typecheck_program(program, &env)?;
+    Compiler::new(env, types).compile_program(program)
 }
 
 struct Compiler {
@@ -99,38 +121,95 @@ impl Compiler {
     }
 
     fn compile_program(mut self, program: &Program) -> Result<Module, CompileError> {
-        // Compile all user-visible functions and impl methods.
-        for item in &program.items {
-            match item {
-                Item::Function(func) => {
-                    self.compile_real_function(func, None)?;
-                }
-                Item::Impl(imp) => {
-                    self.compile_impl_item(imp)?;
-                }
-                Item::Struct(_) | Item::Enum(_) | Item::Interface(_) => {}
-            }
-        }
+        self.compile_module_items(&ModulePath::root(), &program.items)?;
 
         Ok(self.module)
     }
 
-    fn compile_impl_item(&mut self, imp: &ImplItem) -> Result<(), CompileError> {
+    fn compile_module_items(
+        &mut self,
+        module: &ModulePath,
+        items: &[Item],
+    ) -> Result<(), CompileError> {
+        for item in items {
+            match item {
+                Item::Function(func) => {
+                    self.compile_real_function(module, func, None)?;
+                }
+                Item::Impl(imp) => {
+                    self.compile_impl_item(module, imp)?;
+                }
+                Item::Mod(m) => {
+                    let child = module.child(&m.name.name);
+                    match &m.kind {
+                        crate::ast::ModKind::Inline { items } => {
+                            self.compile_module_items(&child, items)?;
+                        }
+                        crate::ast::ModKind::File => {
+                            return Err(CompileError {
+                                message: "file modules must be loaded before compilation"
+                                    .to_string(),
+                                span: m.span,
+                            });
+                        }
+                    }
+                }
+                Item::Struct(_) | Item::Enum(_) | Item::Interface(_) | Item::Use(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_impl_item(
+        &mut self,
+        module: &ModulePath,
+        imp: &ImplItem,
+    ) -> Result<(), CompileError> {
         match &imp.header {
             ImplHeader::Inherent { ty, .. } => {
-                let type_name = path_type_name(ty);
+                let segments: Vec<String> =
+                    ty.segments.iter().map(|s| s.name.name.clone()).collect();
+                let (_kind, type_name) = self
+                    .env
+                    .modules
+                    .resolve_type_fqn(module, &segments, ty.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
                 for method in &imp.members {
                     let name_override = format!("{type_name}::{}", method.name.name);
-                    self.compile_real_function(method, Some(name_override))?;
+                    self.compile_real_function(module, method, Some(name_override))?;
                 }
             }
             ImplHeader::InterfaceForType { interface, ty, .. } => {
-                let iface_name = path_type_name(interface);
-                let type_name = path_type_name(ty);
+                let iface_segments: Vec<String> = interface
+                    .segments
+                    .iter()
+                    .map(|s| s.name.name.clone())
+                    .collect();
+                let (_kind, iface_name) = self
+                    .env
+                    .modules
+                    .resolve_type_fqn(module, &iface_segments, interface.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                let type_segments: Vec<String> =
+                    ty.segments.iter().map(|s| s.name.name.clone()).collect();
+                let (_kind, type_name) = self
+                    .env
+                    .modules
+                    .resolve_type_fqn(module, &type_segments, ty.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
                 for method in &imp.members {
                     let mname = &method.name.name;
                     let name_override = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                    self.compile_real_function(method, Some(name_override))?;
+                    self.compile_real_function(module, method, Some(name_override))?;
                 }
             }
         }
@@ -139,10 +218,11 @@ impl Compiler {
 
     fn compile_real_function(
         &mut self,
+        module: &ModulePath,
         func: &FnItem,
         name_override: Option<String>,
     ) -> Result<(), CompileError> {
-        let name = name_override.unwrap_or_else(|| func.name.name.clone());
+        let name = name_override.unwrap_or_else(|| module.qualify(&func.name.name));
         if self.module.functions.contains_key(&name) {
             return Err(CompileError {
                 message: format!("duplicate function `{name}`"),
@@ -150,8 +230,33 @@ impl Compiler {
             });
         }
 
-        let mut lowerer = FunctionLowerer::new(self, FnKind::Real, name.clone());
-        lowerer.bind_params_from_fn_item(func)?;
+        let sig = self
+            .env
+            .functions
+            .get(&name)
+            .ok_or_else(|| CompileError {
+                message: format!("internal error: missing signature for `{name}`"),
+                span: func.span,
+            })?
+            .clone();
+
+        let param_mutabilities: Vec<Mutability> = sig
+            .params
+            .iter()
+            .map(|ty| match ty {
+                Ty::Readonly(_) => Mutability::Readonly,
+                _ => Mutability::Mutable,
+            })
+            .collect();
+        let param_types: Vec<Option<Type>> = sig
+            .params
+            .iter()
+            .map(|ty| mir_type_from_ty(&self.env, ty))
+            .collect();
+        let ret_type = mir_type_from_ty(&self.env, &sig.ret);
+
+        let mut lowerer = FunctionLowerer::new(self, FnKind::Real, module.clone(), name.clone());
+        lowerer.bind_params_from_fn_item(func, &param_mutabilities, &param_types)?;
         let value = lowerer.lower_block_expr(&func.body)?;
         if !lowerer.is_current_terminated() {
             lowerer.set_terminator(Terminator::Return {
@@ -160,7 +265,7 @@ impl Compiler {
         }
 
         let mut mir_fn = lowerer.finish()?;
-        mir_fn.ret_type = Some(lower_type_annotation(&self.env, &func.ret));
+        mir_fn.ret_type = ret_type;
         self.module.functions.insert(name, mir_fn);
         Ok(())
     }
@@ -185,7 +290,8 @@ impl Compiler {
             return Ok(wrapper_name);
         }
 
-        let mut lowerer = FunctionLowerer::new(self, FnKind::Real, wrapper_name.clone());
+        let mut lowerer =
+            FunctionLowerer::new(self, FnKind::Real, ModulePath::root(), wrapper_name.clone());
 
         // Env parameter (ignored).
         let env_param_local = lowerer.alloc_local();
@@ -229,6 +335,7 @@ impl Compiler {
 
     fn compile_lambda_entry(
         &mut self,
+        module: &ModulePath,
         entry_name: String,
         captures: &BTreeMap<String, VarInfo>,
         lambda_params: &[crate::ast::LambdaParam],
@@ -246,7 +353,8 @@ impl Compiler {
             }
         };
 
-        let mut lowerer = FunctionLowerer::new(self, FnKind::Real, entry_name.clone());
+        let mut lowerer =
+            FunctionLowerer::new(self, FnKind::Real, module.clone(), entry_name.clone());
 
         // First param: env array.
         let env_local = lowerer.alloc_local();
@@ -321,13 +429,19 @@ impl Compiler {
 
     fn compile_match_helper(
         &mut self,
+        module: &ModulePath,
         helper_name: String,
         captured: &BTreeMap<String, VarInfo>,
         scrutinee: &Expr,
         arms: &[MatchArm],
         match_span: Span,
     ) -> Result<(), CompileError> {
-        let mut lowerer = FunctionLowerer::new(self, FnKind::ExprHelper, helper_name.clone());
+        let mut lowerer = FunctionLowerer::new(
+            self,
+            FnKind::ExprHelper,
+            module.clone(),
+            helper_name.clone(),
+        );
 
         // Captured environment params (in deterministic name order).
         for (name, info) in captured.iter() {
@@ -390,6 +504,7 @@ struct BlockBuilder {
 struct FunctionLowerer<'a> {
     compiler: &'a mut Compiler,
     kind: FnKind,
+    module: ModulePath,
     name: String,
     params: Vec<Param>,
     blocks: Vec<BlockBuilder>,
@@ -400,10 +515,11 @@ struct FunctionLowerer<'a> {
 }
 
 impl<'a> FunctionLowerer<'a> {
-    fn new(compiler: &'a mut Compiler, kind: FnKind, name: String) -> Self {
+    fn new(compiler: &'a mut Compiler, kind: FnKind, module: ModulePath, name: String) -> Self {
         Self {
             compiler,
             kind,
+            module,
             name,
             params: Vec::new(),
             blocks: vec![BlockBuilder {
@@ -451,18 +567,27 @@ impl<'a> FunctionLowerer<'a> {
         })
     }
 
-    fn bind_params_from_fn_item(&mut self, func: &FnItem) -> Result<(), CompileError> {
+    fn bind_params_from_fn_item(
+        &mut self,
+        func: &FnItem,
+        param_mutabilities: &[Mutability],
+        param_types: &[Option<Type>],
+    ) -> Result<(), CompileError> {
+        if func.params.len() != param_mutabilities.len() || func.params.len() != param_types.len() {
+            return Err(CompileError {
+                message: "internal error: function signature arity mismatch".to_string(),
+                span: func.span,
+            });
+        }
+
         let mut trap_block: Option<BlockId> = None;
         for (idx, p) in func.params.iter().enumerate() {
             let local = self.alloc_local();
-            let mutability = match &p.ty {
-                TypeExpr::Readonly { .. } => Mutability::Readonly,
-                _ => Mutability::Mutable,
-            };
+            let mutability = param_mutabilities[idx];
             self.params.push(Param {
                 local,
                 mutability,
-                ty: Some(lower_type_annotation(self.compiler.env(), &p.ty)),
+                ty: param_types[idx].clone(),
             });
 
             match &p.pat {
@@ -493,7 +618,7 @@ impl<'a> FunctionLowerer<'a> {
                         }
                     };
 
-                    let (mir_pat, bind_names) = lower_ast_pattern(other_pat)?;
+                    let (mir_pat, bind_names) = self.lower_ast_pattern(other_pat)?;
                     let ok_block = self.new_block(format!("param_pat_{idx}_ok"));
 
                     let mut params = Vec::with_capacity(bind_names.len());
@@ -525,6 +650,187 @@ impl<'a> FunctionLowerer<'a> {
             }
         }
         Ok(())
+    }
+
+    fn lower_ast_pattern(
+        &mut self,
+        pat: &AstPattern,
+    ) -> Result<(Pattern, Vec<String>), CompileError> {
+        match pat {
+            AstPattern::Wildcard { .. } => Ok((Pattern::Wildcard, Vec::new())),
+            AstPattern::Bind { name, .. } => Ok((Pattern::Bind, vec![name.name.clone()])),
+            AstPattern::Literal { lit, .. } => {
+                let cv = match lit {
+                    PatLiteral::Unit => ConstValue::Unit,
+                    PatLiteral::Bool(v) => ConstValue::Bool(*v),
+                    PatLiteral::Int(v) => ConstValue::Int(*v),
+                    PatLiteral::Float(v) => ConstValue::Float(*v),
+                    PatLiteral::String(v) => ConstValue::String(v.clone()),
+                    PatLiteral::Bytes(v) => ConstValue::Bytes(v.clone()),
+                };
+                Ok((Pattern::Literal(cv), Vec::new()))
+            }
+            AstPattern::Tuple {
+                prefix,
+                rest,
+                suffix,
+                ..
+            } => {
+                let mut out_prefix = Vec::with_capacity(prefix.len());
+                let mut out_suffix = Vec::with_capacity(suffix.len());
+                let mut binds = Vec::new();
+
+                for it in prefix {
+                    let (p, b) = self.lower_ast_pattern(it)?;
+                    out_prefix.push(p);
+                    binds.extend(b);
+                }
+
+                let out_rest = rest.as_ref().map(|r| {
+                    if let Some(binding) = &r.binding {
+                        binds.push(binding.name.clone());
+                        Box::new(Pattern::Bind)
+                    } else {
+                        Box::new(Pattern::Wildcard)
+                    }
+                });
+
+                for it in suffix {
+                    let (p, b) = self.lower_ast_pattern(it)?;
+                    out_suffix.push(p);
+                    binds.extend(b);
+                }
+
+                Ok((
+                    Pattern::Tuple {
+                        prefix: out_prefix,
+                        rest: out_rest,
+                        suffix: out_suffix,
+                    },
+                    binds,
+                ))
+            }
+            AstPattern::Enum {
+                enum_path,
+                variant,
+                fields,
+                ..
+            } => {
+                let segments: Vec<String> =
+                    enum_path.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, enum_name) = self
+                    .compiler
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, enum_path.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != DefKind::Enum {
+                    return Err(CompileError {
+                        message: format!(
+                            "internal error: expected an enum type in pattern, got `{enum_name}`"
+                        ),
+                        span: enum_path.span,
+                    });
+                }
+
+                let mut out_fields = Vec::with_capacity(fields.len());
+                let mut binds = Vec::new();
+                for f in fields {
+                    let (p, b) = self.lower_ast_pattern(f)?;
+                    out_fields.push(p);
+                    binds.extend(b);
+                }
+                Ok((
+                    Pattern::Enum {
+                        enum_name,
+                        variant: variant.name.clone(),
+                        fields: out_fields,
+                    },
+                    binds,
+                ))
+            }
+            AstPattern::Struct {
+                type_path, fields, ..
+            } => {
+                let segments: Vec<String> =
+                    type_path.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, type_name) = self
+                    .compiler
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, type_path.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != DefKind::Struct {
+                    return Err(CompileError {
+                        message: format!(
+                            "internal error: expected a struct type in pattern, got `{type_name}`"
+                        ),
+                        span: type_path.span,
+                    });
+                }
+
+                let mut out_fields = Vec::with_capacity(fields.len());
+                let mut binds = Vec::new();
+                for (fname, subpat) in fields {
+                    let (p, b) = self.lower_ast_pattern(subpat)?;
+                    out_fields.push((fname.name.clone(), p));
+                    binds.extend(b);
+                }
+                Ok((
+                    Pattern::Struct {
+                        type_name,
+                        fields: out_fields,
+                    },
+                    binds,
+                ))
+            }
+            AstPattern::Array {
+                prefix,
+                rest,
+                suffix,
+                ..
+            } => {
+                let mut out_prefix = Vec::with_capacity(prefix.len());
+                let mut out_suffix = Vec::with_capacity(suffix.len());
+                let mut binds = Vec::new();
+
+                for it in prefix {
+                    let (p, b) = self.lower_ast_pattern(it)?;
+                    out_prefix.push(p);
+                    binds.extend(b);
+                }
+
+                let out_rest = rest.as_ref().map(|r| {
+                    if let Some(binding) = &r.binding {
+                        binds.push(binding.name.clone());
+                        Box::new(Pattern::Bind)
+                    } else {
+                        Box::new(Pattern::Wildcard)
+                    }
+                });
+
+                for it in suffix {
+                    let (p, b) = self.lower_ast_pattern(it)?;
+                    out_suffix.push(p);
+                    binds.extend(b);
+                }
+
+                Ok((
+                    Pattern::Array {
+                        prefix: out_prefix,
+                        rest: out_rest,
+                        suffix: out_suffix,
+                    },
+                    binds,
+                ))
+            }
+        }
     }
 
     fn alloc_local(&mut self) -> Local {
@@ -1076,7 +1382,7 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(dst)
             }
             Expr::StructLit {
-                type_name, fields, ..
+                type_path, fields, ..
             } => {
                 let mut mir_fields = Vec::with_capacity(fields.len());
                 for (name, value_expr) in fields {
@@ -1084,9 +1390,28 @@ impl<'a> FunctionLowerer<'a> {
                     mir_fields.push((name.name.clone(), Operand::Local(v)));
                 }
                 let dst = self.alloc_local();
+                let segments: Vec<String> =
+                    type_path.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, type_name) = self
+                    .compiler
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, type_path.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != DefKind::Struct {
+                    return Err(CompileError {
+                        message: format!(
+                            "internal error: expected a struct type for struct literal, got `{type_name}`"
+                        ),
+                        span: type_path.span,
+                    });
+                }
                 self.emit(Instruction::MakeStruct {
                     dst,
-                    type_name: type_name.name.clone(),
+                    type_name,
                     fields: mir_fields,
                 });
                 Ok(dst)
@@ -1103,10 +1428,29 @@ impl<'a> FunctionLowerer<'a> {
                     mir_args.push(Operand::Local(v));
                 }
                 let dst = self.alloc_local();
+                let segments: Vec<String> =
+                    interface.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, interface_name) = self
+                    .compiler
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, interface.span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != DefKind::Interface {
+                    return Err(CompileError {
+                        message: format!(
+                            "internal error: expected an interface for effect call, got `{interface_name}`"
+                        ),
+                        span: interface.span,
+                    });
+                }
                 self.emit(Instruction::Perform {
                     dst: Some(dst),
                     effect: EffectId {
-                        interface: path_name(&interface.segments),
+                        interface: interface_name,
                         method: method.name.clone(),
                     },
                     args: mir_args,
@@ -1180,7 +1524,42 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         // Function item used as a value.
-        let name = path_name(&path.segments);
+        let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+        let mut func_name: Option<String> = None;
+        if segments.len() >= 2 {
+            let prefix = &segments[..segments.len() - 1];
+            let last = segments.last().expect("len >= 2");
+            let prefix_ty = self
+                .compiler
+                .env
+                .modules
+                .try_resolve_type_fqn(&self.module, prefix, span)
+                .map_err(|e| CompileError {
+                    message: e.message,
+                    span: e.span,
+                })?;
+            if let Some((kind, type_fqn)) = prefix_ty
+                && kind != DefKind::Interface
+            {
+                let candidate = format!("{type_fqn}::{last}");
+                if self.compiler.env.functions.contains_key(&candidate) {
+                    func_name = Some(candidate);
+                }
+            }
+        }
+
+        let name = match func_name {
+            Some(name) => name,
+            None => self
+                .compiler
+                .env
+                .modules
+                .resolve_value_fqn(&self.module, &segments, span)
+                .map_err(|e| CompileError {
+                    message: e.message,
+                    span: e.span,
+                })?,
+        };
         let wrapper = {
             let compiler = &mut *self.compiler;
             compiler.ensure_fn_value_wrapper(&name)?
@@ -1216,7 +1595,14 @@ impl<'a> FunctionLowerer<'a> {
 
         {
             let compiler = &mut *self.compiler;
-            compiler.compile_lambda_entry(entry_name.clone(), &captures, params, body, span)?;
+            compiler.compile_lambda_entry(
+                &self.module,
+                entry_name.clone(),
+                &captures,
+                params,
+                body,
+                span,
+            )?;
         }
 
         // Capture values into an env array (name order).
@@ -1376,9 +1762,9 @@ impl<'a> FunctionLowerer<'a> {
         span: Span,
     ) -> Result<Local, CompileError> {
         // Desugar:
-        //   let it = std::into_iter(iter);
+        //   let it = core::intrinsics::into_iter(iter);
         //   loop {
-        //     match std::next(it) {
+        //     match core::intrinsics::next(it) {
         //       Option::Some(x) => { body; }
         //       Option::None(()) => break;
         //     }
@@ -1387,7 +1773,7 @@ impl<'a> FunctionLowerer<'a> {
         let it_local = self.alloc_local();
         self.emit(Instruction::Call {
             dst: Some(it_local),
-            func: "std::into_iter".to_string(),
+            func: "core::intrinsics::into_iter".to_string(),
             args: vec![Operand::Local(iter_val)],
         });
 
@@ -1410,7 +1796,7 @@ impl<'a> FunctionLowerer<'a> {
         let next_local = self.alloc_local();
         self.emit(Instruction::Call {
             dst: Some(next_local),
-            func: "std::next".to_string(),
+            func: "core::intrinsics::next".to_string(),
             args: vec![Operand::Local(it_local)],
         });
 
@@ -1522,7 +1908,7 @@ impl<'a> FunctionLowerer<'a> {
                 let dst = self.alloc_local();
                 self.emit(Instruction::Call {
                     dst: Some(dst),
-                    func: "std::bool_not".to_string(),
+                    func: "core::intrinsics::bool_not".to_string(),
                     args: vec![Operand::Local(v)],
                 });
                 Ok(dst)
@@ -1540,7 +1926,7 @@ impl<'a> FunctionLowerer<'a> {
                     Ty::Int => {
                         let zero = self.alloc_int(0);
                         self.lower_named_call(
-                            "std::int_sub",
+                            "core::intrinsics::int_sub",
                             vec![Operand::Local(zero), Operand::Local(v)],
                         )
                     }
@@ -1551,7 +1937,7 @@ impl<'a> FunctionLowerer<'a> {
                             value: ConstValue::Float(0.0),
                         });
                         self.lower_named_call(
-                            "std::float_sub",
+                            "core::intrinsics::float_sub",
                             vec![Operand::Local(zero), Operand::Local(v)],
                         )
                     }
@@ -1773,41 +2159,80 @@ impl<'a> FunctionLowerer<'a> {
                 return self.lower_call_closure(callee, args);
             }
 
-            // Enum constructor call: `Enum::Variant(args...)`.
-            if path.segments.len() == 2 {
-                let enum_name = &path.segments[0].name;
-                let variant = &path.segments[1].name;
-                if let Some(def) = self.compiler.env.enums.get(enum_name)
-                    && def.variants.contains_key(variant)
+            let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+            let mut func_name: Option<String> = None;
+
+            if segments.len() >= 2 {
+                let prefix = &segments[..segments.len() - 1];
+                let last = segments.last().expect("len >= 2");
+                let last_ident = path.segments.last().expect("len >= 2");
+
+                if let Some((kind, type_fqn)) = self
+                    .compiler
+                    .env
+                    .modules
+                    .try_resolve_type_fqn(&self.module, prefix, span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?
                 {
-                    let mut ops = Vec::with_capacity(args.len());
-                    for a in args {
-                        let v = self.lower_expr(a)?;
-                        ops.push(Operand::Local(v));
+                    match kind {
+                        DefKind::Enum => {
+                            if let Some(def) = self.compiler.env.enums.get(&type_fqn)
+                                && def.variants.contains_key(last)
+                            {
+                                let mut ops = Vec::with_capacity(args.len());
+                                for a in args {
+                                    let v = self.lower_expr(a)?;
+                                    ops.push(Operand::Local(v));
+                                }
+                                let dst = self.alloc_local();
+                                self.emit(Instruction::MakeEnum {
+                                    dst,
+                                    enum_name: type_fqn,
+                                    variant: last_ident.name.clone(),
+                                    fields: ops,
+                                });
+                                return Ok(dst);
+                            }
+
+                            // Not a variant: allow inherent enum methods via `Enum::method(...)`.
+                            let candidate = format!("{type_fqn}::{last}");
+                            if self.compiler.env.functions.contains_key(&candidate) {
+                                func_name = Some(candidate);
+                            }
+                        }
+                        DefKind::Interface => {
+                            return self.lower_interface_method_call(
+                                type_fqn,
+                                last_ident.name.clone(),
+                                args,
+                                span,
+                            );
+                        }
+                        DefKind::Struct => {
+                            let candidate = format!("{type_fqn}::{last}");
+                            if self.compiler.env.functions.contains_key(&candidate) {
+                                func_name = Some(candidate);
+                            }
+                        }
                     }
-                    let dst = self.alloc_local();
-                    self.emit(Instruction::MakeEnum {
-                        dst,
-                        enum_name: enum_name.clone(),
-                        variant: variant.clone(),
-                        fields: ops,
-                    });
-                    return Ok(dst);
                 }
             }
 
-            // Interface::method(receiver, ...)
-            if path.segments.len() == 2
-                && self
+            let func_name = match func_name {
+                Some(name) => name,
+                None => self
                     .compiler
                     .env
-                    .interfaces
-                    .contains_key(path.segments[0].name.as_str())
-            {
-                return self.lower_interface_method_call(path, args, span);
-            }
-
-            let func_name = path_name(&path.segments);
+                    .modules
+                    .resolve_value_fqn(&self.module, &segments, span)
+                    .map_err(|e| CompileError {
+                        message: e.message,
+                        span: e.span,
+                    })?,
+            };
             let mut call_args = Vec::with_capacity(args.len());
             for arg in args {
                 let v = self.lower_expr(arg)?;
@@ -1871,7 +2296,8 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_interface_method_call(
         &mut self,
-        path: &crate::ast::Path,
+        iface_name: String,
+        method_name: String,
         args: &[Expr],
         span: Span,
     ) -> Result<Local, CompileError> {
@@ -1881,8 +2307,6 @@ impl<'a> FunctionLowerer<'a> {
                 span,
             });
         }
-        let iface_name = path.segments[0].name.clone();
-        let method_name = path.segments[1].name.clone();
 
         let recv_ty = self
             .expr_ty(&args[0])
@@ -1959,6 +2383,12 @@ impl<'a> FunctionLowerer<'a> {
         // Otherwise: interface method (must be unambiguous).
         let mut candidates = Vec::new();
         for (iface_name, iface) in &self.compiler.env.interfaces {
+            if let Some(def) = self.compiler.env.modules.def(iface_name)
+                && !def.vis.is_public()
+                && !self.module.is_descendant_of(&def.defining_module)
+            {
+                continue;
+            }
             if iface.methods.contains_key(&method.name)
                 && type_implements_interface(&self.compiler.env, recv_nom, iface_name)
             {
@@ -2038,7 +2468,14 @@ impl<'a> FunctionLowerer<'a> {
         let helper_name = self.compiler.fresh_internal_name("match");
         {
             let compiler = &mut *self.compiler;
-            compiler.compile_match_helper(helper_name.clone(), &captured, scrutinee, arms, span)?;
+            compiler.compile_match_helper(
+                &self.module,
+                helper_name.clone(),
+                &captured,
+                scrutinee,
+                arms,
+                span,
+            )?;
         }
 
         let mut args = Vec::with_capacity(captured.len());
@@ -2080,7 +2517,7 @@ impl<'a> FunctionLowerer<'a> {
             let MatchPat::Value(pat) = &arm.pat else {
                 continue;
             };
-            let (mir_pat, bind_names) = lower_ast_pattern(pat)?;
+            let (mir_pat, bind_names) = self.lower_ast_pattern(pat)?;
             let arm_block = self.new_block(format!("match_arm_{idx}"));
 
             let mut params = Vec::with_capacity(bind_names.len());
@@ -2153,13 +2590,35 @@ impl<'a> FunctionLowerer<'a> {
         // Build handler clauses and handler blocks.
         let mut clauses = Vec::new();
         for (idx, (effect_pat, body, _arm_span)) in effect_arms.into_iter().enumerate() {
-            let interface = path_name(&effect_pat.interface.segments);
+            let segments: Vec<String> = effect_pat
+                .interface
+                .segments
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
+            let (kind, interface) = self
+                .compiler
+                .env
+                .modules
+                .resolve_type_fqn(&self.module, &segments, effect_pat.interface.span)
+                .map_err(|e| CompileError {
+                    message: e.message,
+                    span: e.span,
+                })?;
+            if kind != DefKind::Interface {
+                return Err(CompileError {
+                    message: format!(
+                        "internal error: expected interface in handler clause, got `{interface}`"
+                    ),
+                    span: effect_pat.interface.span,
+                });
+            }
             let method = effect_pat.method.name.clone();
 
             let mut arg_patterns = Vec::with_capacity(effect_pat.args.len());
             let mut bind_names = Vec::new();
             for p in &effect_pat.args {
-                let (mp, binds) = lower_ast_pattern(p)?;
+                let (mp, binds) = self.lower_ast_pattern(p)?;
                 arg_patterns.push(mp);
                 bind_names.extend(binds);
             }
@@ -2246,7 +2705,7 @@ impl<'a> FunctionLowerer<'a> {
             let MatchPat::Value(pat) = &arm.pat else {
                 continue;
             };
-            let (mir_pat, bind_names) = lower_ast_pattern(pat)?;
+            let (mir_pat, bind_names) = self.lower_ast_pattern(pat)?;
             let arm_block = self.new_block(format!("match_arm_{idx}"));
 
             let mut params = Vec::with_capacity(bind_names.len());
@@ -2292,160 +2751,6 @@ impl<'a> FunctionLowerer<'a> {
     }
 }
 
-fn path_name(segments: &[crate::ast::Ident]) -> String {
-    segments
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect::<Vec<_>>()
-        .join("::")
-}
-
-fn path_type_name(path: &crate::ast::PathType) -> String {
-    path.segments
-        .iter()
-        .map(|s| s.name.name.as_str())
-        .collect::<Vec<_>>()
-        .join("::")
-}
-
-fn lower_ast_pattern(pat: &AstPattern) -> Result<(Pattern, Vec<String>), CompileError> {
-    match pat {
-        AstPattern::Wildcard { .. } => Ok((Pattern::Wildcard, Vec::new())),
-        AstPattern::Bind { name, .. } => Ok((Pattern::Bind, vec![name.name.clone()])),
-        AstPattern::Literal { lit, .. } => {
-            let cv = match lit {
-                PatLiteral::Unit => ConstValue::Unit,
-                PatLiteral::Bool(v) => ConstValue::Bool(*v),
-                PatLiteral::Int(v) => ConstValue::Int(*v),
-                PatLiteral::Float(v) => ConstValue::Float(*v),
-                PatLiteral::String(v) => ConstValue::String(v.clone()),
-                PatLiteral::Bytes(v) => ConstValue::Bytes(v.clone()),
-            };
-            Ok((Pattern::Literal(cv), Vec::new()))
-        }
-        AstPattern::Tuple {
-            prefix,
-            rest,
-            suffix,
-            ..
-        } => {
-            let mut out_prefix = Vec::with_capacity(prefix.len());
-            let mut out_suffix = Vec::with_capacity(suffix.len());
-            let mut binds = Vec::new();
-
-            for it in prefix {
-                let (p, b) = lower_ast_pattern(it)?;
-                out_prefix.push(p);
-                binds.extend(b);
-            }
-
-            let out_rest = rest.as_ref().map(|r| {
-                if let Some(binding) = &r.binding {
-                    binds.push(binding.name.clone());
-                    Box::new(Pattern::Bind)
-                } else {
-                    Box::new(Pattern::Wildcard)
-                }
-            });
-
-            for it in suffix {
-                let (p, b) = lower_ast_pattern(it)?;
-                out_suffix.push(p);
-                binds.extend(b);
-            }
-
-            Ok((
-                Pattern::Tuple {
-                    prefix: out_prefix,
-                    rest: out_rest,
-                    suffix: out_suffix,
-                },
-                binds,
-            ))
-        }
-        AstPattern::Enum {
-            enum_name,
-            variant,
-            fields,
-            ..
-        } => {
-            let mut out_fields = Vec::with_capacity(fields.len());
-            let mut binds = Vec::new();
-            for f in fields {
-                let (p, b) = lower_ast_pattern(f)?;
-                out_fields.push(p);
-                binds.extend(b);
-            }
-            Ok((
-                Pattern::Enum {
-                    enum_name: enum_name.name.clone(),
-                    variant: variant.name.clone(),
-                    fields: out_fields,
-                },
-                binds,
-            ))
-        }
-        AstPattern::Struct {
-            type_name, fields, ..
-        } => {
-            let mut out_fields = Vec::with_capacity(fields.len());
-            let mut binds = Vec::new();
-            for (fname, subpat) in fields {
-                let (p, b) = lower_ast_pattern(subpat)?;
-                out_fields.push((fname.name.clone(), p));
-                binds.extend(b);
-            }
-            Ok((
-                Pattern::Struct {
-                    type_name: type_name.name.clone(),
-                    fields: out_fields,
-                },
-                binds,
-            ))
-        }
-        AstPattern::Array {
-            prefix,
-            rest,
-            suffix,
-            ..
-        } => {
-            let mut out_prefix = Vec::with_capacity(prefix.len());
-            let mut out_suffix = Vec::with_capacity(suffix.len());
-            let mut binds = Vec::new();
-
-            for it in prefix {
-                let (p, b) = lower_ast_pattern(it)?;
-                out_prefix.push(p);
-                binds.extend(b);
-            }
-
-            let out_rest = rest.as_ref().map(|r| {
-                if let Some(binding) = &r.binding {
-                    binds.push(binding.name.clone());
-                    Box::new(Pattern::Bind)
-                } else {
-                    Box::new(Pattern::Wildcard)
-                }
-            });
-
-            for it in suffix {
-                let (p, b) = lower_ast_pattern(it)?;
-                out_suffix.push(p);
-                binds.extend(b);
-            }
-
-            Ok((
-                Pattern::Array {
-                    prefix: out_prefix,
-                    rest: out_rest,
-                    suffix: out_suffix,
-                },
-                binds,
-            ))
-        }
-    }
-}
-
 fn nominal_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Readonly(inner) => nominal_type_name(inner),
@@ -2467,82 +2772,74 @@ fn type_implements_interface(env: &ProgramEnv, type_name: &str, iface: &str) -> 
     })
 }
 
+fn mir_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Option<Type> {
+    match ty {
+        Ty::Unit => Some(Type::Unit),
+        Ty::Bool => Some(Type::Bool),
+        Ty::Int => Some(Type::Int),
+        Ty::Float => Some(Type::Float),
+        Ty::String => Some(Type::String),
+        Ty::Bytes => Some(Type::Bytes),
+        Ty::Array(_) => Some(Type::Array),
+        Ty::Tuple(items) => {
+            if items.is_empty() {
+                Some(Type::Unit)
+            } else {
+                Some(Type::Tuple(items.len()))
+            }
+        }
+        Ty::Fn { .. } => Some(Type::Fn),
+        Ty::Cont { .. } => Some(Type::Cont),
+        Ty::Readonly(inner) => mir_type_from_ty(env, inner),
+        Ty::App(crate::typeck::TyCon::Named(name), _) => {
+            if env.enums.contains_key(name) {
+                Some(Type::Enum(name.clone()))
+            } else if env.interfaces.contains_key(name) {
+                Some(Type::Interface(name.clone()))
+            } else {
+                Some(Type::Struct(name.clone()))
+            }
+        }
+        Ty::App(_, _) | Ty::Gen(_) | Ty::Var(_) => None,
+    }
+}
+
 fn select_binop_fn(op: BinaryOp, ty: &Ty) -> Option<&'static str> {
     match (op, ty) {
-        (BinaryOp::Add, Ty::Int) => Some("std::int_add"),
-        (BinaryOp::Sub, Ty::Int) => Some("std::int_sub"),
-        (BinaryOp::Mul, Ty::Int) => Some("std::int_mul"),
-        (BinaryOp::Div, Ty::Int) => Some("std::int_div"),
-        (BinaryOp::Mod, Ty::Int) => Some("std::int_mod"),
+        (BinaryOp::Add, Ty::Int) => Some("core::intrinsics::int_add"),
+        (BinaryOp::Sub, Ty::Int) => Some("core::intrinsics::int_sub"),
+        (BinaryOp::Mul, Ty::Int) => Some("core::intrinsics::int_mul"),
+        (BinaryOp::Div, Ty::Int) => Some("core::intrinsics::int_div"),
+        (BinaryOp::Mod, Ty::Int) => Some("core::intrinsics::int_mod"),
 
-        (BinaryOp::Eq, Ty::Int) => Some("std::int_eq"),
-        (BinaryOp::Ne, Ty::Int) => Some("std::int_ne"),
-        (BinaryOp::Lt, Ty::Int) => Some("std::int_lt"),
-        (BinaryOp::Le, Ty::Int) => Some("std::int_le"),
-        (BinaryOp::Gt, Ty::Int) => Some("std::int_gt"),
-        (BinaryOp::Ge, Ty::Int) => Some("std::int_ge"),
+        (BinaryOp::Eq, Ty::Int) => Some("core::intrinsics::int_eq"),
+        (BinaryOp::Ne, Ty::Int) => Some("core::intrinsics::int_ne"),
+        (BinaryOp::Lt, Ty::Int) => Some("core::intrinsics::int_lt"),
+        (BinaryOp::Le, Ty::Int) => Some("core::intrinsics::int_le"),
+        (BinaryOp::Gt, Ty::Int) => Some("core::intrinsics::int_gt"),
+        (BinaryOp::Ge, Ty::Int) => Some("core::intrinsics::int_ge"),
 
-        (BinaryOp::Add, Ty::Float) => Some("std::float_add"),
-        (BinaryOp::Sub, Ty::Float) => Some("std::float_sub"),
-        (BinaryOp::Mul, Ty::Float) => Some("std::float_mul"),
-        (BinaryOp::Div, Ty::Float) => Some("std::float_div"),
-        (BinaryOp::Mod, Ty::Float) => Some("std::float_mod"),
+        (BinaryOp::Add, Ty::Float) => Some("core::intrinsics::float_add"),
+        (BinaryOp::Sub, Ty::Float) => Some("core::intrinsics::float_sub"),
+        (BinaryOp::Mul, Ty::Float) => Some("core::intrinsics::float_mul"),
+        (BinaryOp::Div, Ty::Float) => Some("core::intrinsics::float_div"),
+        (BinaryOp::Mod, Ty::Float) => Some("core::intrinsics::float_mod"),
 
-        (BinaryOp::Eq, Ty::Float) => Some("std::float_eq"),
-        (BinaryOp::Ne, Ty::Float) => Some("std::float_ne"),
-        (BinaryOp::Lt, Ty::Float) => Some("std::float_lt"),
-        (BinaryOp::Le, Ty::Float) => Some("std::float_le"),
-        (BinaryOp::Gt, Ty::Float) => Some("std::float_gt"),
-        (BinaryOp::Ge, Ty::Float) => Some("std::float_ge"),
+        (BinaryOp::Eq, Ty::Float) => Some("core::intrinsics::float_eq"),
+        (BinaryOp::Ne, Ty::Float) => Some("core::intrinsics::float_ne"),
+        (BinaryOp::Lt, Ty::Float) => Some("core::intrinsics::float_lt"),
+        (BinaryOp::Le, Ty::Float) => Some("core::intrinsics::float_le"),
+        (BinaryOp::Gt, Ty::Float) => Some("core::intrinsics::float_gt"),
+        (BinaryOp::Ge, Ty::Float) => Some("core::intrinsics::float_ge"),
 
-        (BinaryOp::Eq, Ty::Bool) => Some("std::bool_eq"),
-        (BinaryOp::Ne, Ty::Bool) => Some("std::bool_ne"),
-        (BinaryOp::Eq, Ty::String) => Some("std::string_eq"),
-        (BinaryOp::Ne, Ty::String) => Some("std::string_ne"),
-        (BinaryOp::Eq, Ty::Bytes) => Some("std::bytes_eq"),
-        (BinaryOp::Ne, Ty::Bytes) => Some("std::bytes_ne"),
-        (BinaryOp::Eq, Ty::Unit) => Some("std::unit_eq"),
-        (BinaryOp::Ne, Ty::Unit) => Some("std::unit_ne"),
+        (BinaryOp::Eq, Ty::Bool) => Some("core::intrinsics::bool_eq"),
+        (BinaryOp::Ne, Ty::Bool) => Some("core::intrinsics::bool_ne"),
+        (BinaryOp::Eq, Ty::String) => Some("core::intrinsics::string_eq"),
+        (BinaryOp::Ne, Ty::String) => Some("core::intrinsics::string_ne"),
+        (BinaryOp::Eq, Ty::Bytes) => Some("core::intrinsics::bytes_eq"),
+        (BinaryOp::Ne, Ty::Bytes) => Some("core::intrinsics::bytes_ne"),
+        (BinaryOp::Eq, Ty::Unit) => Some("core::intrinsics::unit_eq"),
+        (BinaryOp::Ne, Ty::Unit) => Some("core::intrinsics::unit_ne"),
         _ => None,
-    }
-}
-
-fn lower_type_annotation(env: &ProgramEnv, ty: &TypeExpr) -> Type {
-    match ty {
-        TypeExpr::Readonly { inner, .. } => lower_type_annotation(env, inner),
-        TypeExpr::Prim { prim, .. } => match prim {
-            crate::ast::PrimType::Unit => Type::Unit,
-            crate::ast::PrimType::Bool => Type::Bool,
-            crate::ast::PrimType::Int => Type::Int,
-            crate::ast::PrimType::Float => Type::Float,
-            crate::ast::PrimType::String => Type::String,
-            crate::ast::PrimType::Bytes => Type::Bytes,
-        },
-        TypeExpr::Array { .. } => Type::Array,
-        TypeExpr::Tuple { items, .. } => {
-            if items.is_empty() {
-                Type::Unit
-            } else {
-                Type::Tuple(items.len())
-            }
-        }
-        TypeExpr::Fn { .. } => Type::Fn,
-        TypeExpr::Cont { .. } => Type::Cont,
-        TypeExpr::Path(path) => {
-            let name = path_type_name(path);
-            if env.enums.contains_key(&name) {
-                Type::Enum(name)
-            } else if env.interfaces.contains_key(&name) {
-                Type::Interface(name)
-            } else {
-                Type::Struct(name)
-            }
-        }
-    }
-}
-
-impl Compiler {
-    fn env(&self) -> &ProgramEnv {
-        &self.env
     }
 }

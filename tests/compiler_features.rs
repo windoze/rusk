@@ -1,5 +1,5 @@
 use rusk::compiler::compile_to_mir;
-use rusk::stdlib::register_std_host_fns;
+use rusk::corelib::register_core_host_fns;
 use rusk::{Interpreter, RuntimeError, Value};
 
 fn run0(src: &str, fn_name: &str) -> Result<Value, RuntimeError> {
@@ -7,7 +7,7 @@ fn run0(src: &str, fn_name: &str) -> Result<Value, RuntimeError> {
         message: format!("compile error: {e}"),
     })?;
     let mut interp = Interpreter::new(module);
-    register_std_host_fns(&mut interp);
+    register_core_host_fns(&mut interp);
     interp.run_function(fn_name, vec![])
 }
 
@@ -382,7 +382,7 @@ fn evaluation_order_is_left_to_right_for_array_literals() {
 }
 
 #[test]
-fn formatted_strings_desugar_via_std() {
+fn formatted_strings_desugar_via_core_intrinsics() {
     let src = r#"
         fn test() -> string {
             f"hello {1} world {true}"

@@ -1,5 +1,5 @@
 use rusk::compiler::compile_to_mir;
-use rusk::stdlib::register_std_host_fns;
+use rusk::corelib::register_core_host_fns;
 use rusk::{Interpreter, Value};
 
 #[test]
@@ -17,7 +17,7 @@ fn for_loop_iterates_using_iterator_protocol() {
 
     let module = compile_to_mir(src).expect("compile");
     let mut interp = Interpreter::new(module);
-    register_std_host_fns(&mut interp);
+    register_core_host_fns(&mut interp);
 
     let out = interp.run_function("sum", vec![]).expect("run");
     assert_eq!(out, Value::Int(6));
@@ -38,7 +38,7 @@ fn for_loop_over_readonly_array_is_allowed() {
 
     let module = compile_to_mir(src).expect("compile");
     let mut interp = Interpreter::new(module);
-    register_std_host_fns(&mut interp);
+    register_core_host_fns(&mut interp);
 
     let out = interp.run_function("sum", vec![]).expect("run");
     assert_eq!(out, Value::Int(6));

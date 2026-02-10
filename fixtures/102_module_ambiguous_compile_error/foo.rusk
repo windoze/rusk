@@ -1,0 +1,4 @@
+pub fn answer() -> int {
+    0
+}
+

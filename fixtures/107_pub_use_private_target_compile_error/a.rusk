@@ -1,0 +1,6 @@
+fn secret() -> int {
+    1
+}
+
+pub use self::secret;
+

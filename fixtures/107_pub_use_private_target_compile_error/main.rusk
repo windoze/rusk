@@ -1,0 +1,8 @@
+// expect: compile_error cannot re-export private value
+
+mod a;
+
+fn main() -> unit {
+    ()
+}
+

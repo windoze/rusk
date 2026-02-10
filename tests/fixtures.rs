@@ -1,5 +1,5 @@
-use rusk::compiler::compile_to_mir;
-use rusk::stdlib::register_std_host_fns;
+use rusk::compiler::{compile_file_to_mir, compile_to_mir};
+use rusk::corelib::register_core_host_fns;
 use rusk::{Interpreter, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -118,61 +118,133 @@ fn parse_expected_value(spec: &str, path: &Path) -> Value {
     );
 }
 
+#[derive(Clone, Debug)]
+enum FixtureKind {
+    SingleFile(PathBuf),
+    DirMain(PathBuf),
+}
+
+#[derive(Clone, Debug)]
+struct FixtureCase {
+    path: PathBuf,
+    kind: FixtureKind,
+}
+
+fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
+    let mut out = Vec::new();
+    let entries = fs::read_dir(fixture_dir).unwrap_or_else(|e| {
+        panic!(
+            "failed to read fixtures dir `{}`: {e}",
+            fixture_dir.display()
+        )
+    });
+
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "failed to read fixtures dir entry under `{}`: {e}",
+                fixture_dir.display()
+            )
+        });
+        let path = entry.path();
+        if path.is_file() {
+            if path.extension().and_then(|s| s.to_str()) == Some("rusk") {
+                out.push(FixtureCase {
+                    path: path.clone(),
+                    kind: FixtureKind::SingleFile(path),
+                });
+            }
+            continue;
+        }
+
+        if path.is_dir() {
+            let main = path.join("main.rusk");
+            if main.is_file() {
+                out.push(FixtureCase {
+                    path: path.clone(),
+                    kind: FixtureKind::DirMain(main),
+                });
+                continue;
+            }
+
+            let has_rusk = fs::read_dir(&path).ok().is_some_and(|iter| {
+                iter.filter_map(Result::ok).any(|e| {
+                    e.path().is_file()
+                        && e.path().extension().and_then(|s| s.to_str()) == Some("rusk")
+                })
+            });
+            if has_rusk {
+                panic!(
+                    "fixture directory `{}` contains `.rusk` files but no `main.rusk` entry",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
 #[test]
 fn fixtures() {
     let fixture_dir = Path::new("fixtures");
-    let mut files: Vec<PathBuf> = fs::read_dir(fixture_dir)
-        .unwrap_or_else(|e| {
-            panic!(
-                "failed to read fixtures dir `{}`: {e}",
-                fixture_dir.display()
-            )
-        })
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            match path.extension().and_then(|s| s.to_str()) {
-                Some("rusk") => Some(path),
-                _ => None,
-            }
-        })
-        .collect();
-
-    files.sort();
-    if files.is_empty() {
+    let cases = discover_fixtures(fixture_dir);
+    if cases.is_empty() {
         panic!("no fixtures found under `{}`", fixture_dir.display());
     }
 
-    for path in files {
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("fixture {}: read failed: {e}", path.display()));
-        let expect = parse_expectation(&source, &path);
+    for case in cases {
+        let (entry_path, source, module) = match &case.kind {
+            FixtureKind::SingleFile(path) => {
+                let source = fs::read_to_string(path)
+                    .unwrap_or_else(|e| panic!("fixture {}: read failed: {e}", path.display()));
+                let module = compile_to_mir(&source);
+                (path.as_path(), source, module)
+            }
+            FixtureKind::DirMain(main_path) => {
+                let source = fs::read_to_string(main_path).unwrap_or_else(|e| {
+                    panic!("fixture {}: read failed: {e}", main_path.display())
+                });
+                let module = compile_file_to_mir(main_path);
+                (main_path.as_path(), source, module)
+            }
+        };
+
+        let expect = parse_expectation(&source, entry_path);
 
         match expect {
             Expectation::CompileError { contains } => {
-                let err = compile_to_mir(&source).expect_err("expected compile error");
+                let err = module.expect_err("expected compile error");
                 assert!(
                     err.message.contains(&contains),
                     "fixture {}: compile error mismatch\n  want message containing: {contains:?}\n  got: {}",
-                    path.display(),
+                    entry_path.display(),
                     err.message
                 );
             }
             Expectation::Ok(want) => {
-                let module = compile_to_mir(&source)
-                    .unwrap_or_else(|e| panic!("fixture {}: compile failed: {e}", path.display()));
+                let module = module.unwrap_or_else(|e| {
+                    panic!("fixture {}: compile failed: {e}", entry_path.display())
+                });
                 let mut interp = Interpreter::new(module);
-                register_std_host_fns(&mut interp);
-                let got = interp
-                    .run_function("main", vec![])
-                    .unwrap_or_else(|e| panic!("fixture {}: runtime failed: {e}", path.display()));
-                assert_eq!(got, want, "fixture {}: result mismatch", path.display());
+                register_core_host_fns(&mut interp);
+                let got = interp.run_function("main", vec![]).unwrap_or_else(|e| {
+                    panic!("fixture {}: runtime failed: {e}", entry_path.display())
+                });
+                assert_eq!(
+                    got,
+                    want,
+                    "fixture {}: result mismatch",
+                    entry_path.display()
+                );
             }
             Expectation::RuntimeError { contains } => {
-                let module = compile_to_mir(&source)
-                    .unwrap_or_else(|e| panic!("fixture {}: compile failed: {e}", path.display()));
+                let module = module.unwrap_or_else(|e| {
+                    panic!("fixture {}: compile failed: {e}", entry_path.display())
+                });
                 let mut interp = Interpreter::new(module);
-                register_std_host_fns(&mut interp);
+                register_core_host_fns(&mut interp);
                 let err = interp
                     .run_function("main", vec![])
                     .expect_err("expected runtime error");
@@ -180,7 +252,7 @@ fn fixtures() {
                 assert!(
                     msg.contains(&contains),
                     "fixture {}: runtime error mismatch\n  want message containing: {contains:?}\n  got: {msg}",
-                    path.display()
+                    entry_path.display()
                 );
             }
         }

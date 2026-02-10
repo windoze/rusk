@@ -1,0 +1,14 @@
+fn helper() -> int {
+    2
+}
+
+pub fn calc() -> int {
+    let x = crate::root();
+    let y = super::super::root();
+    if x == y {
+        x + super::a() + self::helper()
+    } else {
+        0
+    }
+}
+

@@ -1,0 +1,8 @@
+// expect: compile_error ambiguous module `foo`
+
+mod foo;
+
+fn main() -> unit {
+    ()
+}
+

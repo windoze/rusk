@@ -1,0 +1,10 @@
+mod b {
+    pub fn answer() -> int {
+        1
+    }
+}
+
+pub fn ok() -> int {
+    b::answer()
+}
+

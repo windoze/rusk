@@ -1,0 +1,8 @@
+// expect: compile_error `secret` is private
+
+mod a;
+
+fn main() -> int {
+    a::secret()
+}
+

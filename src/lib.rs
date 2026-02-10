@@ -8,6 +8,7 @@ pub mod source;
 
 mod ast;
 mod lexer;
+mod modules;
 mod parser;
 mod typeck;
 
@@ -20,7 +21,7 @@ pub mod gc;
 /// A small interpreter for executing Rusk MIR.
 pub mod interpreter;
 
-/// Standard-library host functions used by the compiler desugarings.
-pub mod stdlib;
+/// Core-library host functions used by the compiler desugarings.
+pub mod corelib;
 
 pub use interpreter::{Interpreter, RuntimeError, Value};

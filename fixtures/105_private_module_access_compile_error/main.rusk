@@ -1,0 +1,8 @@
+// expect: compile_error module `b` is private
+
+mod a;
+
+fn main() -> int {
+    a::b::answer()
+}
+
