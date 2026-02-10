@@ -1,0 +1,12 @@
+// expect: ok int 123
+
+interface Tick { fn tick(n: int) -> unit; }
+
+fn main() -> int {
+    let acc = 0;
+    match [@Tick.tick(1), @Tick.tick(2), @Tick.tick(3)] {
+        @Tick.tick(n) => { acc = acc * 10 + n; resume(()) }
+        _ => acc
+    }
+}
+

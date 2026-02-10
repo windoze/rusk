@@ -1,0 +1,22 @@
+// expect: ok int 48
+
+struct Point { x: int, y: int }
+
+impl Point {
+    fn sum(self: Point) -> int { self.x + self.y }
+}
+
+interface Add {
+    fn add(n: int) -> int;
+}
+
+impl Add for Point {
+    fn add(self: Point, n: int) -> int { self.sum() + n }
+}
+
+fn main() -> int {
+    let p = Point { x: 1, y: 2 };
+    p.x = 10;
+    p.sum() + Add::add(p, 5) + p.add(7)
+}
+

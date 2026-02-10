@@ -1,0 +1,9 @@
+// expect: compile_error `..` can only appear once
+
+fn main() -> int {
+    match (1, 2, 3) {
+        (..a, ..b) => 0
+        _ => 0
+    }
+}
+

@@ -1,0 +1,6 @@
+// expect: compile_error outside of a loop
+
+fn main() -> unit {
+    break;
+}
+

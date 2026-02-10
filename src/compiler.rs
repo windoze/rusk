@@ -452,7 +452,8 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn bind_params_from_fn_item(&mut self, func: &FnItem) -> Result<(), CompileError> {
-        for p in &func.params {
+        let mut trap_block: Option<BlockId> = None;
+        for (idx, p) in func.params.iter().enumerate() {
             let local = self.alloc_local();
             let mutability = match &p.ty {
                 TypeExpr::Readonly { .. } => Mutability::Readonly,
@@ -463,14 +464,65 @@ impl<'a> FunctionLowerer<'a> {
                 mutability,
                 ty: Some(lower_type_annotation(self.compiler.env(), &p.ty)),
             });
-            // Parameters are immutable bindings.
-            self.bind_var(
-                &p.name.name,
-                VarInfo {
-                    local,
-                    kind: BindingKind::Const,
-                },
-            );
+
+            match &p.pat {
+                crate::ast::Pattern::Wildcard { .. } => {}
+                crate::ast::Pattern::Bind { name, .. } => {
+                    // Simple parameter binding.
+                    self.bind_var(
+                        &name.name,
+                        VarInfo {
+                            local,
+                            kind: BindingKind::Const,
+                        },
+                    );
+                }
+                other_pat => {
+                    let trap = match trap_block {
+                        Some(id) => id,
+                        None => {
+                            let fail = self.new_block("param_pat_fail");
+                            let prev = self.current;
+                            self.set_current(fail);
+                            self.set_terminator(Terminator::Trap {
+                                message: "parameter pattern match failed".to_string(),
+                            })?;
+                            self.set_current(prev);
+                            trap_block = Some(fail);
+                            fail
+                        }
+                    };
+
+                    let (mir_pat, bind_names) = lower_ast_pattern(other_pat)?;
+                    let ok_block = self.new_block(format!("param_pat_{idx}_ok"));
+
+                    let mut params = Vec::with_capacity(bind_names.len());
+                    for _ in 0..bind_names.len() {
+                        params.push(self.alloc_local());
+                    }
+                    self.blocks[ok_block.0].params = params.clone();
+
+                    self.set_terminator(Terminator::Switch {
+                        value: Operand::Local(local),
+                        cases: vec![SwitchCase {
+                            pattern: mir_pat,
+                            target: ok_block,
+                        }],
+                        default: trap,
+                    })?;
+
+                    self.set_current(ok_block);
+                    for (name, local) in bind_names.into_iter().zip(params.into_iter()) {
+                        self.bind_var(
+                            &name,
+                            VarInfo {
+                                local,
+                                kind: BindingKind::Const,
+                            },
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1013,6 +1065,16 @@ impl<'a> FunctionLowerer<'a> {
                 self.emit(Instruction::MakeArray { dst, items: ops });
                 Ok(dst)
             }
+            Expr::Tuple { items, .. } => {
+                let mut ops = Vec::with_capacity(items.len());
+                for item in items {
+                    let v = self.lower_expr(item)?;
+                    ops.push(Operand::Local(v));
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTuple { dst, items: ops });
+                Ok(dst)
+            }
             Expr::StructLit {
                 type_name, fields, ..
             } => {
@@ -1414,14 +1476,18 @@ impl<'a> FunctionLowerer<'a> {
     fn lower_field_expr(
         &mut self,
         base: &Expr,
-        name: &crate::ast::Ident,
+        name: &crate::ast::FieldName,
     ) -> Result<Local, CompileError> {
         let base_local = self.lower_expr(base)?;
+        let field = match name {
+            crate::ast::FieldName::Named(name) => name.name.clone(),
+            crate::ast::FieldName::Index { index, .. } => format!(".{index}"),
+        };
         let dst = self.alloc_local();
         self.emit(Instruction::GetField {
             dst,
             obj: Operand::Local(base_local),
-            field: name.name.clone(),
+            field,
         });
         if self.expr_is_readonly(base) {
             self.emit(Instruction::AsReadonly { dst, src: dst });
@@ -1636,9 +1702,13 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Field { base, name, .. } => {
                 let obj = self.lower_expr(base)?;
                 let rhs = self.lower_expr(value)?;
+                let field = match name {
+                    crate::ast::FieldName::Named(name) => name.name.clone(),
+                    crate::ast::FieldName::Index { index, .. } => format!(".{index}"),
+                };
                 self.emit(Instruction::SetField {
                     obj: Operand::Local(obj),
-                    field: name.name.clone(),
+                    field,
                     value: Operand::Local(rhs),
                 });
                 Ok(self.alloc_unit())
@@ -1753,7 +1823,12 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         // Method call sugar: receiver.method(args...)
-        if let Expr::Field { base, name, .. } = callee {
+        if let Expr::Field {
+            base,
+            name: crate::ast::FieldName::Named(name),
+            ..
+        } = callee
+        {
             return self.lower_method_call(base, name, args, span);
         }
 
@@ -2248,6 +2323,46 @@ fn lower_ast_pattern(pat: &AstPattern) -> Result<(Pattern, Vec<String>), Compile
             };
             Ok((Pattern::Literal(cv), Vec::new()))
         }
+        AstPattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+            ..
+        } => {
+            let mut out_prefix = Vec::with_capacity(prefix.len());
+            let mut out_suffix = Vec::with_capacity(suffix.len());
+            let mut binds = Vec::new();
+
+            for it in prefix {
+                let (p, b) = lower_ast_pattern(it)?;
+                out_prefix.push(p);
+                binds.extend(b);
+            }
+
+            let out_rest = rest.as_ref().map(|r| {
+                if let Some(binding) = &r.binding {
+                    binds.push(binding.name.clone());
+                    Box::new(Pattern::Bind)
+                } else {
+                    Box::new(Pattern::Wildcard)
+                }
+            });
+
+            for it in suffix {
+                let (p, b) = lower_ast_pattern(it)?;
+                out_suffix.push(p);
+                binds.extend(b);
+            }
+
+            Ok((
+                Pattern::Tuple {
+                    prefix: out_prefix,
+                    rest: out_rest,
+                    suffix: out_suffix,
+                },
+                binds,
+            ))
+        }
         AstPattern::Enum {
             enum_name,
             variant,
@@ -2288,20 +2403,42 @@ fn lower_ast_pattern(pat: &AstPattern) -> Result<(Pattern, Vec<String>), Compile
                 binds,
             ))
         }
-        AstPattern::ArrayPrefix {
-            items, has_rest, ..
+        AstPattern::Array {
+            prefix,
+            rest,
+            suffix,
+            ..
         } => {
-            let mut out_items = Vec::with_capacity(items.len());
+            let mut out_prefix = Vec::with_capacity(prefix.len());
+            let mut out_suffix = Vec::with_capacity(suffix.len());
             let mut binds = Vec::new();
-            for it in items {
+
+            for it in prefix {
                 let (p, b) = lower_ast_pattern(it)?;
-                out_items.push(p);
+                out_prefix.push(p);
                 binds.extend(b);
             }
+
+            let out_rest = rest.as_ref().map(|r| {
+                if let Some(binding) = &r.binding {
+                    binds.push(binding.name.clone());
+                    Box::new(Pattern::Bind)
+                } else {
+                    Box::new(Pattern::Wildcard)
+                }
+            });
+
+            for it in suffix {
+                let (p, b) = lower_ast_pattern(it)?;
+                out_suffix.push(p);
+                binds.extend(b);
+            }
+
             Ok((
-                Pattern::ArrayPrefix {
-                    items: out_items,
-                    has_rest: *has_rest,
+                Pattern::Array {
+                    prefix: out_prefix,
+                    rest: out_rest,
+                    suffix: out_suffix,
                 },
                 binds,
             ))
@@ -2382,7 +2519,15 @@ fn lower_type_annotation(env: &ProgramEnv, ty: &TypeExpr) -> Type {
             crate::ast::PrimType::Bytes => Type::Bytes,
         },
         TypeExpr::Array { .. } => Type::Array,
+        TypeExpr::Tuple { items, .. } => {
+            if items.is_empty() {
+                Type::Unit
+            } else {
+                Type::Tuple(items.len())
+            }
+        }
         TypeExpr::Fn { .. } => Type::Fn,
+        TypeExpr::Cont { .. } => Type::Cont,
         TypeExpr::Path(path) => {
             let name = path_type_name(path);
             if env.enums.contains_key(&name) {

@@ -1,0 +1,6 @@
+// expect: ok string ok
+
+fn id<T>(x: T) -> T { x }
+
+fn main() -> string { id("ok") }
+

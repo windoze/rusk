@@ -51,7 +51,7 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`fn`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
+`fn`, `cont`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
 
 Control flow:
 
@@ -98,7 +98,7 @@ Item           := FnItem | StructItem | EnumItem | InterfaceItem | ImplItem ;
 ```
 FnItem         := "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? Block ;
 ParamList      := Param ("," Param)* (",")? ;
-Param          := ParamMut? Ident ":" Type ;
+Param          := ParamMut? Pattern ":" Type ;
 ParamMut       := "readonly" ;
 ReturnType     := "->" Type ;
 ```
@@ -106,6 +106,7 @@ ReturnType     := "->" Type ;
 Notes:
 - Parameters are immutable bindings; mutability in Rusk refers to *object mutability* (heap objects), not rebinding.
 - `readonly` on a parameter means the parameter is a readonly view (attempting to mutate through it traps).
+- Parameters may use destructuring patterns; if a parameter pattern does not match at runtime, the function traps.
 
 #### 3.2.2 Structs
 
@@ -184,6 +185,10 @@ Type           := ("readonly")? TypeAtom ;
 TypeAtom       := PrimType
                | "[" Type "]"                      // dynamic array type
                | "fn" "(" TypeList? ")" "->" Type  // function type
+               | "cont" "(" Type ")" "->" Type     // continuation token type
+               | "(" ")"                           // empty tuple type (aka unit)
+               | "(" Type ")"                      // parenthesized type
+               | "(" Type "," TypeList? ")"        // tuple type (comma required)
                | PathType ;
 
 PrimType       := "unit" | "bool" | "int" | "float" | "string" | "bytes" ;
@@ -194,7 +199,8 @@ PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
 Notes:
 - `PathType` is used for nominal types (structs/enums/interfaces) and associated names.
 - For this implementation, generic type arguments are **erased at runtime** (they do not affect runtime representation).
-- `readonly T` is a *view type* for reference-like values (arrays/structs/enums). Writing through a `readonly` view is a compile-time error and also traps at runtime.
+- `readonly T` is a *view type* for reference-like values (arrays/structs/enums/tuples). Writing through a `readonly` view is a compile-time error and also traps at runtime.
+- Tuples use Rust-like comma disambiguation: `(T)` is a parenthesized type, `(T,)` is a 1-tuple type, and `()` is `unit`.
 
 ### 3.5 Statements and Blocks
 
@@ -221,7 +227,7 @@ ExprStmt       := Expr ";" ;
 ```
 
 Notes:
-- `let x;` declares an uninitialized local (reading it before assignment is a runtime error).
+- `let x: T;` declares an uninitialized local (reading it before assignment is a runtime error). In this implementation, an uninitialized `let` binding must have an explicit type annotation.
 - `let x = e;` initializes `x`.
 - `const x = e;` prevents rebinding of `x` (but does not deep-freeze referenced objects).
 - `readonly x = e;` is equivalent to `const x = e;` plus a readonly view: it prevents rebinding and forbids mutation through `x`.
@@ -259,12 +265,13 @@ Postfix        := Call | Field | Index ;
 
 Call           := "(" ArgList? ")" ;
 ArgList        := Expr ("," Expr)* (",")? ;
-Field          := "." Ident ;
+Field          := "." (Ident | IntLit) ;
 Index          := "[" Expr "]" ;
 
 PrimaryExpr    := Literal
                | PathExpr
                | ArrayLit
+               | TupleLit
                | StructLit
                | EnumLit
                | EffectCall
@@ -280,6 +287,8 @@ PrimaryExpr    := Literal
 PathExpr       := Ident ("::" Ident)* ;
 
 EffectCall     := "@" PathExpr "." Ident "(" ArgList? ")" ;
+
+TupleLit       := "(" Expr "," ArgList? ")" ;
 ```
 
 #### 3.6.1 Literals
@@ -328,16 +337,22 @@ Formatted strings:
 - `{{` and `}}` encode literal `{` and `}` respectively.
 - Desugaring is defined in §9.3.
 
-#### 3.6.2 Array, Struct, Enum literals
+#### 3.6.2 Array, Tuple, Struct, Enum literals
 
 ```
 ArrayLit       := "[" (Expr ("," Expr)*)? (",")? "]" ;
+
+TupleLit       := "(" Expr "," ArgList? ")" ;
 
 StructLit      := Ident "{" (StructFieldInit ("," StructFieldInit)*)? (",")? "}" ;
 StructFieldInit:= Ident ":" Expr ;
 
 EnumLit        := Ident "::" Ident "(" (Expr ("," Expr)*)? (",")? ")" ;
 ```
+
+Notes:
+- Tuple literals use Rust-like comma disambiguation: `(x)` is a parenthesized expression, `(x,)` is a 1-tuple, and `()` is `unit`.
+- Struct literals are parsed only when `Ident` looks like a nominal type name (it must start with an ASCII uppercase letter, e.g. `Point { x: 1 }`).
 
 #### 3.6.3 Lambdas
 
@@ -358,7 +373,7 @@ IfExpr         := "if" Expr Block ("else" (IfExpr | Block))? ;
 
 Parsing note (struct literals vs blocks):
 
-Because `{ ... }` is used for both blocks and struct literals (`Type { field: expr, ... }`),
+Because `{ ... }` is used for both blocks and struct literals (`Point { x: 1, y: 2 }`),
 in positions where a block follows immediately (`if` / `while` conditions, `for` iterables,
 `match` scrutinees), a struct literal must be parenthesized to disambiguate:
 
@@ -399,30 +414,72 @@ ForExpr        := "for" Ident "in" Expr Block ;
 and desugars (in the type system and compiler) to a `while` loop over an iterator
 protocol in the standard library (see §9.4).
 
+#### 3.6.7 Trailing closures (syntax sugar)
+
+Rusk supports trailing-closure call syntax for *zero-argument* lambdas.
+
+This syntax is **purely syntactic sugar** and does not introduce any new semantics.
+
+Desugaring:
+
+- `f(a, b) { body }` is equivalent to `f(a, b, || { body })`.
+- `f { body }` is equivalent to `f(|| { body })`.
+
+Named-bind form:
+
+- `f(x=ex, y=ey) { body }` is equivalent to:
+  ```rust
+  { let x = ex; let y = ey; f(x, y, || { body }) }
+  ```
+
+Rules:
+- The named-bind form requires **every** argument to be of the form `name = expr` (mixing positional and named arguments is a parse error).
+- Named-bind names must be unique within the call.
+
 ### 3.7 Patterns
 
-Patterns are used in `match` value arms and in effect arms’ parameter patterns.
+Patterns are used in:
+- `match` value arms
+- effect arms’ parameter patterns
+- function parameters (§3.2.1)
 
 ```
 Pattern        := "_"                       // wildcard
                | Ident                     // binding
                | LiteralPat
+               | TuplePat
                | EnumPat
                | StructPat
-               | ArrayPrefixPat ;
+               | ArrayPat ;
 
 LiteralPat     := "()" | BoolLit | IntLit | FloatLit | StringLit | BytesLit ;
 
-EnumPat        := Ident "::" Ident "(" (Pattern ("," Pattern)*)? (",")? ")" ;
-StructPat      := Ident "{" (StructPatField ("," StructPatField)*)? (",")? "}" ;
-StructPatField := Ident ":" Pattern ;
+TuplePat       := "(" TuplePatItemList? ")" ;
+TuplePatItemList
+              := TuplePatItem ("," TuplePatItem)* (",")? ;
+TuplePatItem   := Pattern | RestPat ;
 
-ArrayPrefixPat := "[" (Pattern ("," Pattern)*)? (",")? (".." )? "]" ;
+EnumPat        := Ident "::" Ident "(" (Pattern ("," Pattern)*)? (",")? ")" ;
+StructPat      := Ident "{" (StructPatItem ("," StructPatItem)*)? (",")? "}" ;
+StructPatItem  := StructPatField | ".." ;
+StructPatField := Ident (":" Pattern)? ;
+
+ArrayPat       := "[" (ArrayPatItem ("," ArrayPatItem)*)? (",")? "]" ;
+ArrayPatItem   := Pattern | RestPat ;
+
+RestPat        := ".." Ident? ;
 ```
 
 Notes:
 - `Ident` in a pattern always binds (there are no “constant patterns” for names).
-- Array prefix patterns match `[p1, p2, ..]` (prefix) and `[p1, p2]` (exact length).
+- Parentheses are Rust-like: `(p)` is a parenthesized pattern; a tuple pattern requires a comma and/or a `..` rest marker (e.g. `(p,)`, `(a, b)`, `(..rest)`).
+- Tuple and array patterns may contain `..` at most once; it matches “the rest”:
+  - `(a, ..b, c)` binds `b` to the middle slice as a tuple (or `()` if empty).
+  - `[a, ..b, c]` binds `b` to the middle slice as an array.
+- Struct patterns support `..` only as an ignore marker (it cannot bind): `{x, ..}` is allowed but `{x, ..rest}` is rejected.
+  - Without `..`, all fields must be listed exactly once (Rust-like).
+  - With `..`, unspecified fields are ignored.
+- Struct field shorthand is supported: `{x}` means `{x: x}`.
 
 ---
 
@@ -433,13 +490,13 @@ Notes:
 Runtime values are:
 
 - `unit`, `bool`, `int`, `float`, `string`, `bytes`
-- heap references: structs, enums, arrays (shared references)
+- heap references: structs, enums, arrays, tuples (shared references)
 - function values (first-class, referring to a named function)
 - continuation tokens (captured by effects)
 
 ### 4.2 Heap Objects and Sharing
 
-Structs/enums/arrays are heap-allocated and passed by reference. Copying a reference
+Structs/enums/arrays/tuples are heap-allocated and passed by reference. Copying a reference
 creates an alias; mutations are observable through all aliases.
 
 ### 4.3 Readonly Views
@@ -464,6 +521,7 @@ Evaluation is left-to-right:
 - function call arguments
 - struct field initializers
 - array elements
+- tuple elements
 - binary operator operands
 - match scrutinee evaluation
 
@@ -477,12 +535,14 @@ The left-hand side of `=` must be one of:
 
 - a local name: `x = expr` (only if `x` was declared with `let`, not `const`/`readonly`)
 - a struct field: `obj.field = expr`
+- a tuple field: `t.0 = expr`, `t.1 = expr`, ...
 - an array slot: `arr[index] = expr`
 
 Evaluation order is left-to-right:
 
 - `x = expr`: evaluate `expr`, then assign.
 - `obj.field = expr`: evaluate `obj`, then evaluate `expr`, then mutate the field.
+- `t.<n> = expr`: evaluate `t`, then evaluate `expr`, then mutate the tuple slot.
 - `arr[index] = expr`: evaluate `arr`, then `index`, then `expr`, then mutate the slot.
 
 If the target is a readonly view (`readonly T`), the mutation is rejected by the type
@@ -699,12 +759,13 @@ Nominal types:
 
 - primitives: `unit`, `bool`, `int`, `float`, `string`, `bytes`
 - arrays: `[T]`
+- tuples: `(T1, T2, ...)` (where `()` is `unit`)
 - structs: `Name<...>`
 - enums: `Name<...>`
 - functions: `fn(T1, T2, ...) -> R`
-- continuations: `cont(T) -> R` (introduced by effect handlers; not currently expressible as a type annotation in v0.4)
+- continuations: `cont(T) -> R` (values are introduced by effect handlers, but the type is usable in annotations)
 - interfaces: `Interface<...>`
-- readonly views: `readonly T` (only meaningful when `T` is an array/struct/enum; it forbids mutation through that reference)
+- readonly views: `readonly T` (only meaningful when `T` is a reference-like type; it forbids mutation through that reference)
 
 ### 8.4 Generics and Kinds
 

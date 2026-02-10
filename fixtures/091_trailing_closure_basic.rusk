@@ -1,0 +1,8 @@
+// expect: ok int 42
+
+fn apply0(f: fn() -> int) -> int { f() }
+
+fn main() -> int {
+    apply0 { 41 + 1 }
+}
+

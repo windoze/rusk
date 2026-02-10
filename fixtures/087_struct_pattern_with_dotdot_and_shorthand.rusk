@@ -1,0 +1,12 @@
+// expect: ok int 9
+
+struct Book { title: int, pages: int }
+
+fn main() -> int {
+    let b = Book { title: 9, pages: 100 };
+    match b {
+        Book { title, .. } => title
+        _ => 0
+    }
+}
+

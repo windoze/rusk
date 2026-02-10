@@ -1,0 +1,8 @@
+// expect: ok int 99
+
+fn main() -> int {
+    let xs = [10, 20, 30];
+    xs[1] = 99;
+    xs[1]
+}
+

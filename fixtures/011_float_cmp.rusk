@@ -1,0 +1,6 @@
+// expect: ok bool true
+
+fn main() -> bool {
+    1.5 < 2.0 && 2.0 >= 2.0
+}
+

@@ -1,0 +1,11 @@
+// expect: ok int 6
+
+fn main() -> int {
+    let total = 0;
+    readonly xs = [1, 2, 3];
+    for x in xs {
+        total = total + x;
+    };
+    total
+}
+

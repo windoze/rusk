@@ -111,6 +111,7 @@ MIR values are dynamically typed at runtime. v0.2 requires support for:
   - `struct` instances
   - `enum` instances
   - `array` instances
+  - `tuple` instances
 - `fn` references (for `icall`)
 - continuation tokens (for `resume`)
 
@@ -154,8 +155,9 @@ MIR provides `as_readonly` to create a readonly view.
 MIR may carry types for optimization/debugging:
 
 - primitives: `int`, `float`, `bool`, `string`, `bytes`, `unit`
-- composite: `struct`, `enum`, `array`
+- composite: `struct`, `enum`, `array`, `tuple`
 - callable: `fn`
+- continuations: `cont`
 - effects: `interface`
 
 Type checking is optional; a conforming interpreter executes dynamically.
@@ -174,6 +176,7 @@ An operand is either:
 
 Literals may be nested:
 - array literal: `[<lit>, ...]`
+- tuple literal: `(<lit>, <lit>, ...)` (comma required; empty tuple is `unit`)
 - struct literal: `Type { field: <lit>, ... }`
 - enum literal: `Enum::Variant(<lit>, ...)`
 
@@ -187,9 +190,18 @@ Supported forms:
 - `_` (wildcard)
 - `bind` (a binding site; textual form uses a local, e.g. `%msg`)
 - literals: `unit`, `true`, `123`, `"s"`, `b\"...\"`
+- tuple destructuring: `(p1, p2, .., pk)` / `(p1, p2)` / `(..rest)`
 - enum destructuring: `Enum::Variant(<pat>, ...)`
 - struct destructuring: `Type { field: <pat>, ... }`
-- array prefix: `[<pat>, <pat>, ..]`
+- array destructuring: `[p1, p2, .., pk]` / `[p1, p2]` / `[..rest]`
+
+Tuple/array destructuring uses a single optional “rest” marker:
+- If there is no rest marker, arity/length must match exactly.
+- If there is a rest marker, the value must have length at least `prefix + suffix`.
+- If the rest marker is a wildcard, the middle slice is ignored.
+- If the rest marker is a bind, the middle slice is captured as a fresh value:
+  - tuple rest capture allocates a new tuple containing the slice (or yields `unit` if the slice is empty)
+  - array rest capture allocates a new array containing the slice (possibly empty)
 
 Pattern matching is structural on composite values. For struct patterns:
 - missing field traps **at match time** (treated as non-match is allowed by
@@ -253,6 +265,12 @@ Some instructions are statement-like and produce no value.
   - Semantics: allocate an array instance and write a reference into `%dst`.
   - Operand evaluation order: elements are evaluated **left-to-right**.
 
+- `make_tuple`:
+  - Syntax: `%dst = make_tuple ( <op>, <op>, ... )`
+  - Semantics: allocate a tuple instance and write a reference into `%dst`.
+  - Special case: a tuple with zero elements is `unit` and does not allocate.
+  - Operand evaluation order: elements are evaluated **left-to-right**.
+
 - `make_enum`:
   - Syntax: `%dst = make_enum <Enum>::<Variant>(<op>, <op>, ...)`
   - Semantics: allocate an enum instance and write a reference into `%dst`.
@@ -260,11 +278,17 @@ Some instructions are statement-like and produce no value.
 
 - `get_field`:
   - Syntax: `%dst = get_field <op_obj> <field>`
-  - Trap: non-struct, missing field.
+  - Semantics:
+    - for structs: read the named field
+    - for tuples: `field` must be of the form `".<n>"` and reads element `n` (0-based)
+  - Trap: non-struct/non-tuple, missing field / out-of-bounds.
 
 - `set_field`:
   - Syntax: `set_field <op_obj> <field> <op_val>`
-  - Trap: readonly reference, non-struct, missing field.
+  - Semantics:
+    - for structs: write the named field
+    - for tuples: `field` must be of the form `".<n>"` and writes element `n` (0-based)
+  - Trap: readonly reference, non-struct/non-tuple, missing field / out-of-bounds.
 
 - `index_get`:
   - Syntax: `%dst = index_get <op_arr> <op_idx>`

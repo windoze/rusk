@@ -1,0 +1,6 @@
+// expect: ok int 3
+
+fn sum_pair((a, b): (int, int)) -> int { a + b }
+
+fn main() -> int { sum_pair((1, 2)) }
+

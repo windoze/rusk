@@ -139,6 +139,7 @@ pub enum HeapValue {
         fields: BTreeMap<String, Value>,
     },
     Array(Vec<Value>),
+    Tuple(Vec<Value>),
     Enum {
         enum_name: String,
         variant: String,
@@ -637,6 +638,14 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let handle = self.alloc_heap(HeapValue::Array(values));
                 Value::Ref(RefValue::new(handle))
             }
+            ConstValue::Tuple(items) => {
+                if items.is_empty() {
+                    return Value::Unit;
+                }
+                let values = items.iter().map(|x| self.eval_const(x)).collect();
+                let handle = self.alloc_heap(HeapValue::Tuple(values));
+                Value::Ref(RefValue::new(handle))
+            }
             ConstValue::Struct { type_name, fields } => {
                 let mut values = BTreeMap::new();
                 for (k, v) in fields {
@@ -714,6 +723,18 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let handle = self.alloc_heap(HeapValue::Array(values));
                 self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
             }
+            Instruction::MakeTuple { dst, items } => {
+                if items.is_empty() {
+                    self.stack[frame_index].write_local(dst, Value::Unit)?;
+                    return Ok(());
+                }
+                let mut values = Vec::with_capacity(items.len());
+                for op in items {
+                    values.push(self.eval_operand(frame_index, &op)?);
+                }
+                let handle = self.alloc_heap(HeapValue::Tuple(values));
+                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+            }
             Instruction::MakeEnum {
                 dst,
                 enum_name,
@@ -736,7 +757,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let Value::Ref(r) = v else {
                     return Err(RuntimeError::TypeError {
                         op: "get_field",
-                        expected: "ref(struct)",
+                        expected: "ref(struct/tuple)",
                         got: v.kind(),
                     });
                 };
@@ -745,10 +766,22 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         .get(&field)
                         .cloned()
                         .ok_or(RuntimeError::MissingField { field })?,
+                    HeapValue::Tuple(items) => {
+                        let Some(idx) = field
+                            .strip_prefix('.')
+                            .and_then(|s| s.parse::<usize>().ok())
+                        else {
+                            return Err(RuntimeError::MissingField { field });
+                        };
+                        items
+                            .get(idx)
+                            .cloned()
+                            .ok_or(RuntimeError::MissingField { field })?
+                    }
                     _ => {
                         return Err(RuntimeError::TypeError {
                             op: "get_field",
-                            expected: "struct",
+                            expected: "struct/tuple",
                             got: ValueKind::Ref,
                         });
                     }
@@ -760,7 +793,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let Value::Ref(r) = obj_v else {
                     return Err(RuntimeError::TypeError {
                         op: "set_field",
-                        expected: "ref(struct)",
+                        expected: "ref(struct/tuple)",
                         got: obj_v.kind(),
                     });
                 };
@@ -768,17 +801,33 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     return Err(RuntimeError::ReadonlyWrite);
                 }
                 let val = self.eval_operand(frame_index, &value)?;
-                let HeapValue::Struct { fields, .. } = self.heap_get_mut(r.handle)? else {
-                    return Err(RuntimeError::TypeError {
-                        op: "set_field",
-                        expected: "struct",
-                        got: ValueKind::Ref,
-                    });
-                };
-                if !fields.contains_key(&field) {
-                    return Err(RuntimeError::MissingField { field });
+                match self.heap_get_mut(r.handle)? {
+                    HeapValue::Struct { fields, .. } => {
+                        if !fields.contains_key(&field) {
+                            return Err(RuntimeError::MissingField { field });
+                        }
+                        fields.insert(field, val);
+                    }
+                    HeapValue::Tuple(items) => {
+                        let Some(idx) = field
+                            .strip_prefix('.')
+                            .and_then(|s| s.parse::<usize>().ok())
+                        else {
+                            return Err(RuntimeError::MissingField { field });
+                        };
+                        let Some(slot) = items.get_mut(idx) else {
+                            return Err(RuntimeError::MissingField { field });
+                        };
+                        *slot = val;
+                    }
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "set_field",
+                            expected: "struct/tuple",
+                            got: ValueKind::Ref,
+                        });
+                    }
                 }
-                fields.insert(field, val);
             }
 
             Instruction::IndexGet { dst, arr, idx } => {
@@ -1128,7 +1177,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     }
 
     fn find_handler_for_effect(
-        &self,
+        &mut self,
         effect: &EffectId,
         args: &[Value],
     ) -> Result<Option<(usize, usize, Vec<Value>)>, RuntimeError> {
@@ -1143,7 +1192,13 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let mut binds = Vec::new();
                 let mut ok = true;
                 for (pat, arg) in clause.arg_patterns.iter().zip(args.iter()) {
-                    if !match_pattern(&self.heap, pat, arg, &mut binds)? {
+                    if !match_pattern(
+                        &mut self.heap,
+                        &mut self.allocations_since_gc,
+                        pat,
+                        arg,
+                        &mut binds,
+                    )? {
                         ok = false;
                         break;
                     }
@@ -1226,7 +1281,13 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let scrutinee = self.eval_operand(frame_index, &value)?;
                 for SwitchCase { pattern, target } in cases {
                     let mut binds = Vec::new();
-                    if match_pattern(&self.heap, &pattern, &scrutinee, &mut binds)? {
+                    if match_pattern(
+                        &mut self.heap,
+                        &mut self.allocations_since_gc,
+                        &pattern,
+                        &scrutinee,
+                        &mut binds,
+                    )? {
                         self.enter_block(frame_index, target, binds)?;
                         return Ok(None);
                     }
@@ -1392,6 +1453,11 @@ impl Trace for HeapValue {
                     value.trace(tracer);
                 }
             }
+            HeapValue::Tuple(items) => {
+                for value in items {
+                    value.trace(tracer);
+                }
+            }
             HeapValue::Enum { fields, .. } => {
                 for value in fields {
                     value.trace(tracer);
@@ -1428,16 +1494,34 @@ fn count_binds_in_pattern(p: &Pattern) -> usize {
         Pattern::Wildcard => 0,
         Pattern::Bind => 1,
         Pattern::Literal(_) => 0,
+        Pattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            prefix.iter().map(count_binds_in_pattern).sum::<usize>()
+                + rest.as_deref().map(count_binds_in_pattern).unwrap_or(0)
+                + suffix.iter().map(count_binds_in_pattern).sum::<usize>()
+        }
         Pattern::Enum { fields, .. } => fields.iter().map(count_binds_in_pattern).sum(),
         Pattern::Struct { fields, .. } => {
             fields.iter().map(|(_, p)| count_binds_in_pattern(p)).sum()
         }
-        Pattern::ArrayPrefix { items, .. } => items.iter().map(count_binds_in_pattern).sum(),
+        Pattern::Array {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            prefix.iter().map(count_binds_in_pattern).sum::<usize>()
+                + rest.as_deref().map(count_binds_in_pattern).unwrap_or(0)
+                + suffix.iter().map(count_binds_in_pattern).sum::<usize>()
+        }
     }
 }
 
 fn match_pattern<GC: GcHeap>(
-    heap: &GC,
+    heap: &mut GC,
+    allocations_since_gc: &mut usize,
     pat: &Pattern,
     value: &Value,
     binds: &mut Vec<Value>,
@@ -1466,21 +1550,103 @@ fn match_pattern<GC: GcHeap>(
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let HeapValue::Enum {
-                enum_name: e,
-                variant: v,
-                fields: actual_fields,
-            } = heap
+            let (e, v, actual_fields) = match heap
                 .get(r.handle)
                 .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
-            else {
-                return Ok(false);
+            {
+                HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    fields,
+                } => (enum_name.clone(), variant.clone(), fields.clone()),
+                _ => return Ok(false),
             };
-            if e != enum_name || v != variant || actual_fields.len() != fields.len() {
+            if e != *enum_name || v != *variant || actual_fields.len() != fields.len() {
                 return Ok(false);
             }
             for (p, actual) in fields.iter().zip(actual_fields.iter()) {
-                if !match_pattern(heap, p, actual, binds)? {
+                let actual = if r.readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let actual_items = match heap
+                .get(r.handle)
+                .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
+            {
+                HeapValue::Tuple(items) => items.clone(),
+                _ => return Ok(false),
+            };
+            let min_len = prefix.len() + suffix.len();
+            if rest.is_some() {
+                if actual_items.len() < min_len {
+                    return Ok(false);
+                }
+            } else if actual_items.len() != min_len {
+                return Ok(false);
+            }
+
+            let readonly = r.readonly;
+
+            for (p, actual) in prefix.iter().zip(actual_items.iter()) {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+
+            if let Some(rest_pat) = rest {
+                let start = prefix.len();
+                let end = actual_items.len().saturating_sub(suffix.len());
+                let slice: Vec<Value> = actual_items[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|v| if readonly { v.into_readonly_view() } else { v })
+                    .collect();
+                match rest_pat.as_ref() {
+                    Pattern::Wildcard => {}
+                    Pattern::Bind => {
+                        let rest_value = if slice.is_empty() {
+                            Value::Unit
+                        } else {
+                            *allocations_since_gc = allocations_since_gc.saturating_add(1);
+                            let handle = heap.alloc(HeapValue::Tuple(slice));
+                            Value::Ref(RefValue::new(handle))
+                        };
+                        binds.push(rest_value);
+                    }
+                    _ => return Ok(false),
+                }
+            }
+
+            for (p, actual) in suffix
+                .iter()
+                .zip(actual_items.iter().rev().take(suffix.len()).rev())
+            {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
                     return Ok(false);
                 }
             }
@@ -1490,16 +1656,14 @@ fn match_pattern<GC: GcHeap>(
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let HeapValue::Struct {
-                type_name: actual_ty,
-                fields: actual_fields,
-            } = heap
+            let (actual_ty, actual_fields) = match heap
                 .get(r.handle)
                 .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
-            else {
-                return Ok(false);
+            {
+                HeapValue::Struct { type_name, fields } => (type_name.clone(), fields.clone()),
+                _ => return Ok(false),
             };
-            if actual_ty != type_name {
+            if actual_ty != *type_name {
                 return Ok(false);
             }
             for (field_name, field_pat) in fields.iter() {
@@ -1508,30 +1672,83 @@ fn match_pattern<GC: GcHeap>(
                         field: field_name.clone(),
                     });
                 };
-                if !match_pattern(heap, field_pat, field_value, binds)? {
+                let field_value = if r.readonly {
+                    field_value.clone().into_readonly_view()
+                } else {
+                    field_value.clone()
+                };
+                if !match_pattern(heap, allocations_since_gc, field_pat, &field_value, binds)? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        Pattern::ArrayPrefix { items, has_rest } => {
+        Pattern::Array {
+            prefix,
+            rest,
+            suffix,
+        } => {
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let HeapValue::Array(actual_items) = heap
+            let actual_items = match heap
                 .get(r.handle)
                 .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
-            else {
-                return Ok(false);
+            {
+                HeapValue::Array(items) => items.clone(),
+                _ => return Ok(false),
             };
-            if actual_items.len() < items.len() {
+            let min_len = prefix.len() + suffix.len();
+            if rest.is_some() {
+                if actual_items.len() < min_len {
+                    return Ok(false);
+                }
+            } else if actual_items.len() != min_len {
                 return Ok(false);
             }
-            if !*has_rest && actual_items.len() != items.len() {
-                return Ok(false);
+
+            let readonly = r.readonly;
+
+            for (p, actual) in prefix.iter().zip(actual_items.iter()) {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                    return Ok(false);
+                }
             }
-            for (p, actual) in items.iter().zip(actual_items.iter()) {
-                if !match_pattern(heap, p, actual, binds)? {
+
+            if let Some(rest_pat) = rest {
+                let start = prefix.len();
+                let end = actual_items.len().saturating_sub(suffix.len());
+                let slice: Vec<Value> = actual_items[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|v| if readonly { v.into_readonly_view() } else { v })
+                    .collect();
+                match rest_pat.as_ref() {
+                    Pattern::Wildcard => {}
+                    Pattern::Bind => {
+                        *allocations_since_gc = allocations_since_gc.saturating_add(1);
+                        let handle = heap.alloc(HeapValue::Array(slice));
+                        binds.push(Value::Ref(RefValue::new(handle)));
+                    }
+                    _ => return Ok(false),
+                }
+            }
+
+            for (p, actual) in suffix
+                .iter()
+                .zip(actual_items.iter().rev().take(suffix.len()).rev())
+            {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
                     return Ok(false);
                 }
             }

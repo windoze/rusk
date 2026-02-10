@@ -1,7 +1,7 @@
 use crate::ast::{
-    BinaryOp, BindingKind, Block, EnumItem, Expr, FnItem, GenericParam, Ident, ImplHeader,
-    ImplItem, InterfaceItem, Item, MatchArm, MatchPat, PatLiteral, Pattern, PrimType, Program,
-    StructItem, TypeExpr, UnaryOp,
+    BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, GenericParam, Ident,
+    ImplHeader, ImplItem, InterfaceItem, Item, MatchArm, MatchPat, PatLiteral, Pattern, PrimType,
+    Program, StructItem, TypeExpr, UnaryOp,
 };
 use crate::source::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -34,6 +34,7 @@ pub(crate) enum Ty {
     String,
     Bytes,
     Array(Box<Ty>),
+    Tuple(Vec<Ty>),
     Fn {
         params: Vec<Ty>,
         ret: Box<Ty>,
@@ -66,14 +67,17 @@ pub(crate) type ConVarId = u32;
 
 impl Ty {
     pub(crate) fn is_ref_like(&self) -> bool {
-        matches!(self, Ty::Array(_) | Ty::App(..))
+        matches!(
+            self,
+            Ty::Array(_) | Ty::Tuple(_) | Ty::App(..) | Ty::Gen(_) | Ty::Var(_) | Ty::Readonly(_)
+        )
     }
 
     pub(crate) fn as_readonly_view(&self) -> Ty {
-        if self.is_ref_like() {
-            Ty::Readonly(Box::new(self.clone()))
-        } else {
-            self.clone()
+        match self {
+            Ty::Readonly(_) => self.clone(),
+            _ if self.is_ref_like() => Ty::Readonly(Box::new(self.clone())),
+            _ => self.clone(),
         }
     }
 }
@@ -88,6 +92,19 @@ impl fmt::Display for Ty {
             Ty::String => write!(f, "string"),
             Ty::Bytes => write!(f, "bytes"),
             Ty::Array(elem) => write!(f, "[{elem}]"),
+            Ty::Tuple(items) => {
+                write!(f, "(")?;
+                for (idx, item) in items.iter().enumerate() {
+                    if idx != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                if items.len() == 1 {
+                    write!(f, ",")?;
+                }
+                write!(f, ")")
+            }
             Ty::Fn { params, ret } => {
                 write!(f, "fn(")?;
                 for (idx, p) in params.iter().enumerate() {
@@ -920,6 +937,17 @@ fn lower_type_expr(env: &ProgramEnv, scope: &GenericScope, ty: &TypeExpr) -> Res
             PrimType::Bytes => Ty::Bytes,
         }),
         TypeExpr::Array { elem, .. } => Ok(Ty::Array(Box::new(lower_type_expr(env, scope, elem)?))),
+        TypeExpr::Tuple { items, .. } => {
+            let items = items
+                .iter()
+                .map(|t| lower_type_expr(env, scope, t))
+                .collect::<Result<Vec<_>, _>>()?;
+            if items.is_empty() {
+                Ok(Ty::Unit)
+            } else {
+                Ok(Ty::Tuple(items))
+            }
+        }
         TypeExpr::Fn { params, ret, .. } => {
             let params = params
                 .iter()
@@ -931,6 +959,10 @@ fn lower_type_expr(env: &ProgramEnv, scope: &GenericScope, ty: &TypeExpr) -> Res
                 ret: Box::new(ret),
             })
         }
+        TypeExpr::Cont { param, ret, .. } => Ok(Ty::Cont {
+            param: Box::new(lower_type_expr(env, scope, param)?),
+            ret: Box::new(lower_type_expr(env, scope, ret)?),
+        }),
         TypeExpr::Path(path) => lower_path_type(env, scope, path),
     }
 }
@@ -1077,6 +1109,7 @@ impl InferCtx {
                 }
             }
             Ty::Array(elem) => Ty::Array(Box::new(self.resolve_ty(*elem))),
+            Ty::Tuple(items) => Ty::Tuple(items.into_iter().map(|t| self.resolve_ty(t)).collect()),
             Ty::Fn { params, ret } => Ty::Fn {
                 params: params.into_iter().map(|p| self.resolve_ty(p)).collect(),
                 ret: Box::new(self.resolve_ty(*ret)),
@@ -1085,7 +1118,14 @@ impl InferCtx {
                 param: Box::new(self.resolve_ty(*param)),
                 ret: Box::new(self.resolve_ty(*ret)),
             },
-            Ty::Readonly(inner) => Ty::Readonly(Box::new(self.resolve_ty(*inner))),
+            Ty::Readonly(inner) => {
+                let inner = self.resolve_ty(*inner);
+                if inner.is_ref_like() {
+                    inner.as_readonly_view()
+                } else {
+                    inner
+                }
+            }
             Ty::App(con, args) => Ty::App(
                 self.resolve_con(con),
                 args.into_iter().map(|a| self.resolve_ty(a)).collect(),
@@ -1113,6 +1153,7 @@ impl InferCtx {
         match self.resolve_ty(ty.clone()) {
             Ty::Var(id) => id == var,
             Ty::Array(elem) | Ty::Readonly(elem) => self.occurs_in(var, elem.as_ref()),
+            Ty::Tuple(items) => items.iter().any(|item| self.occurs_in(var, item)),
             Ty::Fn { params, ret } => {
                 params.iter().any(|p| self.occurs_in(var, p)) || self.occurs_in(var, ret.as_ref())
             }
@@ -1149,6 +1190,23 @@ impl InferCtx {
             (Ty::Array(ae), Ty::Array(be)) => {
                 let elem = self.unify(*ae, *be, span)?;
                 Ok(Ty::Array(Box::new(elem)))
+            }
+            (Ty::Tuple(a_items), Ty::Tuple(b_items)) => {
+                if a_items.len() != b_items.len() {
+                    return Err(TypeError {
+                        message: format!(
+                            "tuple arity mismatch: expected {}, got {}",
+                            a_items.len(),
+                            b_items.len()
+                        ),
+                        span,
+                    });
+                }
+                let mut items = Vec::with_capacity(a_items.len());
+                for (a, b) in a_items.into_iter().zip(b_items.into_iter()) {
+                    items.push(self.unify(a, b, span)?);
+                }
+                Ok(Ty::Tuple(items))
             }
             (
                 Ty::Fn {
@@ -1390,14 +1448,17 @@ fn typecheck_function_body(
 
     // Parameters are immutable bindings.
     for (param, ty) in func.params.iter().zip(sig.params.iter()) {
-        tc.bind_local(
-            &param.name,
-            LocalInfo {
-                ty: ty.clone(),
-                kind: BindingKind::Const,
-                span: param.span,
-            },
-        )?;
+        let binds = tc.typecheck_pattern(&param.pat, ty.clone())?;
+        for (name, bind_ty) in binds {
+            tc.bind_local(
+                &name,
+                LocalInfo {
+                    ty: bind_ty,
+                    kind: BindingKind::Const,
+                    span: name.span,
+                },
+            )?;
+        }
     }
 
     let body_ty = tc.typecheck_block(&func.body, ExprUse::Value)?;
@@ -1647,6 +1708,17 @@ impl<'a> FnTypechecker<'a> {
                     let _ = self.infer.unify(elem_ty.clone(), t, item.span())?;
                 }
                 Ty::Array(Box::new(self.infer.resolve_ty(elem_ty)))
+            }
+            Expr::Tuple { items, span: _ } => {
+                let mut tys = Vec::with_capacity(items.len());
+                for item in items {
+                    tys.push(self.typecheck_expr(item, ExprUse::Value)?);
+                }
+                if tys.is_empty() {
+                    Ty::Unit
+                } else {
+                    Ty::Tuple(tys.into_iter().map(|t| self.infer.resolve_ty(t)).collect())
+                }
             }
             Expr::StructLit {
                 type_name,
@@ -2197,11 +2269,107 @@ impl<'a> FnTypechecker<'a> {
                 let _ = self.infer.unify(expected, lit_ty, *span)?;
                 Ok(Vec::new())
             }
-            Pattern::ArrayPrefix {
-                items,
-                has_rest: _,
+            Pattern::Tuple {
+                prefix,
+                rest,
+                suffix,
                 span,
-                ..
+            } => {
+                let (is_ro, inner) = match expected {
+                    Ty::Readonly(inner) => (true, *inner),
+                    other => (false, other),
+                };
+
+                let inner_resolved = self.infer.resolve_ty(inner.clone());
+                let items = match inner_resolved {
+                    Ty::Tuple(items) => items,
+                    Ty::Var(_) if rest.is_none() => {
+                        let total = prefix.len() + suffix.len();
+                        let mut items = Vec::with_capacity(total);
+                        for _ in 0..total {
+                            items.push(self.infer.fresh_type_var());
+                        }
+                        let _ = self.infer.unify(inner, Ty::Tuple(items.clone()), *span)?;
+                        items
+                    }
+                    other => {
+                        return Err(TypeError {
+                            message: format!("tuple pattern requires a tuple, got `{other}`"),
+                            span: *span,
+                        });
+                    }
+                };
+
+                let prefix_len = prefix.len();
+                let suffix_len = suffix.len();
+                if rest.is_some() {
+                    if items.len() < prefix_len + suffix_len {
+                        return Err(TypeError {
+                            message: format!(
+                                "tuple pattern expects at least {} element(s), got {}",
+                                prefix_len + suffix_len,
+                                items.len()
+                            ),
+                            span: *span,
+                        });
+                    }
+                } else if items.len() != prefix_len + suffix_len {
+                    return Err(TypeError {
+                        message: format!(
+                            "tuple arity mismatch: expected {}, got {}",
+                            prefix_len + suffix_len,
+                            items.len()
+                        ),
+                        span: *span,
+                    });
+                }
+
+                let mut binds = Vec::new();
+                for (idx, subpat) in prefix.iter().enumerate() {
+                    let mut elem_ty = items[idx].clone();
+                    if is_ro {
+                        elem_ty = elem_ty.as_readonly_view();
+                    }
+                    binds.extend(self.typecheck_pattern(subpat, elem_ty)?);
+                }
+
+                if let Some(rest_pat) = rest
+                    && let Some(binding) = &rest_pat.binding
+                {
+                    let start = prefix_len;
+                    let end = items.len().saturating_sub(suffix_len);
+                    let mut rest_items = Vec::new();
+                    for item_ty in &items[start..end] {
+                        let mut ty = item_ty.clone();
+                        if is_ro {
+                            ty = ty.as_readonly_view();
+                        }
+                        rest_items.push(ty);
+                    }
+                    let rest_ty = if rest_items.is_empty() {
+                        Ty::Unit
+                    } else {
+                        Ty::Tuple(rest_items)
+                    };
+                    binds.push((binding.clone(), rest_ty));
+                }
+
+                for (idx, subpat) in suffix.iter().enumerate() {
+                    let item_idx = items.len() - suffix_len + idx;
+                    let mut elem_ty = items[item_idx].clone();
+                    if is_ro {
+                        elem_ty = elem_ty.as_readonly_view();
+                    }
+                    binds.extend(self.typecheck_pattern(subpat, elem_ty)?);
+                }
+
+                Ok(binds)
+            }
+            Pattern::Array {
+                prefix,
+                rest,
+                suffix,
+                span,
             } => {
                 let (is_ro, inner) = match expected {
                     Ty::Readonly(inner) => (true, *inner),
@@ -2211,13 +2379,17 @@ impl<'a> FnTypechecker<'a> {
                 let _ = self
                     .infer
                     .unify(inner, Ty::Array(Box::new(elem.clone())), *span)?;
-                let elem_expected = if is_ro {
-                    Ty::Readonly(Box::new(elem))
-                } else {
-                    elem
-                };
+                let elem_expected = if is_ro { elem.as_readonly_view() } else { elem };
                 let mut binds = Vec::new();
-                for it in items {
+                for it in prefix {
+                    binds.extend(self.typecheck_pattern(it, elem_expected.clone())?);
+                }
+                if let Some(rest_pat) = rest
+                    && let Some(binding) = &rest_pat.binding
+                {
+                    binds.push((binding.clone(), Ty::Array(Box::new(elem_expected.clone()))));
+                }
+                for it in suffix {
                     binds.extend(self.typecheck_pattern(it, elem_expected.clone())?);
                 }
                 Ok(binds)
@@ -2225,6 +2397,7 @@ impl<'a> FnTypechecker<'a> {
             Pattern::Struct {
                 type_name,
                 fields,
+                has_rest,
                 span,
             } => {
                 let Some(def) = self.env.structs.get(&type_name.name) else {
@@ -2233,6 +2406,38 @@ impl<'a> FnTypechecker<'a> {
                         span: type_name.span,
                     });
                 };
+
+                let mut seen_fields = BTreeSet::<String>::new();
+                for (fname, _) in fields.iter() {
+                    if !seen_fields.insert(fname.name.clone()) {
+                        return Err(TypeError {
+                            message: format!(
+                                "duplicate field `{}` in pattern for `{}`",
+                                fname.name, def.name
+                            ),
+                            span: fname.span,
+                        });
+                    }
+                }
+                if !*has_rest {
+                    let mut missing = Vec::new();
+                    for (def_field, _) in def.fields.iter() {
+                        if !seen_fields.contains(def_field) {
+                            missing.push(def_field.clone());
+                        }
+                    }
+                    if !missing.is_empty() {
+                        return Err(TypeError {
+                            message: format!(
+                                "missing fields in pattern for `{}`: {} (add `..` to ignore remaining fields)",
+                                def.name,
+                                missing.join(", ")
+                            ),
+                            span: *span,
+                        });
+                    }
+                }
+
                 let mut type_args = Vec::with_capacity(def.generics.len());
                 for _ in &def.generics {
                     type_args.push(self.infer.fresh_type_var());
@@ -2257,7 +2462,7 @@ impl<'a> FnTypechecker<'a> {
                     };
                     let mut fty = subst_ty(fty.clone(), &ty_subst, &con_subst);
                     if ro {
-                        fty = Ty::Readonly(Box::new(fty));
+                        fty = fty.as_readonly_view();
                     }
                     binds.extend(self.typecheck_pattern(subpat, fty)?);
                 }
@@ -2315,7 +2520,7 @@ impl<'a> FnTypechecker<'a> {
                 for (subpat, fty) in fields.iter().zip(variant_fields.iter()) {
                     let mut fty = subst_ty(fty.clone(), &ty_subst, &con_subst);
                     if ro {
-                        fty = Ty::Readonly(Box::new(fty));
+                        fty = fty.as_readonly_view();
                     }
                     binds.extend(self.typecheck_pattern(subpat, fty)?);
                 }
@@ -2395,7 +2600,12 @@ impl<'a> FnTypechecker<'a> {
         }
 
         // Method call sugar: receiver.method(args...)
-        if let Expr::Field { base, name, .. } = callee {
+        if let Expr::Field {
+            base,
+            name: FieldName::Named(name),
+            ..
+        } = callee
+        {
             return self.typecheck_method_call(base, name, args, span);
         }
 
@@ -2592,53 +2802,99 @@ impl<'a> FnTypechecker<'a> {
         Ok(msig.ret.clone())
     }
 
-    fn typecheck_field(&mut self, base: &Expr, name: &Ident, span: Span) -> Result<Ty, TypeError> {
+    fn typecheck_field(
+        &mut self,
+        base: &Expr,
+        name: &FieldName,
+        span: Span,
+    ) -> Result<Ty, TypeError> {
         let base_ty = self.typecheck_expr(base, ExprUse::Value)?;
         let base_ty = self.infer.resolve_ty(base_ty);
         let (is_readonly, inner) = match base_ty {
             Ty::Readonly(inner) => (true, *inner),
             other => (false, other),
         };
-        let Ty::App(TyCon::Named(type_name), type_args) = inner else {
-            return Err(TypeError {
-                message: format!("field access on non-struct value of type `{inner}`"),
-                span,
-            });
-        };
-        let Some(def) = self.env.structs.get(&type_name) else {
-            return Err(TypeError {
-                message: format!("field access requires a struct type, got `{type_name}`"),
-                span,
-            });
-        };
-        if type_args.len() != def.generics.len() {
-            return Err(TypeError {
-                message: format!(
-                    "internal error: struct `{}` expected {} type argument(s), got {}",
-                    def.name,
-                    def.generics.len(),
-                    type_args.len()
-                ),
-                span,
-            });
-        }
-        let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
-        let con_subst: HashMap<GenId, TyCon> = HashMap::new();
 
-        let Some((_, field_ty)) = def.fields.iter().find(|(n, _)| n == &name.name) else {
-            return Err(TypeError {
-                message: format!("unknown field `{}` on `{}`", name.name, def.name),
-                span: name.span,
-            });
-        };
-        let field_ty = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
-        let out = if is_readonly {
-            field_ty.as_readonly_view()
-        } else {
-            field_ty
-        };
-        let _ = span;
-        Ok(out)
+        match name {
+            FieldName::Named(name) => {
+                let Ty::App(TyCon::Named(type_name), type_args) = inner else {
+                    return Err(TypeError {
+                        message: format!("field access on non-struct value of type `{inner}`"),
+                        span,
+                    });
+                };
+                let Some(def) = self.env.structs.get(&type_name) else {
+                    return Err(TypeError {
+                        message: format!("field access requires a struct type, got `{type_name}`"),
+                        span,
+                    });
+                };
+                if type_args.len() != def.generics.len() {
+                    return Err(TypeError {
+                        message: format!(
+                            "internal error: struct `{}` expected {} type argument(s), got {}",
+                            def.name,
+                            def.generics.len(),
+                            type_args.len()
+                        ),
+                        span,
+                    });
+                }
+                let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                let Some((_, field_ty)) = def.fields.iter().find(|(n, _)| n == &name.name) else {
+                    return Err(TypeError {
+                        message: format!("unknown field `{}` on `{}`", name.name, def.name),
+                        span: name.span,
+                    });
+                };
+                let field_ty = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
+                let out = if is_readonly {
+                    field_ty.as_readonly_view()
+                } else {
+                    field_ty
+                };
+                Ok(out)
+            }
+            FieldName::Index {
+                index,
+                span: idx_span,
+            } => {
+                let idx = *index;
+                let out = match inner {
+                    Ty::Tuple(items) => items.get(idx).cloned().ok_or(TypeError {
+                        message: format!("tuple index {idx} out of bounds (len={})", items.len()),
+                        span: *idx_span,
+                    })?,
+                    Ty::Var(_) => {
+                        // Inference fallback: access `t.0` constrains `t` to a tuple of at least
+                        // `idx + 1` elements, but tuples have fixed arity in Rusk; we pick the
+                        // minimal arity that satisfies the access.
+                        let mut items = Vec::with_capacity(idx + 1);
+                        for _ in 0..=idx {
+                            items.push(self.infer.fresh_type_var());
+                        }
+                        let expected_tuple = Ty::Tuple(items.clone());
+                        let _ = self.infer.unify(inner, expected_tuple, span)?;
+                        items[idx].clone()
+                    }
+                    other => {
+                        return Err(TypeError {
+                            message: format!(
+                                "tuple field access on non-tuple value of type `{other}`"
+                            ),
+                            span,
+                        });
+                    }
+                };
+                Ok(if is_readonly {
+                    out.as_readonly_view()
+                } else {
+                    out
+                })
+            }
+        }
     }
 
     fn typecheck_index(&mut self, base: &Expr, index: &Expr, span: Span) -> Result<Ty, TypeError> {
@@ -2793,38 +3049,74 @@ impl<'a> FnTypechecker<'a> {
                     }
                     other => other,
                 };
-                let Ty::App(TyCon::Named(type_name), type_args) = inner else {
-                    return Err(TypeError {
-                        message: format!("field assignment requires a struct, got `{inner}`"),
-                        span: base.span(),
-                    });
-                };
-                let Some(def) = self.env.structs.get(&type_name) else {
-                    return Err(TypeError {
-                        message: format!(
-                            "field assignment requires a struct type, got `{type_name}`"
-                        ),
-                        span: base.span(),
-                    });
-                };
-                if type_args.len() != def.generics.len() {
-                    return Err(TypeError {
-                        message: "internal error: struct type argument mismatch".to_string(),
-                        span,
-                    });
+
+                match name {
+                    FieldName::Named(name) => {
+                        let Ty::App(TyCon::Named(type_name), type_args) = inner else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "field assignment requires a struct, got `{inner}`"
+                                ),
+                                span: base.span(),
+                            });
+                        };
+                        let Some(def) = self.env.structs.get(&type_name) else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "field assignment requires a struct type, got `{type_name}`"
+                                ),
+                                span: base.span(),
+                            });
+                        };
+                        if type_args.len() != def.generics.len() {
+                            return Err(TypeError {
+                                message: "internal error: struct type argument mismatch"
+                                    .to_string(),
+                                span,
+                            });
+                        }
+                        let Some((_, field_ty)) = def.fields.iter().find(|(n, _)| n == &name.name)
+                        else {
+                            return Err(TypeError {
+                                message: format!("unknown field `{}` on `{}`", name.name, def.name),
+                                span: name.span,
+                            });
+                        };
+                        let ty_subst: HashMap<GenId, Ty> =
+                            type_args.iter().cloned().enumerate().collect();
+                        let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+                        let expected = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
+                        let rhs = self.typecheck_expr(value, ExprUse::Value)?;
+                        self.infer.unify(expected, rhs, value.span())?;
+                        Ok(Ty::Unit)
+                    }
+                    FieldName::Index {
+                        index,
+                        span: idx_span,
+                    } => {
+                        let idx = *index;
+                        let expected = match inner {
+                            Ty::Tuple(items) => items.get(idx).cloned().ok_or(TypeError {
+                                message: format!(
+                                    "tuple index {idx} out of bounds (len={})",
+                                    items.len()
+                                ),
+                                span: *idx_span,
+                            })?,
+                            other => {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "tuple field assignment requires a tuple, got `{other}`"
+                                    ),
+                                    span: base.span(),
+                                });
+                            }
+                        };
+                        let rhs = self.typecheck_expr(value, ExprUse::Value)?;
+                        self.infer.unify(expected, rhs, value.span())?;
+                        Ok(Ty::Unit)
+                    }
                 }
-                let Some((_, field_ty)) = def.fields.iter().find(|(n, _)| n == &name.name) else {
-                    return Err(TypeError {
-                        message: format!("unknown field `{}` on `{}`", name.name, def.name),
-                        span: name.span,
-                    });
-                };
-                let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
-                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
-                let expected = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
-                let rhs = self.typecheck_expr(value, ExprUse::Value)?;
-                self.infer.unify(expected, rhs, value.span())?;
-                Ok(Ty::Unit)
             }
             Expr::Index { base, index, .. } => {
                 let base_ty = self.typecheck_expr(base, ExprUse::Value)?;
@@ -2904,6 +3196,7 @@ fn contains_infer_vars(ty: &Ty) -> bool {
     match ty {
         Ty::Var(_) => true,
         Ty::Array(elem) | Ty::Readonly(elem) => contains_infer_vars(elem),
+        Ty::Tuple(items) => items.iter().any(contains_infer_vars),
         Ty::Fn { params, ret } => {
             params.iter().any(contains_infer_vars) || contains_infer_vars(ret)
         }

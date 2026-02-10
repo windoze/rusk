@@ -1,0 +1,17 @@
+// expect: ok int 41
+
+struct Cell<T> { v: T }
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    let cell = Cell { v: Option::None(()) };
+    match @E.boom() {
+        @E.boom() => { cell.v = Option::Some(resume); 0 }
+        x => x
+    };
+    match cell.v {
+        Option::Some(k) => k(41)
+        Option::None(_) => 0
+    }
+}
+

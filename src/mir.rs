@@ -62,9 +62,11 @@ pub enum Type {
     String,
     Bytes,
     Array,
+    Tuple(usize),
     Struct(String),
     Enum(String),
     Fn,
+    Cont,
     Interface(String),
 }
 
@@ -98,6 +100,7 @@ pub enum ConstValue {
     /// A first-class reference to a named MIR function.
     Function(String),
     Array(Vec<ConstValue>),
+    Tuple(Vec<ConstValue>),
     Struct {
         type_name: String,
         /// Fields in source/textual order.
@@ -119,6 +122,17 @@ pub enum Pattern {
     Bind,
     /// A primitive literal match (unit/bool/int/float/string/bytes).
     Literal(ConstValue),
+    /// Tuple destructuring: `(p1, p2, .., pk)` / `(p1, p2)` / `(..rest)`.
+    ///
+    /// If `rest` is:
+    /// - `None`: arity must match exactly (`prefix.len() + suffix.len()`).
+    /// - `Some(Pattern::Wildcard)`: variable-length match, rest ignored.
+    /// - `Some(Pattern::Bind)`: variable-length match, rest captured as a tuple.
+    Tuple {
+        prefix: Vec<Pattern>,
+        rest: Option<Box<Pattern>>,
+        suffix: Vec<Pattern>,
+    },
     /// `Enum::Variant(p1, p2, ...)`
     Enum {
         enum_name: String,
@@ -131,8 +145,17 @@ pub enum Pattern {
         /// Fields in source/textual order.
         fields: Vec<(String, Pattern)>,
     },
-    /// `[p1, p2, ..]` (prefix match; if `has_rest` is false, length must match exactly).
-    ArrayPrefix { items: Vec<Pattern>, has_rest: bool },
+    /// Array destructuring: `[p1, p2, .., pk]` / `[p1, p2]` / `[..rest]`.
+    ///
+    /// If `rest` is:
+    /// - `None`: length must match exactly (`prefix.len() + suffix.len()`).
+    /// - `Some(Pattern::Wildcard)`: variable-length match, rest ignored.
+    /// - `Some(Pattern::Bind)`: variable-length match, rest captured as a new array.
+    Array {
+        prefix: Vec<Pattern>,
+        rest: Option<Box<Pattern>>,
+        suffix: Vec<Pattern>,
+    },
 }
 
 /// An interface method effect identifier.
@@ -177,6 +200,11 @@ pub enum Instruction {
         fields: Vec<(String, Operand)>,
     },
     MakeArray {
+        dst: Local,
+        /// Elements in source/textual order.
+        items: Vec<Operand>,
+    },
+    MakeTuple {
         dst: Local,
         /// Elements in source/textual order.
         items: Vec<Operand>,

@@ -1,0 +1,9 @@
+// expect: ok int 3
+
+fn id<T>(x: T) -> T { x }
+
+fn main() -> int {
+    let t = id((1, 2));
+    t.0 + t.1
+}
+

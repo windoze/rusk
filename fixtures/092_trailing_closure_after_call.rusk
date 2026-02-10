@@ -1,0 +1,8 @@
+// expect: ok int 6
+
+fn with2(a: int, b: int, f: fn() -> int) -> int { f() + a + b }
+
+fn main() -> int {
+    with2(1, 2) { 3 }
+}
+

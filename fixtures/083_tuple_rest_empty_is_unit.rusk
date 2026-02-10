@@ -1,0 +1,11 @@
+// expect: ok int 31
+
+fn is_unit(x: unit) -> int { 1 }
+
+fn main() -> int {
+    match (10, 20) {
+        (a, ..mid, b) => a + b + is_unit(mid)
+        _ => 0
+    }
+}
+

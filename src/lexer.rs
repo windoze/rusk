@@ -20,6 +20,7 @@ pub enum TokenKind {
 
     // Keywords.
     KwFn,
+    KwCont,
     KwLet,
     KwConst,
     KwReadonly,
@@ -324,6 +325,7 @@ impl<'a> Lexer<'a> {
         let text = &self.src[start..self.pos];
         let kind = match text {
             "fn" => TokenKind::KwFn,
+            "cont" => TokenKind::KwCont,
             "let" => TokenKind::KwLet,
             "const" => TokenKind::KwConst,
             "readonly" => TokenKind::KwReadonly,

@@ -1,0 +1,13 @@
+// expect: ok int 3
+
+fn main() -> int {
+    let x = 0;
+    let add = |n: int| {
+        x = x + n;
+        x
+    };
+    add(1);
+    add(2);
+    x
+}
+

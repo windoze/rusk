@@ -1,0 +1,8 @@
+// expect: ok int 3
+
+struct Pair { x: int, y: int }
+
+fn sum(Pair { x, y }: Pair) -> int { x + y }
+
+fn main() -> int { sum(Pair { x: 1, y: 2 }) }
+

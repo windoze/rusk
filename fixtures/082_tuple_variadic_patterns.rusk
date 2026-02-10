@@ -1,0 +1,16 @@
+// expect: ok int 137
+
+fn main() -> int {
+    let a = match (1, 2, 3, 4) {
+        (x, ..mid, y) => x * 100 + mid.0 * 10 + y
+        _ => 0
+    };
+
+    let b = match (1, 2, 3) {
+        (..rest, last) => rest.0 * 10 + last
+        _ => 0
+    };
+
+    a + b
+}
+

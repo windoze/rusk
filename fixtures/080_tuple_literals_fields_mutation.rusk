@@ -1,0 +1,8 @@
+// expect: ok int 14
+
+fn main() -> int {
+    let t = (1, 2, 3);
+    t.1 = 10;
+    t.0 + t.1 + t.2
+}
+

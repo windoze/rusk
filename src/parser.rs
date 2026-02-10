@@ -330,7 +330,7 @@ impl<'a> Parser<'a> {
             if readonly {
                 self.bump()?;
             }
-            let name = self.expect_ident()?;
+            let pat = self.parse_pattern()?;
             self.expect(TokenKind::Colon)?;
             let mut ty = self.parse_type()?;
             if readonly {
@@ -341,7 +341,7 @@ impl<'a> Parser<'a> {
                 };
             }
             let span = Span::new(p_start, ty.span().end);
-            params.push(Param { name, ty, span });
+            params.push(Param { pat, ty, span });
             if matches!(self.lookahead.kind, TokenKind::Comma) {
                 self.bump()?;
                 if matches!(self.lookahead.kind, TokenKind::RParen) {
@@ -386,7 +386,9 @@ impl<'a> Parser<'a> {
                 Ok(TypeExpr::Path(self.parse_path_type()?))
             }
             TokenKind::KwFn => self.parse_fn_type(),
+            TokenKind::KwCont => self.parse_cont_type(),
             TokenKind::LBracket => self.parse_array_type(),
+            TokenKind::LParen => self.parse_paren_type(),
             TokenKind::KwReadonly => unreachable!("handled above"),
             _ => Err(self.error_here("expected type")),
         }
@@ -425,6 +427,61 @@ impl<'a> Parser<'a> {
         let end = ret.span().end;
         Ok(TypeExpr::Fn {
             params,
+            ret: Box::new(ret),
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_paren_type(&mut self) -> Result<TypeExpr, ParseError> {
+        let start = self.expect(TokenKind::LParen)?.span.start;
+        if matches!(self.lookahead.kind, TokenKind::RParen) {
+            let end = self.bump()?.span.end;
+            return Ok(TypeExpr::Tuple {
+                items: Vec::new(),
+                span: Span::new(start, end),
+            });
+        }
+
+        let first = self.parse_type()?;
+        if !matches!(self.lookahead.kind, TokenKind::Comma) {
+            // Parenthesized type.
+            self.expect(TokenKind::RParen)?;
+            return Ok(first);
+        }
+
+        // Tuple type.
+        self.bump()?;
+        let mut items = vec![first];
+        if !matches!(self.lookahead.kind, TokenKind::RParen) {
+            loop {
+                items.push(self.parse_type()?);
+                if matches!(self.lookahead.kind, TokenKind::Comma) {
+                    self.bump()?;
+                    if matches!(self.lookahead.kind, TokenKind::RParen) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RParen)?.span.end;
+        Ok(TypeExpr::Tuple {
+            items,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_cont_type(&mut self) -> Result<TypeExpr, ParseError> {
+        let start = self.expect(TokenKind::KwCont)?.span.start;
+        self.expect(TokenKind::LParen)?;
+        let param = self.parse_type()?;
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Arrow)?;
+        let ret = self.parse_type()?;
+        let end = ret.span().end;
+        Ok(TypeExpr::Cont {
+            param: Box::new(param),
             ret: Box::new(ret),
             span: Span::new(start, end),
         })
@@ -629,11 +686,148 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
+                TokenKind::LBrace => {
+                    // Trailing closure syntax sugar:
+                    // - `foo(a, b) { ... }`  ==>  `foo(a, b, || { ... })`
+                    // - `foo { ... }`       ==>  `foo(|| { ... })`
+                    //
+                    // Additionally, if the call arguments are all `name = expr`, this becomes
+                    // "named binds" sugar for capturing values into the trailing closure:
+                    // - `foo(a=expr1, b=expr2) { ... }`
+                    //   ==> `{ let a = expr1; let b = expr2; foo(a, b, || { ... }) }`
+                    let start = lhs.span().start;
+                    let body = self.parse_block()?;
+                    let closure_span = body.span;
+                    let closure = Expr::Lambda {
+                        params: Vec::new(),
+                        body,
+                        span: closure_span,
+                    };
+
+                    lhs = match lhs {
+                        Expr::Call { callee, args, span } => {
+                            // Detect `name = expr` bind list.
+                            let is_named_bind_arg = |arg: &Expr| -> bool {
+                                matches!(
+                                    arg,
+                                    Expr::Assign { target, .. }
+                                        if matches!(
+                                            target.as_ref(),
+                                            Expr::Path { path, .. } if path.segments.len() == 1
+                                        )
+                                )
+                            };
+
+                            let any_named = args.iter().any(is_named_bind_arg);
+                            let all_named = args.iter().all(is_named_bind_arg);
+
+                            if any_named {
+                                if !all_named {
+                                    return Err(ParseError {
+                                        message: "trailing-closure named bindings require every argument to be `name = expr`".to_string(),
+                                        span,
+                                    });
+                                }
+                                let mut bind_pairs: Vec<(Ident, Expr)> =
+                                    Vec::with_capacity(args.len());
+                                for arg in args {
+                                    let Expr::Assign { target, value, .. } = arg else {
+                                        unreachable!("all args checked by all_named");
+                                    };
+                                    let Expr::Path { path, .. } = *target else {
+                                        unreachable!("all args checked by all_named");
+                                    };
+                                    debug_assert_eq!(path.segments.len(), 1);
+                                    bind_pairs.push((path.segments[0].clone(), *value));
+                                }
+
+                                let mut seen = std::collections::BTreeSet::<String>::new();
+                                let mut stmts = Vec::with_capacity(bind_pairs.len());
+                                let mut call_args = Vec::with_capacity(bind_pairs.len() + 1);
+                                for (name, init) in bind_pairs {
+                                    if !seen.insert(name.name.clone()) {
+                                        return Err(ParseError {
+                                            message: format!(
+                                                "duplicate trailing-closure binding `{}`",
+                                                name.name
+                                            ),
+                                            span: name.span,
+                                        });
+                                    }
+                                    let stmt_span = Span::new(name.span.start, init.span().end);
+                                    stmts.push(Stmt::Let {
+                                        kind: BindingKind::Let,
+                                        name: name.clone(),
+                                        ty: None,
+                                        init: Some(init),
+                                        span: stmt_span,
+                                    });
+                                    call_args.push(Expr::Path {
+                                        path: Path {
+                                            segments: vec![name.clone()],
+                                            span: name.span,
+                                        },
+                                        span: name.span,
+                                    });
+                                }
+                                call_args.push(closure);
+                                let call_span = Span::new(span.start, closure_span.end);
+                                let call_expr = Expr::Call {
+                                    callee,
+                                    args: call_args,
+                                    span: call_span,
+                                };
+                                Expr::Block {
+                                    block: Block {
+                                        stmts,
+                                        tail: Some(Box::new(call_expr)),
+                                        span: call_span,
+                                    },
+                                    span: call_span,
+                                }
+                            } else {
+                                let mut new_args = args;
+                                new_args.push(closure);
+                                Expr::Call {
+                                    callee,
+                                    args: new_args,
+                                    span: Span::new(span.start, closure_span.end),
+                                }
+                            }
+                        }
+                        other => Expr::Call {
+                            callee: Box::new(other),
+                            args: vec![closure],
+                            span: Span::new(start, closure_span.end),
+                        },
+                    };
+                    continue;
+                }
                 TokenKind::Dot => {
                     let start = lhs.span().start;
                     self.bump()?;
-                    let name = self.expect_ident()?;
-                    let end = name.span.end;
+                    let name = match self.lookahead.kind.clone() {
+                        TokenKind::Ident(_) => FieldName::Named(self.expect_ident()?),
+                        TokenKind::Int(v) => {
+                            let tok = self.bump()?;
+                            if v < 0 {
+                                return Err(ParseError {
+                                    message: "tuple field index must be non-negative".to_string(),
+                                    span: tok.span,
+                                });
+                            }
+                            let idx = usize::try_from(v).map_err(|_| ParseError {
+                                message: "tuple field index is too large".to_string(),
+                                span: tok.span,
+                            })?;
+                            FieldName::Index {
+                                index: idx,
+                                span: tok.span,
+                            }
+                        }
+                        _ => return Err(self.error_here("expected field name")),
+                    };
+                    let end = name.span().end;
                     lhs = Expr::Field {
                         base: Box::new(lhs),
                         name,
@@ -719,8 +913,28 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot => {
                     let start = lhs.span().start;
                     self.bump()?;
-                    let name = self.expect_ident()?;
-                    let end = name.span.end;
+                    let name = match self.lookahead.kind.clone() {
+                        TokenKind::Ident(_) => FieldName::Named(self.expect_ident()?),
+                        TokenKind::Int(v) => {
+                            let tok = self.bump()?;
+                            if v < 0 {
+                                return Err(ParseError {
+                                    message: "tuple field index must be non-negative".to_string(),
+                                    span: tok.span,
+                                });
+                            }
+                            let idx = usize::try_from(v).map_err(|_| ParseError {
+                                message: "tuple field index is too large".to_string(),
+                                span: tok.span,
+                            })?;
+                            FieldName::Index {
+                                index: idx,
+                                span: tok.span,
+                            }
+                        }
+                        _ => return Err(self.error_here("expected field name")),
+                    };
+                    let end = name.span().end;
                     lhs = Expr::Field {
                         base: Box::new(lhs),
                         name,
@@ -844,18 +1058,7 @@ impl<'a> Parser<'a> {
                     block,
                 })
             }
-            TokenKind::LParen => {
-                let start = self.bump()?.span.start;
-                if matches!(self.lookahead.kind, TokenKind::RParen) {
-                    let end = self.bump()?.span.end;
-                    return Ok(Expr::Unit {
-                        span: Span::new(start, end),
-                    });
-                }
-                let expr = self.parse_expr()?;
-                self.expect(TokenKind::RParen)?;
-                Ok(expr)
-            }
+            TokenKind::LParen => self.parse_paren_expr(),
             TokenKind::KwIf => self.parse_if_expr(),
             TokenKind::KwMatch => self.parse_match_expr(),
             TokenKind::KwLoop => {
@@ -925,18 +1128,7 @@ impl<'a> Parser<'a> {
                     block,
                 })
             }
-            TokenKind::LParen => {
-                let start = self.bump()?.span.start;
-                if matches!(self.lookahead.kind, TokenKind::RParen) {
-                    let end = self.bump()?.span.end;
-                    return Ok(Expr::Unit {
-                        span: Span::new(start, end),
-                    });
-                }
-                let expr = self.parse_expr()?;
-                self.expect(TokenKind::RParen)?;
-                Ok(expr)
-            }
+            TokenKind::LParen => self.parse_paren_expr(),
             TokenKind::KwIf => self.parse_if_expr(),
             TokenKind::KwMatch => self.parse_match_expr(),
             TokenKind::KwLoop => {
@@ -997,6 +1189,46 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.expect(TokenKind::LParen)?.span.start;
+        if matches!(self.lookahead.kind, TokenKind::RParen) {
+            let end = self.bump()?.span.end;
+            return Ok(Expr::Unit {
+                span: Span::new(start, end),
+            });
+        }
+
+        let first = self.parse_expr()?;
+        if !matches!(self.lookahead.kind, TokenKind::Comma) {
+            // Parenthesized expression.
+            self.expect(TokenKind::RParen)?;
+            return Ok(first);
+        }
+
+        // Tuple expression.
+        self.bump()?;
+        let mut items = vec![first];
+        if !matches!(self.lookahead.kind, TokenKind::RParen) {
+            loop {
+                let next = self.parse_expr()?;
+                items.push(next);
+                if matches!(self.lookahead.kind, TokenKind::Comma) {
+                    self.bump()?;
+                    if matches!(self.lookahead.kind, TokenKind::RParen) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RParen)?.span.end;
+        Ok(Expr::Tuple {
+            items,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_array_lit(&mut self) -> Result<Expr, ParseError> {
         let start = self.expect(TokenKind::LBracket)?.span.start;
         let mut items = Vec::new();
@@ -1025,7 +1257,15 @@ impl<'a> Parser<'a> {
         let head = self.expect_ident()?;
 
         // Struct literal: `Type { field: expr, ... }`
-        if allow_struct_lit && matches!(self.lookahead.kind, TokenKind::LBrace) {
+        let looks_like_type_name = head
+            .name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase());
+        if allow_struct_lit
+            && looks_like_type_name
+            && matches!(self.lookahead.kind, TokenKind::LBrace)
+        {
             self.bump()?;
             let mut fields = Vec::new();
             while !matches!(self.lookahead.kind, TokenKind::RBrace) {
@@ -1305,14 +1545,7 @@ impl<'a> Parser<'a> {
                 let tok = self.bump()?;
                 Ok(Pattern::Wildcard { span: tok.span })
             }
-            TokenKind::LParen => {
-                let start = self.bump()?.span.start;
-                let end = self.expect(TokenKind::RParen)?.span.end;
-                Ok(Pattern::Literal {
-                    lit: PatLiteral::Unit,
-                    span: Span::new(start, end),
-                })
-            }
+            TokenKind::LParen => self.parse_paren_pat(),
             TokenKind::Int(v) => {
                 let tok = self.bump()?;
                 Ok(Pattern::Literal {
@@ -1348,33 +1581,160 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 })
             }
-            TokenKind::LBracket => self.parse_array_prefix_pat(),
+            TokenKind::LBracket => self.parse_array_pat(),
             TokenKind::Ident(_) => self.parse_bind_or_ctor_pat(),
             _ => Err(self.error_here("expected pattern")),
         }
     }
 
-    fn parse_array_prefix_pat(&mut self) -> Result<Pattern, ParseError> {
-        let start = self.expect(TokenKind::LBracket)?.span.start;
-        let mut items = Vec::new();
-        let mut has_rest = false;
-        while !matches!(self.lookahead.kind, TokenKind::RBracket) {
-            if matches!(self.lookahead.kind, TokenKind::DotDot) {
-                self.bump()?;
-                has_rest = true;
-                break;
-            }
-            items.push(self.parse_pattern()?);
+    fn parse_paren_pat(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.expect(TokenKind::LParen)?.span.start;
+        if matches!(self.lookahead.kind, TokenKind::RParen) {
+            let end = self.bump()?.span.end;
+            return Ok(Pattern::Literal {
+                lit: PatLiteral::Unit,
+                span: Span::new(start, end),
+            });
+        }
+        // Tuple pattern with leading rest: `(..rest, x, y)` or `(..)`.
+        if matches!(self.lookahead.kind, TokenKind::DotDot) {
+            let rest = Some(self.parse_rest_pat(true)?);
+            let mut suffix = Vec::new();
             if matches!(self.lookahead.kind, TokenKind::Comma) {
                 self.bump()?;
+                if !matches!(self.lookahead.kind, TokenKind::RParen) {
+                    loop {
+                        if matches!(self.lookahead.kind, TokenKind::DotDot) {
+                            return Err(
+                                self.error_here("`..` can only appear once in a tuple pattern")
+                            );
+                        }
+                        suffix.push(self.parse_pattern()?);
+                        if matches!(self.lookahead.kind, TokenKind::Comma) {
+                            self.bump()?;
+                            if matches!(self.lookahead.kind, TokenKind::RParen) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+            let end = self.expect(TokenKind::RParen)?.span.end;
+            return Ok(Pattern::Tuple {
+                prefix: Vec::new(),
+                rest,
+                suffix,
+                span: Span::new(start, end),
+            });
+        }
+
+        let first = self.parse_pattern()?;
+        if matches!(self.lookahead.kind, TokenKind::RParen) {
+            // Parenthesized pattern.
+            self.expect(TokenKind::RParen)?;
+            return Ok(first);
+        }
+
+        if !matches!(self.lookahead.kind, TokenKind::Comma) {
+            return Err(self.error_here("expected `,` or `)` in tuple pattern"));
+        }
+
+        // Tuple pattern (possibly with `..`).
+        self.bump()?;
+        let mut prefix = vec![first];
+        let mut rest: Option<RestPat> = None;
+        let mut suffix = Vec::new();
+        if !matches!(self.lookahead.kind, TokenKind::RParen) {
+            loop {
+                if matches!(self.lookahead.kind, TokenKind::DotDot) {
+                    if rest.is_some() {
+                        return Err(self.error_here("`..` can only appear once in a tuple pattern"));
+                    }
+                    rest = Some(self.parse_rest_pat(true)?);
+                } else {
+                    let p = self.parse_pattern()?;
+                    if rest.is_some() {
+                        suffix.push(p);
+                    } else {
+                        prefix.push(p);
+                    }
+                }
+
+                if matches!(self.lookahead.kind, TokenKind::Comma) {
+                    self.bump()?;
+                    if matches!(self.lookahead.kind, TokenKind::RParen) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RParen)?.span.end;
+        Ok(Pattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_array_pat(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.expect(TokenKind::LBracket)?.span.start;
+        let mut prefix = Vec::new();
+        let mut rest: Option<RestPat> = None;
+        let mut suffix = Vec::new();
+        while !matches!(self.lookahead.kind, TokenKind::RBracket) {
+            if matches!(self.lookahead.kind, TokenKind::DotDot) {
+                if rest.is_some() {
+                    return Err(self.error_here("`..` can only appear once in an array pattern"));
+                }
+                rest = Some(self.parse_rest_pat(true)?);
+            } else {
+                let p = self.parse_pattern()?;
+                if rest.is_some() {
+                    suffix.push(p);
+                } else {
+                    prefix.push(p);
+                }
+            }
+            if matches!(self.lookahead.kind, TokenKind::Comma) {
+                self.bump()?;
+                if matches!(self.lookahead.kind, TokenKind::RBracket) {
+                    break;
+                }
                 continue;
             }
             break;
         }
         let end = self.expect(TokenKind::RBracket)?.span.end;
-        Ok(Pattern::ArrayPrefix {
-            items,
-            has_rest,
+        Ok(Pattern::Array {
+            prefix,
+            rest,
+            suffix,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_rest_pat(&mut self, allow_binding: bool) -> Result<RestPat, ParseError> {
+        let dotdot = self.expect(TokenKind::DotDot)?;
+        let start = dotdot.span.start;
+        let dotdot_end = dotdot.span.end;
+        let binding = if allow_binding && matches!(self.lookahead.kind, TokenKind::Ident(_)) {
+            Some(self.expect_ident()?)
+        } else if !allow_binding && matches!(self.lookahead.kind, TokenKind::Ident(_)) {
+            return Err(ParseError {
+                message: "struct patterns do not support binding `..name`".to_string(),
+                span: self.lookahead.span,
+            });
+        } else {
+            None
+        };
+        let end = binding.as_ref().map(|b| b.span.end).unwrap_or(dotdot_end);
+        Ok(RestPat {
+            binding,
             span: Span::new(start, end),
         })
     }
@@ -1411,15 +1771,34 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // Struct pattern: `Type { field: pat, ... }`
+        // Struct pattern: `Type { field, field: pat, .. }`
         if matches!(self.lookahead.kind, TokenKind::LBrace) {
             self.bump()?;
             let mut fields = Vec::new();
+            let mut has_rest = false;
             while !matches!(self.lookahead.kind, TokenKind::RBrace) {
-                let fname = self.expect_ident()?;
-                self.expect(TokenKind::Colon)?;
-                let pat = self.parse_pattern()?;
-                fields.push((fname, pat));
+                if matches!(self.lookahead.kind, TokenKind::DotDot) {
+                    if has_rest {
+                        return Err(
+                            self.error_here("`..` can only appear once in a struct pattern")
+                        );
+                    }
+                    let _ = self.parse_rest_pat(false)?;
+                    has_rest = true;
+                } else {
+                    let fname = self.expect_ident()?;
+                    if matches!(self.lookahead.kind, TokenKind::Colon) {
+                        self.bump()?;
+                        let pat = self.parse_pattern()?;
+                        fields.push((fname, pat));
+                    } else {
+                        let pat = Pattern::Bind {
+                            name: fname.clone(),
+                            span: fname.span,
+                        };
+                        fields.push((fname, pat));
+                    }
+                }
                 if matches!(self.lookahead.kind, TokenKind::Comma) {
                     self.bump()?;
                 } else {
@@ -1430,6 +1809,7 @@ impl<'a> Parser<'a> {
             return Ok(Pattern::Struct {
                 type_name: head,
                 fields,
+                has_rest,
                 span: Span::new(start, end),
             });
         }

@@ -1,0 +1,14 @@
+// expect: runtime_error invalid resume
+
+interface E { fn boom() -> unit; }
+
+fn main() -> unit {
+    match @E.boom() {
+        @E.boom() => {
+            resume(());
+            resume(())
+        }
+        _ => ()
+    }
+}
+

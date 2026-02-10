@@ -1,0 +1,6 @@
+// expect: ok string "hello 1 world true"
+
+fn main() -> string {
+    f"hello {1} world {true}"
+}
+

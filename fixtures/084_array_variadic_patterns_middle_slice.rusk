@@ -1,0 +1,9 @@
+// expect: ok int 124
+
+fn main() -> int {
+    match [1, 2, 3, 4] {
+        [a, ..rest, d] => a * 100 + rest[0] * 10 + d
+        _ => 0
+    }
+}
+

@@ -1,0 +1,8 @@
+// expect: runtime_error unhandled effect
+
+interface E { fn boom() -> unit; }
+
+fn main() -> unit {
+    @E.boom()
+}
+

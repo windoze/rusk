@@ -1,0 +1,10 @@
+// expect: compile_error cannot assign through a readonly view
+
+struct Box { v: int }
+
+fn main() -> unit {
+    readonly b = Box { v: 1 };
+    b.v = 2;
+    ()
+}
+

@@ -1,0 +1,9 @@
+// expect: ok bool true
+
+fn main() -> bool {
+    (true == false || true != false)
+        && ("a" == "a" && "a" != "b")
+        && (b"hi" == b"hi" && b"hi" != b"ho")
+        && (() == () && () != () == false)
+}
+

@@ -21,6 +21,21 @@ pub struct Ident {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum FieldName {
+    Named(Ident),
+    Index { index: usize, span: Span },
+}
+
+impl FieldName {
+    pub fn span(&self) -> Span {
+        match self {
+            FieldName::Named(ident) => ident.span,
+            FieldName::Index { span, .. } => *span,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Path {
     pub segments: Vec<Ident>,
     pub span: Span,
@@ -38,7 +53,7 @@ pub struct FnItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param {
-    pub name: Ident,
+    pub pat: Pattern,
     pub ty: TypeExpr,
     pub span: Span,
 }
@@ -140,8 +155,17 @@ pub enum TypeExpr {
         elem: Box<TypeExpr>,
         span: Span,
     },
+    Tuple {
+        items: Vec<TypeExpr>,
+        span: Span,
+    },
     Fn {
         params: Vec<TypeExpr>,
+        ret: Box<TypeExpr>,
+        span: Span,
+    },
+    Cont {
+        param: Box<TypeExpr>,
         ret: Box<TypeExpr>,
         span: Span,
     },
@@ -154,7 +178,9 @@ impl TypeExpr {
             TypeExpr::Readonly { span, .. }
             | TypeExpr::Prim { span, .. }
             | TypeExpr::Array { span, .. }
-            | TypeExpr::Fn { span, .. } => *span,
+            | TypeExpr::Tuple { span, .. }
+            | TypeExpr::Fn { span, .. }
+            | TypeExpr::Cont { span, .. } => *span,
             TypeExpr::Path(p) => p.span,
         }
     }
@@ -256,6 +282,10 @@ pub enum Expr {
         items: Vec<Expr>,
         span: Span,
     },
+    Tuple {
+        items: Vec<Expr>,
+        span: Span,
+    },
     StructLit {
         type_name: Ident,
         fields: Vec<(Ident, Expr)>,
@@ -311,7 +341,7 @@ pub enum Expr {
     },
     Field {
         base: Box<Expr>,
-        name: Ident,
+        name: FieldName,
         span: Span,
     },
     Index {
@@ -348,6 +378,7 @@ impl Expr {
             | Expr::Bytes { span, .. }
             | Expr::Path { span, .. }
             | Expr::Array { span, .. }
+            | Expr::Tuple { span, .. }
             | Expr::StructLit { span, .. }
             | Expr::EffectCall { span, .. }
             | Expr::Lambda { span, .. }
@@ -436,6 +467,12 @@ pub enum Pattern {
         lit: PatLiteral,
         span: Span,
     },
+    Tuple {
+        prefix: Vec<Pattern>,
+        rest: Option<RestPat>,
+        suffix: Vec<Pattern>,
+        span: Span,
+    },
     Enum {
         enum_name: Ident,
         variant: Ident,
@@ -445,11 +482,13 @@ pub enum Pattern {
     Struct {
         type_name: Ident,
         fields: Vec<(Ident, Pattern)>,
+        has_rest: bool,
         span: Span,
     },
-    ArrayPrefix {
-        items: Vec<Pattern>,
-        has_rest: bool,
+    Array {
+        prefix: Vec<Pattern>,
+        rest: Option<RestPat>,
+        suffix: Vec<Pattern>,
         span: Span,
     },
 }
@@ -462,9 +501,17 @@ impl Pattern {
             | Pattern::Literal { span, .. }
             | Pattern::Enum { span, .. }
             | Pattern::Struct { span, .. }
-            | Pattern::ArrayPrefix { span, .. } => *span,
+            | Pattern::Tuple { span, .. }
+            | Pattern::Array { span, .. } => *span,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestPat {
+    /// Binder name for `..name`, or `None` for plain `..` (ignored).
+    pub binding: Option<Ident>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -1,0 +1,8 @@
+// expect: ok int 60
+
+fn foo(a: int, b: int, f: fn() -> int) -> int { a + b + f() }
+
+fn main() -> int {
+    foo(a=10, b=20) { a + b }
+}
+

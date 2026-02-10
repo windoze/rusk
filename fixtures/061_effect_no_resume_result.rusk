@@ -1,0 +1,11 @@
+// expect: ok int 99
+
+interface Tick { fn tick(n: int) -> int; }
+
+fn main() -> int {
+    match @Tick.tick(1) {
+        @Tick.tick(_) => 99
+        v => v
+    }
+}
+

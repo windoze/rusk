@@ -1,0 +1,21 @@
+// expect: runtime_error invalid resume
+
+struct Cell<T> { v: T }
+interface E { fn boom() -> int; }
+
+fn main() -> unit {
+    let cell = Cell { v: Option::None(()) };
+    match @E.boom() {
+        @E.boom() -> k => { cell.v = Option::Some(k); 0 }
+        x => x
+    };
+    match cell.v {
+        Option::Some(k) => {
+            k(1);
+            k(2);
+            ()
+        }
+        Option::None(_) => ()
+    }
+}
+

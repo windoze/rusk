@@ -1,0 +1,10 @@
+// expect: compile_error generic function
+
+fn id<T>(x: T) -> T { x }
+
+fn main() -> unit {
+    let f = id;
+    f(1);
+    ()
+}
+

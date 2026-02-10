@@ -12,15 +12,80 @@ Tuple is a lightweight alternative to variadic generic, the latter is too comple
 - Tuple should fully support type inference and can be used with generic types.
 - Tuple should support field access via `get_field` and `set_field` instructions, with fields named as `.0`, `.1`, etc.
 - Tuple should support destructuring.
-- Question 1: should tuple support dynamic field access via `get_index` and `set_index`? (probably not necessary)
-- Question 2: should tuple be read-only like in Python? Or mutable like any other struct? (probably mutable)
+- Question 1: should tuple support dynamic field access via `get_index` and `set_index`? (probably not necessary, leave it out for now)
+- Question 2: should tuple be read-only like in Python? Or mutable like any other struct? (better to be readonly, but you can leave it mutable for now if it simplifies implementation)
 
 ## Interpreter
 
+### Trailing closure syntax sugar
+
+In function call expression, if the last argument is a closure expression, it can be written outside of the parentheses as a trailing closure, e.g.
+
+```
+foo(a, b, {
+    // closure body
+})
+```
+can be written as
+```
+foo(a, b) {
+    // closure body
+}
+```
+
+And if the function call has no other arguments, the parentheses can be omitted entirely, e.g.
+
+```
+foo({
+    // closure body
+})
+```
+can be written as
+```
+foo {
+    // closure body
+}
+```
+
+Also we can add extra name binding for the closure when using trailing closure syntax, e.g.
+
+```
+fn foo(x, y, closure) {
+    // ...
+}
+// `a` and `b` must match the parameters of `foo`
+foo(a=expr1, b=expr2) {
+    // can use `a` and `b` here
+}
+```
+is equivalent to
+```
+let a = expr1;
+let b = expr2;
+foo(a, b, {
+    // can use `a` and `b` here as they're captured by the closure
+})
+```
+This syntax sugar is useful for implementing `with` statements and similar constructs. E.g.
+
+```
+with (f=open("file.txt")) {
+    // use resource here
+}
+```
+
+**Above syntax is purely syntactic sugar and does not introduce any new semantics, it is just a more convenient way to write certain function calls.**
+
 ### Destructuring
 
-- Add support for variadic patterns (e.g. `..` in tuple and array patterns). Rule: `..` can only appear once in a pattern
-- Function declaration patterns should support destructuring (e.g. `fn foo((x, y): (i32, i32))`, `fn foo({title, ..}: Book)`),
+- Add support for variadic patterns (e.g. `..` in tuple and array patterns). Rule: `..` can only appear once in a pattern, some examples of `..` usage in patterns:
+  - `(a, ..b)`: `a` matches the first element, `b` matches the rest as a tuple
+  - `(..a, b)`: `b` matches the last element, `a` matches the rest as a tuple
+  - `(a, .., b)`: `a` matches the first element, `b` matches the last element, the rest is ignored
+  - `(a, ..b, c)`: `a` matches the first element, `c` matches the last element, `b` matches the rest as a tuple
+  - Similar rules apply to array patterns, but `..` matches as an array
+  - `{x, ..}`: `x` matches the field `x`, the rest fields are ignored, `{x, ..b}` or similar are not allowed because struct fields are not ordered
+- Function declaration patterns should support destructuring (e.g. `fn foo((x, y): (i32, i32))`, `fn foo({title, ..}: Book)`), as well as variadic patterns above.
 
 ### First-class continuations
 

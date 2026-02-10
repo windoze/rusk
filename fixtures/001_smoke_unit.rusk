@@ -1,0 +1,6 @@
+// expect: ok unit
+
+fn main() -> unit {
+    ()
+}
+

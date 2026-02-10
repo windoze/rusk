@@ -1,0 +1,7 @@
+// expect: runtime_error index out of bounds
+
+fn main() -> int {
+    let xs = [1, 2, 3];
+    xs[999]
+}
+

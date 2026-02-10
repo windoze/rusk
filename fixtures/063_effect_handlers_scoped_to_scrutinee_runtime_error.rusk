@@ -1,0 +1,12 @@
+// expect: runtime_error unhandled effect
+
+interface E { fn boom() -> unit; }
+
+fn main() -> unit {
+    match 0 {
+        @E.boom() => resume(())
+        0 => { @E.boom() }
+        _ => ()
+    }
+}
+

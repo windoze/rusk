@@ -1,0 +1,8 @@
+// expect: runtime_error non-exhaustive match
+
+fn main() -> int {
+    match 1 {
+        0 => 0
+    }
+}
+

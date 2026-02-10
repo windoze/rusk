@@ -1,0 +1,6 @@
+// expect: runtime_error parameter pattern match failed
+
+fn f(0: int) -> int { 1 }
+
+fn main() -> int { f(1) }
+

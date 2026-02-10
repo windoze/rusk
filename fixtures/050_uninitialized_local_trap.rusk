@@ -1,0 +1,6 @@
+// expect: runtime_error uninitialized local
+
+fn main() -> int {
+    let x: int;
+    x
+}

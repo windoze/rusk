@@ -1,0 +1,9 @@
+// expect: ok int 42
+
+fn main() -> int {
+    match Option::Some(42) {
+        Option::Some(n) => n
+        Option::None(_) => 0
+    }
+}
+

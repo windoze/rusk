@@ -1,0 +1,11 @@
+// expect: compile_error missing fields in pattern
+
+struct Book { title: int, pages: int }
+
+fn main() -> int {
+    let b = Book { title: 1, pages: 2 };
+    match b {
+        Book { title } => title
+    }
+}
+

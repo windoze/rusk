@@ -1,0 +1,6 @@
+// expect: ok int 5
+
+fn main() -> int {
+    1 + 2 * 3 - 4 / 2
+}
+

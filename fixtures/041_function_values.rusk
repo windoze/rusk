@@ -1,0 +1,7 @@
+// expect: ok int 42
+
+fn add1(x: int) -> int { x + 1 }
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+
+fn main() -> int { apply(add1, 41) }
+
