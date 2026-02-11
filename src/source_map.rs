@@ -213,8 +213,8 @@ mod tests {
         let mut map = SourceMap::new();
         map.add_source(SourceName::Virtual("<string>".to_string()), src, 0);
 
-        let alpha_len = "α".as_bytes().len();
-        let beta_len = "β".as_bytes().len();
+        let alpha_len = "α".len();
+        let beta_len = "β".len();
 
         let span_alpha = Span::new(0, alpha_len);
         let alpha = map.lookup_span(span_alpha).expect("range");
