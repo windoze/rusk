@@ -1975,16 +1975,14 @@ impl<'a> FnTypechecker<'a> {
                     message: e.message,
                     span: e.span,
                 })?
+                && kind == crate::modules::DefKind::Enum
+                && let Some(def) = self.env.enums.get(&type_fqn)
+                && def
+                    .variants
+                    .get(last)
+                    .is_some_and(|variant_fields| variant_fields.is_empty())
             {
-                if kind == crate::modules::DefKind::Enum
-                    && let Some(def) = self.env.enums.get(&type_fqn)
-                    && def
-                        .variants
-                        .get(last)
-                        .is_some_and(|variant_fields| variant_fields.is_empty())
-                {
-                    return self.typecheck_enum_lit(&type_fqn, last_ident, &[], span);
-                }
+                return self.typecheck_enum_lit(&type_fqn, last_ident, &[], span);
             }
         }
 

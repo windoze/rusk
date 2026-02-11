@@ -1542,23 +1542,21 @@ impl<'a> FunctionLowerer<'a> {
                     message: e.message,
                     span: e.span,
                 })?
+                && kind == DefKind::Enum
+                && let Some(def) = self.compiler.env.enums.get(&type_fqn)
+                && def
+                    .variants
+                    .get(last)
+                    .is_some_and(|variant_fields| variant_fields.is_empty())
             {
-                if kind == DefKind::Enum
-                    && let Some(def) = self.compiler.env.enums.get(&type_fqn)
-                    && def
-                        .variants
-                        .get(last)
-                        .is_some_and(|variant_fields| variant_fields.is_empty())
-                {
-                    let dst = self.alloc_local();
-                    self.emit(Instruction::MakeEnum {
-                        dst,
-                        enum_name: type_fqn,
-                        variant: last_ident.name.clone(),
-                        fields: Vec::new(),
-                    });
-                    return Ok(dst);
-                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeEnum {
+                    dst,
+                    enum_name: type_fqn,
+                    variant: last_ident.name.clone(),
+                    fields: Vec::new(),
+                });
+                return Ok(dst);
             }
         }
 
