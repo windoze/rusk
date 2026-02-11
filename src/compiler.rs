@@ -9,10 +9,12 @@ use crate::mir::{
 use crate::modules::{DefKind, ModuleLoader, ModulePath};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
+use crate::source_map::{SourceMap, SourceName};
 use crate::typeck::{self, ProgramEnv, Ty, TypeError as TypeckError, TypeInfo};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 const INTERNAL_CELL_STRUCT: &str = "$Cell";
 const CELL_FIELD_SET: &str = "set";
@@ -32,25 +34,46 @@ const CONTROL_VARIANT_CONTINUE: &str = "Continue";
 pub struct CompileError {
     pub message: String,
     pub span: Span,
+    pub rendered_location: Option<String>,
 }
 
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} at {}..{}",
-            self.message, self.span.start, self.span.end
-        )
+        if let Some(location) = &self.rendered_location {
+            write!(f, "{location}: {}", self.message)
+        } else {
+            write!(
+                f,
+                "{} at {}..{}",
+                self.message, self.span.start, self.span.end
+            )
+        }
     }
 }
 
 impl std::error::Error for CompileError {}
+
+impl CompileError {
+    fn new(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            rendered_location: None,
+        }
+    }
+
+    fn with_source_map(mut self, source_map: &SourceMap) -> Self {
+        self.rendered_location = source_map.render_span_location(self.span);
+        self
+    }
+}
 
 impl From<ParseError> for CompileError {
     fn from(err: ParseError) -> Self {
         Self {
             message: err.message,
             span: err.span,
+            rendered_location: None,
         }
     }
 }
@@ -60,6 +83,7 @@ impl From<TypeckError> for CompileError {
         Self {
             message: err.message,
             span: err.span,
+            rendered_location: None,
         }
     }
 }
@@ -69,6 +93,7 @@ impl From<crate::modules::LoadError> for CompileError {
         Self {
             message: err.message,
             span: err.span,
+            rendered_location: None,
         }
     }
 }
@@ -77,16 +102,43 @@ impl From<crate::modules::LoadError> for CompileError {
 ///
 /// This is the front-end entrypoint used by tests and the CLI.
 pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
-    let mut parser = Parser::new(source)?;
-    let program = parser.parse_program()?;
-    compile_program_to_mir(&program)
+    let mut source_map = SourceMap::new();
+    source_map.add_source(
+        SourceName::Virtual("<string>".to_string()),
+        Arc::<str>::from(source),
+        0,
+    );
+
+    let result = (|| {
+        let mut parser = Parser::new(source)?;
+        let program = parser.parse_program()?;
+        compile_program_to_mir(&program)
+    })();
+
+    result.map_err(|e| e.with_source_map(&source_map))
 }
 
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR.
 pub fn compile_file_to_mir(entry_path: &Path) -> Result<Module, CompileError> {
     let mut loader = ModuleLoader::new();
-    let program = loader.load_program_from_file(entry_path)?;
-    compile_program_to_mir(&program)
+    let program = match loader.load_program_from_file(entry_path) {
+        Ok(program) => program,
+        Err(err) => {
+            let mut err = CompileError::from(err).with_source_map(loader.source_map());
+            if err.rendered_location.is_none() {
+                let mut fallback = SourceMap::new();
+                fallback.add_source(
+                    SourceName::Path(entry_path.to_path_buf()),
+                    Arc::<str>::from(""),
+                    0,
+                );
+                err = err.with_source_map(&fallback);
+            }
+            return Err(err);
+        }
+    };
+
+    compile_program_to_mir(&program).map_err(|e| e.with_source_map(loader.source_map()))
 }
 
 fn compile_program_to_mir(program: &Program) -> Result<Module, CompileError> {
@@ -132,13 +184,13 @@ impl Compiler {
             let method_id = format!("{origin_iface}::{method_name}");
             let key = (type_name.clone(), method_id);
             if let Some(prev) = self.module.methods.insert(key.clone(), impl_fn.clone()) {
-                return Err(CompileError {
-                    message: format!(
+                return Err(CompileError::new(
+                    format!(
                         "internal error: duplicate dispatch entry for ({}, {}) ({prev})",
                         key.0, key.1
                     ),
-                    span: Span::new(0, 0),
-                });
+                    Span::new(0, 0),
+                ));
             }
         }
         Ok(())
@@ -164,11 +216,10 @@ impl Compiler {
                             self.compile_module_items(&child, items)?;
                         }
                         crate::ast::ModKind::File => {
-                            return Err(CompileError {
-                                message: "file modules must be loaded before compilation"
-                                    .to_string(),
-                                span: m.span,
-                            });
+                            return Err(CompileError::new(
+                                "file modules must be loaded before compilation",
+                                m.span,
+                            ));
                         }
                     }
                 }
@@ -191,10 +242,7 @@ impl Compiler {
                     .env
                     .modules
                     .resolve_type_fqn(module, &segments, ty.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 for method in &imp.members {
                     let name_override = format!("{type_name}::{}", method.name.name);
                     self.compile_real_function(module, method, Some(name_override))?;
@@ -210,20 +258,14 @@ impl Compiler {
                     .env
                     .modules
                     .resolve_type_fqn(module, &iface_segments, interface.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 let type_segments: Vec<String> =
                     ty.segments.iter().map(|s| s.name.name.clone()).collect();
                 let (_kind, type_name) = self
                     .env
                     .modules
                     .resolve_type_fqn(module, &type_segments, ty.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 for method in &imp.members {
                     let mname = &method.name.name;
                     let name_override = format!("impl::{iface_name}::for::{type_name}::{mname}");
@@ -242,19 +284,21 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         let name = name_override.unwrap_or_else(|| module.qualify(&func.name.name));
         if self.module.functions.contains_key(&name) {
-            return Err(CompileError {
-                message: format!("duplicate function `{name}`"),
-                span: func.name.span,
-            });
+            return Err(CompileError::new(
+                format!("duplicate function `{name}`"),
+                func.name.span,
+            ));
         }
 
         let sig = self
             .env
             .functions
             .get(&name)
-            .ok_or_else(|| CompileError {
-                message: format!("internal error: missing signature for `{name}`"),
-                span: func.span,
+            .ok_or_else(|| {
+                CompileError::new(
+                    format!("internal error: missing signature for `{name}`"),
+                    func.span,
+                )
             })?
             .clone();
 
@@ -303,9 +347,11 @@ impl Compiler {
             .env
             .functions
             .get(target)
-            .ok_or_else(|| CompileError {
-                message: format!("internal error: missing signature for `{target}`"),
-                span: Span::new(0, 0),
+            .ok_or_else(|| {
+                CompileError::new(
+                    format!("internal error: missing signature for `{target}`"),
+                    Span::new(0, 0),
+                )
             })?
             .clone();
 
@@ -377,10 +423,10 @@ impl Compiler {
         let param_tys = match self.types.expr_types.get(&lambda_expr_span) {
             Some(Ty::Fn { params, .. }) => params.clone(),
             other => {
-                return Err(CompileError {
-                    message: format!("internal error: expected fn type for lambda, got {other:?}"),
-                    span: lambda_expr_span,
-                });
+                return Err(CompileError::new(
+                    format!("internal error: expected fn type for lambda, got {other:?}"),
+                    lambda_expr_span,
+                ));
             }
         };
 
@@ -402,10 +448,10 @@ impl Compiler {
 
         // Lambda params.
         if lambda_params.len() != param_tys.len() {
-            return Err(CompileError {
-                message: "internal error: lambda param arity mismatch".to_string(),
-                span: lambda_expr_span,
-            });
+            return Err(CompileError::new(
+                "internal error: lambda param arity mismatch",
+                lambda_expr_span,
+            ));
         }
 
         for (idx, _p) in lambda_params.iter().enumerate() {
@@ -626,10 +672,10 @@ impl<'a> FunctionLowerer<'a> {
         param_types: &[Option<Type>],
     ) -> Result<(), CompileError> {
         if func.params.len() != param_mutabilities.len() || func.params.len() != param_types.len() {
-            return Err(CompileError {
-                message: "internal error: function signature arity mismatch".to_string(),
-                span: func.span,
-            });
+            return Err(CompileError::new(
+                "internal error: function signature arity mismatch",
+                func.span,
+            ));
         }
 
         let mut trap_block: Option<BlockId> = None;
@@ -775,17 +821,14 @@ impl<'a> FunctionLowerer<'a> {
                     .env
                     .modules
                     .resolve_type_fqn(&self.module, &segments, enum_path.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 if kind != DefKind::Enum {
-                    return Err(CompileError {
-                        message: format!(
+                    return Err(CompileError::new(
+                        format!(
                             "internal error: expected an enum type in pattern, got `{enum_name}`"
                         ),
-                        span: enum_path.span,
-                    });
+                        enum_path.span,
+                    ));
                 }
 
                 let mut out_fields = Vec::with_capacity(fields.len());
@@ -814,17 +857,14 @@ impl<'a> FunctionLowerer<'a> {
                     .env
                     .modules
                     .resolve_type_fqn(&self.module, &segments, type_path.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 if kind != DefKind::Struct {
-                    return Err(CompileError {
-                        message: format!(
+                    return Err(CompileError::new(
+                        format!(
                             "internal error: expected a struct type in pattern, got `{type_name}`"
                         ),
-                        span: type_path.span,
-                    });
+                        type_path.span,
+                    ));
                 }
 
                 let mut out_fields = Vec::with_capacity(fields.len());
@@ -920,10 +960,10 @@ impl<'a> FunctionLowerer<'a> {
             let label = block.label.clone();
             let func = self.name.clone();
             let id = self.current.0;
-            return Err(CompileError {
-                message: format!("internal error: block already terminated ({func}:{id} {label})"),
-                span: Span::new(0, 0),
-            });
+            return Err(CompileError::new(
+                format!("internal error: block already terminated ({func}:{id} {label})"),
+                Span::new(0, 0),
+            ));
         }
         block.terminator = Some(term);
         Ok(())
@@ -1226,14 +1266,14 @@ impl<'a> FunctionLowerer<'a> {
 
         // No local loop: this can only happen if we are compiling an extracted helper.
         match self.kind {
-            FnKind::Real => Err(CompileError {
-                message: if is_break {
-                    "`break` outside of a loop".to_string()
+            FnKind::Real => Err(CompileError::new(
+                if is_break {
+                    "`break` outside of a loop"
                 } else {
-                    "`continue` outside of a loop".to_string()
+                    "`continue` outside of a loop"
                 },
                 span,
-            }),
+            )),
             FnKind::ExprHelper => {
                 let variant = if is_break {
                     CONTROL_VARIANT_BREAK
@@ -1289,10 +1329,10 @@ impl<'a> FunctionLowerer<'a> {
             }
             BindingKind::Const | BindingKind::Readonly => {
                 let Some(init_expr) = init else {
-                    return Err(CompileError {
-                        message: "const/readonly bindings require an initializer".to_string(),
+                    return Err(CompileError::new(
+                        "const/readonly bindings require an initializer",
                         span,
-                    });
+                    ));
                 };
                 let value_local = self.lower_expr(init_expr)?;
                 let dst = self.alloc_local();
@@ -1449,17 +1489,14 @@ impl<'a> FunctionLowerer<'a> {
                     .env
                     .modules
                     .resolve_type_fqn(&self.module, &segments, type_path.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 if kind != DefKind::Struct {
-                    return Err(CompileError {
-                        message: format!(
+                    return Err(CompileError::new(
+                        format!(
                             "internal error: expected a struct type for struct literal, got `{type_name}`"
                         ),
-                        span: type_path.span,
-                    });
+                        type_path.span,
+                    ));
                 }
                 self.emit(Instruction::MakeStruct {
                     dst,
@@ -1487,32 +1524,29 @@ impl<'a> FunctionLowerer<'a> {
                     .env
                     .modules
                     .resolve_type_fqn(&self.module, &segments, interface.span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
+                    .map_err(|e| CompileError::new(e.message, e.span))?;
                 if kind != DefKind::Interface {
-                    return Err(CompileError {
-                        message: format!(
+                    return Err(CompileError::new(
+                        format!(
                             "internal error: expected an interface for effect call, got `{interface_name}`"
                         ),
-                        span: interface.span,
-                    });
+                        interface.span,
+                    ));
                 }
                 let Some(iface_def) = self.compiler.env.interfaces.get(&interface_name) else {
-                    return Err(CompileError {
-                        message: format!("internal error: unknown interface `{interface_name}`"),
-                        span: interface.span,
-                    });
+                    return Err(CompileError::new(
+                        format!("internal error: unknown interface `{interface_name}`"),
+                        interface.span,
+                    ));
                 };
                 let Some(method_info) = iface_def.all_methods.get(&method.name) else {
-                    return Err(CompileError {
-                        message: format!(
+                    return Err(CompileError::new(
+                        format!(
                             "internal error: unknown effect/method `{}.{}`",
                             interface_name, method.name
                         ),
-                        span: method.span,
-                    });
+                        method.span,
+                    ));
                 };
                 self.emit(Instruction::Perform {
                     dst: Some(dst),
@@ -1606,10 +1640,7 @@ impl<'a> FunctionLowerer<'a> {
                 .env
                 .modules
                 .try_resolve_type_fqn(&self.module, prefix, span)
-                .map_err(|e| CompileError {
-                    message: e.message,
-                    span: e.span,
-                })?
+                .map_err(|e| CompileError::new(e.message, e.span))?
                 && kind == DefKind::Enum
                 && let Some(def) = self.compiler.env.enums.get(&type_fqn)
                 && def
@@ -1638,10 +1669,7 @@ impl<'a> FunctionLowerer<'a> {
                 .env
                 .modules
                 .try_resolve_type_fqn(&self.module, prefix, span)
-                .map_err(|e| CompileError {
-                    message: e.message,
-                    span: e.span,
-                })?;
+                .map_err(|e| CompileError::new(e.message, e.span))?;
             if let Some((kind, type_fqn)) = prefix_ty
                 && kind != DefKind::Interface
             {
@@ -1659,10 +1687,7 @@ impl<'a> FunctionLowerer<'a> {
                 .env
                 .modules
                 .resolve_value_fqn(&self.module, &segments, span)
-                .map_err(|e| CompileError {
-                    message: e.message,
-                    span: e.span,
-                })?,
+                .map_err(|e| CompileError::new(e.message, e.span))?,
         };
         let wrapper = {
             let compiler = &mut *self.compiler;
@@ -2021,9 +2046,8 @@ impl<'a> FunctionLowerer<'a> {
             UnaryOp::Neg => {
                 let ty = self
                     .expr_ty(expr)
-                    .ok_or_else(|| CompileError {
-                        message: "internal error: missing type for unary expression".to_string(),
-                        span,
+                    .ok_or_else(|| {
+                        CompileError::new("internal error: missing type for unary expression", span)
                     })?
                     .clone();
                 let v = self.lower_expr(expr)?;
@@ -2046,10 +2070,10 @@ impl<'a> FunctionLowerer<'a> {
                             vec![Operand::Local(zero), Operand::Local(v)],
                         )
                     }
-                    other => Err(CompileError {
-                        message: format!("internal error: unary - not supported for {other}"),
+                    other => Err(CompileError::new(
+                        format!("internal error: unary - not supported for {other}"),
                         span,
-                    }),
+                    )),
                 }
             }
         }
@@ -2142,16 +2166,17 @@ impl<'a> FunctionLowerer<'a> {
             _ => {
                 let ty = self
                     .expr_ty(left)
-                    .ok_or_else(|| CompileError {
-                        message: "internal error: missing type for binary operator".to_string(),
-                        span,
+                    .ok_or_else(|| {
+                        CompileError::new("internal error: missing type for binary operator", span)
                     })?
                     .clone();
                 let l = self.lower_expr(left)?;
                 let r = self.lower_expr(right)?;
-                let func = select_binop_fn(op, &ty).ok_or_else(|| CompileError {
-                    message: format!("internal error: unsupported binary op `{op:?}` for `{ty}`"),
-                    span,
+                let func = select_binop_fn(op, &ty).ok_or_else(|| {
+                    CompileError::new(
+                        format!("internal error: unsupported binary op `{op:?}` for `{ty}`"),
+                        span,
+                    )
                 })?;
                 self.lower_named_call(func, vec![Operand::Local(l), Operand::Local(r)])
             }
@@ -2167,23 +2192,23 @@ impl<'a> FunctionLowerer<'a> {
         match target {
             Expr::Path { path, .. } => {
                 if path.segments.len() != 1 {
-                    return Err(CompileError {
-                        message: "assignment target must be a local name".to_string(),
+                    return Err(CompileError::new(
+                        "assignment target must be a local name",
                         span,
-                    });
+                    ));
                 }
                 let name = &path.segments[0].name;
                 let Some(var) = self.lookup_var(name) else {
-                    return Err(CompileError {
-                        message: format!("unknown name `{name}`"),
-                        span: path.segments[0].span,
-                    });
+                    return Err(CompileError::new(
+                        format!("unknown name `{name}`"),
+                        path.segments[0].span,
+                    ));
                 };
                 if var.kind != BindingKind::Let {
-                    return Err(CompileError {
-                        message: format!("cannot assign to `{name}` (not a `let` binding)"),
-                        span: path.segments[0].span,
-                    });
+                    return Err(CompileError::new(
+                        format!("cannot assign to `{name}` (not a `let` binding)"),
+                        path.segments[0].span,
+                    ));
                 }
                 let local = var.local;
                 let rhs = self.lower_expr(value)?;
@@ -2215,10 +2240,7 @@ impl<'a> FunctionLowerer<'a> {
                 });
                 Ok(self.alloc_unit())
             }
-            _ => Err(CompileError {
-                message: "invalid assignment target".to_string(),
-                span,
-            }),
+            _ => Err(CompileError::new("invalid assignment target", span)),
         }
     }
 
@@ -2241,10 +2263,10 @@ impl<'a> FunctionLowerer<'a> {
         // First-class continuation call: `cont(value_for_effect_call)`.
         if matches!(self.expr_ty(callee), Some(Ty::Cont { .. })) {
             if args.len() != 1 {
-                return Err(CompileError {
-                    message: "continuation call takes exactly one argument".to_string(),
+                return Err(CompileError::new(
+                    "continuation call takes exactly one argument",
                     span,
-                });
+                ));
             }
             let k_local = self.lower_expr(callee)?;
             let v = self.lower_expr(&args[0])?;
@@ -2277,10 +2299,7 @@ impl<'a> FunctionLowerer<'a> {
                     .env
                     .modules
                     .try_resolve_type_fqn(&self.module, prefix, span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?
+                    .map_err(|e| CompileError::new(e.message, e.span))?
                 {
                     match kind {
                         DefKind::Enum => {
@@ -2333,10 +2352,7 @@ impl<'a> FunctionLowerer<'a> {
                     .env
                     .modules
                     .resolve_value_fqn(&self.module, &segments, span)
-                    .map_err(|e| CompileError {
-                        message: e.message,
-                        span: e.span,
-                    })?,
+                    .map_err(|e| CompileError::new(e.message, e.span))?,
             };
             let mut call_args = Vec::with_capacity(args.len());
             for arg in args {
@@ -2407,26 +2423,26 @@ impl<'a> FunctionLowerer<'a> {
         span: Span,
     ) -> Result<Local, CompileError> {
         if args.is_empty() {
-            return Err(CompileError {
-                message: "interface method call requires an explicit receiver argument".to_string(),
+            return Err(CompileError::new(
+                "interface method call requires an explicit receiver argument",
                 span,
-            });
+            ));
         }
 
         let (origin_iface, method_id) = {
             let Some(iface_def) = self.compiler.env.interfaces.get(&iface_name) else {
-                return Err(CompileError {
-                    message: format!("internal error: unknown interface `{iface_name}`"),
+                return Err(CompileError::new(
+                    format!("internal error: unknown interface `{iface_name}`"),
                     span,
-                });
+                ));
             };
             let Some(method_info) = iface_def.all_methods.get(&method_name) else {
-                return Err(CompileError {
-                    message: format!(
+                return Err(CompileError::new(
+                    format!(
                         "internal error: unknown interface method `{iface_name}::{method_name}`"
                     ),
                     span,
-                });
+                ));
             };
             let origin = method_info.origin.clone();
             let method_id = format!("{origin}::{method_name}");
@@ -2435,11 +2451,14 @@ impl<'a> FunctionLowerer<'a> {
 
         let recv_ty = self
             .expr_ty(&args[0])
-            .ok_or_else(|| CompileError {
-                message: "internal error: missing type for interface call receiver".to_string(),
-                span: args[0].span(),
+            .ok_or_else(|| {
+                CompileError::new(
+                    "internal error: missing type for interface call receiver",
+                    args[0].span(),
+                )
             })?
             .clone();
+
         let recv_for_dispatch = match &recv_ty {
             Ty::Readonly(inner) => inner.as_ref(),
             other => other,
@@ -2454,12 +2473,10 @@ impl<'a> FunctionLowerer<'a> {
                 origin_iface.clone(),
                 method_name.clone(),
             )) else {
-                return Err(CompileError {
-                    message: format!(
-                        "no impl found for `{origin_iface}::{method_name}` on `{type_name}`"
-                    ),
+                return Err(CompileError::new(
+                    format!("no impl found for `{origin_iface}::{method_name}` on `{type_name}`"),
                     span,
-                });
+                ));
             };
             let impl_fn = impl_fn.clone();
 
@@ -2503,9 +2520,11 @@ impl<'a> FunctionLowerer<'a> {
     ) -> Result<Local, CompileError> {
         let recv_ty = self
             .expr_ty(receiver)
-            .ok_or_else(|| CompileError {
-                message: "internal error: missing type for method receiver".to_string(),
-                span: receiver.span(),
+            .ok_or_else(|| {
+                CompileError::new(
+                    "internal error: missing type for method receiver",
+                    receiver.span(),
+                )
             })?
             .clone();
 
@@ -2538,10 +2557,10 @@ impl<'a> FunctionLowerer<'a> {
         // Constrained generic receiver (`T: I`) => dynamic dispatch within `I`.
         if let Ty::Gen(id) = recv_for_dispatch {
             let Some(iface_name) = self.generics.get(*id).and_then(|g| g.constraint.clone()) else {
-                return Err(CompileError {
-                    message: "internal error: unconstrained generic method call".to_string(),
+                return Err(CompileError::new(
+                    "internal error: unconstrained generic method call",
                     span,
-                });
+                ));
             };
             return self.lower_method_vcall(receiver, &iface_name, &method.name, args, span);
         }
@@ -2554,9 +2573,8 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         // Concrete receiver => static dispatch via the canonical interface method id.
-        let recv_nom = nominal_type_name(&recv_ty).ok_or_else(|| CompileError {
-            message: "method receiver must be a nominal type".to_string(),
-            span: receiver.span(),
+        let recv_nom = nominal_type_name(&recv_ty).ok_or_else(|| {
+            CompileError::new("method receiver must be a nominal type", receiver.span())
         })?;
 
         let mut origins: BTreeMap<String, String> = BTreeMap::new();
@@ -2576,23 +2594,22 @@ impl<'a> FunctionLowerer<'a> {
                     .or_insert_with(|| iface_name.clone());
             }
         }
-
         if origins.is_empty() {
-            return Err(CompileError {
-                message: format!("unknown method `{}` on `{recv_nom}`", method.name),
-                span: method.span,
-            });
+            return Err(CompileError::new(
+                format!("unknown method `{}` on `{recv_nom}`", method.name),
+                method.span,
+            ));
         }
         if origins.len() != 1 {
             let candidates: Vec<String> = origins.into_keys().collect();
-            return Err(CompileError {
-                message: format!(
+            return Err(CompileError::new(
+                format!(
                     "ambiguous method `{}` on `{recv_nom}`; candidates: {}",
                     method.name,
                     candidates.join(", ")
                 ),
-                span: method.span,
-            });
+                method.span,
+            ));
         }
 
         let origin_iface = origins.into_keys().next().expect("origins.len()==1");
@@ -2601,13 +2618,13 @@ impl<'a> FunctionLowerer<'a> {
             origin_iface.clone(),
             method.name.clone(),
         )) else {
-            return Err(CompileError {
-                message: format!(
+            return Err(CompileError::new(
+                format!(
                     "internal error: missing impl entry for `{origin_iface}::{}`",
                     method.name
                 ),
                 span,
-            });
+            ));
         };
         let impl_fn = impl_fn.clone();
 
@@ -2636,16 +2653,16 @@ impl<'a> FunctionLowerer<'a> {
         span: Span,
     ) -> Result<Local, CompileError> {
         let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
-            return Err(CompileError {
-                message: format!("internal error: unknown interface `{iface_name}`"),
+            return Err(CompileError::new(
+                format!("internal error: unknown interface `{iface_name}`"),
                 span,
-            });
+            ));
         };
         let Some(info) = iface_def.all_methods.get(method_name) else {
-            return Err(CompileError {
-                message: format!("unknown method `{method_name}` on `{iface_name}`"),
+            return Err(CompileError::new(
+                format!("unknown method `{method_name}` on `{iface_name}`"),
                 span,
-            });
+            ));
         };
         let method_id = format!("{}::{method_name}", info.origin);
 
@@ -2803,10 +2820,10 @@ impl<'a> FunctionLowerer<'a> {
             }
         }
         if value_arms.is_empty() {
-            return Err(CompileError {
-                message: "`match` must have at least one value arm".to_string(),
+            return Err(CompileError::new(
+                "`match` must have at least one value arm",
                 span,
-            });
+            ));
         }
 
         // Build handler clauses and handler blocks.
@@ -2823,31 +2840,28 @@ impl<'a> FunctionLowerer<'a> {
                 .env
                 .modules
                 .resolve_type_fqn(&self.module, &segments, effect_pat.interface.span)
-                .map_err(|e| CompileError {
-                    message: e.message,
-                    span: e.span,
-                })?;
+                .map_err(|e| CompileError::new(e.message, e.span))?;
             if kind != DefKind::Interface {
-                return Err(CompileError {
-                    message: format!(
+                return Err(CompileError::new(
+                    format!(
                         "internal error: expected interface in handler clause, got `{interface}`"
                     ),
-                    span: effect_pat.interface.span,
-                });
+                    effect_pat.interface.span,
+                ));
             }
             let method = effect_pat.method.name.clone();
             let interface = {
                 let Some(iface_def) = self.compiler.env.interfaces.get(&interface) else {
-                    return Err(CompileError {
-                        message: format!("internal error: unknown interface `{interface}`"),
-                        span: effect_pat.interface.span,
-                    });
+                    return Err(CompileError::new(
+                        format!("internal error: unknown interface `{interface}`"),
+                        effect_pat.interface.span,
+                    ));
                 };
                 let Some(method_info) = iface_def.all_methods.get(&method) else {
-                    return Err(CompileError {
-                        message: format!("unknown effect/method `{}.{}`", interface, method),
-                        span: effect_pat.method.span,
-                    });
+                    return Err(CompileError::new(
+                        format!("unknown effect/method `{}.{}`", interface, method),
+                        effect_pat.method.span,
+                    ));
                 };
                 method_info.origin.clone()
             };
