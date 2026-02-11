@@ -1,5 +1,7 @@
 # Generic interfaces (and other generic ergonomics)
 
+NOTE: This document is superseded by `proposals/generic-rework.md` and is kept for history.
+
 This doc proposes adding support for **generic interfaces** (and potentially generic interface
 methods) and clarifies how they should interact with:
 
