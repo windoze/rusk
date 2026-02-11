@@ -950,7 +950,9 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
 
-            // Infix cast: `expr as Type`
+            // Infix casts:
+            // - `expr as Type`   (interface upcast; chainable)
+            // - `expr as? Type`  (checked cast; returns `Option<T>`)
             if matches!(self.lookahead.kind, TokenKind::KwAs) {
                 let l_bp = 15;
                 if l_bp < min_bp {
@@ -958,14 +960,44 @@ impl<'a> Parser<'a> {
                 }
                 let start = lhs.span().start;
                 self.bump()?;
+                let checked = matches!(self.lookahead.kind, TokenKind::Question);
+                if checked {
+                    self.bump()?;
+                }
                 let ty = self.parse_type()?;
                 let end = ty.span().end;
-                lhs = Expr::As {
+                lhs = if checked {
+                    Expr::AsQuestion {
+                        expr: Box::new(lhs),
+                        ty,
+                        span: Span::new(start, end),
+                    }
+                } else {
+                    Expr::As {
+                        expr: Box::new(lhs),
+                        ty,
+                        span: Span::new(start, end),
+                    }
+                };
+                // Allow chaining: `x as A as B` (and `x as A as? B`).
+                continue;
+            }
+
+            // Infix type test: `expr is Type`
+            if matches!(self.lookahead.kind, TokenKind::KwIs) {
+                let l_bp = 9;
+                if l_bp < min_bp {
+                    break;
+                }
+                let start = lhs.span().start;
+                self.bump()?;
+                let ty = self.parse_type()?;
+                let end = ty.span().end;
+                lhs = Expr::Is {
                     expr: Box::new(lhs),
                     ty,
                     span: Span::new(start, end),
                 };
-                // Allow chaining: `x as A as B`.
                 continue;
             }
 
@@ -1076,7 +1108,9 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
 
-            // Infix cast: `expr as Type`
+            // Infix casts:
+            // - `expr as Type`   (interface upcast; chainable)
+            // - `expr as? Type`  (checked cast; returns `Option<T>`)
             if matches!(self.lookahead.kind, TokenKind::KwAs) {
                 let l_bp = 15;
                 if l_bp < min_bp {
@@ -1084,9 +1118,39 @@ impl<'a> Parser<'a> {
                 }
                 let start = lhs.span().start;
                 self.bump()?;
+                let checked = matches!(self.lookahead.kind, TokenKind::Question);
+                if checked {
+                    self.bump()?;
+                }
                 let ty = self.parse_type()?;
                 let end = ty.span().end;
-                lhs = Expr::As {
+                lhs = if checked {
+                    Expr::AsQuestion {
+                        expr: Box::new(lhs),
+                        ty,
+                        span: Span::new(start, end),
+                    }
+                } else {
+                    Expr::As {
+                        expr: Box::new(lhs),
+                        ty,
+                        span: Span::new(start, end),
+                    }
+                };
+                continue;
+            }
+
+            // Infix type test: `expr is Type`
+            if matches!(self.lookahead.kind, TokenKind::KwIs) {
+                let l_bp = 9;
+                if l_bp < min_bp {
+                    break;
+                }
+                let start = lhs.span().start;
+                self.bump()?;
+                let ty = self.parse_type()?;
+                let end = ty.span().end;
+                lhs = Expr::Is {
                     expr: Box::new(lhs),
                     ty,
                     span: Span::new(start, end),

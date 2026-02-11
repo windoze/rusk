@@ -1,0 +1,18 @@
+// expect: ok int 11
+
+interface Marker {}
+
+struct S {}
+
+impl Marker for S {}
+
+fn main() -> int {
+    let x = (S {} as Marker);
+    let a = if x is Marker { 1 } else { 0 };
+    let b = match x as? Marker {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    };
+    a * 10 + b
+}
+

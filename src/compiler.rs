@@ -175,6 +175,7 @@ impl Compiler {
     fn compile_program(mut self, program: &Program) -> Result<Module, CompileError> {
         self.compile_module_items(&ModulePath::root(), &program.items)?;
         self.populate_interface_dispatch_table()?;
+        self.populate_interface_impl_table();
 
         Ok(self.module)
     }
@@ -194,6 +195,16 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    fn populate_interface_impl_table(&mut self) {
+        for (type_name, iface) in &self.env.interface_impls {
+            self.module
+                .interface_impls
+                .entry(type_name.clone())
+                .or_default()
+                .insert(iface.clone());
+        }
     }
 
     fn compile_module_items(
@@ -1601,6 +1612,8 @@ impl<'a> FunctionLowerer<'a> {
                 span,
             } => self.lower_assign_expr(target, value, *span),
             Expr::As { expr, .. } => self.lower_expr(expr),
+            Expr::AsQuestion { expr, ty, span } => self.lower_checked_cast_expr(expr, ty, *span),
+            Expr::Is { expr, ty, span } => self.lower_is_expr(expr, ty, *span),
         }
     }
 
@@ -2242,6 +2255,83 @@ impl<'a> FunctionLowerer<'a> {
             }
             _ => Err(CompileError::new("invalid assignment target", span)),
         }
+    }
+
+    fn lower_is_expr(
+        &mut self,
+        expr: &Expr,
+        ty: &crate::ast::TypeExpr,
+        span: Span,
+    ) -> Result<Local, CompileError> {
+        let value = self.lower_expr(expr)?;
+        let target_ty = self.resolve_runtime_check_target_type(ty, "`is`")?;
+        let dst = self.alloc_local();
+        self.emit(Instruction::IsType {
+            dst,
+            value: Operand::Local(value),
+            ty: target_ty,
+        });
+        let _ = span;
+        Ok(dst)
+    }
+
+    fn lower_checked_cast_expr(
+        &mut self,
+        expr: &Expr,
+        ty: &crate::ast::TypeExpr,
+        span: Span,
+    ) -> Result<Local, CompileError> {
+        let value = self.lower_expr(expr)?;
+        let target_ty = self.resolve_runtime_check_target_type(ty, "`as?`")?;
+        let dst = self.alloc_local();
+        self.emit(Instruction::CheckedCast {
+            dst,
+            value: Operand::Local(value),
+            ty: target_ty,
+        });
+        let _ = span;
+        Ok(dst)
+    }
+
+    fn resolve_runtime_check_target_type(
+        &self,
+        ty: &crate::ast::TypeExpr,
+        op: &str,
+    ) -> Result<Type, CompileError> {
+        let path = match ty {
+            crate::ast::TypeExpr::Path(path) => path,
+            other => {
+                return Err(CompileError::new(
+                    format!("{op} target must be a nominal type"),
+                    other.span(),
+                ));
+            }
+        };
+
+        if !path.segments.iter().all(|seg| seg.args.is_empty()) {
+            return Err(CompileError::new(
+                format!("{op} target type must not have type arguments in v0.4"),
+                path.span,
+            ));
+        }
+
+        let segments: Vec<String> = path
+            .segments
+            .iter()
+            .map(|seg| seg.name.name.clone())
+            .collect();
+        let (kind, fqn) = self
+            .compiler
+            .env
+            .modules
+            .resolve_type_fqn(&self.module, &segments, path.span)
+            .map_err(|e| CompileError::new(e.message, e.span))?;
+
+        Ok(match kind {
+            DefKind::Struct => Type::Struct(fqn),
+            DefKind::Enum => Type::Enum(fqn),
+            DefKind::Interface => Type::Interface(fqn),
+        })
     }
 
     fn lower_named_call(&mut self, func: &str, args: Vec<Operand>) -> Result<Local, CompileError> {
@@ -3011,16 +3101,8 @@ fn nominal_type_name(ty: &Ty) -> Option<&str> {
 }
 
 fn type_implements_interface(env: &ProgramEnv, type_name: &str, iface: &str) -> bool {
-    let Some(iface_def) = env.interfaces.get(iface) else {
-        return false;
-    };
-    iface_def.all_methods.iter().all(|(m, info)| {
-        env.interface_methods.contains_key(&(
-            type_name.to_string(),
-            info.origin.clone(),
-            m.to_string(),
-        ))
-    })
+    env.interface_impls
+        .contains(&(type_name.to_string(), iface.to_string()))
 }
 
 fn mir_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Option<Type> {

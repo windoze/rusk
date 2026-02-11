@@ -414,6 +414,16 @@ pub enum Expr {
         ty: TypeExpr,
         span: Span,
     },
+    AsQuestion {
+        expr: Box<Expr>,
+        ty: TypeExpr,
+        span: Span,
+    },
+    Is {
+        expr: Box<Expr>,
+        ty: TypeExpr,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -443,7 +453,9 @@ impl Expr {
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Assign { span, .. }
-            | Expr::As { span, .. } => *span,
+            | Expr::As { span, .. }
+            | Expr::AsQuestion { span, .. }
+            | Expr::Is { span, .. } => *span,
         }
     }
 }

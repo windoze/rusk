@@ -1,7 +1,7 @@
 use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
 use crate::mir::{
     BasicBlock, BlockId, ConstValue, EffectId, Function, HandlerClause, Instruction, Local, Module,
-    Mutability, Operand, Pattern, SwitchCase, Terminator,
+    Mutability, Operand, Pattern, SwitchCase, Terminator, Type,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -673,6 +673,58 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
+    fn type_test(&mut self, value: &Value, ty: &Type) -> Result<bool, RuntimeError> {
+        Ok(match ty {
+            Type::Unit => matches!(value, Value::Unit),
+            Type::Bool => matches!(value, Value::Bool(_)),
+            Type::Int => matches!(value, Value::Int(_)),
+            Type::Float => matches!(value, Value::Float(_)),
+            Type::String => matches!(value, Value::String(_)),
+            Type::Bytes => matches!(value, Value::Bytes(_)),
+            Type::Fn => matches!(value, Value::Function(_)),
+            Type::Cont => matches!(value, Value::Continuation(_)),
+            Type::Array => match value {
+                Value::Ref(r) => matches!(self.heap_get(r.handle)?, HeapValue::Array(_)),
+                _ => false,
+            },
+            Type::Tuple(arity) => match value {
+                Value::Ref(r) => match self.heap_get(r.handle)? {
+                    HeapValue::Tuple(items) => items.len() == *arity,
+                    _ => false,
+                },
+                _ => false,
+            },
+            Type::Struct(name) => match value {
+                Value::Ref(r) => match self.heap_get(r.handle)? {
+                    HeapValue::Struct { type_name, .. } => type_name == name,
+                    _ => false,
+                },
+                _ => false,
+            },
+            Type::Enum(name) => match value {
+                Value::Ref(r) => match self.heap_get(r.handle)? {
+                    HeapValue::Enum { enum_name, .. } => enum_name == name,
+                    _ => false,
+                },
+                _ => false,
+            },
+            Type::Interface(iface) => {
+                let Value::Ref(r) = value else {
+                    return Ok(false);
+                };
+                let dyn_type = match self.heap_get(r.handle)? {
+                    HeapValue::Struct { type_name, .. } => type_name.as_str(),
+                    HeapValue::Enum { enum_name, .. } => enum_name.as_str(),
+                    _ => return Ok(false),
+                };
+                self.module
+                    .interface_impls
+                    .get(dyn_type)
+                    .is_some_and(|ifaces| ifaces.contains(iface.as_str()))
+            }
+        })
+    }
+
     fn execute_instruction(
         &mut self,
         frame_index: usize,
@@ -696,6 +748,26 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     .read_local(src)?
                     .into_readonly_view();
                 self.stack[frame_index].write_local(dst, v)?;
+            }
+            Instruction::IsType { dst, value, ty } => {
+                let v = self.eval_operand(frame_index, &value)?;
+                let ok = self.type_test(&v, &ty)?;
+                self.stack[frame_index].write_local(dst, Value::Bool(ok))?;
+            }
+            Instruction::CheckedCast { dst, value, ty } => {
+                let v = self.eval_operand(frame_index, &value)?;
+                let ok = self.type_test(&v, &ty)?;
+                let (variant, fields) = if ok {
+                    ("Some", vec![v])
+                } else {
+                    ("None", Vec::new())
+                };
+                let handle = self.alloc_heap(HeapValue::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: variant.to_string(),
+                    fields,
+                });
+                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
             }
 
             Instruction::MakeStruct {

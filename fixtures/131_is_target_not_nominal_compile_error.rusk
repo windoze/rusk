@@ -1,0 +1,6 @@
+// expect: compile_error target must be a nominal type
+
+fn main() -> bool {
+    1 is int
+}
+

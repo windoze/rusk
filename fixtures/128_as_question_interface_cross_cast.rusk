@@ -1,0 +1,28 @@
+// expect: ok int 10
+
+interface Animal { fn kind() -> int; }
+interface Drawable { fn draw() -> int; }
+
+struct Dog {}
+struct Rock {}
+
+impl Animal for Dog { fn kind(self: Dog) -> int { 1 } }
+impl Drawable for Dog { fn draw(self: Dog) -> int { 10 } }
+impl Drawable for Rock { fn draw(self: Rock) -> int { 20 } }
+
+fn main() -> int {
+    let d1 = (Dog {} as Drawable);
+    let d2 = (Rock {} as Drawable);
+
+    let a = match d1 as? Animal {
+        Option::Some(_a) => 1,
+        Option::None => 0,
+    };
+    let b = match d2 as? Animal {
+        Option::Some(_a) => 1,
+        Option::None => 0,
+    };
+
+    a * 10 + b
+}
+

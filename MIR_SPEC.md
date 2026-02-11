@@ -62,6 +62,11 @@ In this implementation, method-resolution metadata is represented as a lookup ta
 
 - `(dynamic_type_name, method_id) -> function_name`
 
+Additionally, checked casts / runtime type tests against `interface` targets may use optional
+interface-implementation metadata:
+
+- `(dynamic_type_name, interface_name) -> bool`
+
 ### 3.2 Function
 
 A function body is a CFG of basic blocks:
@@ -255,6 +260,18 @@ Some instructions are statement-like and produce no value.
   - Syntax: `%dst = as_readonly %src`
   - Semantics: if `%src` is a reference, create a readonly view; otherwise copy.
   - Trap: `%src` is uninitialized.
+
+- `is_type`:
+  - Syntax: `%dst = is_type <op_value> <Type>`
+  - Semantics: runtime type test; writes `bool` into `%dst`.
+    - for nominal targets (`struct`/`enum`): compare dynamic nominal type identity
+    - for `interface` targets: consult interface-implementation metadata (if present)
+
+- `checked_cast`:
+  - Syntax: `%dst = checked_cast <op_value> <Type>`
+  - Semantics: runtime checked cast; writes an `Option` enum value into `%dst`:
+    - on success: `Option::Some(<op_value>)`
+    - on failure: `Option::None`
 
 ### 7.2 Data and Fields
 

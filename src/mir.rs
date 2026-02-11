@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A local slot index within a MIR function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -16,6 +16,11 @@ pub struct Module {
 
     /// Optional virtual-call resolution: `(type_name, method_name) -> function_name`.
     pub methods: BTreeMap<(String, String), String>,
+
+    /// Optional interface implementation metadata: `(type_name -> {interface_name...})`.
+    ///
+    /// Used by checked casts / runtime type tests for `interface` targets.
+    pub interface_impls: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// A MIR function body.
@@ -191,6 +196,16 @@ pub enum Instruction {
     AsReadonly {
         dst: Local,
         src: Local,
+    },
+    IsType {
+        dst: Local,
+        value: Operand,
+        ty: Type,
+    },
+    CheckedCast {
+        dst: Local,
+        value: Operand,
+        ty: Type,
     },
 
     MakeStruct {

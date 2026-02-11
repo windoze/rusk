@@ -1,0 +1,22 @@
+// expect: ok int 1
+
+struct Cell { v: int }
+
+interface Animal { fn tag() -> int; }
+
+struct Dog { cell: Cell }
+
+impl Animal for Dog { fn tag(self: Dog) -> int { 1 } }
+
+fn make(cell: Cell) -> Animal {
+    cell.v = cell.v + 1;
+    Dog { cell: cell } as Animal
+}
+
+fn main() -> int {
+    let c = Cell { v: 0 };
+    match make(c) as? Dog {
+        Option::Some(_dog) => c.v,
+        Option::None => -1,
+    }
+}

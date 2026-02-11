@@ -23,6 +23,7 @@ pub enum TokenKind {
     KwUse,
     KwMod,
     KwAs,
+    KwIs,
     KwFn,
     KwCont,
     KwLet,
@@ -75,6 +76,7 @@ pub enum TokenKind {
     AndAnd,
     OrOr,
     Bang,
+    Question,
     At,
     Pipe,
 }
@@ -246,6 +248,10 @@ impl<'a> Lexer<'a> {
                     TokenKind::Bang
                 }
             }
+            '?' => {
+                self.bump_char();
+                TokenKind::Question
+            }
             '<' => {
                 self.bump_char();
                 if self.peek_char() == Some('=') {
@@ -332,6 +338,7 @@ impl<'a> Lexer<'a> {
             "use" => TokenKind::KwUse,
             "mod" => TokenKind::KwMod,
             "as" => TokenKind::KwAs,
+            "is" => TokenKind::KwIs,
             "fn" => TokenKind::KwFn,
             "cont" => TokenKind::KwCont,
             "let" => TokenKind::KwLet,

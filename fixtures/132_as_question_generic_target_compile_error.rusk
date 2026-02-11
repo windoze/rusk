@@ -1,0 +1,9 @@
+// expect: compile_error type args are erased at runtime
+
+fn main() -> int {
+    match (Option::Some(1) as? Option<int>) {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    }
+}
+

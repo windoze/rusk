@@ -51,7 +51,7 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`pub`, `use`, `mod`, `as`, `fn`, `cont`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
+`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
 
 Control flow:
 
@@ -70,6 +70,8 @@ Operators:
 `==` `!=` `<` `<=` `>` `>=`
 
 `&&` `||` `!`
+
+`?` (used only as part of `as?` in v0.4)
 
 Effect marker:
 
@@ -294,14 +296,15 @@ Precedence (high → low):
 
 1. postfix: call, field, index
 2. unary: `!` `-`
-3. cast: `as`
+3. cast: `as`, `as?`
 4. multiplicative: `*` `/` `%`
 5. additive: `+` `-`
-6. comparison: `<` `<=` `>` `>=`
-7. equality: `==` `!=`
-8. logical and: `&&`
-9. logical or: `||`
-10. assignment: `=`
+6. type test: `is`
+7. comparison: `<` `<=` `>` `>=`
+8. equality: `==` `!=`
+9. logical and: `&&`
+10. logical or: `||`
+11. assignment: `=`
 
 ```
 Expr           := AssignExpr ;
@@ -310,10 +313,11 @@ AssignExpr     := OrExpr ( "=" AssignExpr )? ;
 OrExpr         := AndExpr ( "||" AndExpr )* ;
 AndExpr        := EqExpr ( "&&" EqExpr )* ;
 EqExpr         := CmpExpr ( ( "==" | "!=" ) CmpExpr )* ;
-CmpExpr        := AddExpr ( ( "<" | "<=" | ">" | ">=" ) AddExpr )* ;
+CmpExpr        := TypeTestExpr ( ( "<" | "<=" | ">" | ">=" ) TypeTestExpr )* ;
+TypeTestExpr   := AddExpr ( "is" Type )? ;
 AddExpr        := MulExpr ( ( "+" | "-" ) MulExpr )* ;
 MulExpr        := CastExpr ( ( "*" | "/" | "%" ) CastExpr )* ;
-CastExpr       := UnaryExpr ( "as" Type )* ;
+CastExpr       := UnaryExpr ( "as" ("?")? Type )* ;
 UnaryExpr      := ( "!" | "-" ) UnaryExpr | PostfixExpr ;
 
 PostfixExpr    := PrimaryExpr Postfix* ;
@@ -350,6 +354,21 @@ TupleLit       := "(" Expr "," ArgList? ")" ;
 `expr as I` performs an explicit interface upcast. The RHS must be an `interface` type. The cast
 does not allocate and does not change runtime representation; it only changes the static type, and
 it preserves `readonly` views.
+
+`expr as? T` performs a checked cast and returns `Option<T>`. It evaluates `expr` once, then:
+
+- if the runtime type test succeeds, returns `Option::Some(expr)` (no wrapper allocation for the cast itself)
+- otherwise returns `Option::None`
+
+`expr is T` performs the same runtime type test but returns `bool`.
+
+In v0.4, the target type `T` for `is` / `as?` must be a **runtime-checkable nominal type**:
+
+- an arity-0 `struct` type, or
+- an arity-0 `enum` type, or
+- a (non-generic) `interface` type.
+
+Type arguments are erased at runtime in v0.4, so `is` / `as?` reject targets with type arguments.
 
 #### 3.6.1 Literals
 

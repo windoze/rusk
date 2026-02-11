@@ -227,6 +227,14 @@ pub(crate) struct ProgramEnv {
     ///
     /// `function_name` must exist in `functions`.
     pub(crate) interface_methods: BTreeMap<(String, String, String), String>,
+
+    /// Nominal interface implementation table:
+    ///
+    /// `(dynamic_type_name, interface_name)` is present iff the type implements the interface.
+    ///
+    /// Entries include transitive super-interfaces, so if `J: I` and `T` implements `J`, then
+    /// `(T, I)` is also present.
+    pub(crate) interface_impls: BTreeSet<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1082,6 +1090,26 @@ fn process_impl_item(
                         message: format!(
                             "extra method `{extra}` not declared in interface `{}`",
                             iface_def_name
+                        ),
+                        span: item.span,
+                    });
+                }
+            }
+
+            // Record nominal interface implementations, including transitive supers.
+            //
+            // This is used for:
+            // - checked casts (`as?`) / type tests (`is`) against interfaces, including marker
+            //   interfaces with zero methods
+            // - overlap detection for marker interfaces (no methods => no interface_methods keys)
+            let mut all_ifaces = BTreeSet::<String>::new();
+            collect_interface_and_supers(env, &iface_def_name, &mut all_ifaces);
+            for iface in all_ifaces {
+                let key = (type_name.clone(), iface.clone());
+                if !env.interface_impls.insert(key) {
+                    return Err(TypeError {
+                        message: format!(
+                            "overlapping impls for `{type_name}`: duplicate implementation of interface `{iface}`"
                         ),
                         span: item.span,
                     });
@@ -2120,6 +2148,8 @@ impl<'a> FnTypechecker<'a> {
                 span,
             } => self.typecheck_assign(target, value, *span)?,
             Expr::As { expr, ty, span } => self.typecheck_as(expr, ty, *span)?,
+            Expr::AsQuestion { expr, ty, span } => self.typecheck_as_question(expr, ty, *span)?,
+            Expr::Is { expr, ty, span } => self.typecheck_is(expr, ty, *span)?,
         };
 
         let resolved = self.infer.resolve_ty(ty);
@@ -3817,6 +3847,95 @@ impl<'a> FnTypechecker<'a> {
         })
     }
 
+    fn typecheck_is(&mut self, expr: &Expr, ty: &TypeExpr, span: Span) -> Result<Ty, TypeError> {
+        // Evaluate/typecheck the LHS for side effects and to populate `expr_types`.
+        let _ = self.typecheck_expr(expr, ExprUse::Value)?;
+
+        // Validate the target type is runtime-checkable in v0.4.
+        let _ = self.lower_runtime_checkable_type(ty, ty.span(), "`is`")?;
+        let _ = span;
+        Ok(Ty::Bool)
+    }
+
+    fn typecheck_as_question(
+        &mut self,
+        expr: &Expr,
+        ty: &TypeExpr,
+        span: Span,
+    ) -> Result<Ty, TypeError> {
+        let src_ty = self.typecheck_expr(expr, ExprUse::Value)?;
+        let src_ty = self.infer.resolve_ty(src_ty);
+        let src_is_readonly = matches!(src_ty, Ty::Readonly(_));
+
+        let target = self.lower_runtime_checkable_type(ty, ty.span(), "`as?`")?;
+        let target = if src_is_readonly {
+            target.as_readonly_view()
+        } else {
+            target
+        };
+        let _ = span;
+
+        // Built-in enum `Option<T> { Some(T), None }`.
+        Ok(Ty::App(TyCon::Named("Option".to_string()), vec![target]))
+    }
+
+    fn lower_runtime_checkable_type(
+        &self,
+        ty: &TypeExpr,
+        span: Span,
+        op: &str,
+    ) -> Result<Ty, TypeError> {
+        let scope = GenericScope::new(&self.sig.generics)?;
+        let target_ty = lower_type_expr(self.env, &self.module, &scope, ty)?;
+
+        let target_ty = match target_ty {
+            Ty::Readonly(inner) => {
+                return Err(TypeError {
+                    message: format!(
+                        "{op} target type must not be `readonly`; got `readonly {inner}`"
+                    ),
+                    span,
+                });
+            }
+            other => other,
+        };
+
+        let (name, args) = match target_ty {
+            Ty::App(TyCon::Named(name), args) => (name, args),
+            other => {
+                return Err(TypeError {
+                    message: format!(
+                        "{op} target must be a nominal type (`struct`/`enum`/`interface`), got `{other}`"
+                    ),
+                    span,
+                });
+            }
+        };
+
+        if !args.is_empty() {
+            return Err(TypeError {
+                message: format!(
+                    "{op} target type must be monomorphic in v0.4 (type args are erased at runtime)"
+                ),
+                span,
+            });
+        }
+
+        if !self.env.structs.contains_key(&name)
+            && !self.env.enums.contains_key(&name)
+            && !self.env.interfaces.contains_key(&name)
+        {
+            return Err(TypeError {
+                message: format!(
+                    "{op} target must be a nominal type (`struct`/`enum`/`interface`), got `{name}`"
+                ),
+                span,
+            });
+        }
+
+        Ok(Ty::App(TyCon::Named(name), Vec::new()))
+    }
+
     fn ensure_implements_interface(
         &self,
         ty: &Ty,
@@ -3834,9 +3953,9 @@ impl<'a> FnTypechecker<'a> {
     }
 
     fn type_implements_interface(&self, ty: &Ty, iface: &str) -> bool {
-        let Some(iface_def) = self.env.interfaces.get(iface) else {
+        if !self.env.interfaces.contains_key(iface) {
             return false;
-        };
+        }
 
         let ty = match ty {
             Ty::Readonly(inner) => inner.as_ref(),
@@ -3860,16 +3979,11 @@ impl<'a> FnTypechecker<'a> {
             }
 
             // Concrete nominal type: must provide implementations for every canonical method in
-            // the target interface's full method set.
-            Ty::App(TyCon::Named(type_name), _args) => {
-                iface_def.all_methods.iter().all(|(m, info)| {
-                    self.env.interface_methods.contains_key(&(
-                        type_name.clone(),
-                        info.origin.clone(),
-                        m.clone(),
-                    ))
-                })
-            }
+            // the target interface, including super-interfaces.
+            Ty::App(TyCon::Named(type_name), _args) => self
+                .env
+                .interface_impls
+                .contains(&(type_name.clone(), iface.to_string())),
 
             _ => false,
         }
@@ -3895,6 +4009,18 @@ fn nominal_type_name(ty: &Ty) -> Option<&str> {
         Ty::Readonly(inner) => nominal_type_name(inner),
         Ty::App(TyCon::Named(name), _) => Some(name.as_str()),
         _ => None,
+    }
+}
+
+fn collect_interface_and_supers(env: &ProgramEnv, iface: &str, out: &mut BTreeSet<String>) {
+    if !out.insert(iface.to_string()) {
+        return;
+    }
+    let Some(def) = env.interfaces.get(iface) else {
+        return;
+    };
+    for sup in &def.supers {
+        collect_interface_and_supers(env, sup, out);
     }
 }
 
