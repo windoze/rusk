@@ -3,101 +3,34 @@
 ### Summary
 
 The `unit` type should be able to be omitted in certain contexts to improve code readability and reduce verbosity.
-This change should be purely syntactic and should not affect the underlying semantics of the language.
+This change should be purely grammar/parser change and should not affect the underlying semantics of the language.
+Syntax and SPEC should be updated accordingly.
 
-- Clarify that `unit` is equivalent to an empty tuple `()` whenever there is no ambiguity. An extra pair of parentheses may be required in some cases to avoid ambiguity.
-
-- `fn` return type when it is `unit`, should be able to be omitted.
+- `fn` return type may be omitted iff it's `unit`. Below 2 function definitions are equivalent.
     ```
     // Before
-    fn foo() -> unit {}
+    fn foo() -> unit {...}
 
     // After
-    fn foo() {}
-    ```
+    fn foo() {...}
 
-- `enum` variant with `unit` type should be able to be defined and used without explicitly specifying `unit`.
-    ```
+    // It applies to interface method signatures as well
     // Before
-    enum MyEnum {
-        A(unit),
-        B(i32),
-    }
-
-    fn foo(e: MyEnum) {
-        match e {
-            MyEnum::A(unit) => { /* ... */ },
-            MyEnum::B(val) => { /* ... */ },
-        }
+    interface I {
+        fn bar() -> unit;
     }
 
     // After
-    enum MyEnum {
-        A,
-        B(i32),
-    }
-    fn foo(e: MyEnum) {
-        match e {
-            MyEnum::A => { /* ... */ },
-            MyEnum::B(val) => { /* ... */ },
-        }
+    interface I {
+        fn bar();
     }
     ```
 
-
-- `fn` type signatures with `unit` parameters should allow omission of `unit`.
+- `fn` type signatures return type may be omitted iff it’s `unit`. Below 2 sets are equivalent.
     ```
     // Before
-    type MyFn = fn(unit) -> i32;
-    fn bar(f: fn(unit) -> i32) -> i32 {}
+    fn baz(f: fn(int) -> unit) -> int {}
 
     // After
-    type MyFn = fn() -> i32;
-    fn bar(f: fn() -> i32) -> i32 {}
-    ```
-
-- `fn` type signatures with `unit` return type should allow omission of `unit`.
-    ```
-    // Before
-    type MyFn = fn(i32) -> unit;
-    fn baz(f: fn(i32) -> unit) -> i32 {}
-
-    // After
-    type MyFn = fn(i32);
-    fn baz(f: fn(i32)) -> i32 {}
-    ```
-
-- Return unit should be able to be omitted.
-    ```
-    // Before
-    fn qux() -> unit {
-        return unit;
-    }
-
-    // After
-    fn qux() {
-        return;
-    }
-    // Or
-    fn qux() {
-        // implicit return of unit
-    }
-    ```
-
-    ```
-    // Before
-    let a = {
-        // some code
-        let x = 1;
-        return unit;
-    };
-    // After
-    let a = {
-        let x =1;
-        return;
-    };
-    // Or
-    let a = {
-        let x =1;
-    }
+    fn baz(f: fn(int)) -> int {}
     ```

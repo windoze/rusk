@@ -309,7 +309,7 @@ fn walk_module_items(
 }
 
 fn add_prelude(env: &mut ProgramEnv) {
-    // Built-in enum Option<T> { Some(T), None(unit) }
+    // Built-in enum Option<T> { Some(T), None }
     env.enums.insert(
         "Option".to_string(),
         EnumDef {
@@ -322,7 +322,7 @@ fn add_prelude(env: &mut ProgramEnv) {
             }],
             variants: BTreeMap::from([
                 ("Some".to_string(), vec![Ty::Gen(0)]),
-                ("None".to_string(), vec![Ty::Unit]),
+                ("None".to_string(), vec![]),
             ]),
         },
     );
@@ -1959,6 +1959,34 @@ impl<'a> FnTypechecker<'a> {
 
         let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
         let mut func_name: Option<String> = None;
+
+        // Bare enum variant value: `Enum::Variant` where `Variant` has zero fields.
+        //
+        // This is sugar for `Enum::Variant()` (and is only allowed for zero-field variants).
+        if segments.len() >= 2 {
+            let prefix = &segments[..segments.len() - 1];
+            let last = segments.last().expect("len >= 2");
+            let last_ident = path.segments.last().expect("len >= 2");
+            if let Some((kind, type_fqn)) = self
+                .env
+                .modules
+                .try_resolve_type_fqn(&self.module, prefix, span)
+                .map_err(|e| TypeError {
+                    message: e.message,
+                    span: e.span,
+                })?
+            {
+                if kind == crate::modules::DefKind::Enum
+                    && let Some(def) = self.env.enums.get(&type_fqn)
+                    && def
+                        .variants
+                        .get(last)
+                        .is_some_and(|variant_fields| variant_fields.is_empty())
+                {
+                    return self.typecheck_enum_lit(&type_fqn, last_ident, &[], span);
+                }
+            }
+        }
 
         // Allow taking an inherent method as a value: `Type::method`.
         if segments.len() >= 2 {

@@ -1523,8 +1523,46 @@ impl<'a> FunctionLowerer<'a> {
             }
         }
 
-        // Function item used as a value.
         let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+
+        // Bare enum variant value: `Enum::Variant` where `Variant` has zero fields.
+        //
+        // This is sugar for `Enum::Variant()`. The typechecker ensures it is only used for
+        // zero-field variants, but we also validate here for better errors and robustness.
+        if segments.len() >= 2 {
+            let prefix = &segments[..segments.len() - 1];
+            let last = segments.last().expect("len >= 2");
+            let last_ident = path.segments.last().expect("len >= 2");
+            if let Some((kind, type_fqn)) = self
+                .compiler
+                .env
+                .modules
+                .try_resolve_type_fqn(&self.module, prefix, span)
+                .map_err(|e| CompileError {
+                    message: e.message,
+                    span: e.span,
+                })?
+            {
+                if kind == DefKind::Enum
+                    && let Some(def) = self.compiler.env.enums.get(&type_fqn)
+                    && def
+                        .variants
+                        .get(last)
+                        .is_some_and(|variant_fields| variant_fields.is_empty())
+                {
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::MakeEnum {
+                        dst,
+                        enum_name: type_fqn,
+                        variant: last_ident.name.clone(),
+                        fields: Vec::new(),
+                    });
+                    return Ok(dst);
+                }
+            }
+        }
+
+        // Function item used as a value.
         let mut func_name: Option<String> = None;
         if segments.len() >= 2 {
             let prefix = &segments[..segments.len() - 1];
@@ -1766,7 +1804,7 @@ impl<'a> FunctionLowerer<'a> {
         //   loop {
         //     match core::intrinsics::next(it) {
         //       Option::Some(x) => { body; }
-        //       Option::None(()) => break;
+        //       Option::None => break;
         //     }
         //   }
         let iter_val = self.lower_expr(iter)?;
@@ -1800,7 +1838,7 @@ impl<'a> FunctionLowerer<'a> {
             args: vec![Operand::Local(it_local)],
         });
 
-        // `Option::Some(x)` binds one value, `Option::None(())` binds none.
+        // `Option::Some(x)` binds one value, `Option::None` binds none.
         let some_param = self.alloc_local();
         self.blocks[loop_body.0].params = vec![some_param];
 
@@ -1819,7 +1857,7 @@ impl<'a> FunctionLowerer<'a> {
                     pattern: Pattern::Enum {
                         enum_name: "Option".to_string(),
                         variant: "None".to_string(),
-                        fields: vec![Pattern::Wildcard],
+                        fields: vec![],
                     },
                     target: loop_none,
                 },

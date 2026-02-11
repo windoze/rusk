@@ -30,8 +30,8 @@ fn main() {
     match interp.run_function("main", vec![]) {
         Ok(Value::Unit) => {}
         Ok(other) => {
-            // The current spec requires `main() -> unit`, but printing a non-unit return
-            // is useful during development.
+            // `main` defaults to returning `unit` (explicitly or via omission), but printing a
+            // non-unit return is useful during development.
             println!("{other:?}");
         }
         Err(e) => {

@@ -109,6 +109,7 @@ Notes:
 - Parameters are immutable bindings; mutability in Rusk refers to *object mutability* (heap objects), not rebinding.
 - `readonly` on a parameter means the parameter is a readonly view (attempting to mutate through it traps).
 - Parameters may use destructuring patterns; if a parameter pattern does not match at runtime, the function traps.
+- If `ReturnType` is omitted, it defaults to `unit` (i.e., `fn f(...) { ... }` is sugar for `fn f(...) -> unit { ... }`).
 
 #### 3.2.2 Structs
 
@@ -142,6 +143,9 @@ Interfaces define:
 InterfaceItem  := "interface" Ident GenericParams? "{" InterfaceMember* "}" ;
 InterfaceMember:= "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? ";" ;
 ```
+
+Notes:
+- If `ReturnType` is omitted in an interface member, it defaults to `unit`.
 
 #### 3.2.5 Implementations
 
@@ -227,7 +231,7 @@ Type           := ("readonly")? TypeAtom ;
 
 TypeAtom       := PrimType
                | "[" Type "]"                      // dynamic array type
-               | "fn" "(" TypeList? ")" "->" Type  // function type
+               | "fn" "(" TypeList? ")" ("->" Type)?  // function type (defaults to `unit`)
                | "cont" "(" Type ")" "->" Type     // continuation token type
                | "(" ")"                           // empty tuple type (aka unit)
                | "(" Type ")"                      // parenthesized type
@@ -396,6 +400,7 @@ EnumLit        := Ident "::" Ident "(" (Expr ("," Expr)*)? (",")? ")" ;
 Notes:
 - Tuple literals use Rust-like comma disambiguation: `(x)` is a parenthesized expression, `(x,)` is a 1-tuple, and `()` is `unit`.
 - Struct literals are parsed only when `Ident` looks like a nominal type name (it must start with an ASCII uppercase letter, e.g. `Point { x: 1 }`).
+- A zero-field enum variant may be written without parentheses as `Enum::Variant`; this is sugar for `Enum::Variant()`.
 
 #### 3.6.3 Lambdas
 
@@ -502,7 +507,7 @@ TuplePatItemList
               := TuplePatItem ("," TuplePatItem)* (",")? ;
 TuplePatItem   := Pattern | RestPat ;
 
-EnumPat        := Ident "::" Ident "(" (Pattern ("," Pattern)*)? (",")? ")" ;
+EnumPat        := Ident "::" Ident ("(" (Pattern ("," Pattern)*)? (",")? ")")? ;
 StructPat      := Ident "{" (StructPatItem ("," StructPatItem)*)? (",")? "}" ;
 StructPatItem  := StructPatField | ".." ;
 StructPatField := Ident (":" Pattern)? ;
@@ -516,6 +521,7 @@ RestPat        := ".." Ident? ;
 Notes:
 - `Ident` in a pattern always binds (there are no “constant patterns” for names).
 - Parentheses are Rust-like: `(p)` is a parenthesized pattern; a tuple pattern requires a comma and/or a `..` rest marker (e.g. `(p,)`, `(a, b)`, `(..rest)`).
+- A zero-field enum variant may be written without parentheses as `Enum::Variant`; this is sugar for `Enum::Variant()`.
 - Tuple and array patterns may contain `..` at most once; it matches “the rest”:
   - `(a, ..b, c)` binds `b` to the middle slice as a tuple (or `()` if empty).
   - `[a, ..b, c]` binds `b` to the middle slice as an array.
@@ -789,10 +795,10 @@ at runtime.
 
 The following must be fully annotated:
 
-- all `fn` item parameters and return types
+- all `fn` item parameters and non-`unit` return types (a `unit` return type may be omitted)
 - all `struct` field types
 - all `enum` variant field types
-- all `interface` method parameter and return types
+- all `interface` method parameter and non-`unit` return types (a `unit` return type may be omitted)
 
 Local `let` bindings may omit types (inferred).
 
@@ -805,7 +811,7 @@ Nominal types:
 - tuples: `(T1, T2, ...)` (where `()` is `unit`)
 - structs: `Name<...>`
 - enums: `Name<...>`
-- functions: `fn(T1, T2, ...) -> R`
+- functions: `fn(T1, T2, ...) -> R` (or `fn(T1, T2, ...)` as sugar for `-> unit`)
 - continuations: `cont(T) -> R` (values are introduced by effect handlers, but the type is usable in annotations)
 - interfaces: `Interface<...>`
 - readonly views: `readonly T` (only meaningful when `T` is a reference-like type; it forbids mutation through that reference)
@@ -951,7 +957,7 @@ let it = core::intrinsics::into_iter(iter);
 loop {
   match core::intrinsics::next(it) {
     Option::Some(x) => { body; }
-    Option::None(()) => break;
+    Option::None => break;
   }
 }
 ```
@@ -961,7 +967,7 @@ Required core intrinsics functions and types:
 - `struct core::intrinsics::ArrayIter<T> { arr: [T], idx: int }` (iterator state object)
 - `core::intrinsics::into_iter<T>([T]) -> core::intrinsics::ArrayIter<T>`
 - `core::intrinsics::next<T>(core::intrinsics::ArrayIter<T>) -> Option<T>`
-- `enum Option<T> { Some(T), None(unit) }`
+- `enum Option<T> { Some(T), None }`
 
 ### 9.5 Panic
 

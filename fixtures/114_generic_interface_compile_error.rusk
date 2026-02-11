@@ -1,0 +1,6 @@
+// expect: compile_error interfaces cannot be generic in v0.4
+
+interface Boxed<T> {
+    fn get() -> unit;
+}
+

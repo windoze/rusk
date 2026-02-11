@@ -1,0 +1,35 @@
+// expect: ok int 11720
+
+struct Counter { n: int }
+
+interface CounterOps {
+    fn get() -> int;
+    fn add(delta: int) -> int;
+    fn reset();
+}
+
+impl CounterOps for Counter {
+    fn get(self: Counter) -> int { self.n }
+
+    fn add(self: Counter, delta: int) -> int {
+        self.n = self.n + delta;
+        self.n
+    }
+
+    fn reset(self: Counter) {
+        self.n = 0;
+    }
+}
+
+fn main() -> int {
+    let c = Counter { n: 10 };
+
+    let a = c.get();
+    let b = c.add(5);
+    let c2 = CounterOps::add(c, 7);
+    CounterOps::reset(c);
+    let d = c.get();
+
+    a * 1000 + b * 100 + c2 * 10 + d
+}
+

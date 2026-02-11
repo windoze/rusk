@@ -1,0 +1,9 @@
+// expect: ok int 42
+
+struct Pair<A, B> { first: A, second: B }
+
+fn main() -> int {
+    let p: Pair<int, bool> = Pair { first: 42, second: true };
+    if p.second { p.first } else { 0 }
+}
+

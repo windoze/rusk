@@ -99,13 +99,16 @@ impl<'a> Parser<'a> {
         } else {
             self.parse_param_list()?
         };
-        self.expect(TokenKind::RParen)?;
+        let rparen = self.expect(TokenKind::RParen)?;
         let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
             self.bump()?;
             self.parse_type()?
         } else {
-            // In v0.4, function items must have explicit return types. Use `unit` for no value.
-            return Err(self.error_here("missing function return type (`-> ...`)"));
+            // Default return type: `unit`.
+            TypeExpr::Prim {
+                prim: PrimType::Unit,
+                span: rparen.span,
+            }
         };
         let body = self.parse_block()?;
         let end = body.span.end;
@@ -218,12 +221,16 @@ impl<'a> Parser<'a> {
             } else {
                 self.parse_param_list()?
             };
-            self.expect(TokenKind::RParen)?;
+            let rparen = self.expect(TokenKind::RParen)?;
             let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
                 self.bump()?;
                 self.parse_type()?
             } else {
-                return Err(self.error_here("missing interface method return type (`-> ...`)"));
+                // Default return type: `unit`.
+                TypeExpr::Prim {
+                    prim: PrimType::Unit,
+                    span: rparen.span,
+                }
             };
             let m_end = self.expect(TokenKind::Semi)?.span.end;
             members.push(InterfaceMember {
@@ -493,9 +500,17 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.expect(TokenKind::RParen)?;
-        self.expect(TokenKind::Arrow)?;
-        let ret = self.parse_type()?;
+        let rparen = self.expect(TokenKind::RParen)?;
+        let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
+            self.bump()?;
+            self.parse_type()?
+        } else {
+            // Default return type: `unit`.
+            TypeExpr::Prim {
+                prim: PrimType::Unit,
+                span: rparen.span,
+            }
+        };
         let end = ret.span().end;
         Ok(TypeExpr::Fn {
             params,
@@ -1890,6 +1905,26 @@ impl<'a> Parser<'a> {
                 type_path,
                 fields,
                 has_rest,
+                span: Span::new(start, end),
+            });
+        }
+
+        // Bare enum variant pattern: `EnumPath::Variant` (zero-field variant).
+        //
+        // This is syntactic sugar for `EnumPath::Variant()`. The typechecker is responsible for
+        // rejecting bare patterns for non-zero-field variants.
+        if segments.len() >= 2 {
+            let variant = segments.pop().expect("len >= 2");
+            let enum_end = segments.last().map(|s| s.span.end).unwrap_or(start);
+            let enum_path = Path {
+                segments,
+                span: Span::new(start, enum_end),
+            };
+            let end = variant.span.end;
+            return Ok(Pattern::Enum {
+                enum_path,
+                variant,
+                fields: Vec::new(),
                 span: Span::new(start, end),
             });
         }

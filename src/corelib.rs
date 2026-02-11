@@ -330,7 +330,7 @@ fn register_iterator_fns(interp: &mut Interpreter) {
                 }
                 interp.alloc_enum("Option", "Some", vec![item])
             } else {
-                interp.alloc_enum("Option", "None", vec![Value::Unit])
+                interp.alloc_enum("Option", "None", vec![])
             };
 
             let HeapValue::Struct { fields, .. } = interp.heap_value_mut(iter)? else {

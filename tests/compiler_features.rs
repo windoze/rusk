@@ -165,6 +165,63 @@ fn function_items_can_be_used_as_values() {
 }
 
 #[test]
+fn unit_return_type_can_be_omitted_on_function_items() {
+    let src = r#"
+        fn test() {
+            ()
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), Value::Unit);
+}
+
+#[test]
+fn fn_type_syntax_can_omit_unit_return_type() {
+    let src = r#"
+        fn sink(f: fn(int), x: int) -> unit {
+            f(x);
+            ()
+        }
+
+        fn g(n: int) {
+            ()
+        }
+
+        fn test() -> unit {
+            sink(g, 1);
+            ()
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), Value::Unit);
+}
+
+#[test]
+fn interface_method_signatures_can_omit_unit_return_type() {
+    let src = r#"
+        struct S {}
+
+        interface I {
+            fn bar(n: int);
+        }
+
+        impl I for S {
+            fn bar(self: S, n: int) {
+                ()
+            }
+        }
+
+        fn test() -> unit {
+            let s = S {};
+            I::bar(s, 42);
+            ()
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), Value::Unit);
+}
+
+#[test]
 fn generic_functions_infer_type_arguments() {
     let src = r#"
         fn id<T>(x: T) -> T { x }
@@ -302,26 +359,26 @@ fn can_store_and_resume_a_captured_continuation_later() {
         interface E { fn boom() -> int; }
 
         fn test_default_binder() -> int {
-            let cell = Cell { v: Option::None(()) };
+            let cell = Cell { v: Option::None };
             match @E.boom() {
                 @E.boom() => { cell.v = Option::Some(resume); 0 }
                 x => x
             };
             match cell.v {
                 Option::Some(k) => k(41)
-                Option::None(_) => 0
+                Option::None => 0
             }
         }
 
         fn test_explicit_binder() -> int {
-            let cell = Cell { v: Option::None(()) };
+            let cell = Cell { v: Option::None };
             match @E.boom() {
                 @E.boom() -> k => { cell.v = Option::Some(k); 0 }
                 x => x
             };
             match cell.v {
                 Option::Some(k) => k(42)
-                Option::None(_) => 0
+                Option::None => 0
             }
         }
     "#;
@@ -344,7 +401,7 @@ fn calling_a_continuation_value_is_one_shot() {
         interface E { fn boom() -> int; }
 
         fn bad() -> unit {
-            let cell = Cell { v: Option::None(()) };
+            let cell = Cell { v: Option::None };
             match @E.boom() {
                 @E.boom() -> k => { cell.v = Option::Some(k); 0 }
                 x => x
@@ -355,7 +412,7 @@ fn calling_a_continuation_value_is_one_shot() {
                     k(2);
                     ()
                 }
-                Option::None(_) => ()
+                Option::None => ()
             }
         }
     "#;
@@ -401,14 +458,14 @@ fn enum_construction_via_call_and_matching() {
         fn some() -> int {
             match Option::Some(42) {
                 Option::Some(n) => n
-                Option::None(_) => 0
+                Option::None => 0
             }
         }
 
         fn none() -> int {
-            match Option::None(()) {
+            match Option::None {
                 Option::Some(_) => 0
-                Option::None(_) => 7
+                Option::None => 7
             }
         }
     "#;
