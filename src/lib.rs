@@ -6,6 +6,8 @@ pub mod mir;
 /// Source text span utilities used by the front-end.
 pub mod source;
 
+mod source_map;
+
 mod ast;
 mod lexer;
 mod modules;

@@ -1,10 +1,12 @@
 use crate::ast::{Item, ModItem, ModKind, Program, UseItem, Visibility};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
+use crate::source_map::{SourceMap, SourceName};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadError {
@@ -1228,6 +1230,7 @@ impl ResolvedItem {
 pub(crate) struct ModuleLoader {
     next_base_offset: usize,
     loaded_files: BTreeSet<PathBuf>,
+    source_map: SourceMap,
 }
 
 impl ModuleLoader {
@@ -1235,28 +1238,42 @@ impl ModuleLoader {
         Self {
             next_base_offset: 0,
             loaded_files: BTreeSet::new(),
+            source_map: SourceMap::new(),
         }
+    }
+
+    pub(crate) fn source_map(&self) -> &SourceMap {
+        &self.source_map
     }
 
     pub(crate) fn load_program_from_file(
         &mut self,
         entry_path: &Path,
     ) -> Result<Program, LoadError> {
+        let display_path = entry_path.to_path_buf();
+
         let source = fs::read_to_string(entry_path).map_err(|e| LoadError {
             message: format!("failed to read `{}`: {e}", entry_path.display()),
             span: Span::new(0, 0),
         })?;
 
-        let entry_path = entry_path
+        let canon_entry = entry_path
             .canonicalize()
             .unwrap_or_else(|_| entry_path.to_path_buf());
-        self.loaded_files.insert(entry_path.clone());
+        self.loaded_files.insert(canon_entry);
 
-        let base_offset = self.alloc_base_offset(&source);
-        let mut parser = Parser::with_base_offset(&source, base_offset)?;
+        let src: Arc<str> = Arc::from(source);
+        let base_offset = self.alloc_base_offset(&src);
+        self.source_map.add_source(
+            SourceName::Path(display_path.clone()),
+            Arc::clone(&src),
+            base_offset,
+        );
+
+        let mut parser = Parser::with_base_offset(&src, base_offset)?;
         let mut program = parser.parse_program()?;
 
-        let module_dir = entry_path
+        let module_dir = display_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -1347,8 +1364,14 @@ impl ModuleLoader {
                     message: format!("failed to read `{}`: {e}", canon.display()),
                     span: item.span,
                 })?;
-                let base_offset = self.alloc_base_offset(&source);
-                let mut parser = Parser::with_base_offset(&source, base_offset)?;
+                let src: Arc<str> = Arc::from(source);
+                let base_offset = self.alloc_base_offset(&src);
+                self.source_map.add_source(
+                    SourceName::Path(path.clone()),
+                    Arc::clone(&src),
+                    base_offset,
+                );
+                let mut parser = Parser::with_base_offset(&src, base_offset)?;
                 let mut program = parser.parse_program()?;
                 program.items = self.inline_modules(program.items, &child_dir)?;
 
