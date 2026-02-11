@@ -956,23 +956,25 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let Value::Ref(r) = &recv else {
                     return Err(RuntimeError::TypeError {
                         op: "vcall",
-                        expected: "ref(struct)",
+                        expected: "ref(struct|enum)",
                         got: recv.kind(),
                     });
                 };
                 let type_name = match self.heap_get(r.handle)? {
                     HeapValue::Struct { type_name, .. } => type_name.clone(),
+                    HeapValue::Enum { enum_name, .. } => enum_name.clone(),
                     _ => {
                         return Err(RuntimeError::TypeError {
                             op: "vcall",
-                            expected: "struct",
+                            expected: "struct|enum",
                             got: ValueKind::Ref,
                         });
                     }
                 };
-                let Some(fn_name) = self.module.methods.get(&(type_name, method.clone())) else {
+                let lookup_key = (type_name.clone(), method.clone());
+                let Some(fn_name) = self.module.methods.get(&lookup_key) else {
                     return Err(RuntimeError::Trap {
-                        message: format!("unresolved vcall method: {method}"),
+                        message: format!("unresolved vcall method: {method} on {type_name}"),
                     });
                 };
                 let fn_name = fn_name.clone();

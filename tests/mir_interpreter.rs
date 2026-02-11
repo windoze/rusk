@@ -1897,7 +1897,7 @@ fn vcall_unresolved_method_is_trap() {
     let RuntimeError::Trap { message } = err else {
         panic!("expected trap error");
     };
-    assert_eq!(message, "unresolved vcall method: nope");
+    assert_eq!(message, "unresolved vcall method: nope on Point");
 }
 
 #[test]

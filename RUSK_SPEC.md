@@ -140,12 +140,19 @@ Interfaces define:
 - (2) effect signatures for `@Interface.method(...)`.
 
 ```
-InterfaceItem  := "interface" Ident GenericParams? "{" InterfaceMember* "}" ;
+InterfaceItem  := "interface" Ident GenericParams?
+                 ( ":" PathType ( "+" PathType )* )?
+                 "{" InterfaceMember* "}" ;
 InterfaceMember:= "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? ";" ;
 ```
 
 Notes:
 - If `ReturnType` is omitted in an interface member, it defaults to `unit`.
+- `interface` items may inherit from one or more super-interfaces using `: A + B + ...`.
+- Super-interfaces must resolve to interfaces (not structs/enums).
+- Cycles in the interface inheritance graph are rejected.
+- In v0.4, multiple inheritance is rejected if two inherited interfaces introduce the same method
+  name from different origins (diamond duplication of the same origin is allowed).
 
 #### 3.2.5 Implementations
 
@@ -287,13 +294,14 @@ Precedence (high → low):
 
 1. postfix: call, field, index
 2. unary: `!` `-`
-3. multiplicative: `*` `/` `%`
-4. additive: `+` `-`
-5. comparison: `<` `<=` `>` `>=`
-6. equality: `==` `!=`
-7. logical and: `&&`
-8. logical or: `||`
-9. assignment: `=`
+3. cast: `as`
+4. multiplicative: `*` `/` `%`
+5. additive: `+` `-`
+6. comparison: `<` `<=` `>` `>=`
+7. equality: `==` `!=`
+8. logical and: `&&`
+9. logical or: `||`
+10. assignment: `=`
 
 ```
 Expr           := AssignExpr ;
@@ -304,7 +312,8 @@ AndExpr        := EqExpr ( "&&" EqExpr )* ;
 EqExpr         := CmpExpr ( ( "==" | "!=" ) CmpExpr )* ;
 CmpExpr        := AddExpr ( ( "<" | "<=" | ">" | ">=" ) AddExpr )* ;
 AddExpr        := MulExpr ( ( "+" | "-" ) MulExpr )* ;
-MulExpr        := UnaryExpr ( ( "*" | "/" | "%" ) UnaryExpr )* ;
+MulExpr        := CastExpr ( ( "*" | "/" | "%" ) CastExpr )* ;
+CastExpr       := UnaryExpr ( "as" Type )* ;
 UnaryExpr      := ( "!" | "-" ) UnaryExpr | PostfixExpr ;
 
 PostfixExpr    := PrimaryExpr Postfix* ;
@@ -337,6 +346,10 @@ EffectCall     := "@" PathExpr "." Ident "(" ArgList? ")" ;
 
 TupleLit       := "(" Expr "," ArgList? ")" ;
 ```
+
+`expr as I` performs an explicit interface upcast. The RHS must be an `interface` type. The cast
+does not allocate and does not change runtime representation; it only changes the static type, and
+it preserves `readonly` views.
 
 #### 3.6.1 Literals
 
@@ -640,7 +653,11 @@ Interface methods are called using explicit qualification:
 Logger::log(console, "hello");
 ```
 
-This is always statically resolved by the compiler based on the selected `impl`.
+If the static receiver type is a concrete nominal type (struct/enum), this may be statically
+resolved by the compiler based on the selected `impl`.
+
+If the static receiver type is an `interface` type (or an interface-constrained generic), the call
+is dynamically dispatched at runtime based on the receiver’s dynamic type.
 
 Method-call sugar is allowed:
 
@@ -649,7 +666,7 @@ console.log("hello")
 ```
 
 and is equivalent to `Logger::log(console, "hello")` **only if** the call is
-unambiguous (exactly one interface method named `log` is applicable). Otherwise,
+unambiguous (exactly one canonical interface method named `log` is applicable). Otherwise,
 the compiler reports an ambiguity error and requires explicit qualification.
 
 > Rationale: this keeps “TypeScript-like ergonomics” while maintaining “Rust-like”
@@ -675,6 +692,25 @@ Resolution rules:
 There is no ad-hoc overloading by argument types. A name resolves to at most one
 call target after the method resolution rules above are applied.
 
+### 6.4 Interface Inheritance and Upcasts
+
+Interfaces may inherit from one or more super-interfaces:
+
+```rust
+interface J: I { fn bar() -> unit; }
+interface L: J + K { fn boo() -> unit; }
+```
+
+Rules:
+
+- An interface’s *full* method set includes all methods declared in its transitive super-interfaces.
+- Interface methods are identified by their **origin interface** and method name. In diamond graphs,
+  inherited methods with the same origin are treated as a single method.
+- In v0.4, multiple inheritance is rejected if two unrelated origins introduce the same method name.
+- `impl X for T { ... }` must implement every method in `X`’s full method set (including inherited ones).
+- `expr as I` performs an explicit upcast to an interface type. Upcasts are the primary mechanism for
+  producing interface-typed values without introducing implicit subtyping into inference.
+
 ---
 
 ## 7. Effects and Handlers
@@ -688,6 +724,10 @@ An effect call is written:
 ```
 
 and is distinct from a normal interface method call.
+
+For inherited interface methods, effect identity is based on the **origin interface** and method
+name. For example, if `J: I` and `foo` is declared in `I`, then `@J.foo(...)` is the same effect as
+`@I.foo(...)`.
 
 Semantics:
 
@@ -855,6 +895,9 @@ fn log_all<T: Logger>(xs: [T]) -> unit { ... }
 ```
 
 Constraint satisfaction is based on the existence of an `impl Logger for T`.
+
+Interface inheritance is respected for constraints: if `J` inherits from `I`, then `T: J` also
+satisfies `T: I`.
 
 ### 8.7 Effects Typing
 

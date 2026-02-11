@@ -122,8 +122,26 @@ impl Compiler {
 
     fn compile_program(mut self, program: &Program) -> Result<Module, CompileError> {
         self.compile_module_items(&ModulePath::root(), &program.items)?;
+        self.populate_interface_dispatch_table()?;
 
         Ok(self.module)
+    }
+
+    fn populate_interface_dispatch_table(&mut self) -> Result<(), CompileError> {
+        for ((type_name, origin_iface, method_name), impl_fn) in &self.env.interface_methods {
+            let method_id = format!("{origin_iface}::{method_name}");
+            let key = (type_name.clone(), method_id);
+            if let Some(prev) = self.module.methods.insert(key.clone(), impl_fn.clone()) {
+                return Err(CompileError {
+                    message: format!(
+                        "internal error: duplicate dispatch entry for ({}, {}) ({prev})",
+                        key.0, key.1
+                    ),
+                    span: Span::new(0, 0),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn compile_module_items(
@@ -255,7 +273,13 @@ impl Compiler {
             .collect();
         let ret_type = mir_type_from_ty(&self.env, &sig.ret);
 
-        let mut lowerer = FunctionLowerer::new(self, FnKind::Real, module.clone(), name.clone());
+        let mut lowerer = FunctionLowerer::new(
+            self,
+            FnKind::Real,
+            module.clone(),
+            name.clone(),
+            sig.generics.clone(),
+        );
         lowerer.bind_params_from_fn_item(func, &param_mutabilities, &param_types)?;
         let value = lowerer.lower_block_expr(&func.body)?;
         if !lowerer.is_current_terminated() {
@@ -290,8 +314,13 @@ impl Compiler {
             return Ok(wrapper_name);
         }
 
-        let mut lowerer =
-            FunctionLowerer::new(self, FnKind::Real, ModulePath::root(), wrapper_name.clone());
+        let mut lowerer = FunctionLowerer::new(
+            self,
+            FnKind::Real,
+            ModulePath::root(),
+            wrapper_name.clone(),
+            Vec::new(),
+        );
 
         // Env parameter (ignored).
         let env_param_local = lowerer.alloc_local();
@@ -333,10 +362,12 @@ impl Compiler {
         Ok(wrapper_name)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_lambda_entry(
         &mut self,
         module: &ModulePath,
         entry_name: String,
+        generics: Vec<typeck::GenericParamInfo>,
         captures: &BTreeMap<String, VarInfo>,
         lambda_params: &[crate::ast::LambdaParam],
         body: &Block,
@@ -353,8 +384,13 @@ impl Compiler {
             }
         };
 
-        let mut lowerer =
-            FunctionLowerer::new(self, FnKind::Real, module.clone(), entry_name.clone());
+        let mut lowerer = FunctionLowerer::new(
+            self,
+            FnKind::Real,
+            module.clone(),
+            entry_name.clone(),
+            generics,
+        );
 
         // First param: env array.
         let env_local = lowerer.alloc_local();
@@ -427,10 +463,12 @@ impl Compiler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_match_helper(
         &mut self,
         module: &ModulePath,
         helper_name: String,
+        generics: Vec<typeck::GenericParamInfo>,
         captured: &BTreeMap<String, VarInfo>,
         scrutinee: &Expr,
         arms: &[MatchArm],
@@ -441,6 +479,7 @@ impl Compiler {
             FnKind::ExprHelper,
             module.clone(),
             helper_name.clone(),
+            generics,
         );
 
         // Captured environment params (in deterministic name order).
@@ -506,6 +545,12 @@ struct FunctionLowerer<'a> {
     kind: FnKind,
     module: ModulePath,
     name: String,
+    /// Generic parameters in scope for interpreting `Ty::Gen(n)` during lowering.
+    ///
+    /// This must match the typechecker's notion of "current generics environment" for the AST
+    /// being lowered (not necessarily the MIR function's own signature, since lambdas/helpers are
+    /// compiled from within a parent function).
+    generics: Vec<typeck::GenericParamInfo>,
     params: Vec<Param>,
     blocks: Vec<BlockBuilder>,
     current: BlockId,
@@ -515,12 +560,19 @@ struct FunctionLowerer<'a> {
 }
 
 impl<'a> FunctionLowerer<'a> {
-    fn new(compiler: &'a mut Compiler, kind: FnKind, module: ModulePath, name: String) -> Self {
+    fn new(
+        compiler: &'a mut Compiler,
+        kind: FnKind,
+        module: ModulePath,
+        name: String,
+        generics: Vec<typeck::GenericParamInfo>,
+    ) -> Self {
         Self {
             compiler,
             kind,
             module,
             name,
+            generics,
             params: Vec::new(),
             blocks: vec![BlockBuilder {
                 label: "block0".to_string(),
@@ -1447,10 +1499,25 @@ impl<'a> FunctionLowerer<'a> {
                         span: interface.span,
                     });
                 }
+                let Some(iface_def) = self.compiler.env.interfaces.get(&interface_name) else {
+                    return Err(CompileError {
+                        message: format!("internal error: unknown interface `{interface_name}`"),
+                        span: interface.span,
+                    });
+                };
+                let Some(method_info) = iface_def.all_methods.get(&method.name) else {
+                    return Err(CompileError {
+                        message: format!(
+                            "internal error: unknown effect/method `{}.{}`",
+                            interface_name, method.name
+                        ),
+                        span: method.span,
+                    });
+                };
                 self.emit(Instruction::Perform {
                     dst: Some(dst),
                     effect: EffectId {
-                        interface: interface_name,
+                        interface: method_info.origin.clone(),
                         method: method.name.clone(),
                     },
                     args: mir_args,
@@ -1499,6 +1566,7 @@ impl<'a> FunctionLowerer<'a> {
                 value,
                 span,
             } => self.lower_assign_expr(target, value, *span),
+            Expr::As { expr, .. } => self.lower_expr(expr),
         }
     }
 
@@ -1634,6 +1702,7 @@ impl<'a> FunctionLowerer<'a> {
             compiler.compile_lambda_entry(
                 &self.module,
                 entry_name.clone(),
+                self.generics.clone(),
                 &captures,
                 params,
                 body,
@@ -2344,6 +2413,26 @@ impl<'a> FunctionLowerer<'a> {
             });
         }
 
+        let (origin_iface, method_id) = {
+            let Some(iface_def) = self.compiler.env.interfaces.get(&iface_name) else {
+                return Err(CompileError {
+                    message: format!("internal error: unknown interface `{iface_name}`"),
+                    span,
+                });
+            };
+            let Some(method_info) = iface_def.all_methods.get(&method_name) else {
+                return Err(CompileError {
+                    message: format!(
+                        "internal error: unknown interface method `{iface_name}::{method_name}`"
+                    ),
+                    span,
+                });
+            };
+            let origin = method_info.origin.clone();
+            let method_id = format!("{origin}::{method_name}");
+            (origin, method_id)
+        };
+
         let recv_ty = self
             .expr_ty(&args[0])
             .ok_or_else(|| CompileError {
@@ -2351,32 +2440,56 @@ impl<'a> FunctionLowerer<'a> {
                 span: args[0].span(),
             })?
             .clone();
-        let recv_nom = nominal_type_name(&recv_ty).ok_or_else(|| CompileError {
-            message: "interface call receiver must be a nominal type".to_string(),
-            span: args[0].span(),
-        })?;
-        let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
-            recv_nom.to_string(),
-            iface_name.clone(),
-            method_name.clone(),
-        )) else {
-            return Err(CompileError {
-                message: format!("no impl found for `{iface_name}::{method_name}` on `{recv_nom}`"),
-                span,
-            });
+        let recv_for_dispatch = match &recv_ty {
+            Ty::Readonly(inner) => inner.as_ref(),
+            other => other,
         };
-        let impl_fn = impl_fn.clone();
 
-        let mut call_args = Vec::with_capacity(args.len());
-        for a in args {
+        // Static dispatch is only valid when the static receiver type is a concrete nominal type.
+        if let Ty::App(typeck::TyCon::Named(type_name), _args) = recv_for_dispatch
+            && !self.compiler.env.interfaces.contains_key(type_name)
+        {
+            let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
+                type_name.clone(),
+                origin_iface.clone(),
+                method_name.clone(),
+            )) else {
+                return Err(CompileError {
+                    message: format!(
+                        "no impl found for `{origin_iface}::{method_name}` on `{type_name}`"
+                    ),
+                    span,
+                });
+            };
+            let impl_fn = impl_fn.clone();
+
+            let mut call_args = Vec::with_capacity(args.len());
+            for a in args {
+                let v = self.lower_expr(a)?;
+                call_args.push(Operand::Local(v));
+            }
+            let dst = self.alloc_local();
+            self.emit(Instruction::Call {
+                dst: Some(dst),
+                func: impl_fn,
+                args: call_args,
+            });
+            return Ok(dst);
+        }
+
+        // Otherwise, lower to dynamic dispatch (`vcall`).
+        let recv_local = self.lower_expr(&args[0])?;
+        let mut vcall_args = Vec::with_capacity(args.len().saturating_sub(1));
+        for a in &args[1..] {
             let v = self.lower_expr(a)?;
-            call_args.push(Operand::Local(v));
+            vcall_args.push(Operand::Local(v));
         }
         let dst = self.alloc_local();
-        self.emit(Instruction::Call {
+        self.emit(Instruction::VCall {
             dst: Some(dst),
-            func: impl_fn,
-            args: call_args,
+            obj: Operand::Local(recv_local),
+            method: method_id,
+            args: vcall_args,
         });
         Ok(dst)
     }
@@ -2388,36 +2501,65 @@ impl<'a> FunctionLowerer<'a> {
         args: &[Expr],
         span: Span,
     ) -> Result<Local, CompileError> {
-        let recv_ty = self.expr_ty(receiver).ok_or_else(|| CompileError {
-            message: "internal error: missing type for method receiver".to_string(),
-            span: receiver.span(),
-        })?;
-        let recv_nom = nominal_type_name(recv_ty).ok_or_else(|| CompileError {
+        let recv_ty = self
+            .expr_ty(receiver)
+            .ok_or_else(|| CompileError {
+                message: "internal error: missing type for method receiver".to_string(),
+                span: receiver.span(),
+            })?
+            .clone();
+
+        // Inherent methods first (if the receiver has a nominal type name).
+        if let Some(recv_nom) = nominal_type_name(&recv_ty) {
+            let inherent_name = format!("{recv_nom}::{}", method.name);
+            if self.compiler.env.functions.contains_key(&inherent_name) {
+                let recv_local = self.lower_expr(receiver)?;
+                let mut call_args = Vec::with_capacity(args.len() + 1);
+                call_args.push(Operand::Local(recv_local));
+                for a in args {
+                    let v = self.lower_expr(a)?;
+                    call_args.push(Operand::Local(v));
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(dst),
+                    func: inherent_name,
+                    args: call_args,
+                });
+                return Ok(dst);
+            }
+        }
+
+        let recv_for_dispatch = match &recv_ty {
+            Ty::Readonly(inner) => inner.as_ref(),
+            other => other,
+        };
+
+        // Constrained generic receiver (`T: I`) => dynamic dispatch within `I`.
+        if let Ty::Gen(id) = recv_for_dispatch {
+            let Some(iface_name) = self.generics.get(*id).and_then(|g| g.constraint.clone()) else {
+                return Err(CompileError {
+                    message: "internal error: unconstrained generic method call".to_string(),
+                    span,
+                });
+            };
+            return self.lower_method_vcall(receiver, &iface_name, &method.name, args, span);
+        }
+
+        // Interface-typed receiver => dynamic dispatch within that interface.
+        if let Ty::App(typeck::TyCon::Named(iface_name), _args) = recv_for_dispatch
+            && self.compiler.env.interfaces.contains_key(iface_name)
+        {
+            return self.lower_method_vcall(receiver, iface_name, &method.name, args, span);
+        }
+
+        // Concrete receiver => static dispatch via the canonical interface method id.
+        let recv_nom = nominal_type_name(&recv_ty).ok_or_else(|| CompileError {
             message: "method receiver must be a nominal type".to_string(),
             span: receiver.span(),
         })?;
 
-        // Inherent methods first.
-        let inherent_name = format!("{recv_nom}::{}", method.name);
-        if self.compiler.env.functions.contains_key(&inherent_name) {
-            let recv_local = self.lower_expr(receiver)?;
-            let mut call_args = Vec::with_capacity(args.len() + 1);
-            call_args.push(Operand::Local(recv_local));
-            for a in args {
-                let v = self.lower_expr(a)?;
-                call_args.push(Operand::Local(v));
-            }
-            let dst = self.alloc_local();
-            self.emit(Instruction::Call {
-                dst: Some(dst),
-                func: inherent_name,
-                args: call_args,
-            });
-            return Ok(dst);
-        }
-
-        // Otherwise: interface method (must be unambiguous).
-        let mut candidates = Vec::new();
+        let mut origins: BTreeMap<String, String> = BTreeMap::new();
         for (iface_name, iface) in &self.compiler.env.interfaces {
             if let Some(def) = self.compiler.env.modules.def(iface_name)
                 && !def.vis.is_public()
@@ -2425,19 +2567,24 @@ impl<'a> FunctionLowerer<'a> {
             {
                 continue;
             }
-            if iface.methods.contains_key(&method.name)
-                && type_implements_interface(&self.compiler.env, recv_nom, iface_name)
-            {
-                candidates.push(iface_name.clone());
+            let Some(method_info) = iface.all_methods.get(&method.name) else {
+                continue;
+            };
+            if type_implements_interface(&self.compiler.env, recv_nom, iface_name) {
+                origins
+                    .entry(method_info.origin.clone())
+                    .or_insert_with(|| iface_name.clone());
             }
         }
-        if candidates.is_empty() {
+
+        if origins.is_empty() {
             return Err(CompileError {
                 message: format!("unknown method `{}` on `{recv_nom}`", method.name),
                 span: method.span,
             });
         }
-        if candidates.len() != 1 {
+        if origins.len() != 1 {
+            let candidates: Vec<String> = origins.into_keys().collect();
             return Err(CompileError {
                 message: format!(
                     "ambiguous method `{}` on `{recv_nom}`; candidates: {}",
@@ -2448,15 +2595,15 @@ impl<'a> FunctionLowerer<'a> {
             });
         }
 
-        let iface = &candidates[0];
+        let origin_iface = origins.into_keys().next().expect("origins.len()==1");
         let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
             recv_nom.to_string(),
-            iface.clone(),
+            origin_iface.clone(),
             method.name.clone(),
         )) else {
             return Err(CompileError {
                 message: format!(
-                    "internal error: missing impl entry for `{iface}::{}`",
+                    "internal error: missing impl entry for `{origin_iface}::{}`",
                     method.name
                 ),
                 span,
@@ -2476,6 +2623,44 @@ impl<'a> FunctionLowerer<'a> {
             dst: Some(dst),
             func: impl_fn,
             args: call_args,
+        });
+        Ok(dst)
+    }
+
+    fn lower_method_vcall(
+        &mut self,
+        receiver: &Expr,
+        iface_name: &str,
+        method_name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Local, CompileError> {
+        let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
+            return Err(CompileError {
+                message: format!("internal error: unknown interface `{iface_name}`"),
+                span,
+            });
+        };
+        let Some(info) = iface_def.all_methods.get(method_name) else {
+            return Err(CompileError {
+                message: format!("unknown method `{method_name}` on `{iface_name}`"),
+                span,
+            });
+        };
+        let method_id = format!("{}::{method_name}", info.origin);
+
+        let recv_local = self.lower_expr(receiver)?;
+        let mut vcall_args = Vec::with_capacity(args.len());
+        for a in args {
+            let v = self.lower_expr(a)?;
+            vcall_args.push(Operand::Local(v));
+        }
+        let dst = self.alloc_local();
+        self.emit(Instruction::VCall {
+            dst: Some(dst),
+            obj: Operand::Local(recv_local),
+            method: method_id,
+            args: vcall_args,
         });
         Ok(dst)
     }
@@ -2507,6 +2692,7 @@ impl<'a> FunctionLowerer<'a> {
             compiler.compile_match_helper(
                 &self.module,
                 helper_name.clone(),
+                self.generics.clone(),
                 &captured,
                 scrutinee,
                 arms,
@@ -2650,6 +2836,21 @@ impl<'a> FunctionLowerer<'a> {
                 });
             }
             let method = effect_pat.method.name.clone();
+            let interface = {
+                let Some(iface_def) = self.compiler.env.interfaces.get(&interface) else {
+                    return Err(CompileError {
+                        message: format!("internal error: unknown interface `{interface}`"),
+                        span: effect_pat.interface.span,
+                    });
+                };
+                let Some(method_info) = iface_def.all_methods.get(&method) else {
+                    return Err(CompileError {
+                        message: format!("unknown effect/method `{}.{}`", interface, method),
+                        span: effect_pat.method.span,
+                    });
+                };
+                method_info.origin.clone()
+            };
 
             let mut arg_patterns = Vec::with_capacity(effect_pat.args.len());
             let mut bind_names = Vec::new();
@@ -2799,10 +3000,10 @@ fn type_implements_interface(env: &ProgramEnv, type_name: &str, iface: &str) -> 
     let Some(iface_def) = env.interfaces.get(iface) else {
         return false;
     };
-    iface_def.methods.keys().all(|m| {
+    iface_def.all_methods.iter().all(|(m, info)| {
         env.interface_methods.contains_key(&(
             type_name.to_string(),
-            iface.to_string(),
+            info.origin.clone(),
             m.to_string(),
         ))
     })

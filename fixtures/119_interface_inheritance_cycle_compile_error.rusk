@@ -1,0 +1,7 @@
+// expect: compile_error cycle
+
+interface A: B { fn a() -> int; }
+interface B: A { fn b() -> int; }
+
+fn main() -> int { 0 }
+

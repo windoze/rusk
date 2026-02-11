@@ -110,6 +110,8 @@ pub struct InterfaceItem {
     pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
+    /// Super-interfaces declared in `interface X: A + B { ... }`.
+    pub supers: Vec<PathType>,
     pub members: Vec<InterfaceMember>,
     pub span: Span,
 }
@@ -407,6 +409,11 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+    As {
+        expr: Box<Expr>,
+        ty: TypeExpr,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -435,7 +442,8 @@ impl Expr {
             | Expr::Index { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }
-            | Expr::Assign { span, .. } => *span,
+            | Expr::Assign { span, .. }
+            | Expr::As { span, .. } => *span,
         }
     }
 }

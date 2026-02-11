@@ -209,6 +209,18 @@ impl<'a> Parser<'a> {
         let start = self.expect(TokenKind::KwInterface)?.span.start;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
+        let supers = if matches!(self.lookahead.kind, TokenKind::Colon) {
+            self.bump()?;
+            let mut supers = Vec::new();
+            supers.push(self.parse_path_type()?);
+            while matches!(self.lookahead.kind, TokenKind::Plus) {
+                self.bump()?;
+                supers.push(self.parse_path_type()?);
+            }
+            supers
+        } else {
+            Vec::new()
+        };
         self.expect(TokenKind::LBrace)?;
         let mut members = Vec::new();
         while !matches!(self.lookahead.kind, TokenKind::RBrace) {
@@ -246,6 +258,7 @@ impl<'a> Parser<'a> {
             vis,
             name,
             generics,
+            supers,
             members,
             span: Span::new(start, end),
         })
@@ -937,6 +950,25 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
 
+            // Infix cast: `expr as Type`
+            if matches!(self.lookahead.kind, TokenKind::KwAs) {
+                let l_bp = 15;
+                if l_bp < min_bp {
+                    break;
+                }
+                let start = lhs.span().start;
+                self.bump()?;
+                let ty = self.parse_type()?;
+                let end = ty.span().end;
+                lhs = Expr::As {
+                    expr: Box::new(lhs),
+                    ty,
+                    span: Span::new(start, end),
+                };
+                // Allow chaining: `x as A as B`.
+                continue;
+            }
+
             // Infix / assignment.
             let (l_bp, r_bp, op) = match self.lookahead.kind {
                 TokenKind::Assign => (1, 0, Infix::Assign),
@@ -1042,6 +1074,24 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 _ => {}
+            }
+
+            // Infix cast: `expr as Type`
+            if matches!(self.lookahead.kind, TokenKind::KwAs) {
+                let l_bp = 15;
+                if l_bp < min_bp {
+                    break;
+                }
+                let start = lhs.span().start;
+                self.bump()?;
+                let ty = self.parse_type()?;
+                let end = ty.span().end;
+                lhs = Expr::As {
+                    expr: Box::new(lhs),
+                    ty,
+                    span: Span::new(start, end),
+                };
+                continue;
             }
 
             // Infix / assignment.

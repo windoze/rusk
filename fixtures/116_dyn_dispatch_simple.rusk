@@ -1,0 +1,16 @@
+// expect: ok int 42
+
+interface I { fn foo() -> int; }
+
+struct S {}
+
+impl I for S {
+    fn foo(self: S) -> int { 42 }
+}
+
+fn main() -> int {
+    let s = S {};
+    let x = s as I;
+    x.foo()
+}
+

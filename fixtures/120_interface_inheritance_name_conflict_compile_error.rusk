@@ -1,0 +1,8 @@
+// expect: compile_error conflicting inherited method
+
+interface A { fn foo() -> int; }
+interface B { fn foo() -> int; }
+interface C: A + B { fn bar() -> int; }
+
+fn main() -> int { 0 }
+

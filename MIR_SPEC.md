@@ -43,7 +43,7 @@ MIR uses the following identifier forms in its canonical textual format
 - **Function name**: `<ident>` (e.g. `main`, `process_data`)
 - **Block label**: `<ident>` (e.g. `block0`, `block_log`)
 - **Local**: `%<ident>` (e.g. `%0`, `%msg`, `%k`)
-- **Interface method**: `<Interface>.<method>` (e.g. `Logger.log`)
+- **Virtual method id**: `<InterfaceFqn>::<method>` (e.g. `Logger::log`)
 
 An implementation may intern these names.
 
@@ -57,6 +57,10 @@ A module contains:
 - functions (required)
 - optional interface/type metadata (optional, for tooling/validation/optimization)
 - optional method-resolution metadata (optional, for `vcall`)
+
+In this implementation, method-resolution metadata is represented as a lookup table:
+
+- `(dynamic_type_name, method_id) -> function_name`
 
 ### 3.2 Function
 
@@ -316,8 +320,16 @@ Some instructions are statement-like and produce no value.
 
 - `vcall` (virtual):
   - Syntax: `%dst = vcall <op_obj> <method> (<op_args...>)`
-  - Semantics: method resolution is module/host-defined.
+  - Semantics:
+    - Evaluate `<op_obj>` to a reference value and determine its dynamic type name.
+    - Resolve `<method>` via module/host-defined method metadata, typically:
+      `(dynamic_type_name, <method>) -> <fn_name>`.
+    - Invoke `<fn_name>` with the receiver passed as the first argument, followed by `<op_args...>`.
   - Trap: missing method resolution.
+
+For interface dynamic dispatch in v0.4, the compiler uses a canonical method-id string:
+
+- `<origin_interface_fqn>::<method_name>`
 
 Argument passing respects Rusk’s value/reference semantics:
 - primitives and other value types are cloned

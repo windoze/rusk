@@ -1,0 +1,28 @@
+// expect: ok int 11112340
+
+interface I { fn foo() -> int; }
+interface J: I { fn bar() -> int; }
+interface K: I { fn baz() -> int; }
+interface L: J + K { fn boo() -> int; }
+
+struct S {}
+
+impl L for S {
+    fn foo(self: S) -> int { 10 }
+    fn bar(self: S) -> int { 20 }
+    fn baz(self: S) -> int { 30 }
+    fn boo(self: S) -> int { 40 }
+}
+
+fn main() -> int {
+    let s = S {};
+    let a = (s as I).foo();
+    let b = (s as J).foo();
+    let c = (s as K).foo();
+    let d = (s as L).foo();
+    let e = (s as J).bar();
+    let f = (s as K).baz();
+    let g = (s as L).boo();
+    a * 1000000 + b * 100000 + c * 10000 + d * 1000 + e * 100 + f * 10 + g
+}
+
