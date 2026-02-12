@@ -1,5 +1,5 @@
 use rusk_compiler::compile_file_to_mir;
-use rusk_interpreter::{Interpreter, Value, load_module, register_core_host_fns};
+use rusk_interpreter::{Interpreter, Value, from_bytes, register_core_host_fns};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -29,7 +29,7 @@ fn main() {
                     process::exit(1);
                 }
             };
-            match load_module(&bytes) {
+            match from_bytes(&bytes) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("load error: {e}");

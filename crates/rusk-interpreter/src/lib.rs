@@ -30,6 +30,6 @@ impl core::fmt::Display for LoadError {
 impl core::error::Error for LoadError {}
 
 #[cfg(feature = "serde")]
-pub fn load_module(bytes: &[u8]) -> Result<rusk_mir::Module, LoadError> {
+pub fn from_bytes(bytes: &[u8]) -> Result<rusk_mir::Module, LoadError> {
     bitcode::deserialize(bytes).map_err(LoadError)
 }

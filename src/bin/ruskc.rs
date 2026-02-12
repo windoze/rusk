@@ -1,4 +1,4 @@
-use rusk_compiler::{compile_file_to_mir, save_module};
+use rusk_compiler::{compile_file_to_mir, to_bytes};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -25,7 +25,7 @@ fn main() {
     };
 
     // 序列化 MIR
-    let bytes = match save_module(&module) {
+    let bytes = match to_bytes(&module) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("serialization error: {e}");

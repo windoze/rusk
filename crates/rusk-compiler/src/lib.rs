@@ -33,6 +33,6 @@ impl core::fmt::Display for SaveError {
 impl core::error::Error for SaveError {}
 
 #[cfg(feature = "serde")]
-pub fn save_module(module: &rusk_mir::Module) -> Result<Vec<u8>, SaveError> {
+pub fn to_bytes(module: &rusk_mir::Module) -> Result<Vec<u8>, SaveError> {
     bitcode::serialize(module).map_err(SaveError)
 }
