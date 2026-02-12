@@ -175,6 +175,7 @@ impl ModuleResolver {
 
         resolver.inject_builtin_option()?;
         resolver.inject_builtin_core()?;
+        resolver.inject_builtin_std()?;
         resolver.resolve_all_uses()?;
         Ok(resolver)
     }
@@ -743,6 +744,83 @@ impl ModuleResolver {
             );
         }
 
+        Ok(())
+    }
+
+    fn inject_builtin_std(&mut self) -> Result<(), ResolveError> {
+        // Inject a built-in `std` module, available from every module (extern-prelude-like).
+        //
+        // Unlike `core`, the `std` surface is expected to be host/platform-specific. This
+        // reference implementation provides `std::print` / `std::println` in the `rusk` CLI
+        // binary (not in `rusk-interpreter`) so that the core runtime stays portable.
+        let std_path = ModulePath::root().child("std");
+        if self.scopes.contains_key(&std_path) {
+            return Err(ResolveError {
+                message: "module path `std` is reserved".to_string(),
+                span: Span::new(0, 0),
+            });
+        }
+
+        self.defs.insert(
+            std_path.fqn(),
+            DefDecl {
+                vis: Visibility::Public {
+                    span: Span::new(0, 0),
+                },
+                defining_module: ModulePath::root(),
+            },
+        );
+
+        let std_binding = Binding {
+            vis: Visibility::Public {
+                span: Span::new(0, 0),
+            },
+            defining_module: ModulePath::root(),
+            span: Span::new(0, 0),
+            target: BindingTarget::Module(std_path.clone()),
+        };
+        for scope in self.scopes.values_mut() {
+            if scope.modules.contains_key("std") {
+                return Err(ResolveError {
+                    message: "module name `std` is reserved".to_string(),
+                    span: Span::new(0, 0),
+                });
+            }
+            scope.modules.insert("std".to_string(), std_binding.clone());
+        }
+
+        let mut std_scope = ModuleScope {
+            path: std_path.clone(),
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            values: BTreeMap::new(),
+            pending_uses: Vec::new(),
+        };
+
+        for (local, target) in [("print", "std::print"), ("println", "std::println")] {
+            std_scope.values.insert(
+                local.to_string(),
+                Binding {
+                    vis: Visibility::Public {
+                        span: Span::new(0, 0),
+                    },
+                    defining_module: std_path.clone(),
+                    span: Span::new(0, 0),
+                    target: BindingTarget::Function(target.to_string()),
+                },
+            );
+            self.defs.insert(
+                target.to_string(),
+                DefDecl {
+                    vis: Visibility::Public {
+                        span: Span::new(0, 0),
+                    },
+                    defining_module: std_path.clone(),
+                },
+            );
+        }
+
+        self.scopes.insert(std_path, std_scope);
         Ok(())
     }
 

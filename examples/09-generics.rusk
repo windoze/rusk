@@ -1,0 +1,17 @@
+// 09 - Generics
+//
+// Rusk supports parametric polymorphism for functions and nominal types.
+
+struct Pair<A, B> { first: A, second: B }
+
+fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> {
+    Pair { first: p.second, second: p.first }
+}
+
+fn main() -> int {
+    let p: Pair<int, int> = Pair { first: 1, second: 2 };
+    let q = swap(p);
+    std::println(f"swapped = ({q.first}, {q.second})");
+    q.first * 10 + q.second
+}
+

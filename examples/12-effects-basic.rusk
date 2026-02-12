@@ -1,0 +1,22 @@
+// 12 - Algebraic effects (basic)
+//
+// An effect call uses `@Interface.method(...)`. A `match` expression can handle effects while
+// evaluating its scrutinee.
+
+interface Logger { fn log(msg: string); }
+
+fn compute(x: int) -> int {
+    @Logger.log(f"compute: x = {x}");
+    x + 1
+}
+
+fn main() -> int {
+    match compute(41) {
+        @Logger.log(msg) => {
+            std::println(f"[log] {msg}");
+            resume(())
+        }
+        v => v
+    }
+}
+

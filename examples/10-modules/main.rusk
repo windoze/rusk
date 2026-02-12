@@ -1,0 +1,18 @@
+// 10 - Modules and `use`
+//
+// This is a multi-file example. Run it with:
+//   cargo run -- examples/10-modules/main.rusk
+
+mod math;
+mod util;
+
+use math::fib as fibonacci;
+use util::strings::greet;
+
+fn main() -> unit {
+    let n = 10;
+    std::println(f"fib({n}) = {fibonacci(n)}");
+    std::println(greet("modules"));
+    ()
+}
+

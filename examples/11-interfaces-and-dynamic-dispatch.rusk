@@ -1,0 +1,34 @@
+// 11 - Interfaces and dynamic dispatch
+//
+// Casting a concrete value to an `interface` enables dynamic dispatch:
+//   let x = (Concrete {} as Interface);
+//   x.method()
+
+interface Shape { fn area() -> int; }
+
+struct Rect { w: int, h: int }
+struct Square { side: int }
+
+impl Shape for Rect {
+    fn area() -> int { self.w * self.h }
+}
+
+impl Shape for Square {
+    fn area() -> int { self.side * self.side }
+}
+
+fn main() -> int {
+    let shapes = [
+        (Rect { w: 3, h: 4 } as Shape),
+        (Square { side: 5 } as Shape),
+    ];
+
+    let total = 0;
+    for s in shapes {
+        total = total + s.area();
+    };
+
+    std::println(f"total area = {total}");
+    total
+}
+

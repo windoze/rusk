@@ -554,6 +554,10 @@ fn add_prelude(env: &mut ProgramEnv) {
         )],
         Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
     );
+
+    // Host / platform functions (not part of `core`).
+    add_fn("std::print", Vec::new(), vec![Ty::String], Ty::Unit);
+    add_fn("std::println", Vec::new(), vec![Ty::String], Ty::Unit);
 }
 
 fn declare_struct(

@@ -1,0 +1,25 @@
+// 03 - Control flow: `if` and `match`
+//
+// In Rusk, `if` and `match` are expressions, so they produce values.
+
+fn abs(n: int) -> int {
+    if n < 0 { 0 - n } else { n }
+}
+
+fn classify(n: int) -> string {
+    match n {
+        0 => "zero"
+        1 => "one"
+        other => f"many (like {other})"
+    }
+}
+
+fn main() -> int {
+    let n = -3;
+    let a = abs(n);
+    let label = classify(a);
+    std::println(f"abs({n}) = {a}");
+    std::println(f"classify({a}) = {label}");
+    a
+}
+

@@ -1,0 +1,25 @@
+// 08 - Closures and `fn(...) -> ...` function values
+//
+// - Named functions and non-capturing lambdas can be passed as `fn(...) -> ...`.
+// - Lambdas can also capture locals.
+
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+
+fn main() -> int {
+    let add1 = |n| { n + 1 };
+    let v = apply(add1, 41);
+
+    let total = 0;
+    let push = |n: int| {
+        total = total + n;
+        total
+    };
+    push(10);
+    push(20);
+
+    std::println(f"apply(add1, 41) = {v}");
+    std::println(f"captured total = {total}");
+
+    v + total
+}
+

@@ -1,0 +1,16 @@
+// 13 - Typed effects
+//
+// Effects can be generic and include explicit type arguments at the call site.
+
+interface Yield<T> { fn yield(value: T) -> int; }
+
+fn main() -> int {
+    let r = match @Yield<int>.yield(10) {
+        @Yield<string>.yield(_) => resume(0)
+        @Yield<int>.yield(n) => resume(n + 1)
+        v => v
+    };
+    std::println(f"yield result = {r}");
+    r
+}
+

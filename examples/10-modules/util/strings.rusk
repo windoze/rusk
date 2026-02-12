@@ -1,0 +1,6 @@
+// A nested module loaded by `pub mod strings;` from `util/mod.rusk`.
+
+pub fn greet(name: string) -> string {
+    f"hello, {name} (from util::strings)"
+}
+

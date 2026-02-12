@@ -1,0 +1,36 @@
+// 14 - Runtime type tests: `is` and `as?`
+//
+// - `x is T` produces a `bool`.
+// - `x as? T` produces `Option::Some(T)` or `Option::None`.
+
+interface Animal { fn speak() -> string; }
+
+struct Dog { name: string }
+struct Cat { name: string }
+
+impl Animal for Dog {
+    fn speak() -> string { f"{self.name}: woof" }
+}
+
+impl Animal for Cat {
+    fn speak() -> string { f"{self.name}: meow" }
+}
+
+fn main() {
+    let a = (Dog { name: "Rex" } as Animal);
+
+    if a is Dog {
+        std::println("a is a Dog");
+    } else {
+        std::println("a is not a Dog");
+    };
+
+    match a as? Cat {
+        Option::Some(_c) => std::println("cast to Cat succeeded (unexpected)")
+        Option::None => std::println("cast to Cat failed (as expected)")
+    };
+
+    std::println(a.speak());
+    ()
+}
+

@@ -1,0 +1,14 @@
+// 02 - Values and functions
+//
+// A small program that computes a value, prints it, and returns it from `main`.
+
+fn add(a: int, b: int) -> int { a + b }
+
+fn main() -> int {
+    let a = 40;
+    let b = 2;
+    let c = add(a, b);
+    std::println(f"{a} + {b} = {c}");
+    c
+}
+

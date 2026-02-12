@@ -1,0 +1,18 @@
+// 04 - Arrays and `for` loops
+//
+// Arrays are dynamic and support indexing (`xs[i]`) and mutation (`xs[i] = v`).
+// `for` loops iterate over arrays via the iterator protocol.
+
+fn main() -> int {
+    let xs = [1, 2, 3, 4, 5];
+    xs[2] = 30;
+
+    let total = 0;
+    for x in xs {
+        total = total + x;
+    };
+
+    std::println(f"sum = {total}");
+    total
+}
+

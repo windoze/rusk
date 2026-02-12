@@ -1,0 +1,11 @@
+// 05 - Strings and `f"..."` formatted strings
+//
+// `f"..."` expressions format embedded values by converting them to strings.
+
+fn main() -> string {
+    let name = "Rusk";
+    let msg = f"Hello from {name}! 2 + 3 = {2 + 3}.";
+    std::println(msg);
+    msg
+}
+

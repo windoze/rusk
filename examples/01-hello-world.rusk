@@ -1,0 +1,12 @@
+// 01 - Hello, world!
+//
+// Demonstrates calling host-provided I/O functions:
+// - std::print(string)   -> unit
+// - std::println(string) -> unit
+
+fn main() {
+    std::print("Hello, ");
+    std::println("world!");
+    ()
+}
+

@@ -1,0 +1,30 @@
+// 06 - Structs and inherent methods
+//
+// Structs are heap-allocated objects with named fields. `impl Type { ... }` adds methods.
+
+struct Counter { n: int }
+
+impl Counter {
+    static fn new(n: int) -> Counter { Counter { n: n } }
+
+    fn inc() -> int {
+        self.n = self.n + 1;
+        self.n
+    }
+
+    fn add(delta: int) -> int {
+        self.n = self.n + delta;
+        self.n
+    }
+}
+
+fn main() -> int {
+    let c = Counter::new(0);
+    c.inc();
+    c.add(41);
+    let out = c.add(1);
+
+    std::println(f"counter = {out}");
+    out
+}
+

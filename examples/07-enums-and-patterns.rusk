@@ -1,0 +1,22 @@
+// 07 - Enums and pattern matching
+//
+// Enums are tagged unions. `match` destructures values with patterns.
+
+enum Color {
+    Rgb(int, int, int),
+    Named(string),
+}
+
+fn describe(c: Color) -> string {
+    match c {
+        Color::Rgb(r, g, b) => f"rgb({r}, {g}, {b})"
+        Color::Named(name) => f"named({name})"
+    }
+}
+
+fn main() {
+    std::println(describe(Color::Rgb(255, 0, 0)));
+    std::println(describe(Color::Named("blue")));
+    ()
+}
+

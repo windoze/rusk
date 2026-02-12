@@ -1,0 +1,19 @@
+// A file module loaded by `mod math;` from `main.rusk`.
+
+pub fn fib(n: int) -> int {
+    if n <= 0 {
+        0
+    } else {
+        let a = 0;
+        let b = 1;
+        let i = 1;
+        while i < n {
+            let next = a + b;
+            a = b;
+            b = next;
+            i = i + 1;
+        };
+        b
+    }
+}
+
