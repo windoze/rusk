@@ -1,0 +1,20 @@
+// expect: compile_error bounds do not match interface
+
+interface Show { fn show() -> string; }
+interface Hash { fn hash() -> int; }
+
+interface Pair<T> {
+    fn pair<U: Show>(u: U) -> (T, U);
+}
+
+struct Box<T> { v: T }
+struct S { x: int }
+
+impl Show for S { fn show(self: S) -> string { "S" } }
+impl Hash for S { fn hash(self: S) -> int { self.x } }
+
+impl<T> Pair<T> for Box<T> {
+    fn pair<U: Hash>(self: Box<T>, u: U) -> (T, U) { (self.v, u) }
+}
+
+fn main() -> int { 0 }

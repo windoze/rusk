@@ -1,0 +1,14 @@
+// expect: ok bool true
+
+mod a {
+    pub struct Pair<T, U> { x: T, y: U }
+
+    pub fn mk_pair<T, U>(x: T, y: U) -> Pair<T, U> {
+        Pair { x: x, y: y }
+    }
+}
+
+fn main() -> bool {
+    let p = a::mk_pair(1, "hi");
+    p is a<int>::Pair<string>
+}

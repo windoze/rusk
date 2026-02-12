@@ -1,0 +1,13 @@
+// expect: ok int 11
+
+mod a {
+    pub interface Yield2<T, U> { fn yield(value: T, tag: U) -> int; }
+}
+
+fn main() -> int {
+    match @a<int>::Yield2<string>.yield(10, "tag") {
+        @a<string>::Yield2<int>.yield(_, _) => resume(0)
+        @a<int>::Yield2<string>.yield(n, _) => resume(n + 1)
+        v => v
+    }
+}

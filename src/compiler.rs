@@ -1709,14 +1709,6 @@ impl<'a> FunctionLowerer<'a> {
                 path.span,
             ));
         }
-        for seg in &path.segments[..path.segments.len() - 1] {
-            if !seg.args.is_empty() {
-                return Err(CompileError::new(
-                    "type arguments are only supported on the last path segment",
-                    seg.span,
-                ));
-            }
-        }
 
         // Generic type parameter `T` in a type position: reify via the hidden runtime `TypeRep` value.
         if path.segments.len() == 1 && path.segments[0].args.is_empty() {
@@ -1755,14 +1747,16 @@ impl<'a> FunctionLowerer<'a> {
             DefKind::Interface => TypeRepLit::Interface(fqn),
         };
 
-        let last = path.segments.last().expect("non-empty");
-        if last.args.is_empty() {
+        let arg_count: usize = path.segments.iter().map(|seg| seg.args.len()).sum();
+        if arg_count == 0 {
             return Ok(Operand::Literal(ConstValue::TypeRep(base)));
         }
 
-        let mut arg_reps = Vec::with_capacity(last.args.len());
-        for arg in &last.args {
-            arg_reps.push(self.lower_type_rep_for_type_expr(arg)?);
+        let mut arg_reps = Vec::with_capacity(arg_count);
+        for seg in &path.segments {
+            for arg in &seg.args {
+                arg_reps.push(self.lower_type_rep_for_type_expr(arg)?);
+            }
         }
         let dst = self.alloc_local();
         self.emit(Instruction::MakeTypeRep {

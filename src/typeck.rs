@@ -1274,12 +1274,6 @@ fn process_impl_item(
                         span: item.span,
                     });
                 };
-                if method.generics.iter().any(|g| !g.bounds.is_empty()) {
-                    return Err(TypeError {
-                        message: "bounds on impl method generics are not supported yet".to_string(),
-                        span: method.name.span,
-                    });
-                }
                 if method.generics.len() != info.sig.generics.len() {
                     return Err(TypeError {
                         message: format!(
@@ -1351,6 +1345,70 @@ fn process_impl_item(
                 // Non-receiver params + return must match the interface signature, with method
                 // generic indices shifted into the impl's generic environment.
                 let shift = impl_arity - expected_iface_arity;
+
+                // Method-generic parameters (arity + bounds) must match the interface contract.
+                let got_method_generics = impl_sig.generics.get(impl_arity..).unwrap_or(&[]);
+                if got_method_generics.len() != info.sig.generics.len() {
+                    return Err(TypeError {
+                        message: "internal error: impl method generic arity mismatch".to_string(),
+                        span: method.name.span,
+                    });
+                }
+                let fmt_bounds = |bounds: &[Ty]| {
+                    if bounds.is_empty() {
+                        "no bounds".to_string()
+                    } else {
+                        bounds
+                            .iter()
+                            .map(|b| b.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" + ")
+                    }
+                };
+                for (idx, (got, expected)) in got_method_generics
+                    .iter()
+                    .zip(info.sig.generics.iter())
+                    .enumerate()
+                {
+                    if got.arity != expected.arity {
+                        return Err(TypeError {
+                            message: format!(
+                                "method `{mname}` generic parameter {} arity does not match interface `{iface_def_name}`",
+                                idx + 1
+                            ),
+                            span: method
+                                .generics
+                                .get(idx)
+                                .map(|g| g.span)
+                                .unwrap_or(method.name.span),
+                        });
+                    }
+
+                    let expected_bounds = expected
+                        .bounds
+                        .iter()
+                        .cloned()
+                        .map(|b| shift_method_generics(b, expected_iface_arity, shift))
+                        .collect::<Vec<_>>();
+                    let bounds_match = expected_bounds.len() == got.bounds.len()
+                        && expected_bounds.iter().all(|b| got.bounds.contains(b));
+                    if !bounds_match {
+                        return Err(TypeError {
+                            message: format!(
+                                "method `{mname}` generic parameter {} bounds do not match interface `{iface_def_name}`: expected {}, got {}",
+                                idx + 1,
+                                fmt_bounds(&expected_bounds),
+                                fmt_bounds(&got.bounds)
+                            ),
+                            span: method
+                                .generics
+                                .get(idx)
+                                .map(|g| g.span)
+                                .unwrap_or(method.name.span),
+                        });
+                    }
+                }
+
                 let expected_params = info
                     .sig
                     .params
@@ -1650,23 +1708,14 @@ fn lower_path_type(
         });
     }
 
-    // v0.4 restriction: only the last segment may have type arguments.
-    for seg in &path.segments[..path.segments.len() - 1] {
-        if !seg.args.is_empty() {
-            return Err(TypeError {
-                message: "type arguments are only supported on the last path segment".to_string(),
-                span: seg.span,
-            });
+    let raw_segments: Vec<String> = path.segments.iter().map(|s| s.name.name.clone()).collect();
+    let arg_count: usize = path.segments.iter().map(|seg| seg.args.len()).sum();
+    let mut args = Vec::with_capacity(arg_count);
+    for seg in &path.segments {
+        for a in &seg.args {
+            args.push(lower_type_expr(env, module, scope, a)?);
         }
     }
-
-    let last = path.segments.last().expect("non-empty");
-    let raw_segments: Vec<String> = path.segments.iter().map(|s| s.name.name.clone()).collect();
-    let args = last
-        .args
-        .iter()
-        .map(|a| lower_type_expr(env, module, scope, a))
-        .collect::<Result<Vec<_>, _>>()?;
 
     if raw_segments.len() == 1
         && let Some((gen_id, arity)) = scope.lookup(&raw_segments[0])
@@ -2925,15 +2974,6 @@ impl<'a> FnTypechecker<'a> {
                 span: interface.span,
             });
         }
-        for seg in &interface.segments[..interface.segments.len() - 1] {
-            if !seg.args.is_empty() {
-                return Err(TypeError {
-                    message: "type arguments are only supported on the last path segment"
-                        .to_string(),
-                    span: seg.span,
-                });
-            }
-        }
 
         let segments: Vec<String> = interface
             .segments
@@ -2962,24 +3002,27 @@ impl<'a> FnTypechecker<'a> {
         };
 
         let iface_arity = iface_def.generics.len();
-        let last = interface.segments.last().expect("non-empty");
-        let explicit_iface_args = !last.args.is_empty();
+        let iface_args_count: usize = interface.segments.iter().map(|seg| seg.args.len()).sum();
+        let explicit_iface_args = iface_args_count != 0;
         let scope = GenericScope::new(&self.sig.generics)?;
 
         let mut iface_args: Vec<Ty> = if explicit_iface_args {
-            if last.args.len() != iface_arity {
+            if iface_args_count != iface_arity {
                 return Err(TypeError {
                     message: format!(
                         "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
-                        last.args.len()
+                        iface_args_count
                     ),
                     span: interface.span,
                 });
             }
-            last.args
-                .iter()
-                .map(|a| lower_type_expr(self.env, &self.module, &scope, a))
-                .collect::<Result<Vec<_>, _>>()?
+            let mut iface_args = Vec::with_capacity(iface_args_count);
+            for seg in &interface.segments {
+                for a in &seg.args {
+                    iface_args.push(lower_type_expr(self.env, &self.module, &scope, a)?);
+                }
+            }
+            iface_args
         } else {
             // Inference case: `@I.foo(...)` where `I` is generic.
             (0..iface_arity)
@@ -3174,18 +3217,6 @@ impl<'a> FnTypechecker<'a> {
                             span: effect_pat.interface.span,
                         });
                     }
-                    for seg in
-                        &effect_pat.interface.segments[..effect_pat.interface.segments.len() - 1]
-                    {
-                        if !seg.args.is_empty() {
-                            return Err(TypeError {
-                                message:
-                                    "type arguments are only supported on the last path segment"
-                                        .to_string(),
-                                span: seg.span,
-                            });
-                        }
-                    }
 
                     let iface_segments: Vec<String> = effect_pat
                         .interface
@@ -3215,23 +3246,36 @@ impl<'a> FnTypechecker<'a> {
                     };
 
                     let iface_arity = iface_def.generics.len();
-                    let last = effect_pat.interface.segments.last().expect("non-empty");
-                    let explicit_iface_args = !last.args.is_empty();
+                    let iface_args_count: usize = effect_pat
+                        .interface
+                        .segments
+                        .iter()
+                        .map(|seg| seg.args.len())
+                        .sum();
+                    let explicit_iface_args = iface_args_count != 0;
                     let scope = GenericScope::new(&self.sig.generics)?;
                     let mut iface_args: Vec<Ty> = if explicit_iface_args {
-                        if last.args.len() != iface_arity {
+                        if iface_args_count != iface_arity {
                             return Err(TypeError {
                                 message: format!(
                                     "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
-                                    last.args.len()
+                                    iface_args_count
                                 ),
                                 span: effect_pat.interface.span,
                             });
                         }
-                        last.args
-                            .iter()
-                            .map(|a| lower_type_expr(self.env, &self.module, &scope, a))
-                            .collect::<Result<Vec<_>, _>>()?
+                        let mut iface_args = Vec::with_capacity(iface_args_count);
+                        for seg in &effect_pat.interface.segments {
+                            for a in &seg.args {
+                                iface_args.push(lower_type_expr(
+                                    self.env,
+                                    &self.module,
+                                    &scope,
+                                    a,
+                                )?);
+                            }
+                        }
+                        iface_args
                     } else {
                         (0..iface_arity)
                             .map(|_| self.infer.fresh_type_var())

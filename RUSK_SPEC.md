@@ -254,6 +254,8 @@ PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
 
 Notes:
 - `PathType` is used for nominal types (structs/enums/interfaces) and associated names.
+- Type arguments may appear on any path segment. Semantically, all type arguments on the path are
+  collected left-to-right and applied to the nominal type named by the path.
 - This implementation reifies arity-0 type arguments (kind `Type`) at runtime as an internal
   `TypeRep` for operations that require type-precise behavior (notably `is` / `as?` and effect
   identity). `readonly` remains a compile-time view and is not a distinct runtime type.
@@ -734,6 +736,15 @@ Interface methods may also be generic:
 interface Pair<T> { fn pair<U>(u: U) -> (T, U); }
 ```
 
+Method-generic parameters may include interface bounds:
+
+```rust
+interface Pair<T> { fn pair<U: Show>(u: U) -> (T, U); }
+```
+
+In an interface impl, the method-generic arities and bounds must match the interface method
+signature.
+
 Rules:
 
 - An interface’s *full* method set includes all methods declared in its transitive super-interfaces.
@@ -818,6 +829,7 @@ Rules:
 - Effect arms do not participate in the final value pattern matching.
 - Multiple effect arms are tried in source order; the first whose parameter
   patterns match the effect arguments is selected.
+- A `match` expression must include at least one value arm.
 
 ### 7.3 Continuations and `resume`
 
@@ -998,8 +1010,8 @@ interface Yield<T> { fn yield(value: T) -> unit; }
 - `@Yield<int>.yield(...)` and `@Yield<string>.yield(...)` are distinct effect operations at
   runtime.
 
-The type of the overall `match` expression is determined by the value arms and
-effect arms collectively (all arms must unify to a single result type).
+The type of the overall `match` expression is determined by the value arms; all effect arms must
+also unify to the same result type. A `match` expression must include at least one value arm.
 
 ### 8.8 General Recursion and Fixpoints
 

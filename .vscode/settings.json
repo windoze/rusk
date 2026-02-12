@@ -1,0 +1,33 @@
+{
+    "cSpell.words": [
+        "arities",
+        "backedge",
+        "binop",
+        "combinators",
+        "corelib",
+        "dedup",
+        "Desugarings",
+        "desugars",
+        "EBNF",
+        "fixpoint",
+        "Fixpoints",
+        "fnptr",
+        "icall",
+        "iface",
+        "impls",
+        "interp",
+        "kinded",
+        "lowerer",
+        "Lvalues",
+        "mutabilities",
+        "scrut",
+        "scrutinee",
+        "scrutinees",
+        "subpat",
+        "subtyping",
+        "typeck",
+        "typerep",
+        "uninit",
+        "vcall"
+    ]
+}

@@ -1,0 +1,9 @@
+// expect: compile_error `match` must have at least one value arm
+
+interface Yield<T> { fn yield(value: T) -> int; }
+
+fn main() -> int {
+    match @Yield<int>.yield(10) {
+        @Yield<int>.yield(n) => resume(n)
+    }
+}
