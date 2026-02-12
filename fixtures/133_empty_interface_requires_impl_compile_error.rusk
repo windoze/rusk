@@ -1,4 +1,4 @@
-// expect: compile_error does not implement interface
+// expect: compile_error does not implement
 
 interface Marker {}
 
@@ -7,4 +7,3 @@ struct Dog {}
 fn main() -> unit {
     let _ = (Dog {} as Marker);
 }
-

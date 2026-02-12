@@ -116,6 +116,8 @@ MIR values are dynamically typed at runtime. v0.2 requires support for:
 - `float` (IEEE-754 binary64)
 - `string` (UTF-8)
 - `bytes` (opaque byte vector)
+- `typerep` (an internal, interned runtime type representation used for generic calls, effect
+  identity, and runtime type tests / casts)
 - reference values:
   - `struct` instances
   - `enum` instances
@@ -261,14 +263,26 @@ Some instructions are statement-like and produce no value.
   - Semantics: if `%src` is a reference, create a readonly view; otherwise copy.
   - Trap: `%src` is uninitialized.
 
+- `make_type_rep`:
+  - Syntax: `%dst = make_type_rep <base> (<op_args...>)`
+  - Semantics:
+    - evaluate `<op_args...>` to `typerep` values
+    - construct and intern an applied type representation from `<base>` and its arguments
+    - write the resulting `typerep` value to `%dst`
+  - Note: leaves such as `int`/`bool` and nominal type ids may be represented as `typerep` literals.
+
 - `is_type`:
-  - Syntax: `%dst = is_type <op_value> <Type>`
+  - Syntax: `%dst = is_type <op_value> <op_type_rep>`
   - Semantics: runtime type test; writes `bool` into `%dst`.
-    - for nominal targets (`struct`/`enum`): compare dynamic nominal type identity
-    - for `interface` targets: consult interface-implementation metadata (if present)
+    - the target type is provided as a runtime `typerep` value (interned)
+    - for nominal targets (`struct`/`enum`): compare dynamic nominal type identity *including*
+      instantiated type arguments
+    - for `interface` targets: check that the dynamic type implements the interface and that the
+      instantiated interface type arguments match (initial-stage coherence may allow this to be
+      checked as a prefix of the dynamic type arguments)
 
 - `checked_cast`:
-  - Syntax: `%dst = checked_cast <op_value> <Type>`
+  - Syntax: `%dst = checked_cast <op_value> <op_type_rep>`
   - Semantics: runtime checked cast; writes an `Option` enum value into `%dst`:
     - on success: `Option::Some(<op_value>)`
     - on failure: `Option::None`
@@ -276,8 +290,9 @@ Some instructions are statement-like and produce no value.
 ### 7.2 Data and Fields
 
 - `make_struct`:
-  - Syntax: `%dst = make_struct <Type> { field: <op>, ... }`
+  - Syntax: `%dst = make_struct <StructName><<op_type_args...>> { field: <op>, ... }`
   - Semantics: allocate a struct instance and write a reference into `%dst`.
+    - `<op_type_args...>` are evaluated to `typerep` values and stored on the heap object
   - Operand evaluation order: field operands are evaluated **left-to-right in
     textual field order**.
 
@@ -293,8 +308,9 @@ Some instructions are statement-like and produce no value.
   - Operand evaluation order: elements are evaluated **left-to-right**.
 
 - `make_enum`:
-  - Syntax: `%dst = make_enum <Enum>::<Variant>(<op>, <op>, ...)`
+  - Syntax: `%dst = make_enum <Enum><<op_type_args...>>::<Variant>(<op>, <op>, ...)`
   - Semantics: allocate an enum instance and write a reference into `%dst`.
+    - `<op_type_args...>` are evaluated to `typerep` values and stored on the heap object
   - Operand evaluation order: fields are evaluated **left-to-right**.
 
 - `get_field`:
@@ -336,12 +352,17 @@ Some instructions are statement-like and produce no value.
   - Trap: operand is not a function reference.
 
 - `vcall` (virtual):
-  - Syntax: `%dst = vcall <op_obj> <method> (<op_args...>)`
+  - Syntax: `%dst = vcall <op_obj> <method> <method_type_args...> (<op_args...>)`
   - Semantics:
     - Evaluate `<op_obj>` to a reference value and determine its dynamic type name.
+    - Read the object’s stored instantiated type arguments (a list of runtime `typerep` values).
     - Resolve `<method>` via module/host-defined method metadata, typically:
       `(dynamic_type_name, <method>) -> <fn_name>`.
-    - Invoke `<fn_name>` with the receiver passed as the first argument, followed by `<op_args...>`.
+    - Invoke `<fn_name>` with arguments:
+      1. the receiver’s dynamic type arguments (as `typerep` values),
+      2. `<method_type_args...>` (as `typerep` values),
+      3. the receiver value,
+      4. then `<op_args...>`.
   - Trap: missing method resolution.
 
 For interface dynamic dispatch in v0.4, the compiler uses a canonical method-id string:
@@ -402,7 +423,7 @@ MIR maintains an implicit **handler stack** during execution.
   - Syntax:
     ```text
     push_handler <handler_id> {
-      <Interface.method>(<pat_args...>) -> <block>,
+      <Interface<op_iface_type_args...>.method>(<pat_args...>) -> <block>,
       ...
     }
     ```
@@ -410,6 +431,8 @@ MIR maintains an implicit **handler stack** during execution.
   - Trap: invalid MIR where a handler target block does not have
     `binding_count + 1` parameters (the final parameter receives the
     continuation token).
+  - Note: `<op_iface_type_args...>` are evaluated to `typerep` values when the handler is pushed.
+    Effect identity includes these instantiated interface arguments.
 
 - `pop_handler`:
   - Syntax: `pop_handler`
@@ -420,14 +443,16 @@ MIR maintains an implicit **handler stack** during execution.
 
 - Syntax:
   ```text
-  %dst = perform <Interface.method>(<op_args...>)
+  %dst = perform <Interface<op_iface_type_args...>.method>(<op_args...>)
   ```
 
 Semantics:
-1. Evaluate arguments.
+1. Evaluate the interface type-argument operands (`<op_iface_type_args...>`) to `typerep` values,
+   then evaluate the ordinary effect arguments.
 2. Walk the handler stack from top to bottom.
 3. For each handler entry, try its clauses in order:
-   - clause matches if the interface/method matches and all patterns match args.
+   - clause matches if the interface/method matches, the instantiated interface type arguments
+     match, and all patterns match args.
 4. On the first match:
    - capture the current execution state as a **one-shot continuation token** `k`
      - the captured computation is **delimited** by the selected handler’s owning frame:

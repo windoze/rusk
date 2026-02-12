@@ -1,0 +1,10 @@
+// expect: ok int 21
+
+interface Yield<T> { fn yield(value: T) -> int; }
+
+fn main() -> int {
+    match @Yield.yield(20) {
+        @Yield.yield(n) => resume(n + 1)
+        v => v
+    }
+}

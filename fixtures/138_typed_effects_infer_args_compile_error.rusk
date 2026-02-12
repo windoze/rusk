@@ -1,0 +1,7 @@
+// expect: compile_error cannot infer interface type arguments
+
+interface Tag<T> { fn ping() -> unit; }
+
+fn main() -> unit {
+    @Tag.ping();
+}

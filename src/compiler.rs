@@ -3,8 +3,8 @@ use crate::ast::{
     PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
 };
 use crate::mir::{
-    BasicBlock, BlockId, ConstValue, EffectId, Function, HandlerClause, Instruction, Local, Module,
-    Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type,
+    BasicBlock, BlockId, ConstValue, EffectSpec, Function, HandlerClause, Instruction, Local,
+    Module, Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type, TypeRepLit,
 };
 use crate::modules::{DefKind, ModuleLoader, ModulePath};
 use crate::parser::{ParseError, Parser};
@@ -29,6 +29,16 @@ const CONTROL_VARIANT_VALUE: &str = "Value";
 const CONTROL_VARIANT_RETURN: &str = "Return";
 const CONTROL_VARIANT_BREAK: &str = "Break";
 const CONTROL_VARIANT_CONTINUE: &str = "Continue";
+
+// Internal capture key prefix used to smuggle runtime `TypeRep` values for in-scope generic type
+// parameters into lambdas and extracted helpers.
+const CAPTURE_TYPE_REP_PREFIX: &str = "$typerep::";
+
+fn parse_type_rep_capture_name(name: &str) -> Option<usize> {
+    name.strip_prefix(CAPTURE_TYPE_REP_PREFIX)?
+        .parse::<usize>()
+        .ok()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileError {
@@ -335,6 +345,7 @@ impl Compiler {
             name.clone(),
             sig.generics.clone(),
         );
+        lowerer.bind_type_rep_params_for_signature();
         lowerer.bind_params_from_fn_item(func, &param_mutabilities, &param_types)?;
         let value = lowerer.lower_block_expr(&func.body)?;
         if !lowerer.is_current_terminated() {
@@ -487,6 +498,17 @@ impl Compiler {
                 arr: Operand::Local(env_local),
                 idx: Operand::Literal(ConstValue::Int(idx as i64)),
             });
+            if let Some(gen_id) = parse_type_rep_capture_name(name) {
+                let Some(slot) = lowerer.generic_type_reps.get_mut(gen_id) else {
+                    return Err(CompileError::new(
+                        "internal error: invalid generic TypeRep capture id",
+                        lambda_expr_span,
+                    ));
+                };
+                *slot = Some(captured_val);
+                continue;
+            }
+
             lowerer.bind_var(
                 name,
                 VarInfo {
@@ -547,6 +569,16 @@ impl Compiler {
                 mutability: Mutability::Mutable,
                 ty: None,
             });
+            if let Some(gen_id) = parse_type_rep_capture_name(name) {
+                let Some(slot) = lowerer.generic_type_reps.get_mut(gen_id) else {
+                    return Err(CompileError::new(
+                        "internal error: invalid generic TypeRep capture id",
+                        match_span,
+                    ));
+                };
+                *slot = Some(local);
+                continue;
+            }
             lowerer.bind_var(
                 name,
                 VarInfo {
@@ -608,6 +640,10 @@ struct FunctionLowerer<'a> {
     /// being lowered (not necessarily the MIR function's own signature, since lambdas/helpers are
     /// compiled from within a parent function).
     generics: Vec<typeck::GenericParamInfo>,
+    /// Runtime locals holding `TypeRep` values for the in-scope generic parameters.
+    ///
+    /// `generic_type_reps[i]` is `Some(local)` iff `generics[i].arity == 0`.
+    generic_type_reps: Vec<Option<Local>>,
     params: Vec<Param>,
     blocks: Vec<BlockBuilder>,
     current: BlockId,
@@ -624,12 +660,14 @@ impl<'a> FunctionLowerer<'a> {
         name: String,
         generics: Vec<typeck::GenericParamInfo>,
     ) -> Self {
+        let generic_count = generics.len();
         Self {
             compiler,
             kind,
             module,
             name,
             generics,
+            generic_type_reps: vec![None; generic_count],
             params: Vec::new(),
             blocks: vec![BlockBuilder {
                 label: "block0".to_string(),
@@ -674,6 +712,24 @@ impl<'a> FunctionLowerer<'a> {
             locals: self.next_local,
             blocks,
         })
+    }
+
+    fn bind_type_rep_params_for_signature(&mut self) {
+        let type_param_ids: Vec<usize> = self
+            .generics
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, gp)| (gp.arity == 0).then_some(idx))
+            .collect();
+        for idx in type_param_ids {
+            let local = self.alloc_local();
+            self.params.push(Param {
+                local,
+                mutability: Mutability::Readonly,
+                ty: Some(Type::TypeRep),
+            });
+            self.generic_type_reps[idx] = Some(local);
+        }
     }
 
     fn bind_params_from_fn_item(
@@ -1011,6 +1067,16 @@ impl<'a> FunctionLowerer<'a> {
                 out.entry(name.clone()).or_insert_with(|| info.clone());
             }
         }
+        for (idx, local) in self.generic_type_reps.iter().copied().enumerate() {
+            let Some(local) = local else {
+                continue;
+            };
+            out.entry(format!("{CAPTURE_TYPE_REP_PREFIX}{idx}"))
+                .or_insert_with(|| VarInfo {
+                    local,
+                    kind: BindingKind::Const,
+                });
+        }
         out
     }
 
@@ -1019,6 +1085,7 @@ impl<'a> FunctionLowerer<'a> {
         self.emit(Instruction::MakeEnum {
             dst,
             enum_name: INTERNAL_CONTROL_ENUM.to_string(),
+            type_args: Vec::new(),
             variant: variant.to_string(),
             fields,
         });
@@ -1321,6 +1388,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.emit(Instruction::MakeStruct {
                     dst: cell,
                     type_name: INTERNAL_CELL_STRUCT.to_string(),
+                    type_args: Vec::new(),
                     fields: vec![
                         (
                             CELL_FIELD_SET.to_string(),
@@ -1429,6 +1497,282 @@ impl<'a> FunctionLowerer<'a> {
         matches!(self.expr_ty(expr), Some(Ty::Readonly(_)))
     }
 
+    fn strip_readonly_ty<'t>(&self, ty: &'t Ty) -> &'t Ty {
+        match ty {
+            Ty::Readonly(inner) => inner.as_ref(),
+            other => other,
+        }
+    }
+
+    fn lower_type_rep_for_ty(&mut self, ty: &Ty, span: Span) -> Result<Operand, CompileError> {
+        let rep = match ty {
+            Ty::Readonly(inner) => return self.lower_type_rep_for_ty(inner, span),
+            Ty::Unit => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Unit)),
+            Ty::Bool => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Bool)),
+            Ty::Int => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
+            Ty::Float => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Float)),
+            Ty::String => Operand::Literal(ConstValue::TypeRep(TypeRepLit::String)),
+            Ty::Bytes => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Bytes)),
+            Ty::Array(elem) => {
+                let elem_rep = self.lower_type_rep_for_ty(elem, span)?;
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Array,
+                    args: vec![elem_rep],
+                });
+                Operand::Local(dst)
+            }
+            Ty::Tuple(items) => {
+                if items.is_empty() {
+                    return Ok(Operand::Literal(ConstValue::TypeRep(TypeRepLit::Unit)));
+                }
+                let mut args = Vec::with_capacity(items.len());
+                for item in items {
+                    args.push(self.lower_type_rep_for_ty(item, span)?);
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Tuple(items.len()),
+                    args,
+                });
+                Operand::Local(dst)
+            }
+            Ty::Fn { params, ret } => {
+                let mut args = Vec::with_capacity(params.len() + 1);
+                for p in params {
+                    args.push(self.lower_type_rep_for_ty(p, span)?);
+                }
+                args.push(self.lower_type_rep_for_ty(ret, span)?);
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Fn,
+                    args,
+                });
+                Operand::Local(dst)
+            }
+            Ty::Cont { param, ret } => {
+                let args = vec![
+                    self.lower_type_rep_for_ty(param, span)?,
+                    self.lower_type_rep_for_ty(ret, span)?,
+                ];
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Cont,
+                    args,
+                });
+                Operand::Local(dst)
+            }
+            Ty::App(typeck::TyCon::Named(name), args) => {
+                let base = if self.compiler.env.structs.contains_key(name) {
+                    TypeRepLit::Struct(name.clone())
+                } else if self.compiler.env.enums.contains_key(name) {
+                    TypeRepLit::Enum(name.clone())
+                } else if self.compiler.env.interfaces.contains_key(name) {
+                    TypeRepLit::Interface(name.clone())
+                } else {
+                    return Err(CompileError::new(
+                        format!("internal error: unknown nominal type `{name}`"),
+                        span,
+                    ));
+                };
+
+                if args.is_empty() {
+                    Operand::Literal(ConstValue::TypeRep(base))
+                } else {
+                    let mut arg_reps = Vec::with_capacity(args.len());
+                    for a in args {
+                        arg_reps.push(self.lower_type_rep_for_ty(a, span)?);
+                    }
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::MakeTypeRep {
+                        dst,
+                        base,
+                        args: arg_reps,
+                    });
+                    Operand::Local(dst)
+                }
+            }
+            Ty::App(typeck::TyCon::Gen(_) | typeck::TyCon::Var(_), _) => {
+                return Err(CompileError::new(
+                    "cannot reify higher-kinded types as `TypeRep` in this stage",
+                    span,
+                ));
+            }
+            Ty::Gen(id) => {
+                let Some(Some(local)) = self.generic_type_reps.get(*id) else {
+                    return Err(CompileError::new(
+                        "internal error: missing runtime `TypeRep` for generic parameter",
+                        span,
+                    ));
+                };
+                Operand::Local(*local)
+            }
+            Ty::Var(_) => {
+                return Err(CompileError::new(
+                    "cannot infer type required for runtime type argument reification; add a type annotation",
+                    span,
+                ));
+            }
+        };
+        Ok(rep)
+    }
+
+    fn lower_type_rep_for_type_expr(
+        &mut self,
+        ty: &crate::ast::TypeExpr,
+    ) -> Result<Operand, CompileError> {
+        use crate::ast::TypeExpr;
+        match ty {
+            TypeExpr::Readonly { inner, .. } => self.lower_type_rep_for_type_expr(inner),
+            TypeExpr::Prim { prim, span: _ } => {
+                Ok(Operand::Literal(ConstValue::TypeRep(match prim {
+                    crate::ast::PrimType::Unit => TypeRepLit::Unit,
+                    crate::ast::PrimType::Bool => TypeRepLit::Bool,
+                    crate::ast::PrimType::Int => TypeRepLit::Int,
+                    crate::ast::PrimType::Float => TypeRepLit::Float,
+                    crate::ast::PrimType::String => TypeRepLit::String,
+                    crate::ast::PrimType::Bytes => TypeRepLit::Bytes,
+                })))
+            }
+            TypeExpr::Array { elem, span } => {
+                let elem_rep = self.lower_type_rep_for_type_expr(elem)?;
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Array,
+                    args: vec![elem_rep],
+                });
+                let _ = span;
+                Ok(Operand::Local(dst))
+            }
+            TypeExpr::Tuple { items, span } => {
+                if items.is_empty() {
+                    return Ok(Operand::Literal(ConstValue::TypeRep(TypeRepLit::Unit)));
+                }
+                let mut args = Vec::with_capacity(items.len());
+                for item in items {
+                    args.push(self.lower_type_rep_for_type_expr(item)?);
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Tuple(items.len()),
+                    args,
+                });
+                let _ = span;
+                Ok(Operand::Local(dst))
+            }
+            TypeExpr::Fn { params, ret, span } => {
+                let mut args = Vec::with_capacity(params.len() + 1);
+                for p in params {
+                    args.push(self.lower_type_rep_for_type_expr(p)?);
+                }
+                args.push(self.lower_type_rep_for_type_expr(ret)?);
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Fn,
+                    args,
+                });
+                let _ = span;
+                Ok(Operand::Local(dst))
+            }
+            TypeExpr::Cont { param, ret, span } => {
+                let args = vec![
+                    self.lower_type_rep_for_type_expr(param)?,
+                    self.lower_type_rep_for_type_expr(ret)?,
+                ];
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeTypeRep {
+                    dst,
+                    base: TypeRepLit::Cont,
+                    args,
+                });
+                let _ = span;
+                Ok(Operand::Local(dst))
+            }
+            TypeExpr::Path(path) => self.lower_type_rep_for_path_type(path),
+        }
+    }
+
+    fn lower_type_rep_for_path_type(
+        &mut self,
+        path: &crate::ast::PathType,
+    ) -> Result<Operand, CompileError> {
+        if path.segments.is_empty() {
+            return Err(CompileError::new(
+                "internal error: empty type path",
+                path.span,
+            ));
+        }
+        for seg in &path.segments[..path.segments.len() - 1] {
+            if !seg.args.is_empty() {
+                return Err(CompileError::new(
+                    "type arguments are only supported on the last path segment",
+                    seg.span,
+                ));
+            }
+        }
+
+        // Generic type parameter `T` in a type position: reify via the hidden runtime `TypeRep` value.
+        if path.segments.len() == 1 && path.segments[0].args.is_empty() {
+            let name = path.segments[0].name.name.as_str();
+            if let Some((idx, _gp)) = self
+                .generics
+                .iter()
+                .enumerate()
+                .find(|(_idx, g)| g.arity == 0 && g.name.as_str() == name)
+            {
+                let Some(Some(local)) = self.generic_type_reps.get(idx) else {
+                    return Err(CompileError::new(
+                        "internal error: missing runtime `TypeRep` for generic parameter",
+                        path.span,
+                    ));
+                };
+                return Ok(Operand::Local(*local));
+            }
+        }
+
+        let segments: Vec<String> = path
+            .segments
+            .iter()
+            .map(|seg| seg.name.name.clone())
+            .collect();
+        let (kind, fqn) = self
+            .compiler
+            .env
+            .modules
+            .resolve_type_fqn(&self.module, &segments, path.span)
+            .map_err(|e| CompileError::new(e.message, e.span))?;
+
+        let base = match kind {
+            DefKind::Struct => TypeRepLit::Struct(fqn),
+            DefKind::Enum => TypeRepLit::Enum(fqn),
+            DefKind::Interface => TypeRepLit::Interface(fqn),
+        };
+
+        let last = path.segments.last().expect("non-empty");
+        if last.args.is_empty() {
+            return Ok(Operand::Literal(ConstValue::TypeRep(base)));
+        }
+
+        let mut arg_reps = Vec::with_capacity(last.args.len());
+        for arg in &last.args {
+            arg_reps.push(self.lower_type_rep_for_type_expr(arg)?);
+        }
+        let dst = self.alloc_local();
+        self.emit(Instruction::MakeTypeRep {
+            dst,
+            base,
+            args: arg_reps,
+        });
+        Ok(Operand::Local(dst))
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<Local, CompileError> {
         if self.is_current_terminated() {
             return Ok(self.alloc_unit());
@@ -1509,9 +1853,22 @@ impl<'a> FunctionLowerer<'a> {
                         type_path.span,
                     ));
                 }
+
+                let type_args = match self.expr_ty(expr) {
+                    Some(ty) => match self.strip_readonly_ty(ty) {
+                        Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
+                let mut type_arg_reps = Vec::with_capacity(type_args.len());
+                for arg in &type_args {
+                    type_arg_reps.push(self.lower_type_rep_for_ty(arg, type_path.span)?);
+                }
                 self.emit(Instruction::MakeStruct {
                     dst,
                     type_name,
+                    type_args: type_arg_reps,
                     fields: mir_fields,
                 });
                 Ok(dst)
@@ -1520,6 +1877,7 @@ impl<'a> FunctionLowerer<'a> {
                 interface,
                 method,
                 args,
+                span: call_span,
                 ..
             } => {
                 let mut mir_args = Vec::with_capacity(args.len());
@@ -1528,8 +1886,11 @@ impl<'a> FunctionLowerer<'a> {
                     mir_args.push(Operand::Local(v));
                 }
                 let dst = self.alloc_local();
-                let segments: Vec<String> =
-                    interface.segments.iter().map(|s| s.name.clone()).collect();
+                let segments: Vec<String> = interface
+                    .segments
+                    .iter()
+                    .map(|s| s.name.name.clone())
+                    .collect();
                 let (kind, interface_name) = self
                     .compiler
                     .env
@@ -1550,19 +1911,42 @@ impl<'a> FunctionLowerer<'a> {
                         interface.span,
                     ));
                 };
-                let Some(method_info) = iface_def.all_methods.get(&method.name) else {
-                    return Err(CompileError::new(
-                        format!(
-                            "internal error: unknown effect/method `{}.{}`",
-                            interface_name, method.name
-                        ),
-                        method.span,
-                    ));
+                let origin = {
+                    let Some(method_info) = iface_def.all_methods.get(&method.name) else {
+                        return Err(CompileError::new(
+                            format!(
+                                "internal error: unknown effect/method `{}.{}`",
+                                interface_name, method.name
+                            ),
+                            method.span,
+                        ));
+                    };
+                    method_info.origin.clone()
                 };
+                let effect_id = format!("{origin}::{}", method.name);
+                let interface_arg_tys = self
+                    .compiler
+                    .types
+                    .effect_interface_args
+                    .get(&(*call_span, effect_id.clone()))
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            format!(
+                                "internal error: missing interface type args for effect `{effect_id}`"
+                            ),
+                            *call_span,
+                        )
+                    })?;
+                let mut interface_arg_reps = Vec::with_capacity(interface_arg_tys.len());
+                for ty in &interface_arg_tys {
+                    interface_arg_reps.push(self.lower_type_rep_for_ty(ty, *call_span)?);
+                }
                 self.emit(Instruction::Perform {
                     dst: Some(dst),
-                    effect: EffectId {
-                        interface: method_info.origin.clone(),
+                    effect: EffectSpec {
+                        interface: origin,
+                        interface_args: interface_arg_reps,
                         method: method.name.clone(),
                     },
                     args: mir_args,
@@ -1662,9 +2046,21 @@ impl<'a> FunctionLowerer<'a> {
                     .is_some_and(|variant_fields| variant_fields.is_empty())
             {
                 let dst = self.alloc_local();
+                let type_args = match self.compiler.types.expr_types.get(&span) {
+                    Some(ty) => match self.strip_readonly_ty(ty) {
+                        Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
+                let mut type_arg_reps = Vec::with_capacity(type_args.len());
+                for arg in &type_args {
+                    type_arg_reps.push(self.lower_type_rep_for_ty(arg, span)?);
+                }
                 self.emit(Instruction::MakeEnum {
                     dst,
                     enum_name: type_fqn,
+                    type_args: type_arg_reps,
                     variant: last_ident.name.clone(),
                     fields: Vec::new(),
                 });
@@ -1715,6 +2111,7 @@ impl<'a> FunctionLowerer<'a> {
         self.emit(Instruction::MakeStruct {
             dst: closure,
             type_name: INTERNAL_CLOSURE_STRUCT.to_string(),
+            type_args: Vec::new(),
             fields: vec![
                 (
                     CLOSURE_FIELD_FUNC.to_string(),
@@ -1763,6 +2160,7 @@ impl<'a> FunctionLowerer<'a> {
         self.emit(Instruction::MakeStruct {
             dst: closure,
             type_name: INTERNAL_CLOSURE_STRUCT.to_string(),
+            type_args: Vec::new(),
             fields: vec![
                 (
                     CLOSURE_FIELD_FUNC.to_string(),
@@ -1913,11 +2311,28 @@ impl<'a> FunctionLowerer<'a> {
         //     }
         //   }
         let iter_val = self.lower_expr(iter)?;
+        let iter_ty = self.expr_ty(iter).ok_or_else(|| {
+            CompileError::new(
+                "internal error: missing type for `for` iterator expression",
+                iter.span(),
+            )
+        })?;
+        let elem_ty = match self.strip_readonly_ty(iter_ty) {
+            Ty::Array(elem) => elem.as_ref().clone(),
+            other => {
+                return Err(CompileError::new(
+                    format!("internal error: `for` expects an array iterator, got `{other}`"),
+                    iter.span(),
+                ));
+            }
+        };
+        let elem_rep = self.lower_type_rep_for_ty(&elem_ty, iter.span())?;
+
         let it_local = self.alloc_local();
         self.emit(Instruction::Call {
             dst: Some(it_local),
             func: "core::intrinsics::into_iter".to_string(),
-            args: vec![Operand::Local(iter_val)],
+            args: vec![elem_rep.clone(), Operand::Local(iter_val)],
         });
 
         let loop_head = self.new_block("for_head");
@@ -1940,7 +2355,7 @@ impl<'a> FunctionLowerer<'a> {
         self.emit(Instruction::Call {
             dst: Some(next_local),
             func: "core::intrinsics::next".to_string(),
-            args: vec![Operand::Local(it_local)],
+            args: vec![elem_rep, Operand::Local(it_local)],
         });
 
         // `Option::Some(x)` binds one value, `Option::None` binds none.
@@ -2264,7 +2679,15 @@ impl<'a> FunctionLowerer<'a> {
         span: Span,
     ) -> Result<Local, CompileError> {
         let value = self.lower_expr(expr)?;
-        let target_ty = self.resolve_runtime_check_target_type(ty, "`is`")?;
+        let target_ty = match ty {
+            crate::ast::TypeExpr::Path(path) => self.lower_type_rep_for_path_type(path)?,
+            other => {
+                return Err(CompileError::new(
+                    "`is` target must be a nominal type",
+                    other.span(),
+                ));
+            }
+        };
         let dst = self.alloc_local();
         self.emit(Instruction::IsType {
             dst,
@@ -2282,7 +2705,15 @@ impl<'a> FunctionLowerer<'a> {
         span: Span,
     ) -> Result<Local, CompileError> {
         let value = self.lower_expr(expr)?;
-        let target_ty = self.resolve_runtime_check_target_type(ty, "`as?`")?;
+        let target_ty = match ty {
+            crate::ast::TypeExpr::Path(path) => self.lower_type_rep_for_path_type(path)?,
+            other => {
+                return Err(CompileError::new(
+                    "`as?` target must be a nominal type",
+                    other.span(),
+                ));
+            }
+        };
         let dst = self.alloc_local();
         self.emit(Instruction::CheckedCast {
             dst,
@@ -2291,47 +2722,6 @@ impl<'a> FunctionLowerer<'a> {
         });
         let _ = span;
         Ok(dst)
-    }
-
-    fn resolve_runtime_check_target_type(
-        &self,
-        ty: &crate::ast::TypeExpr,
-        op: &str,
-    ) -> Result<Type, CompileError> {
-        let path = match ty {
-            crate::ast::TypeExpr::Path(path) => path,
-            other => {
-                return Err(CompileError::new(
-                    format!("{op} target must be a nominal type"),
-                    other.span(),
-                ));
-            }
-        };
-
-        if !path.segments.iter().all(|seg| seg.args.is_empty()) {
-            return Err(CompileError::new(
-                format!("{op} target type must not have type arguments in v0.4"),
-                path.span,
-            ));
-        }
-
-        let segments: Vec<String> = path
-            .segments
-            .iter()
-            .map(|seg| seg.name.name.clone())
-            .collect();
-        let (kind, fqn) = self
-            .compiler
-            .env
-            .modules
-            .resolve_type_fqn(&self.module, &segments, path.span)
-            .map_err(|e| CompileError::new(e.message, e.span))?;
-
-        Ok(match kind {
-            DefKind::Struct => Type::Struct(fqn),
-            DefKind::Enum => Type::Enum(fqn),
-            DefKind::Interface => Type::Interface(fqn),
-        })
     }
 
     fn lower_named_call(&mut self, func: &str, args: Vec<Operand>) -> Result<Local, CompileError> {
@@ -2402,9 +2792,21 @@ impl<'a> FunctionLowerer<'a> {
                                     ops.push(Operand::Local(v));
                                 }
                                 let dst = self.alloc_local();
+                                let type_args = match self.compiler.types.expr_types.get(&span) {
+                                    Some(ty) => match self.strip_readonly_ty(ty) {
+                                        Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
+                                        _ => Vec::new(),
+                                    },
+                                    None => Vec::new(),
+                                };
+                                let mut type_arg_reps = Vec::with_capacity(type_args.len());
+                                for arg in &type_args {
+                                    type_arg_reps.push(self.lower_type_rep_for_ty(arg, span)?);
+                                }
                                 self.emit(Instruction::MakeEnum {
                                     dst,
                                     enum_name: type_fqn,
+                                    type_args: type_arg_reps,
                                     variant: last_ident.name.clone(),
                                     fields: ops,
                                 });
@@ -2444,7 +2846,18 @@ impl<'a> FunctionLowerer<'a> {
                     .resolve_value_fqn(&self.module, &segments, span)
                     .map_err(|e| CompileError::new(e.message, e.span))?,
             };
-            let mut call_args = Vec::with_capacity(args.len());
+            let call_key = (span, func_name.clone());
+            let type_args = self
+                .compiler
+                .types
+                .call_type_args
+                .get(&call_key)
+                .cloned()
+                .unwrap_or_default();
+            let mut call_args = Vec::with_capacity(type_args.len() + args.len());
+            for ty in &type_args {
+                call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+            }
             for arg in args {
                 let v = self.lower_expr(arg)?;
                 call_args.push(Operand::Local(v));
@@ -2555,7 +2968,7 @@ impl<'a> FunctionLowerer<'a> {
         };
 
         // Static dispatch is only valid when the static receiver type is a concrete nominal type.
-        if let Ty::App(typeck::TyCon::Named(type_name), _args) = recv_for_dispatch
+        if let Ty::App(typeck::TyCon::Named(type_name), recv_type_args) = recv_for_dispatch
             && !self.compiler.env.interfaces.contains_key(type_name)
         {
             let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
@@ -2570,7 +2983,21 @@ impl<'a> FunctionLowerer<'a> {
             };
             let impl_fn = impl_fn.clone();
 
-            let mut call_args = Vec::with_capacity(args.len());
+            let method_type_args = self
+                .compiler
+                .types
+                .method_type_args
+                .get(&(span, method_id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let mut call_args =
+                Vec::with_capacity(recv_type_args.len() + method_type_args.len() + args.len());
+            for ty in recv_type_args {
+                call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+            }
+            for ty in &method_type_args {
+                call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+            }
             for a in args {
                 let v = self.lower_expr(a)?;
                 call_args.push(Operand::Local(v));
@@ -2586,6 +3013,17 @@ impl<'a> FunctionLowerer<'a> {
 
         // Otherwise, lower to dynamic dispatch (`vcall`).
         let recv_local = self.lower_expr(&args[0])?;
+        let method_type_args = self
+            .compiler
+            .types
+            .method_type_args
+            .get(&(span, method_id.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
+        for ty in &method_type_args {
+            method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+        }
         let mut vcall_args = Vec::with_capacity(args.len().saturating_sub(1));
         for a in &args[1..] {
             let v = self.lower_expr(a)?;
@@ -2596,6 +3034,7 @@ impl<'a> FunctionLowerer<'a> {
             dst: Some(dst),
             obj: Operand::Local(recv_local),
             method: method_id,
+            method_type_args: method_type_arg_reps,
             args: vcall_args,
         });
         Ok(dst)
@@ -2623,7 +3062,18 @@ impl<'a> FunctionLowerer<'a> {
             let inherent_name = format!("{recv_nom}::{}", method.name);
             if self.compiler.env.functions.contains_key(&inherent_name) {
                 let recv_local = self.lower_expr(receiver)?;
-                let mut call_args = Vec::with_capacity(args.len() + 1);
+                let call_key = (span, inherent_name.clone());
+                let type_args = self
+                    .compiler
+                    .types
+                    .call_type_args
+                    .get(&call_key)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut call_args = Vec::with_capacity(type_args.len() + args.len() + 1);
+                for ty in &type_args {
+                    call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+                }
                 call_args.push(Operand::Local(recv_local));
                 for a in args {
                     let v = self.lower_expr(a)?;
@@ -2646,13 +3096,62 @@ impl<'a> FunctionLowerer<'a> {
 
         // Constrained generic receiver (`T: I`) => dynamic dispatch within `I`.
         if let Ty::Gen(id) = recv_for_dispatch {
-            let Some(iface_name) = self.generics.get(*id).and_then(|g| g.constraint.clone()) else {
+            let Some(gp) = self.generics.get(*id) else {
                 return Err(CompileError::new(
-                    "internal error: unconstrained generic method call",
+                    "internal error: unknown generic parameter in method call",
                     span,
                 ));
             };
-            return self.lower_method_vcall(receiver, &iface_name, &method.name, args, span);
+            let mut candidates: BTreeMap<String, String> = BTreeMap::new();
+            for bound in &gp.bounds {
+                let Ty::App(crate::typeck::TyCon::Named(iface_name), _args) = bound else {
+                    continue;
+                };
+                let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
+                    continue;
+                };
+                let Some(info) = iface_def.all_methods.get(&method.name) else {
+                    continue;
+                };
+                candidates
+                    .entry(info.origin.clone())
+                    .or_insert_with(|| iface_name.clone());
+            }
+            if candidates.len() != 1 {
+                return Err(CompileError::new(
+                    "internal error: ambiguous constrained generic method call",
+                    span,
+                ));
+            }
+            let origin = candidates.into_keys().next().expect("len == 1");
+            let method_id = format!("{origin}::{}", method.name);
+
+            let recv_local = self.lower_expr(receiver)?;
+            let method_type_args = self
+                .compiler
+                .types
+                .method_type_args
+                .get(&(span, method_id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
+            for ty in &method_type_args {
+                method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+            }
+            let mut vcall_args = Vec::with_capacity(args.len());
+            for a in args {
+                let v = self.lower_expr(a)?;
+                vcall_args.push(Operand::Local(v));
+            }
+            let dst = self.alloc_local();
+            self.emit(Instruction::VCall {
+                dst: Some(dst),
+                obj: Operand::Local(recv_local),
+                method: method_id,
+                method_type_args: method_type_arg_reps,
+                args: vcall_args,
+            });
+            return Ok(dst);
         }
 
         // Interface-typed receiver => dynamic dispatch within that interface.
@@ -2719,7 +3218,27 @@ impl<'a> FunctionLowerer<'a> {
         let impl_fn = impl_fn.clone();
 
         let recv_local = self.lower_expr(receiver)?;
-        let mut call_args = Vec::with_capacity(args.len() + 1);
+        let recv_type_args = match self.strip_readonly_ty(&recv_ty) {
+            Ty::App(typeck::TyCon::Named(_), args) => args.clone(),
+            _ => Vec::new(),
+        };
+        let method_id = format!("{origin_iface}::{}", method.name);
+        let method_type_args = self
+            .compiler
+            .types
+            .method_type_args
+            .get(&(span, method_id.clone()))
+            .cloned()
+            .unwrap_or_default();
+
+        let mut call_args =
+            Vec::with_capacity(recv_type_args.len() + method_type_args.len() + args.len() + 1);
+        for ty in &recv_type_args {
+            call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+        }
+        for ty in &method_type_args {
+            call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+        }
         call_args.push(Operand::Local(recv_local));
         for a in args {
             let v = self.lower_expr(a)?;
@@ -2757,6 +3276,17 @@ impl<'a> FunctionLowerer<'a> {
         let method_id = format!("{}::{method_name}", info.origin);
 
         let recv_local = self.lower_expr(receiver)?;
+        let method_type_args = self
+            .compiler
+            .types
+            .method_type_args
+            .get(&(span, method_id.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
+        for ty in &method_type_args {
+            method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+        }
         let mut vcall_args = Vec::with_capacity(args.len());
         for a in args {
             let v = self.lower_expr(a)?;
@@ -2767,6 +3297,7 @@ impl<'a> FunctionLowerer<'a> {
             dst: Some(dst),
             obj: Operand::Local(recv_local),
             method: method_id,
+            method_type_args: method_type_arg_reps,
             args: vcall_args,
         });
         Ok(dst)
@@ -2923,7 +3454,7 @@ impl<'a> FunctionLowerer<'a> {
                 .interface
                 .segments
                 .iter()
-                .map(|s| s.name.clone())
+                .map(|s| s.name.name.clone())
                 .collect();
             let (kind, interface) = self
                 .compiler
@@ -2955,6 +3486,25 @@ impl<'a> FunctionLowerer<'a> {
                 };
                 method_info.origin.clone()
             };
+            let effect_id = format!("{interface}::{method}");
+            let interface_arg_tys = self
+                .compiler
+                .types
+                .effect_interface_args
+                .get(&(effect_pat.span, effect_id.clone()))
+                .cloned()
+                .ok_or_else(|| {
+                    CompileError::new(
+                        format!(
+                            "internal error: missing interface type args for handler clause effect `{effect_id}`"
+                        ),
+                        effect_pat.span,
+                    )
+                })?;
+            let mut interface_arg_reps = Vec::with_capacity(interface_arg_tys.len());
+            for ty in &interface_arg_tys {
+                interface_arg_reps.push(self.lower_type_rep_for_ty(ty, effect_pat.span)?);
+            }
 
             let mut arg_patterns = Vec::with_capacity(effect_pat.args.len());
             let mut bind_names = Vec::new();
@@ -2974,7 +3524,11 @@ impl<'a> FunctionLowerer<'a> {
             self.blocks[handler_block.0].params = params.clone();
 
             clauses.push(HandlerClause {
-                effect: EffectId { interface, method },
+                effect: EffectSpec {
+                    interface,
+                    interface_args: interface_arg_reps,
+                    method,
+                },
                 arg_patterns,
                 target: handler_block,
             });

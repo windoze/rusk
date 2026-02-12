@@ -463,7 +463,8 @@ fn enum_construction_via_call_and_matching() {
         }
 
         fn none() -> int {
-            match Option::None {
+            let x: Option<int> = Option::None;
+            match x {
                 Option::Some(_) => 0
                 Option::None => 7
             }

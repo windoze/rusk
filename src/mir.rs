@@ -73,6 +73,27 @@ pub enum Type {
     Fn,
     Cont,
     Interface(String),
+    TypeRep,
+}
+
+/// A compile-time type constructor used to build runtime [`Type::TypeRep`] values.
+///
+/// Applied types are constructed via [`Instruction::MakeTypeRep`].
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TypeRepLit {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Array,
+    Tuple(usize),
+    Struct(String),
+    Enum(String),
+    Interface(String),
+    Fn,
+    Cont,
 }
 
 /// A basic block: params, instructions, and a terminator.
@@ -102,6 +123,8 @@ pub enum ConstValue {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
+    /// An internal runtime type representation (used for reified generics).
+    TypeRep(TypeRepLit),
     /// A first-class reference to a named MIR function.
     Function(String),
     Array(Vec<ConstValue>),
@@ -163,17 +186,22 @@ pub enum Pattern {
     },
 }
 
-/// An interface method effect identifier.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EffectId {
+/// An effect operation identifier (interface + method), extended with instantiated interface type
+/// arguments.
+///
+/// The `interface_args` are runtime `TypeRep` values represented as operands; they are evaluated
+/// when pushing a handler and when performing an effect.
+#[derive(Clone, Debug)]
+pub struct EffectSpec {
     pub interface: String,
+    pub interface_args: Vec<Operand>,
     pub method: String,
 }
 
 /// A handler clause for a single effect.
 #[derive(Clone, Debug)]
 pub struct HandlerClause {
-    pub effect: EffectId,
+    pub effect: EffectSpec,
     pub arg_patterns: Vec<Pattern>,
     pub target: BlockId,
 }
@@ -200,17 +228,24 @@ pub enum Instruction {
     IsType {
         dst: Local,
         value: Operand,
-        ty: Type,
+        ty: Operand,
     },
     CheckedCast {
         dst: Local,
         value: Operand,
-        ty: Type,
+        ty: Operand,
+    },
+
+    MakeTypeRep {
+        dst: Local,
+        base: TypeRepLit,
+        args: Vec<Operand>,
     },
 
     MakeStruct {
         dst: Local,
         type_name: String,
+        type_args: Vec<Operand>,
         /// Fields in source/textual order.
         fields: Vec<(String, Operand)>,
     },
@@ -227,6 +262,7 @@ pub enum Instruction {
     MakeEnum {
         dst: Local,
         enum_name: String,
+        type_args: Vec<Operand>,
         variant: String,
         /// Fields in source/textual order.
         fields: Vec<Operand>,
@@ -266,6 +302,11 @@ pub enum Instruction {
         dst: Option<Local>,
         obj: Operand,
         method: String,
+        /// Runtime `TypeRep` arguments for method-level generics.
+        ///
+        /// Type arguments coming from the receiver's nominal type (impl/header generics) are
+        /// derived from the receiver value at runtime.
+        method_type_args: Vec<Operand>,
         args: Vec<Operand>,
     },
     ICall {
@@ -282,7 +323,7 @@ pub enum Instruction {
 
     Perform {
         dst: Option<Local>,
-        effect: EffectId,
+        effect: EffectSpec,
         args: Vec<Operand>,
     },
     Resume {

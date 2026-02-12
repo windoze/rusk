@@ -180,8 +180,8 @@ pub struct GenericParam {
     pub arity: usize,
     /// Optional interface constraint (`T: Logger`).
     ///
-    /// Constraints are currently limited to a single interface path.
-    pub constraint: Option<PathType>,
+    /// Bounds are currently limited to interface types.
+    pub bounds: Vec<PathType>,
     pub span: Span,
 }
 
@@ -336,7 +336,7 @@ pub enum Expr {
         span: Span,
     },
     EffectCall {
-        interface: Path,
+        interface: PathType,
         method: Ident,
         args: Vec<Expr>,
         span: Span,
@@ -505,7 +505,7 @@ pub enum MatchPat {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffectPattern {
-    pub interface: Path,
+    pub interface: PathType,
     pub method: Ident,
     pub args: Vec<Pattern>,
     /// Optional binder name for the captured continuation (effect handler context).

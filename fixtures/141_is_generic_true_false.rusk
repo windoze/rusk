@@ -1,0 +1,5 @@
+// expect: ok bool true
+
+fn main() -> bool {
+    (Option::Some(1) is Option<int>) && ((Option::Some(1) is Option<string>) == false)
+}

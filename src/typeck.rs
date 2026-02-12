@@ -5,7 +5,7 @@ use crate::ast::{
 };
 use crate::modules::{ModulePath, ModuleResolver};
 use crate::source::Span;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,8 +152,11 @@ impl fmt::Display for TyCon {
 pub(crate) struct GenericParamInfo {
     pub(crate) name: String,
     pub(crate) arity: usize,
-    /// Optional interface constraint name (currently must be a simple path with no args).
-    pub(crate) constraint: Option<String>,
+    /// Interface bounds (`T: I + J<K> + ...`), stored as instantiated interface types.
+    ///
+    /// In the initial generics-rework stage, bounds are only allowed on arity-0 type parameters
+    /// for `fn`/method generics (not on `impl`/`struct`/`enum`/`interface` generics).
+    pub(crate) bounds: Vec<Ty>,
     pub(crate) span: Span,
 }
 
@@ -173,6 +176,7 @@ pub(crate) struct EnumDef {
 
 #[derive(Clone, Debug)]
 pub(crate) struct InterfaceMethodSig {
+    pub(crate) generics: Vec<GenericParamInfo>,
     pub(crate) params: Vec<Ty>,
     pub(crate) ret: Ty,
 }
@@ -187,7 +191,7 @@ pub(crate) struct InterfaceMethod {
 pub(crate) struct InterfaceDef {
     pub(crate) name: String,
     pub(crate) generics: Vec<GenericParamInfo>,
-    pub(crate) supers: Vec<String>,
+    pub(crate) supers: Vec<Ty>,
     /// Methods declared directly in this interface (not including inherited ones).
     pub(crate) methods: BTreeMap<String, InterfaceMethodSig>,
     /// Full method set including inherited ones, with canonical origin interface IDs.
@@ -240,6 +244,28 @@ pub(crate) struct ProgramEnv {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TypeInfo {
     pub(crate) expr_types: HashMap<Span, Ty>,
+    /// Reified type arguments (kind `Type`) for direct (named) calls.
+    ///
+    /// Keyed by the call expression span.
+    pub(crate) call_type_args: HashMap<(Span, String), Vec<Ty>>,
+    /// Reified type arguments (kind `Type`) for interface method generics at a call site.
+    ///
+    /// This is used for both:
+    /// - fully-qualified calls: `I::m(recv, ...)`
+    /// - method sugar calls that resolve to an interface method: `recv.m(...)`
+    ///
+    /// Keyed by the call expression span.
+    pub(crate) method_type_args: HashMap<(Span, String), Vec<Ty>>,
+    /// Instantiated interface type arguments for effects (perform + handler patterns).
+    ///
+    /// Effect identity includes:
+    /// - canonical origin interface (FQN)
+    /// - instantiated interface type arguments
+    /// - method name
+    ///
+    /// We record the instantiated interface arguments for the *canonical origin interface* at each
+    /// effect call / pattern site so the compiler can reify them as runtime `TypeRep` operands.
+    pub(crate) effect_interface_args: HashMap<(Span, String), Vec<Ty>>,
 }
 
 pub(crate) fn build_env(program: &Program) -> Result<ProgramEnv, TypeError> {
@@ -273,7 +299,7 @@ pub(crate) fn build_env(program: &Program) -> Result<ProgramEnv, TypeError> {
         &mut |module, item| match item {
             Item::Function(f) => {
                 let full_name = module.qualify(&f.name.name);
-                declare_function_sig(&mut env, module, f, Some(full_name))
+                declare_function_sig(&mut env, module, &[], f, Some(full_name))
             }
             _ => Ok(()),
         },
@@ -341,7 +367,7 @@ fn add_prelude(env: &mut ProgramEnv) {
             generics: vec![GenericParamInfo {
                 name: "T".to_string(),
                 arity: 0,
-                constraint: None,
+                bounds: Vec::new(),
                 span: Span::new(0, 0),
             }],
             variants: BTreeMap::from([
@@ -359,7 +385,7 @@ fn add_prelude(env: &mut ProgramEnv) {
             generics: vec![GenericParamInfo {
                 name: "T".to_string(),
                 arity: 0,
-                constraint: None,
+                bounds: Vec::new(),
                 span: Span::new(0, 0),
             }],
             fields: vec![
@@ -398,7 +424,7 @@ fn add_prelude(env: &mut ProgramEnv) {
         vec![GenericParamInfo {
             name: "T".to_string(),
             arity: 0,
-            constraint: None,
+            bounds: Vec::new(),
             span: Span::new(0, 0),
         }],
         vec![Ty::Gen(0)],
@@ -411,7 +437,7 @@ fn add_prelude(env: &mut ProgramEnv) {
         vec![GenericParamInfo {
             name: "T".to_string(),
             arity: 0,
-            constraint: None,
+            bounds: Vec::new(),
             span: Span::new(0, 0),
         }],
         vec![Ty::String],
@@ -488,7 +514,7 @@ fn add_prelude(env: &mut ProgramEnv) {
     let iter_generics = vec![GenericParamInfo {
         name: "T".to_string(),
         arity: 0,
-        constraint: None,
+        bounds: Vec::new(),
         span: Span::new(0, 0),
     }];
     add_fn(
@@ -532,7 +558,7 @@ fn declare_struct(
             span: item.name.span,
         });
     }
-    let generics = lower_generic_params(env, module, &item.generics)?;
+    let generics = lower_generic_params(env, module, &item.generics, false)?;
     if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
             message: "higher-kinded generics on structs are not supported in v0.4".to_string(),
@@ -571,7 +597,7 @@ fn declare_enum(
             span: item.name.span,
         });
     }
-    let generics = lower_generic_params(env, module, &item.generics)?;
+    let generics = lower_generic_params(env, module, &item.generics, false)?;
     if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
             message: "higher-kinded generics on enums are not supported in v0.4".to_string(),
@@ -608,7 +634,7 @@ fn declare_interface(
         name.clone(),
         InterfaceDef {
             name,
-            generics: lower_generic_params(env, module, &item.generics)?,
+            generics: lower_generic_params(env, module, &item.generics, false)?,
             supers: Vec::new(),
             methods: BTreeMap::new(),
             all_methods: BTreeMap::new(),
@@ -621,6 +647,7 @@ fn declare_interface(
 fn declare_function_sig(
     env: &mut ProgramEnv,
     module: &ModulePath,
+    generic_prefix: &[GenericParamInfo],
     func: &FnItem,
     name_override: Option<String>,
 ) -> Result<(), TypeError> {
@@ -632,7 +659,10 @@ fn declare_function_sig(
         });
     }
 
-    let generics = lower_generic_params(env, module, &func.generics)?;
+    let method_generics =
+        lower_generic_params_in_scope(env, module, generic_prefix, &func.generics, true)?;
+    let mut generics: Vec<GenericParamInfo> = generic_prefix.to_vec();
+    generics.extend(method_generics);
     let scope = GenericScope::new(&generics)?;
     let params = func
         .params
@@ -740,57 +770,62 @@ fn fill_interface(
         .generics
         .clone();
 
-    // v0.4 restriction: interfaces used for effects must be monomorphic.
-    if !generics.is_empty() {
+    if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
-            message: "interfaces cannot be generic in v0.4".to_string(),
+            message: "higher-kinded generics on interfaces are not supported".to_string(),
             span: item.name.span,
         });
     }
 
     // Resolve and validate super-interfaces.
     let mut supers = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut seen = Vec::<Ty>::new();
+    let iface_scope = GenericScope::new(&generics)?;
     for sup in &item.supers {
-        if !sup.segments.iter().all(|seg| seg.args.is_empty()) {
+        let sup_ty = lower_path_type(env, module, &iface_scope, sup)?;
+        let Ty::App(TyCon::Named(name), args) = &sup_ty else {
             return Err(TypeError {
-                message: "super-interface references cannot have type arguments in v0.4"
-                    .to_string(),
+                message: format!("super-interface must be an interface type, got `{sup_ty}`"),
+                span: sup.span,
+            });
+        };
+        if !env.interfaces.contains_key(name) {
+            return Err(TypeError {
+                message: format!("super-interface must be an interface, got `{name}`"),
                 span: sup.span,
             });
         }
-        let segments: Vec<String> = sup
-            .segments
-            .iter()
-            .map(|seg| seg.name.name.clone())
-            .collect();
-        let (kind, fqn) = env
-            .modules
-            .resolve_type_fqn(module, &segments, sup.span)
-            .map_err(|e| TypeError {
-                message: e.message,
-                span: e.span,
-            })?;
-        if kind != crate::modules::DefKind::Interface {
-            return Err(TypeError {
-                message: format!("super-interface must be an interface, got `{fqn}`"),
-                span: sup.span,
-            });
+
+        // Initial-stage restriction: super-interface type arguments must be a prefix of this
+        // interface's own type parameters, in order (avoids type-level specialization).
+        for (idx, arg) in args.iter().enumerate() {
+            if arg != &Ty::Gen(idx) {
+                return Err(TypeError {
+                    message: "super-interface type arguments must be the interface's own type parameters (in order)"
+                        .to_string(),
+                    span: sup.span,
+                });
+            }
         }
-        if seen.insert(fqn.clone()) {
-            supers.push(fqn);
+
+        if !seen.contains(&sup_ty) {
+            seen.push(sup_ty.clone());
+            supers.push(sup_ty);
         }
     }
 
-    let scope = GenericScope::new(&generics)?;
     let mut methods = BTreeMap::new();
     for member in &item.members {
-        if !member.generics.is_empty() {
+        let method_generics =
+            lower_generic_params_in_scope(env, module, &generics, &member.generics, true)?;
+        if method_generics.iter().any(|g| g.arity != 0) {
             return Err(TypeError {
-                message: "interface methods cannot be generic in v0.4".to_string(),
+                message: "higher-kinded generics on interface methods are not supported"
+                    .to_string(),
                 span: member.name.span,
             });
         }
+
         let mname = member.name.name.clone();
         if methods.contains_key(&mname) {
             return Err(TypeError {
@@ -798,13 +833,23 @@ fn fill_interface(
                 span: member.name.span,
             });
         }
+        let mut combined = generics.clone();
+        combined.extend(method_generics.clone());
+        let scope = GenericScope::new(&combined)?;
         let params = member
             .params
             .iter()
             .map(|p| lower_type_expr(env, module, &scope, &p.ty))
             .collect::<Result<Vec<_>, _>>()?;
         let ret = lower_type_expr(env, module, &scope, &member.ret)?;
-        methods.insert(mname.clone(), InterfaceMethodSig { params, ret });
+        methods.insert(
+            mname.clone(),
+            InterfaceMethodSig {
+                generics: method_generics,
+                params,
+                ret,
+            },
+        );
     }
     env.interfaces
         .get_mut(&full_name)
@@ -882,8 +927,20 @@ fn compute_interface_all_methods(
         }
     };
 
+    let iface_arity = env
+        .interfaces
+        .get(iface)
+        .map(|d| d.generics.len())
+        .unwrap_or(0);
+
     for sup in &supers {
-        compute_interface_all_methods(env, sup, state, stack)?;
+        let Ty::App(TyCon::Named(sup_name), _args) = sup else {
+            return Err(TypeError {
+                message: "internal error: non-nominal super-interface type".to_string(),
+                span,
+            });
+        };
+        compute_interface_all_methods(env, sup_name, state, stack)?;
     }
 
     let mut all: BTreeMap<String, InterfaceMethod> = BTreeMap::new();
@@ -898,26 +955,47 @@ fn compute_interface_all_methods(
     }
 
     for sup in supers {
-        let super_methods = env
+        let Ty::App(TyCon::Named(sup_name), sup_args) = sup else {
+            return Err(TypeError {
+                message: "internal error: non-nominal super-interface type".to_string(),
+                span,
+            });
+        };
+        let sup_def = env
             .interfaces
-            .get(&sup)
-            .expect("super-interfaces resolved in fill_interface")
-            .all_methods
-            .clone();
+            .get(&sup_name)
+            .expect("super-interfaces resolved in fill_interface");
+        let sup_arity = sup_def.generics.len();
+        if sup_args.len() != sup_arity {
+            return Err(TypeError {
+                message: "internal error: super-interface arity mismatch".to_string(),
+                span,
+            });
+        }
+        let iface_subst: HashMap<GenId, Ty> = sup_args.into_iter().enumerate().collect();
+
+        let super_methods = sup_def.all_methods.clone();
         for (name, meth) in super_methods {
+            let rewritten_sig =
+                rewrite_interface_method_sig(&meth.sig, &iface_subst, sup_arity, iface_arity);
+            let rewritten = InterfaceMethod {
+                origin: meth.origin,
+                sig: rewritten_sig,
+            };
+
             match all.get(&name) {
                 None => {
-                    all.insert(name, meth);
+                    all.insert(name, rewritten);
                 }
                 Some(existing) => {
-                    if existing.origin == meth.origin {
+                    if existing.origin == rewritten.origin {
                         // Diamond duplication: same canonical method, ok.
                         continue;
                     }
                     return Err(TypeError {
                         message: format!(
                             "conflicting inherited method `{name}` in interface `{iface}` (from `{}` and `{}`)",
-                            existing.origin, meth.origin
+                            existing.origin, rewritten.origin
                         ),
                         span,
                     });
@@ -933,12 +1011,156 @@ fn compute_interface_all_methods(
     Ok(())
 }
 
+fn rewrite_interface_method_sig(
+    sig: &InterfaceMethodSig,
+    iface_subst: &HashMap<GenId, Ty>,
+    old_iface_arity: usize,
+    new_iface_arity: usize,
+) -> InterfaceMethodSig {
+    let mut rewritten_generics = Vec::with_capacity(sig.generics.len());
+    for g in &sig.generics {
+        let bounds = g
+            .bounds
+            .iter()
+            .cloned()
+            .map(|b| {
+                rewrite_ty_for_inherited_method(b, iface_subst, old_iface_arity, new_iface_arity)
+            })
+            .collect();
+        rewritten_generics.push(GenericParamInfo {
+            name: g.name.clone(),
+            arity: g.arity,
+            bounds,
+            span: g.span,
+        });
+    }
+
+    InterfaceMethodSig {
+        generics: rewritten_generics,
+        params: sig
+            .params
+            .iter()
+            .cloned()
+            .map(|t| {
+                rewrite_ty_for_inherited_method(t, iface_subst, old_iface_arity, new_iface_arity)
+            })
+            .collect(),
+        ret: rewrite_ty_for_inherited_method(
+            sig.ret.clone(),
+            iface_subst,
+            old_iface_arity,
+            new_iface_arity,
+        ),
+    }
+}
+
+fn rewrite_ty_for_inherited_method(
+    ty: Ty,
+    iface_subst: &HashMap<GenId, Ty>,
+    old_iface_arity: usize,
+    new_iface_arity: usize,
+) -> Ty {
+    match ty {
+        Ty::Gen(id) => {
+            if id < old_iface_arity {
+                iface_subst.get(&id).cloned().unwrap_or(Ty::Gen(id))
+            } else {
+                let method_id = id - old_iface_arity;
+                Ty::Gen(new_iface_arity + method_id)
+            }
+        }
+        Ty::Array(elem) => Ty::Array(Box::new(rewrite_ty_for_inherited_method(
+            *elem,
+            iface_subst,
+            old_iface_arity,
+            new_iface_arity,
+        ))),
+        Ty::Tuple(items) => Ty::Tuple(
+            items
+                .into_iter()
+                .map(|t| {
+                    rewrite_ty_for_inherited_method(
+                        t,
+                        iface_subst,
+                        old_iface_arity,
+                        new_iface_arity,
+                    )
+                })
+                .collect(),
+        ),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params
+                .into_iter()
+                .map(|p| {
+                    rewrite_ty_for_inherited_method(
+                        p,
+                        iface_subst,
+                        old_iface_arity,
+                        new_iface_arity,
+                    )
+                })
+                .collect(),
+            ret: Box::new(rewrite_ty_for_inherited_method(
+                *ret,
+                iface_subst,
+                old_iface_arity,
+                new_iface_arity,
+            )),
+        },
+        Ty::Cont { param, ret } => Ty::Cont {
+            param: Box::new(rewrite_ty_for_inherited_method(
+                *param,
+                iface_subst,
+                old_iface_arity,
+                new_iface_arity,
+            )),
+            ret: Box::new(rewrite_ty_for_inherited_method(
+                *ret,
+                iface_subst,
+                old_iface_arity,
+                new_iface_arity,
+            )),
+        },
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(rewrite_ty_for_inherited_method(
+            *inner,
+            iface_subst,
+            old_iface_arity,
+            new_iface_arity,
+        ))),
+        Ty::App(con, args) => Ty::App(
+            rewrite_con_for_inherited_method(con, iface_subst, old_iface_arity, new_iface_arity),
+            args.into_iter()
+                .map(|a| {
+                    rewrite_ty_for_inherited_method(
+                        a,
+                        iface_subst,
+                        old_iface_arity,
+                        new_iface_arity,
+                    )
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn rewrite_con_for_inherited_method(
+    con: TyCon,
+    _iface_subst: &HashMap<GenId, Ty>,
+    _old_iface_arity: usize,
+    _new_iface_arity: usize,
+) -> TyCon {
+    // Higher-kinded generics are not supported for interfaces in this stage, so there are no
+    // interface-level type constructor parameters to substitute/shift.
+    con
+}
+
 fn process_impl_item(
     env: &mut ProgramEnv,
     module: &ModulePath,
     item: &ImplItem,
 ) -> Result<(), TypeError> {
-    let impl_generics = lower_generic_params(env, module, &item.generics)?;
+    let impl_generics = lower_generic_params(env, module, &item.generics, false)?;
     let impl_scope = GenericScope::new(&impl_generics)?;
 
     match &item.header {
@@ -965,7 +1187,7 @@ fn process_impl_item(
 
             for method in &item.members {
                 let qual_name = format!("{type_name}::{}", method.name.name);
-                declare_function_sig(env, module, method, Some(qual_name))?;
+                declare_function_sig(env, module, &impl_generics, method, Some(qual_name))?;
             }
         }
         ImplHeader::InterfaceForType {
@@ -974,16 +1196,8 @@ fn process_impl_item(
             span: _,
         } => {
             let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
-            let iface_name = match iface_ty {
-                Ty::App(TyCon::Named(name), args) => {
-                    if !args.is_empty() {
-                        return Err(TypeError {
-                            message: "generic interfaces are not supported in v0.4".to_string(),
-                            span: item.span,
-                        });
-                    }
-                    name
-                }
+            let (iface_name, iface_args) = match iface_ty {
+                Ty::App(TyCon::Named(name), args) => (name, args),
                 other => {
                     return Err(TypeError {
                         message: format!(
@@ -999,11 +1213,24 @@ fn process_impl_item(
                     span: item.span,
                 });
             };
-            if !iface_def.generics.is_empty() {
+            let iface_arity = iface_def.generics.len();
+            if iface_args.len() != iface_arity {
                 return Err(TypeError {
-                    message: "generic interfaces are not supported in v0.4".to_string(),
+                    message: format!(
+                        "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
+                        iface_args.len()
+                    ),
                     span: item.span,
                 });
+            }
+            for (idx, arg) in iface_args.iter().enumerate() {
+                if arg != &Ty::Gen(idx) {
+                    return Err(TypeError {
+                        message: "impl interface type arguments must be the impl's type parameters (in order); specialization is not supported yet"
+                            .to_string(),
+                        span: interface.span,
+                    });
+                }
             }
             let iface_methods = iface_def.all_methods.clone();
             let iface_def_name = iface_def.name.clone();
@@ -1047,10 +1274,18 @@ fn process_impl_item(
                         span: item.span,
                     });
                 };
-                if !method.generics.is_empty() {
+                if method.generics.iter().any(|g| !g.bounds.is_empty()) {
                     return Err(TypeError {
-                        message: "impl methods cannot be generic in v0.4 interface impls"
-                            .to_string(),
+                        message: "bounds on impl method generics are not supported yet".to_string(),
+                        span: method.name.span,
+                    });
+                }
+                if method.generics.len() != info.sig.generics.len() {
+                    return Err(TypeError {
+                        message: format!(
+                            "method `{mname}` must declare {} generic parameter(s) to match the interface",
+                            info.sig.generics.len()
+                        ),
                         span: method.name.span,
                     });
                 }
@@ -1069,7 +1304,80 @@ fn process_impl_item(
 
                 // Declare the implementing function with a stable internal name.
                 let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                declare_function_sig(env, module, method, Some(impl_fn_name.clone()))?;
+                declare_function_sig(
+                    env,
+                    module,
+                    &impl_generics,
+                    method,
+                    Some(impl_fn_name.clone()),
+                )?;
+
+                // Validate the declared signature matches the interface contract.
+                let impl_sig = env
+                    .functions
+                    .get(&impl_fn_name)
+                    .expect("declared just above")
+                    .clone();
+                let impl_arity = impl_generics.len();
+                let expected_iface_arity = iface_arity;
+                if impl_arity < expected_iface_arity {
+                    return Err(TypeError {
+                        message: "internal error: interface arity exceeds impl arity".to_string(),
+                        span: item.span,
+                    });
+                }
+                // Receiver type must match the impl target type.
+                if impl_sig
+                    .params
+                    .first()
+                    .is_some_and(|t| nominal_type_name(t).is_none())
+                {
+                    return Err(TypeError {
+                        message: format!("method `{mname}` must be an instance method"),
+                        span: method.name.span,
+                    });
+                }
+                if let Some(recv_ty) = impl_sig.params.first() {
+                    let expected_recv = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+                    if strip_readonly(recv_ty) != strip_readonly(&expected_recv) {
+                        return Err(TypeError {
+                            message: format!(
+                                "method `{mname}` receiver type mismatch: expected `{expected_recv}`, got `{recv_ty}`"
+                            ),
+                            span: method.params.first().map(|p| p.span).unwrap_or(method.span),
+                        });
+                    }
+                }
+                // Non-receiver params + return must match the interface signature, with method
+                // generic indices shifted into the impl's generic environment.
+                let shift = impl_arity - expected_iface_arity;
+                let expected_params = info
+                    .sig
+                    .params
+                    .iter()
+                    .cloned()
+                    .map(|t| shift_method_generics(t, expected_iface_arity, shift))
+                    .collect::<Vec<_>>();
+                let got_params = impl_sig.params.iter().skip(1).cloned().collect::<Vec<_>>();
+                if expected_params != got_params {
+                    return Err(TypeError {
+                        message: format!(
+                            "method `{mname}` parameter types do not match interface `{iface_def_name}`"
+                        ),
+                        span: method.name.span,
+                    });
+                }
+                let expected_ret =
+                    shift_method_generics(info.sig.ret.clone(), expected_iface_arity, shift);
+                if expected_ret != impl_sig.ret {
+                    return Err(TypeError {
+                        message: format!(
+                            "method `{mname}` return type does not match interface `{iface_def_name}`"
+                        ),
+                        span: method.name.span,
+                    });
+                }
+
                 let key = (type_name.clone(), info.origin.clone(), mname.clone());
                 if env.interface_methods.contains_key(&key) {
                     return Err(TypeError {
@@ -1170,9 +1478,26 @@ fn lower_generic_params(
     env: &ProgramEnv,
     module: &ModulePath,
     params: &[GenericParam],
+    allow_bounds: bool,
 ) -> Result<Vec<GenericParamInfo>, TypeError> {
+    lower_generic_params_in_scope(env, module, &[], params, allow_bounds)
+}
+
+fn lower_generic_params_in_scope(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    prefix: &[GenericParamInfo],
+    params: &[GenericParam],
+    allow_bounds: bool,
+) -> Result<Vec<GenericParamInfo>, TypeError> {
+    let mut combined: Vec<GenericParamInfo> = prefix.to_vec();
     let mut out = Vec::with_capacity(params.len());
-    let mut seen = BTreeSet::new();
+
+    let mut seen = BTreeSet::<String>::new();
+    for p in prefix {
+        seen.insert(p.name.clone());
+    }
+
     for p in params {
         let name = p.name.name.clone();
         if !seen.insert(name.clone()) {
@@ -1182,42 +1507,54 @@ fn lower_generic_params(
             });
         }
 
-        let constraint = match &p.constraint {
-            None => None,
-            Some(path) => {
-                if !path.segments.iter().all(|seg| seg.args.is_empty()) {
-                    return Err(TypeError {
-                        message: "generic constraints cannot have type arguments in v0.4"
-                            .to_string(),
-                        span: path.span,
-                    });
-                }
-                let segments: Vec<String> =
-                    path.segments.iter().map(|s| s.name.name.clone()).collect();
-                let (kind, fqn) = env
-                    .modules
-                    .resolve_type_fqn(module, &segments, path.span)
-                    .map_err(|e| TypeError {
-                        message: e.message,
-                        span: e.span,
-                    })?;
-                if kind != crate::modules::DefKind::Interface {
-                    return Err(TypeError {
-                        message: format!("generic constraint must be an interface, got `{fqn}`"),
-                        span: path.span,
-                    });
-                }
-                Some(fqn)
-            }
-        };
+        if !allow_bounds && !p.bounds.is_empty() {
+            return Err(TypeError {
+                message: "generic bounds are only supported on `fn`/method generics".to_string(),
+                span: p.span,
+            });
+        }
+        if p.arity != 0 && !p.bounds.is_empty() {
+            return Err(TypeError {
+                message: "bounds on higher-kinded type parameters are not supported".to_string(),
+                span: p.span,
+            });
+        }
 
-        out.push(GenericParamInfo {
+        let mut bounds = Vec::<Ty>::new();
+        if allow_bounds {
+            let scope = GenericScope::new(&combined)?;
+            for bound in &p.bounds {
+                let bty = lower_path_type(env, module, &scope, bound)?;
+                let Ty::App(TyCon::Named(iface_name), _args) = &bty else {
+                    return Err(TypeError {
+                        message: format!("generic bound must be an interface type, got `{bty}`"),
+                        span: bound.span,
+                    });
+                };
+                if !env.interfaces.contains_key(iface_name) {
+                    return Err(TypeError {
+                        message: format!(
+                            "generic bound must be an interface type, got `{iface_name}`"
+                        ),
+                        span: bound.span,
+                    });
+                }
+                if !bounds.contains(&bty) {
+                    bounds.push(bty);
+                }
+            }
+        }
+
+        let info = GenericParamInfo {
             name,
             arity: p.arity,
-            constraint,
+            bounds,
             span: p.span,
-        });
+        };
+        combined.push(info.clone());
+        out.push(info);
     }
+
     Ok(out)
 }
 
@@ -1401,7 +1738,7 @@ struct InferCtx {
     type_bindings: HashMap<TypeVarId, Ty>,
     con_bindings: HashMap<ConVarId, TyCon>,
     con_arities: HashMap<ConVarId, usize>,
-    type_constraints: HashMap<TypeVarId, Vec<String>>,
+    type_constraints: HashMap<TypeVarId, Vec<Ty>>,
 }
 
 impl InferCtx {
@@ -1429,8 +1766,8 @@ impl InferCtx {
         TyCon::Var(id)
     }
 
-    fn add_constraint(&mut self, var: TypeVarId, iface: String) {
-        self.type_constraints.entry(var).or_default().push(iface);
+    fn add_constraint(&mut self, var: TypeVarId, bound: Ty) {
+        self.type_constraints.entry(var).or_default().push(bound);
     }
 
     fn resolve_ty(&mut self, ty: Ty) -> Ty {
@@ -1631,22 +1968,27 @@ impl InferCtx {
 struct InstFn {
     params: Vec<Ty>,
     ret: Ty,
+    reified_type_args: Vec<Ty>,
 }
 
 fn instantiate_fn(sig: &FnSig, infer: &mut InferCtx) -> InstFn {
     let mut ty_subst: HashMap<GenId, Ty> = HashMap::new();
     let mut con_subst: HashMap<GenId, TyCon> = HashMap::new();
+    let mut reified_type_args: Vec<Ty> = Vec::new();
 
     for (idx, gp) in sig.generics.iter().enumerate() {
         let gen_id: GenId = idx;
         if gp.arity == 0 {
             let ty = infer.fresh_type_var();
-            if let Ty::Var(var_id) = ty
-                && let Some(iface) = gp.constraint.clone()
-            {
-                infer.add_constraint(var_id, iface);
+            let ty_for_args = ty.clone();
+            if let Ty::Var(var_id) = ty {
+                for bound in &gp.bounds {
+                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
+                    infer.add_constraint(var_id, bound);
+                }
             }
-            ty_subst.insert(gen_id, ty);
+            reified_type_args.push(ty_for_args.clone());
+            ty_subst.insert(gen_id, ty_for_args);
         } else {
             let con = infer.fresh_con_var(gp.arity);
             con_subst.insert(gen_id, con);
@@ -1661,6 +2003,57 @@ fn instantiate_fn(sig: &FnSig, infer: &mut InferCtx) -> InstFn {
             .map(|t| subst_ty(t, &ty_subst, &con_subst))
             .collect(),
         ret: subst_ty(sig.ret.clone(), &ty_subst, &con_subst),
+        reified_type_args,
+    }
+}
+
+fn instantiate_interface_method_sig(
+    sig: &InterfaceMethodSig,
+    iface_args: &[Ty],
+    iface_arity: usize,
+    infer: &mut InferCtx,
+) -> InstFn {
+    let mut ty_subst: HashMap<GenId, Ty> = HashMap::new();
+    let mut con_subst: HashMap<GenId, TyCon> = HashMap::new();
+    let mut reified_type_args: Vec<Ty> = Vec::new();
+
+    for (idx, arg) in iface_args.iter().cloned().enumerate() {
+        ty_subst.insert(idx, arg);
+    }
+    debug_assert_eq!(iface_args.len(), iface_arity);
+
+    // Method generics are appended after the interface generics.
+    for (idx, gp) in sig.generics.iter().enumerate() {
+        let gen_id: GenId = iface_arity + idx;
+        if gp.arity == 0 {
+            let ty = infer.fresh_type_var();
+            let ty_for_args = ty.clone();
+            if let Ty::Var(var_id) = ty {
+                // Insert before processing bounds so bounds may mention earlier method generics.
+                ty_subst.insert(gen_id, ty_for_args.clone());
+                for bound in &gp.bounds {
+                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
+                    infer.add_constraint(var_id, bound);
+                }
+            } else {
+                ty_subst.insert(gen_id, ty_for_args.clone());
+            }
+            reified_type_args.push(ty_for_args);
+        } else {
+            let con = infer.fresh_con_var(gp.arity);
+            con_subst.insert(gen_id, con);
+        }
+    }
+
+    InstFn {
+        params: sig
+            .params
+            .iter()
+            .cloned()
+            .map(|t| subst_ty(t, &ty_subst, &con_subst))
+            .collect(),
+        ret: subst_ty(sig.ret.clone(), &ty_subst, &con_subst),
+        reified_type_args,
     }
 }
 
@@ -1669,6 +2062,12 @@ fn subst_ty(ty: Ty, ty_subst: &HashMap<GenId, Ty>, con_subst: &HashMap<GenId, Ty
         Ty::Gen(id) => ty_subst.get(&id).cloned().unwrap_or(Ty::Gen(id)),
         Ty::Var(id) => Ty::Var(id),
         Ty::Array(elem) => Ty::Array(Box::new(subst_ty(*elem, ty_subst, con_subst))),
+        Ty::Tuple(items) => Ty::Tuple(
+            items
+                .into_iter()
+                .map(|t| subst_ty(t, ty_subst, con_subst))
+                .collect(),
+        ),
         Ty::Fn { params, ret } => Ty::Fn {
             params: params
                 .into_iter()
@@ -1718,11 +2117,19 @@ pub(crate) fn typecheck_program(
                 let sig = env.functions.get(&fn_name).expect("declared");
                 let fn_info = typecheck_function_body(env, module, sig, func)?;
                 info.expr_types.extend(fn_info.expr_types);
+                info.call_type_args.extend(fn_info.call_type_args);
+                info.method_type_args.extend(fn_info.method_type_args);
+                info.effect_interface_args
+                    .extend(fn_info.effect_interface_args);
                 Ok(())
             }
             Item::Impl(imp) => {
                 let fn_info = typecheck_impl_item(env, module, imp)?;
                 info.expr_types.extend(fn_info.expr_types);
+                info.call_type_args.extend(fn_info.call_type_args);
+                info.method_type_args.extend(fn_info.method_type_args);
+                info.effect_interface_args
+                    .extend(fn_info.effect_interface_args);
                 Ok(())
             }
             _ => Ok(()),
@@ -1737,7 +2144,7 @@ fn typecheck_impl_item(
     item: &ImplItem,
 ) -> Result<TypeInfo, TypeError> {
     let mut info = TypeInfo::default();
-    let impl_generics = lower_generic_params(env, module, &item.generics)?;
+    let impl_generics = lower_generic_params(env, module, &item.generics, false)?;
     let impl_scope = GenericScope::new(&impl_generics)?;
     match &item.header {
         ImplHeader::Inherent { ty, .. } => {
@@ -1761,6 +2168,10 @@ fn typecheck_impl_item(
                 })?;
                 let fn_info = typecheck_function_body(env, module, sig, method)?;
                 info.expr_types.extend(fn_info.expr_types);
+                info.call_type_args.extend(fn_info.call_type_args);
+                info.method_type_args.extend(fn_info.method_type_args);
+                info.effect_interface_args
+                    .extend(fn_info.effect_interface_args);
             }
         }
         ImplHeader::InterfaceForType { interface, ty, .. } => {
@@ -1796,6 +2207,10 @@ fn typecheck_impl_item(
                 })?;
                 let fn_info = typecheck_function_body(env, module, sig, method)?;
                 info.expr_types.extend(fn_info.expr_types);
+                info.call_type_args.extend(fn_info.call_type_args);
+                info.method_type_args.extend(fn_info.method_type_args);
+                info.effect_interface_args
+                    .extend(fn_info.effect_interface_args);
             }
         }
     }
@@ -1839,7 +2254,42 @@ fn typecheck_function_body(
         .into_iter()
         .map(|(span, ty)| (span, tc.infer.resolve_ty(ty)))
         .collect();
-    Ok(TypeInfo { expr_types })
+    let call_type_args = tc
+        .call_type_args
+        .into_iter()
+        .map(|(key, args)| {
+            (
+                key,
+                args.into_iter().map(|ty| tc.infer.resolve_ty(ty)).collect(),
+            )
+        })
+        .collect();
+    let method_type_args = tc
+        .method_type_args
+        .into_iter()
+        .map(|(key, args)| {
+            (
+                key,
+                args.into_iter().map(|ty| tc.infer.resolve_ty(ty)).collect(),
+            )
+        })
+        .collect();
+    let effect_interface_args = tc
+        .effect_interface_args
+        .into_iter()
+        .map(|(key, args)| {
+            (
+                key,
+                args.into_iter().map(|ty| tc.infer.resolve_ty(ty)).collect(),
+            )
+        })
+        .collect();
+    Ok(TypeInfo {
+        expr_types,
+        call_type_args,
+        method_type_args,
+        effect_interface_args,
+    })
 }
 
 struct FnTypechecker<'a> {
@@ -1851,6 +2301,10 @@ struct FnTypechecker<'a> {
     scopes: Vec<HashMap<String, LocalInfo>>,
     all_bindings: Vec<(String, Span, Ty)>,
     expr_types: HashMap<Span, Ty>,
+    call_type_args: HashMap<(Span, String), Vec<Ty>>,
+    method_type_args: HashMap<(Span, String), Vec<Ty>>,
+    effect_interface_args: HashMap<(Span, String), Vec<Ty>>,
+    stmt_exprs: HashSet<Span>,
     loop_depth: usize,
     reserved_names: BTreeSet<String>,
 }
@@ -1866,6 +2320,10 @@ impl<'a> FnTypechecker<'a> {
             scopes: vec![HashMap::new()],
             all_bindings: Vec::new(),
             expr_types: HashMap::new(),
+            call_type_args: HashMap::new(),
+            method_type_args: HashMap::new(),
+            effect_interface_args: HashMap::new(),
+            stmt_exprs: HashSet::new(),
             loop_depth: 0,
             reserved_names: BTreeSet::from(["resume".to_string()]),
         }
@@ -1881,12 +2339,11 @@ impl<'a> FnTypechecker<'a> {
                     span: self.sig.span,
                 });
             }
-            for iface in ifaces {
-                if !self.type_implements_interface(&resolved, iface) {
+            for bound in ifaces {
+                let bound = self.infer.resolve_ty(bound.clone());
+                if !self.type_implements_interface_type(&resolved, &bound) {
                     return Err(TypeError {
-                        message: format!(
-                            "type `{resolved}` does not implement interface `{iface}`"
-                        ),
+                        message: format!("type `{resolved}` does not implement `{bound}`"),
                         span: self.sig.span,
                     });
                 }
@@ -1902,6 +2359,59 @@ impl<'a> FnTypechecker<'a> {
                     span: *span,
                 });
             }
+        }
+
+        // Ensure no expression types contain unresolved inference variables.
+        //
+        // v0.4 used erased generics, so some unconstrained inference variables could slip through
+        // in "value-only" expression positions (e.g. `Option::None;`). With reified generics, the
+        // compiler must be able to reify instantiated nominal types at runtime, so these become
+        // hard type errors.
+        if let Some((span, _ty)) = self
+            .expr_types
+            .iter()
+            .map(|(span, ty)| (*span, self.infer.resolve_ty(ty.clone())))
+            .filter(|(span, ty)| !self.stmt_exprs.contains(span) && contains_infer_vars(ty))
+            .min_by_key(|(span, _ty)| (span.start, span.end))
+        {
+            return Err(TypeError {
+                message: "cannot infer type of expression; add a type annotation".to_string(),
+                span,
+            });
+        }
+
+        // Ensure we can reify generic type arguments at call sites.
+        if let Some(span) = self
+            .call_type_args
+            .iter()
+            .filter(|(_span, args)| {
+                args.iter()
+                    .any(|ty| contains_infer_vars(&self.infer.resolve_ty(ty.clone())))
+            })
+            .map(|((span, _name), _args)| *span)
+            .min_by_key(|span| (span.start, span.end))
+        {
+            return Err(TypeError {
+                message: "cannot infer type arguments for generic call; add a type annotation"
+                    .to_string(),
+                span,
+            });
+        }
+        if let Some(span) = self
+            .method_type_args
+            .iter()
+            .filter(|(_span, args)| {
+                args.iter()
+                    .any(|ty| contains_infer_vars(&self.infer.resolve_ty(ty.clone())))
+            })
+            .map(|((span, _method_id), _args)| *span)
+            .min_by_key(|span| (span.start, span.end))
+        {
+            return Err(TypeError {
+                message: "cannot infer type arguments for generic method; add a type annotation"
+                    .to_string(),
+                span,
+            });
         }
 
         Ok(())
@@ -2132,7 +2642,9 @@ impl<'a> FnTypechecker<'a> {
             } => self.typecheck_for(binding, iter, body, *span)?,
             Expr::Block { block, .. } => self.typecheck_block(block, use_kind)?,
 
-            Expr::Call { callee, args, span } => self.typecheck_call(callee, args, *span)?,
+            Expr::Call { callee, args, span } => {
+                self.typecheck_call(callee, args, use_kind, *span)?
+            }
             Expr::Field { base, name, span } => self.typecheck_field(base, name, *span)?,
             Expr::Index { base, index, span } => self.typecheck_index(base, index, *span)?,
             Expr::Unary { op, expr, span } => self.typecheck_unary(*op, expr, *span)?,
@@ -2153,6 +2665,9 @@ impl<'a> FnTypechecker<'a> {
         };
 
         let resolved = self.infer.resolve_ty(ty);
+        if use_kind == ExprUse::Stmt {
+            self.stmt_exprs.insert(expr.span());
+        }
         self.expr_types.insert(expr.span(), resolved.clone());
         Ok(resolved)
     }
@@ -2399,12 +2914,32 @@ impl<'a> FnTypechecker<'a> {
 
     fn typecheck_effect_call(
         &mut self,
-        interface: &crate::ast::Path,
+        interface: &crate::ast::PathType,
         method: &Ident,
         args: &[Expr],
         span: Span,
     ) -> Result<Ty, TypeError> {
-        let segments: Vec<String> = interface.segments.iter().map(|s| s.name.clone()).collect();
+        if interface.segments.is_empty() {
+            return Err(TypeError {
+                message: "empty interface path in effect call".to_string(),
+                span: interface.span,
+            });
+        }
+        for seg in &interface.segments[..interface.segments.len() - 1] {
+            if !seg.args.is_empty() {
+                return Err(TypeError {
+                    message: "type arguments are only supported on the last path segment"
+                        .to_string(),
+                    span: seg.span,
+                });
+            }
+        }
+
+        let segments: Vec<String> = interface
+            .segments
+            .iter()
+            .map(|s| s.name.name.clone())
+            .collect();
         let (kind, iface_name) = self
             .env
             .modules
@@ -2419,20 +2954,59 @@ impl<'a> FnTypechecker<'a> {
                 span: interface.span,
             });
         }
-
-        let Some(iface) = self.env.interfaces.get(&iface_name) else {
+        let Some(iface_def) = self.env.interfaces.get(&iface_name) else {
             return Err(TypeError {
                 message: format!("unknown interface `{iface_name}`"),
                 span: interface.span,
             });
         };
-        let Some(method_info) = iface.all_methods.get(&method.name) else {
+
+        let iface_arity = iface_def.generics.len();
+        let last = interface.segments.last().expect("non-empty");
+        let explicit_iface_args = !last.args.is_empty();
+        let scope = GenericScope::new(&self.sig.generics)?;
+
+        let mut iface_args: Vec<Ty> = if explicit_iface_args {
+            if last.args.len() != iface_arity {
+                return Err(TypeError {
+                    message: format!(
+                        "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
+                        last.args.len()
+                    ),
+                    span: interface.span,
+                });
+            }
+            last.args
+                .iter()
+                .map(|a| lower_type_expr(self.env, &self.module, &scope, a))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            // Inference case: `@I.foo(...)` where `I` is generic.
+            (0..iface_arity)
+                .map(|_| self.infer.fresh_type_var())
+                .collect()
+        };
+
+        let Some(method_info) = iface_def.all_methods.get(&method.name) else {
             return Err(TypeError {
                 message: format!("unknown effect/method `{}.{}`", iface_name, method.name),
                 span: method.span,
             });
         };
-        let sig = &method_info.sig;
+        if !method_info.sig.generics.is_empty() {
+            return Err(TypeError {
+                message: "method-generic effect operations are not supported yet".to_string(),
+                span: method.span,
+            });
+        }
+
+        let sig = instantiate_interface_method_sig(
+            &method_info.sig,
+            &iface_args,
+            iface_arity,
+            &mut self.infer,
+        );
+
         if args.len() != sig.params.len() {
             return Err(TypeError {
                 message: format!(
@@ -2449,7 +3023,36 @@ impl<'a> FnTypechecker<'a> {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
             self.infer.unify(expected.clone(), got, arg.span())?;
         }
-        Ok(sig.ret.clone())
+
+        // If interface args were omitted, require inference to fully determine them.
+        if !explicit_iface_args {
+            for arg in &mut iface_args {
+                *arg = self.infer.resolve_ty(arg.clone());
+                if contains_infer_vars(arg) {
+                    return Err(TypeError {
+                        message: format!(
+                            "cannot infer interface type arguments for effect call `@{iface_name}.{}(...)`; use `@{iface_name}<...>.{}(...)`",
+                            method.name, method.name
+                        ),
+                        span: interface.span,
+                    });
+                }
+            }
+        }
+
+        let origin_args = infer_super_interface_args(self.env, &iface_name, &iface_args, &method_info.origin)
+            .ok_or(TypeError {
+                message: format!(
+                    "internal error: cannot infer `{}` type arguments for effect call `@{iface_name}.{}(...)`",
+                    method_info.origin, method.name
+                ),
+                span: interface.span,
+            })?;
+        let effect_id = format!("{}::{}", method_info.origin, method.name);
+        self.effect_interface_args
+            .insert((span, effect_id), origin_args);
+
+        Ok(sig.ret)
     }
 
     fn typecheck_lambda(
@@ -2565,11 +3168,30 @@ impl<'a> FnTypechecker<'a> {
                     self.pop_scope();
                 }
                 MatchPat::Effect(effect_pat) => {
+                    if effect_pat.interface.segments.is_empty() {
+                        return Err(TypeError {
+                            message: "empty interface path in effect pattern".to_string(),
+                            span: effect_pat.interface.span,
+                        });
+                    }
+                    for seg in
+                        &effect_pat.interface.segments[..effect_pat.interface.segments.len() - 1]
+                    {
+                        if !seg.args.is_empty() {
+                            return Err(TypeError {
+                                message:
+                                    "type arguments are only supported on the last path segment"
+                                        .to_string(),
+                                span: seg.span,
+                            });
+                        }
+                    }
+
                     let iface_segments: Vec<String> = effect_pat
                         .interface
                         .segments
                         .iter()
-                        .map(|s| s.name.clone())
+                        .map(|s| s.name.name.clone())
                         .collect();
                     let (kind, iface_name) = self
                         .env
@@ -2585,13 +3207,39 @@ impl<'a> FnTypechecker<'a> {
                             span: effect_pat.interface.span,
                         });
                     }
-                    let Some(iface) = self.env.interfaces.get(&iface_name) else {
+                    let Some(iface_def) = self.env.interfaces.get(&iface_name) else {
                         return Err(TypeError {
                             message: format!("unknown interface `{iface_name}`"),
                             span: effect_pat.interface.span,
                         });
                     };
-                    let Some(method_info) = iface.all_methods.get(&effect_pat.method.name) else {
+
+                    let iface_arity = iface_def.generics.len();
+                    let last = effect_pat.interface.segments.last().expect("non-empty");
+                    let explicit_iface_args = !last.args.is_empty();
+                    let scope = GenericScope::new(&self.sig.generics)?;
+                    let mut iface_args: Vec<Ty> = if explicit_iface_args {
+                        if last.args.len() != iface_arity {
+                            return Err(TypeError {
+                                message: format!(
+                                    "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
+                                    last.args.len()
+                                ),
+                                span: effect_pat.interface.span,
+                            });
+                        }
+                        last.args
+                            .iter()
+                            .map(|a| lower_type_expr(self.env, &self.module, &scope, a))
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        (0..iface_arity)
+                            .map(|_| self.infer.fresh_type_var())
+                            .collect()
+                    };
+
+                    let Some(method_info) = iface_def.all_methods.get(&effect_pat.method.name)
+                    else {
                         return Err(TypeError {
                             message: format!(
                                 "unknown effect/method `{}.{}`",
@@ -2600,7 +3248,21 @@ impl<'a> FnTypechecker<'a> {
                             span: effect_pat.method.span,
                         });
                     };
-                    let msig = &method_info.sig;
+                    if !method_info.sig.generics.is_empty() {
+                        return Err(TypeError {
+                            message: "method-generic effect operations are not supported yet"
+                                .to_string(),
+                            span: effect_pat.method.span,
+                        });
+                    }
+
+                    let msig = instantiate_interface_method_sig(
+                        &method_info.sig,
+                        &iface_args,
+                        iface_arity,
+                        &mut self.infer,
+                    );
+
                     if effect_pat.args.len() != msig.params.len() {
                         return Err(TypeError {
                             message: format!(
@@ -2613,6 +3275,7 @@ impl<'a> FnTypechecker<'a> {
                             span: effect_pat.span,
                         });
                     }
+
                     let mut binds = Vec::new();
                     for (pat, expected) in effect_pat.args.iter().zip(msig.params.iter()) {
                         binds.extend(self.typecheck_pattern(pat, expected.clone())?);
@@ -2664,6 +3327,42 @@ impl<'a> FnTypechecker<'a> {
                     let body_ty = self.typecheck_expr(&arm.body, ExprUse::Value)?;
                     self.infer.unify(result_ty.clone(), body_ty, arm.span)?;
                     self.pop_scope();
+
+                    // If interface args were omitted, allow the handler body to constrain them
+                    // via the bound pattern variables (type inference works across the whole arm).
+                    for arg in &mut iface_args {
+                        *arg = self.infer.resolve_ty(arg.clone());
+                    }
+                    if !explicit_iface_args {
+                        for arg in &iface_args {
+                            if contains_infer_vars(arg) {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "cannot infer interface type arguments for handler pattern `@{iface_name}.{}(...)`; use `@{iface_name}<...>.{}(...)`",
+                                        effect_pat.method.name, effect_pat.method.name
+                                    ),
+                                    span: effect_pat.interface.span,
+                                });
+                            }
+                        }
+                    }
+
+                    let origin_args = infer_super_interface_args(
+                        self.env,
+                        &iface_name,
+                        &iface_args,
+                        &method_info.origin,
+                    )
+                    .ok_or(TypeError {
+                        message: format!(
+                            "internal error: cannot infer `{}` type arguments for handler pattern `@{iface_name}.{}(...)`",
+                            method_info.origin, effect_pat.method.name
+                        ),
+                        span: effect_pat.interface.span,
+                    })?;
+                    let effect_id = format!("{}::{}", method_info.origin, effect_pat.method.name);
+                    self.effect_interface_args
+                        .insert((effect_pat.span, effect_id), origin_args);
                 }
             }
         }
@@ -3037,6 +3736,7 @@ impl<'a> FnTypechecker<'a> {
         &mut self,
         callee: &Expr,
         args: &[Expr],
+        use_kind: ExprUse,
         span: Span,
     ) -> Result<Ty, TypeError> {
         // Direct call by path.
@@ -3140,6 +3840,18 @@ impl<'a> FnTypechecker<'a> {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
                 self.infer.unify(expected.clone(), got, arg.span())?;
             }
+
+            // `panic<T>(...)` is diverging, so in statement position we can safely pick `T := unit`
+            // to avoid unconstrained inference variables that would otherwise block runtime `TypeRep`
+            // passing.
+            if use_kind == ExprUse::Stmt && sig.name == "core::intrinsics::panic" {
+                let _ = self.infer.unify(inst.ret.clone(), Ty::Unit, span)?;
+            }
+
+            if !inst.reified_type_args.is_empty() {
+                self.call_type_args
+                    .insert((span, sig.name.clone()), inst.reified_type_args.clone());
+            }
             return Ok(inst.ret);
         }
 
@@ -3220,7 +3932,6 @@ impl<'a> FnTypechecker<'a> {
                 span,
             });
         };
-        let msig = &method_info.sig;
         if args.is_empty() {
             return Err(TypeError {
                 message: format!(
@@ -3229,11 +3940,11 @@ impl<'a> FnTypechecker<'a> {
                 span,
             });
         }
-        if args.len() != msig.params.len() + 1 {
+        if args.len() != method_info.sig.params.len() + 1 {
             return Err(TypeError {
                 message: format!(
                     "arity mismatch for `{iface_name}::{method_name}`: expected {}, got {}",
-                    msig.params.len() + 1,
+                    method_info.sig.params.len() + 1,
                     args.len()
                 ),
                 span,
@@ -3241,13 +3952,35 @@ impl<'a> FnTypechecker<'a> {
         }
 
         let recv_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
-        self.ensure_implements_interface(&recv_ty, iface_name, args[0].span())?;
+        let recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        let iface_args = self
+            .infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
+            .ok_or(TypeError {
+                message: format!(
+                    "type `{recv_ty_resolved}` does not implement interface `{iface_name}`"
+                ),
+                span: args[0].span(),
+            })?;
+        let iface_arity = iface.generics.len();
+        let inst = instantiate_interface_method_sig(
+            &method_info.sig,
+            &iface_args,
+            iface_arity,
+            &mut self.infer,
+        );
+        let target_iface = Ty::App(TyCon::Named(iface_name.to_string()), iface_args);
+        self.ensure_implements_interface_type(&recv_ty_resolved, &target_iface, args[0].span())?;
 
-        for (arg, expected) in args[1..].iter().zip(msig.params.iter()) {
+        for (arg, expected) in args[1..].iter().zip(inst.params.iter()) {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
             self.infer.unify(expected.clone(), got, arg.span())?;
         }
-        Ok(msig.ret.clone())
+        if !inst.reified_type_args.is_empty() {
+            let method_id = format!("{}::{method_name}", method_info.origin);
+            self.method_type_args
+                .insert((span, method_id), inst.reified_type_args.clone());
+        }
+        Ok(inst.ret)
     }
 
     fn typecheck_method_call(
@@ -3296,6 +4029,12 @@ impl<'a> FnTypechecker<'a> {
                     let got = self.typecheck_expr(arg, ExprUse::Value)?;
                     self.infer.unify(expected.clone(), got, arg.span())?;
                 }
+                if !inst.reified_type_args.is_empty() {
+                    self.call_type_args.insert(
+                        (span, inherent_name.clone()),
+                        inst.reified_type_args.clone(),
+                    );
+                }
                 return Ok(inst.ret);
             }
         }
@@ -3306,52 +4045,86 @@ impl<'a> FnTypechecker<'a> {
             other => other,
         };
 
-        // Constrained generic receiver: `T: I` => resolve within `I`.
+        // Constrained generic receiver: resolve under bounds `T: B1 + ... + Bn`.
         if let Ty::Gen(id) = recv_for_dispatch {
-            let Some(iface_name) = self
-                .sig
-                .generics
-                .get(*id)
-                .and_then(|g| g.constraint.as_deref())
-            else {
+            let Some(gp) = self.sig.generics.get(*id) else {
+                return Err(TypeError {
+                    message: "internal error: unknown generic parameter id".to_string(),
+                    span: method.span,
+                });
+            };
+
+            // Collect candidates named `method`, dedup by canonical origin interface id.
+            let mut candidates: BTreeMap<String, (String, Vec<Ty>, InterfaceMethodSig)> =
+                BTreeMap::new();
+            for bound in &gp.bounds {
+                let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
+                    continue;
+                };
+                let Some(iface_def) = self.env.interfaces.get(bound_iface) else {
+                    continue;
+                };
+                let Some(info) = iface_def.all_methods.get(&method.name) else {
+                    continue;
+                };
+                candidates
+                    .entry(info.origin.clone())
+                    .or_insert_with(|| (bound_iface.clone(), bound_args.clone(), info.sig.clone()));
+            }
+
+            if candidates.is_empty() {
                 return Err(TypeError {
                     message: format!("unknown method `{}` on `{recv_ty_resolved}`", method.name),
                     span: method.span,
                 });
-            };
-            let Some(iface_def) = self.env.interfaces.get(iface_name) else {
+            }
+            if candidates.len() != 1 {
+                let candidates: Vec<String> = candidates.into_keys().collect();
                 return Err(TypeError {
-                    message: format!("unknown interface `{iface_name}`"),
+                    message: format!(
+                        "ambiguous method `{}` on `{recv_ty_resolved}`; candidates: {}",
+                        method.name,
+                        candidates.join(", ")
+                    ),
                     span: method.span,
                 });
-            };
-            let Some(info) = iface_def.all_methods.get(&method.name) else {
-                return Err(TypeError {
-                    message: format!("unknown method `{}` on `{recv_ty_resolved}`", method.name),
-                    span: method.span,
-                });
-            };
-            let msig = &info.sig;
-            if args.len() != msig.params.len() {
+            }
+
+            let (origin, (iface_name, iface_args, sig_template)) =
+                candidates.into_iter().next().expect("len == 1");
+            let iface_def = self.env.interfaces.get(&iface_name).expect("exists");
+            let inst = instantiate_interface_method_sig(
+                &sig_template,
+                &iface_args,
+                iface_def.generics.len(),
+                &mut self.infer,
+            );
+
+            if args.len() != inst.params.len() {
                 return Err(TypeError {
                     message: format!(
                         "arity mismatch for `{iface_name}::{}`: expected {}, got {}",
                         method.name,
-                        msig.params.len(),
+                        inst.params.len(),
                         args.len()
                     ),
                     span,
                 });
             }
-            for (arg, expected) in args.iter().zip(msig.params.iter()) {
+            for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
                 self.infer.unify(expected.clone(), got, arg.span())?;
             }
-            return Ok(msig.ret.clone());
+            if !inst.reified_type_args.is_empty() {
+                let method_id = format!("{origin}::{}", method.name);
+                self.method_type_args
+                    .insert((span, method_id), inst.reified_type_args.clone());
+            }
+            return Ok(inst.ret);
         }
 
-        // Interface-typed receiver: resolve within that interface (including inherited methods).
-        if let Ty::App(TyCon::Named(iface_name), _args) = recv_for_dispatch
+        // Interface-typed receiver: resolve within that interface instantiation (including inherited methods).
+        if let Ty::App(TyCon::Named(iface_name), iface_args) = recv_for_dispatch
             && let Some(iface_def) = self.env.interfaces.get(iface_name)
         {
             let Some(info) = iface_def.all_methods.get(&method.name) else {
@@ -3360,23 +4133,33 @@ impl<'a> FnTypechecker<'a> {
                     span: method.span,
                 });
             };
-            let msig = &info.sig;
-            if args.len() != msig.params.len() {
+            let inst = instantiate_interface_method_sig(
+                &info.sig,
+                iface_args,
+                iface_def.generics.len(),
+                &mut self.infer,
+            );
+            if args.len() != inst.params.len() {
                 return Err(TypeError {
                     message: format!(
                         "arity mismatch for `{iface_name}::{}`: expected {}, got {}",
                         method.name,
-                        msig.params.len(),
+                        inst.params.len(),
                         args.len()
                     ),
-                    span,
+                    span: method.span,
                 });
             }
-            for (arg, expected) in args.iter().zip(msig.params.iter()) {
+            for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
                 self.infer.unify(expected.clone(), got, arg.span())?;
             }
-            return Ok(msig.ret.clone());
+            if !inst.reified_type_args.is_empty() {
+                let method_id = format!("{}::{}", info.origin, method.name);
+                self.method_type_args
+                    .insert((span, method_id), inst.reified_type_args.clone());
+            }
+            return Ok(inst.ret);
         }
 
         // Concrete receiver: search interfaces implemented by the receiver, but treat
@@ -3390,7 +4173,7 @@ impl<'a> FnTypechecker<'a> {
             });
         };
 
-        let mut origins: BTreeMap<String, String> = BTreeMap::new();
+        let mut origins: BTreeMap<String, (String, Vec<Ty>)> = BTreeMap::new();
         for (iface_name, iface) in &self.env.interfaces {
             if let Some(def) = self.env.modules.def(iface_name)
                 && !def.vis.is_public()
@@ -3401,10 +4184,12 @@ impl<'a> FnTypechecker<'a> {
             let Some(method_info) = iface.all_methods.get(&method.name) else {
                 continue;
             };
-            if self.type_implements_interface(&recv_ty_resolved, iface_name) {
+            if let Some(iface_args) =
+                self.infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
+            {
                 origins
                     .entry(method_info.origin.clone())
-                    .or_insert_with(|| iface_name.clone());
+                    .or_insert_with(|| (iface_name.clone(), iface_args));
             }
         }
 
@@ -3426,29 +4211,39 @@ impl<'a> FnTypechecker<'a> {
             });
         }
 
-        let iface = origins.into_values().next().expect("origins.len()==1");
+        let (iface, iface_args) = origins.into_values().next().expect("origins.len()==1");
         let iface_def = self.env.interfaces.get(&iface).expect("exists");
-        let msig = &iface_def
+        let info = iface_def
             .all_methods
             .get(&method.name)
-            .expect("method exists for chosen interface")
-            .sig;
-        if args.len() != msig.params.len() {
+            .expect("method exists for chosen interface");
+        let inst = instantiate_interface_method_sig(
+            &info.sig,
+            &iface_args,
+            iface_def.generics.len(),
+            &mut self.infer,
+        );
+        if args.len() != inst.params.len() {
             return Err(TypeError {
                 message: format!(
                     "arity mismatch for `{iface}::{}`: expected {}, got {}",
                     method.name,
-                    msig.params.len(),
+                    inst.params.len(),
                     args.len()
                 ),
                 span,
             });
         }
-        for (arg, expected) in args.iter().zip(msig.params.iter()) {
+        for (arg, expected) in args.iter().zip(inst.params.iter()) {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
             self.infer.unify(expected.clone(), got, arg.span())?;
         }
-        Ok(msig.ret.clone())
+        if !inst.reified_type_args.is_empty() {
+            let method_id = format!("{}::{}", info.origin, method.name);
+            self.method_type_args
+                .insert((span, method_id), inst.reified_type_args.clone());
+        }
+        Ok(inst.ret)
     }
 
     fn typecheck_field(
@@ -3808,8 +4603,8 @@ impl<'a> FnTypechecker<'a> {
 
         let scope = GenericScope::new(&self.sig.generics)?;
         let target_ty = lower_type_expr(self.env, &self.module, &scope, ty)?;
-        let (iface_name, args) = match target_ty {
-            Ty::App(TyCon::Named(name), args) => (name, args),
+        let target_iface = match target_ty {
+            Ty::App(TyCon::Named(name), args) => Ty::App(TyCon::Named(name), args),
             other => {
                 return Err(TypeError {
                     message: format!("`as` target must be an interface type, got `{other}`"),
@@ -3817,29 +4612,23 @@ impl<'a> FnTypechecker<'a> {
                 });
             }
         };
-        if !args.is_empty() {
-            return Err(TypeError {
-                message: "generic interfaces are not supported in v0.4".to_string(),
-                span,
-            });
-        }
-        if !self.env.interfaces.contains_key(&iface_name) {
+        let Ty::App(TyCon::Named(iface_name), _args) = &target_iface else {
+            unreachable!("constructed above")
+        };
+        if !self.env.interfaces.contains_key(iface_name) {
             return Err(TypeError {
                 message: format!("`as` target must be an interface type, got `{iface_name}`"),
                 span,
             });
         }
-        if !self.type_implements_interface(&src_inner, &iface_name) {
+        if !self.type_implements_interface_type(&src_inner, &target_iface) {
             return Err(TypeError {
-                message: format!(
-                    "type `{}` does not implement interface `{iface_name}`",
-                    src_inner
-                ),
+                message: format!("type `{src_inner}` does not implement `{target_iface}`"),
                 span,
             });
         }
 
-        let out = Ty::App(TyCon::Named(iface_name), Vec::new());
+        let out = target_iface;
         Ok(if src_is_readonly {
             Ty::Readonly(Box::new(out))
         } else {
@@ -3851,7 +4640,7 @@ impl<'a> FnTypechecker<'a> {
         // Evaluate/typecheck the LHS for side effects and to populate `expr_types`.
         let _ = self.typecheck_expr(expr, ExprUse::Value)?;
 
-        // Validate the target type is runtime-checkable in v0.4.
+        // Validate the target type is runtime-checkable.
         let _ = self.lower_runtime_checkable_type(ty, ty.span(), "`is`")?;
         let _ = span;
         Ok(Ty::Bool)
@@ -3912,15 +4701,6 @@ impl<'a> FnTypechecker<'a> {
             }
         };
 
-        if !args.is_empty() {
-            return Err(TypeError {
-                message: format!(
-                    "{op} target type must be monomorphic in v0.4 (type args are erased at runtime)"
-                ),
-                span,
-            });
-        }
-
         if !self.env.structs.contains_key(&name)
             && !self.env.enums.contains_key(&name)
             && !self.env.interfaces.contains_key(&name)
@@ -3933,57 +4713,137 @@ impl<'a> FnTypechecker<'a> {
             });
         }
 
-        Ok(Ty::App(TyCon::Named(name), Vec::new()))
+        Ok(Ty::App(TyCon::Named(name), args))
     }
 
-    fn ensure_implements_interface(
+    fn infer_interface_args_for_receiver(&self, recv_ty: &Ty, iface: &str) -> Option<Vec<Ty>> {
+        let recv_ty = strip_readonly(recv_ty);
+        let iface_arity = self.env.interfaces.get(iface)?.generics.len();
+
+        match recv_ty {
+            // Bounded generic `T`: infer from the bounds list, possibly via subinterface mapping.
+            Ty::Gen(id) => {
+                let bounds = self.sig.generics.get(*id)?.bounds.clone();
+                let mut found: Option<Vec<Ty>> = None;
+                for bound in bounds {
+                    let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
+                        continue;
+                    };
+                    let Some(args) =
+                        infer_super_interface_args(self.env, &bound_iface, &bound_args, iface)
+                    else {
+                        continue;
+                    };
+                    if args.len() != iface_arity {
+                        continue;
+                    }
+                    match &found {
+                        None => found = Some(args),
+                        Some(prev) if prev == &args => {}
+                        Some(_) => return None,
+                    }
+                }
+                found
+            }
+
+            // Interface-typed value `J<...>`: infer from inheritance.
+            Ty::App(TyCon::Named(type_name), type_args)
+                if self.env.interfaces.contains_key(type_name) =>
+            {
+                infer_super_interface_args(self.env, type_name, type_args, iface)
+            }
+
+            // Concrete type `S<...>`: infer by the initial-stage coherence rule (interface args
+            // are a prefix of the concrete type args).
+            Ty::App(TyCon::Named(type_name), type_args) => {
+                if !self
+                    .env
+                    .interface_impls
+                    .contains(&(type_name.clone(), iface.to_string()))
+                {
+                    return None;
+                }
+                if iface_arity > type_args.len() {
+                    return None;
+                }
+                Some(type_args[..iface_arity].to_vec())
+            }
+
+            _ => None,
+        }
+    }
+
+    fn ensure_implements_interface_type(
         &self,
         ty: &Ty,
-        iface: &str,
+        iface_ty: &Ty,
         span: Span,
     ) -> Result<(), TypeError> {
-        if self.type_implements_interface(ty, iface) {
+        if self.type_implements_interface_type(ty, iface_ty) {
             Ok(())
         } else {
             Err(TypeError {
-                message: format!("type `{ty}` does not implement interface `{iface}`"),
+                message: format!("type `{ty}` does not implement `{iface_ty}`"),
                 span,
             })
         }
     }
 
-    fn type_implements_interface(&self, ty: &Ty, iface: &str) -> bool {
-        if !self.env.interfaces.contains_key(iface) {
+    fn type_implements_interface_type(&self, ty: &Ty, iface_ty: &Ty) -> bool {
+        let iface_ty = strip_readonly(iface_ty);
+        let Ty::App(TyCon::Named(iface_name), iface_args) = iface_ty else {
+            return false;
+        };
+        if !self.env.interfaces.contains_key(iface_name) {
             return false;
         }
 
-        let ty = match ty {
-            Ty::Readonly(inner) => inner.as_ref(),
-            other => other,
-        };
-
+        let ty = strip_readonly(ty);
         match ty {
-            // Generic constraint: `T: J` implements `I` iff `J: I`.
-            Ty::Gen(id) => self
-                .sig
-                .generics
-                .get(*id)
-                .and_then(|g| g.constraint.as_deref())
-                .is_some_and(|bound| is_subinterface(self.env, bound, iface)),
-
-            // Interface values: `J` implements `I` iff `J: I`.
-            Ty::App(TyCon::Named(type_name), _args)
-                if self.env.interfaces.contains_key(type_name) =>
-            {
-                is_subinterface(self.env, type_name, iface)
+            // Generic `T` implements `I<...>` iff one of its bounds implies it.
+            Ty::Gen(id) => {
+                let Some(gp) = self.sig.generics.get(*id) else {
+                    return false;
+                };
+                for bound in &gp.bounds {
+                    let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
+                        continue;
+                    };
+                    let Some(args) =
+                        infer_super_interface_args(self.env, bound_iface, bound_args, iface_name)
+                    else {
+                        continue;
+                    };
+                    if args == *iface_args {
+                        return true;
+                    }
+                }
+                false
             }
 
-            // Concrete nominal type: must provide implementations for every canonical method in
-            // the target interface, including super-interfaces.
-            Ty::App(TyCon::Named(type_name), _args) => self
-                .env
-                .interface_impls
-                .contains(&(type_name.clone(), iface.to_string())),
+            // Interface value `J<...>` implements `I<...>` iff `J<...>` implies that instantiation.
+            Ty::App(TyCon::Named(type_name), type_args)
+                if self.env.interfaces.contains_key(type_name) =>
+            {
+                infer_super_interface_args(self.env, type_name, type_args, iface_name)
+                    .is_some_and(|args| args == *iface_args)
+            }
+
+            // Concrete nominal type: initial-stage coherence => interface args are a prefix of
+            // the concrete type args.
+            Ty::App(TyCon::Named(type_name), type_args) => {
+                if !self
+                    .env
+                    .interface_impls
+                    .contains(&(type_name.clone(), iface_name.to_string()))
+                {
+                    return false;
+                }
+                if iface_args.len() > type_args.len() {
+                    return false;
+                }
+                type_args[..iface_args.len()] == *iface_args
+            }
 
             _ => false,
         }
@@ -4012,6 +4872,82 @@ fn nominal_type_name(ty: &Ty) -> Option<&str> {
     }
 }
 
+fn strip_readonly(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::Readonly(inner) => inner.as_ref(),
+        other => other,
+    }
+}
+
+fn infer_super_interface_args(
+    env: &ProgramEnv,
+    sub_iface: &str,
+    sub_args: &[Ty],
+    target_iface: &str,
+) -> Option<Vec<Ty>> {
+    if sub_iface == target_iface {
+        return Some(sub_args.to_vec());
+    }
+
+    let sub_def = env.interfaces.get(sub_iface)?;
+    if sub_args.len() != sub_def.generics.len() {
+        return None;
+    }
+
+    let ty_subst: HashMap<GenId, Ty> = sub_args.iter().cloned().enumerate().collect();
+    let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+    for sup in &sub_def.supers {
+        let instantiated = subst_ty(sup.clone(), &ty_subst, &con_subst);
+        let Ty::App(TyCon::Named(name), args) = instantiated else {
+            continue;
+        };
+        if let Some(found) = infer_super_interface_args(env, &name, &args, target_iface) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn shift_method_generics(ty: Ty, iface_arity: usize, shift: usize) -> Ty {
+    if shift == 0 {
+        return ty;
+    }
+
+    match ty {
+        Ty::Gen(id) if id >= iface_arity => Ty::Gen(id + shift),
+        Ty::Array(elem) => Ty::Array(Box::new(shift_method_generics(*elem, iface_arity, shift))),
+        Ty::Tuple(items) => Ty::Tuple(
+            items
+                .into_iter()
+                .map(|t| shift_method_generics(t, iface_arity, shift))
+                .collect(),
+        ),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params
+                .into_iter()
+                .map(|p| shift_method_generics(p, iface_arity, shift))
+                .collect(),
+            ret: Box::new(shift_method_generics(*ret, iface_arity, shift)),
+        },
+        Ty::Cont { param, ret } => Ty::Cont {
+            param: Box::new(shift_method_generics(*param, iface_arity, shift)),
+            ret: Box::new(shift_method_generics(*ret, iface_arity, shift)),
+        },
+        Ty::Readonly(inner) => {
+            Ty::Readonly(Box::new(shift_method_generics(*inner, iface_arity, shift)))
+        }
+        Ty::App(con, args) => Ty::App(
+            con,
+            args.into_iter()
+                .map(|a| shift_method_generics(a, iface_arity, shift))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn collect_interface_and_supers(env: &ProgramEnv, iface: &str, out: &mut BTreeSet<String>) {
     if !out.insert(iface.to_string()) {
         return;
@@ -4020,30 +4956,9 @@ fn collect_interface_and_supers(env: &ProgramEnv, iface: &str, out: &mut BTreeSe
         return;
     };
     for sup in &def.supers {
-        collect_interface_and_supers(env, sup, out);
-    }
-}
-
-fn is_subinterface(env: &ProgramEnv, sub: &str, sup: &str) -> bool {
-    if sub == sup {
-        return true;
-    }
-
-    let mut stack = vec![sub.to_string()];
-    let mut seen = BTreeSet::<String>::new();
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur.clone()) {
-            continue;
-        }
-        if cur == sup {
-            return true;
-        }
-        let Some(def) = env.interfaces.get(&cur) else {
+        let Ty::App(TyCon::Named(name), _args) = sup else {
             continue;
         };
-        for parent in &def.supers {
-            stack.push(parent.clone());
-        }
+        collect_interface_and_supers(env, name, out);
     }
-    false
 }

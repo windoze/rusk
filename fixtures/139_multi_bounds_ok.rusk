@@ -1,0 +1,17 @@
+// expect: ok int 7
+
+interface Hash { fn hash() -> int; }
+interface Show { fn show() -> string; }
+
+struct S { x: int }
+
+impl Hash for S { fn hash(self: S) -> int { self.x } }
+impl Show for S { fn show(self: S) -> string { "S" } }
+
+fn show_and_hash<T: Hash + Show>(x: T) -> int {
+    if x.show() == "S" { x.hash() } else { 0 }
+}
+
+fn main() -> int {
+    show_and_hash(S { x: 7 })
+}

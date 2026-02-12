@@ -385,18 +385,26 @@ impl<'a> Parser<'a> {
                 end = self.expect(TokenKind::Gt)?.span.end;
                 arity = count;
             }
-            let constraint = if matches!(self.lookahead.kind, TokenKind::Colon) {
+            let bounds = if matches!(self.lookahead.kind, TokenKind::Colon) {
                 self.bump()?;
-                let ty = self.parse_path_type()?;
-                end = ty.span.end;
-                Some(ty)
+                let mut bounds = Vec::new();
+                let first = self.parse_path_type()?;
+                end = first.span.end;
+                bounds.push(first);
+                while matches!(self.lookahead.kind, TokenKind::Plus) {
+                    self.bump()?;
+                    let b = self.parse_path_type()?;
+                    end = b.span.end;
+                    bounds.push(b);
+                }
+                bounds
             } else {
-                None
+                Vec::new()
             };
             params.push(GenericParam {
                 name: name.clone(),
                 arity,
-                constraint,
+                bounds,
                 span: Span::new(name.span.start, end),
             });
             if matches!(self.lookahead.kind, TokenKind::Comma) {
@@ -1602,7 +1610,7 @@ impl<'a> Parser<'a> {
 
     fn parse_effect_pat(&mut self) -> Result<EffectPattern, ParseError> {
         let start = self.expect(TokenKind::At)?.span.start;
-        let interface = self.parse_path_expr()?;
+        let interface = self.parse_path_type()?;
         self.expect(TokenKind::Dot)?;
         let method = self.expect_ident()?;
         self.expect(TokenKind::LParen)?;
@@ -1640,7 +1648,7 @@ impl<'a> Parser<'a> {
 
     fn parse_effect_call(&mut self) -> Result<Expr, ParseError> {
         let start = self.expect(TokenKind::At)?.span.start;
-        let interface = self.parse_path_expr()?;
+        let interface = self.parse_path_type()?;
         self.expect(TokenKind::Dot)?;
         let method = self.expect_ident()?;
         let (args, end) = self.parse_call_args()?;

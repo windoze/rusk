@@ -1,6 +1,19 @@
-// expect: compile_error interfaces cannot be generic in v0.4
+// expect: ok int 42
 
 interface Boxed<T> {
-    fn get() -> unit;
+    fn get() -> T;
 }
 
+struct Box<T> { v: T }
+
+impl<T> Boxed<T> for Box<T> {
+    fn get(self: Box<T>) -> T { self.v }
+}
+
+fn use_interface<T>(x: Boxed<T>) -> T { x.get() }
+
+fn main() -> int {
+    let b: Box<int> = Box { v: 42 };
+    let i = b as Boxed<int>;
+    use_interface(i)
+}

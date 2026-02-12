@@ -1,0 +1,17 @@
+// expect: ok int 7
+
+interface Pair<T> {
+    fn pair<U>(u: U) -> (T, U);
+}
+
+struct Box<T> { v: T }
+
+impl<T> Pair<T> for Box<T> {
+    fn pair<U>(self: Box<T>, u: U) -> (T, U) { (self.v, u) }
+}
+
+fn main() -> int {
+    let b: Box<int> = Box { v: 7 };
+    let p = (b as Pair<int>).pair("hi");
+    p.0
+}

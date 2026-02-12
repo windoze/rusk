@@ -1,12 +1,42 @@
 use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
 use crate::mir::{
-    BasicBlock, BlockId, ConstValue, EffectId, Function, HandlerClause, Instruction, Local, Module,
-    Mutability, Operand, Pattern, SwitchCase, Terminator, Type,
+    BasicBlock, BlockId, ConstValue, EffectSpec, Function, Instruction, Local, Module, Mutability,
+    Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::rc::Rc;
 use std::{cell::RefCell, mem};
+
+/// An internal runtime type representation identifier.
+///
+/// This is intentionally a small, comparable token. The actual structure of a `TypeRep` is kept
+/// inside the interpreter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeRepId(pub u32);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TypeCtor {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Array,
+    Tuple(usize),
+    Struct(String),
+    Enum(String),
+    Interface(String),
+    Fn,
+    Cont,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TypeRepNode {
+    ctor: TypeCtor,
+    args: Vec<TypeRepId>,
+}
 
 /// A runtime value produced by the MIR interpreter.
 #[derive(Clone)]
@@ -17,6 +47,7 @@ pub enum Value {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
+    TypeRep(TypeRepId),
     Ref(RefValue),
     Function(String),
     Continuation(ContinuationToken),
@@ -31,6 +62,7 @@ impl Value {
             Value::Float(_) => ValueKind::Float,
             Value::String(_) => ValueKind::String,
             Value::Bytes(_) => ValueKind::Bytes,
+            Value::TypeRep(_) => ValueKind::TypeRep,
             Value::Ref(_) => ValueKind::Ref,
             Value::Function(_) => ValueKind::Function,
             Value::Continuation(_) => ValueKind::Continuation,
@@ -54,6 +86,7 @@ impl fmt::Debug for Value {
             Value::Float(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "{v:?}"),
             Value::Bytes(v) => write!(f, "bytes(len={})", v.len()),
+            Value::TypeRep(id) => write!(f, "typerep({})", id.0),
             Value::Ref(r) => {
                 let ro = if r.readonly { ", readonly" } else { "" };
                 write!(
@@ -77,6 +110,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::TypeRep(a), Value::TypeRep(b)) => a == b,
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Continuation(a), Value::Continuation(b)) => a.ptr_eq(b),
             (Value::Ref(a), Value::Ref(b)) => a.ptr_eq(b) && a.readonly == b.readonly,
@@ -95,6 +129,7 @@ pub enum ValueKind {
     Float,
     String,
     Bytes,
+    TypeRep,
     Ref,
     Function,
     Continuation,
@@ -136,12 +171,14 @@ impl RefValue {
 pub enum HeapValue {
     Struct {
         type_name: String,
+        type_args: Vec<TypeRepId>,
         fields: BTreeMap<String, Value>,
     },
     Array(Vec<Value>),
     Tuple(Vec<Value>),
     Enum {
         enum_name: String,
+        type_args: Vec<TypeRepId>,
         variant: String,
         fields: Vec<Value>,
     },
@@ -310,6 +347,8 @@ pub type Interpreter = InterpreterImpl<MarkSweepHeap>;
 /// `MarkSweepHeap`.
 pub struct InterpreterImpl<GC: GcHeap> {
     module: Module,
+    type_reps: Vec<TypeRepNode>,
+    type_rep_intern: HashMap<TypeRepNode, TypeRepId>,
     host_functions: BTreeMap<String, HostFunction<GC>>,
     stack: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
@@ -334,6 +373,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     pub fn with_heap(module: Module, heap: GC) -> Self {
         Self {
             module,
+            type_reps: Vec::new(),
+            type_rep_intern: HashMap::new(),
             host_functions: BTreeMap::new(),
             stack: Vec::new(),
             handlers: Vec::new(),
@@ -422,8 +463,19 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         type_name: impl Into<String>,
         fields: BTreeMap<String, Value>,
     ) -> Value {
+        self.alloc_struct_typed(type_name, Vec::new(), fields)
+    }
+
+    /// Allocates a heap struct with instantiated type arguments and returns it as a value.
+    pub fn alloc_struct_typed(
+        &mut self,
+        type_name: impl Into<String>,
+        type_args: Vec<TypeRepId>,
+        fields: BTreeMap<String, Value>,
+    ) -> Value {
         let handle = self.alloc_heap(HeapValue::Struct {
             type_name: type_name.into(),
+            type_args,
             fields,
         });
         Value::Ref(RefValue::new(handle))
@@ -436,8 +488,20 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         variant: impl Into<String>,
         fields: Vec<Value>,
     ) -> Value {
+        self.alloc_enum_typed(enum_name, Vec::new(), variant, fields)
+    }
+
+    /// Allocates a heap enum value with instantiated type arguments and returns it as a value.
+    pub fn alloc_enum_typed(
+        &mut self,
+        enum_name: impl Into<String>,
+        type_args: Vec<TypeRepId>,
+        variant: impl Into<String>,
+        fields: Vec<Value>,
+    ) -> Value {
         let handle = self.alloc_heap(HeapValue::Enum {
             enum_name: enum_name.into(),
+            type_args,
             variant: variant.into(),
             fields,
         });
@@ -624,6 +688,67 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
+    fn eval_type_rep_lit(&mut self, lit: &TypeRepLit) -> TypeRepId {
+        let ctor = match lit {
+            TypeRepLit::Unit => TypeCtor::Unit,
+            TypeRepLit::Bool => TypeCtor::Bool,
+            TypeRepLit::Int => TypeCtor::Int,
+            TypeRepLit::Float => TypeCtor::Float,
+            TypeRepLit::String => TypeCtor::String,
+            TypeRepLit::Bytes => TypeCtor::Bytes,
+            TypeRepLit::Array => TypeCtor::Array,
+            TypeRepLit::Tuple(arity) => TypeCtor::Tuple(*arity),
+            TypeRepLit::Struct(name) => TypeCtor::Struct(name.clone()),
+            TypeRepLit::Enum(name) => TypeCtor::Enum(name.clone()),
+            TypeRepLit::Interface(name) => TypeCtor::Interface(name.clone()),
+            TypeRepLit::Fn => TypeCtor::Fn,
+            TypeRepLit::Cont => TypeCtor::Cont,
+        };
+
+        self.intern_type_rep(TypeRepNode {
+            ctor,
+            args: Vec::new(),
+        })
+    }
+
+    fn intern_type_rep(&mut self, node: TypeRepNode) -> TypeRepId {
+        if let Some(id) = self.type_rep_intern.get(&node).copied() {
+            return id;
+        }
+
+        let id: u32 = self
+            .type_reps
+            .len()
+            .try_into()
+            .expect("TypeRep table overflow");
+        let id = TypeRepId(id);
+        self.type_reps.push(node.clone());
+        self.type_rep_intern.insert(node, id);
+        id
+    }
+
+    fn type_rep_node(&self, id: TypeRepId) -> &TypeRepNode {
+        self.type_reps
+            .get(id.0 as usize)
+            .unwrap_or_else(|| panic!("invalid TypeRepId: {}", id.0))
+    }
+
+    fn eval_type_rep_operand(
+        &mut self,
+        frame_index: usize,
+        op: &Operand,
+    ) -> Result<TypeRepId, RuntimeError> {
+        let v = self.eval_operand(frame_index, op)?;
+        match v {
+            Value::TypeRep(id) => Ok(id),
+            other => Err(RuntimeError::TypeError {
+                op: "typerep",
+                expected: "typerep",
+                got: other.kind(),
+            }),
+        }
+    }
+
     fn eval_const(&mut self, lit: &ConstValue) -> Value {
         match lit {
             ConstValue::Unit => Value::Unit,
@@ -632,6 +757,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             ConstValue::Float(v) => Value::Float(*v),
             ConstValue::String(v) => Value::String(v.clone()),
             ConstValue::Bytes(v) => Value::Bytes(v.clone()),
+            ConstValue::TypeRep(lit) => Value::TypeRep(self.eval_type_rep_lit(lit)),
             ConstValue::Function(name) => Value::Function(name.clone()),
             ConstValue::Array(items) => {
                 let values = items.iter().map(|x| self.eval_const(x)).collect();
@@ -653,6 +779,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 }
                 let handle = self.alloc_heap(HeapValue::Struct {
                     type_name: type_name.clone(),
+                    type_args: Vec::new(),
                     fields: values,
                 });
                 Value::Ref(RefValue::new(handle))
@@ -665,6 +792,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 let vals = fields.iter().map(|x| self.eval_const(x)).collect();
                 let handle = self.alloc_heap(HeapValue::Enum {
                     enum_name: enum_name.clone(),
+                    type_args: Vec::new(),
                     variant: variant.clone(),
                     fields: vals,
                 });
@@ -673,55 +801,86 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
-    fn type_test(&mut self, value: &Value, ty: &Type) -> Result<bool, RuntimeError> {
-        Ok(match ty {
-            Type::Unit => matches!(value, Value::Unit),
-            Type::Bool => matches!(value, Value::Bool(_)),
-            Type::Int => matches!(value, Value::Int(_)),
-            Type::Float => matches!(value, Value::Float(_)),
-            Type::String => matches!(value, Value::String(_)),
-            Type::Bytes => matches!(value, Value::Bytes(_)),
-            Type::Fn => matches!(value, Value::Function(_)),
-            Type::Cont => matches!(value, Value::Continuation(_)),
-            Type::Array => match value {
+    fn type_test(&mut self, value: &Value, target: TypeRepId) -> Result<bool, RuntimeError> {
+        let target = self.type_rep_node(target);
+
+        Ok(match &target.ctor {
+            TypeCtor::Unit => matches!(value, Value::Unit),
+            TypeCtor::Bool => matches!(value, Value::Bool(_)),
+            TypeCtor::Int => matches!(value, Value::Int(_)),
+            TypeCtor::Float => matches!(value, Value::Float(_)),
+            TypeCtor::String => matches!(value, Value::String(_)),
+            TypeCtor::Bytes => matches!(value, Value::Bytes(_)),
+            TypeCtor::Array => match value {
                 Value::Ref(r) => matches!(self.heap_get(r.handle)?, HeapValue::Array(_)),
                 _ => false,
             },
-            Type::Tuple(arity) => match value {
+            TypeCtor::Tuple(arity) => match value {
+                Value::Unit => *arity == 0,
                 Value::Ref(r) => match self.heap_get(r.handle)? {
                     HeapValue::Tuple(items) => items.len() == *arity,
                     _ => false,
                 },
                 _ => false,
             },
-            Type::Struct(name) => match value {
+            TypeCtor::Struct(name) => match value {
                 Value::Ref(r) => match self.heap_get(r.handle)? {
-                    HeapValue::Struct { type_name, .. } => type_name == name,
+                    HeapValue::Struct {
+                        type_name,
+                        type_args,
+                        ..
+                    } => type_name == name && type_args.as_slice() == target.args.as_slice(),
                     _ => false,
                 },
                 _ => false,
             },
-            Type::Enum(name) => match value {
+            TypeCtor::Enum(name) => match value {
                 Value::Ref(r) => match self.heap_get(r.handle)? {
-                    HeapValue::Enum { enum_name, .. } => enum_name == name,
+                    HeapValue::Enum {
+                        enum_name,
+                        type_args,
+                        ..
+                    } => enum_name == name && type_args.as_slice() == target.args.as_slice(),
                     _ => false,
                 },
                 _ => false,
             },
-            Type::Interface(iface) => {
+            TypeCtor::Interface(iface) => {
                 let Value::Ref(r) = value else {
                     return Ok(false);
                 };
-                let dyn_type = match self.heap_get(r.handle)? {
-                    HeapValue::Struct { type_name, .. } => type_name.as_str(),
-                    HeapValue::Enum { enum_name, .. } => enum_name.as_str(),
+                let (dyn_type, dyn_type_args) = match self.heap_get(r.handle)? {
+                    HeapValue::Struct {
+                        type_name,
+                        type_args,
+                        ..
+                    } => (type_name.as_str(), type_args.as_slice()),
+                    HeapValue::Enum {
+                        enum_name,
+                        type_args,
+                        ..
+                    } => (enum_name.as_str(), type_args.as_slice()),
                     _ => return Ok(false),
                 };
-                self.module
+
+                let implements_iface = self
+                    .module
                     .interface_impls
                     .get(dyn_type)
-                    .is_some_and(|ifaces| ifaces.contains(iface.as_str()))
+                    .is_some_and(|ifaces| ifaces.contains(iface.as_str()));
+                if !implements_iface {
+                    return Ok(false);
+                }
+
+                if target.args.is_empty() {
+                    return Ok(true);
+                }
+                if dyn_type_args.len() < target.args.len() {
+                    return Ok(false);
+                }
+                dyn_type_args[..target.args.len()] == target.args
             }
+            TypeCtor::Fn | TypeCtor::Cont => false,
         })
     }
 
@@ -751,12 +910,14 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             }
             Instruction::IsType { dst, value, ty } => {
                 let v = self.eval_operand(frame_index, &value)?;
-                let ok = self.type_test(&v, &ty)?;
+                let target = self.eval_type_rep_operand(frame_index, &ty)?;
+                let ok = self.type_test(&v, target)?;
                 self.stack[frame_index].write_local(dst, Value::Bool(ok))?;
             }
             Instruction::CheckedCast { dst, value, ty } => {
                 let v = self.eval_operand(frame_index, &value)?;
-                let ok = self.type_test(&v, &ty)?;
+                let target = self.eval_type_rep_operand(frame_index, &ty)?;
+                let ok = self.type_test(&v, target)?;
                 let (variant, fields) = if ok {
                     ("Some", vec![v])
                 } else {
@@ -764,17 +925,50 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 };
                 let handle = self.alloc_heap(HeapValue::Enum {
                     enum_name: "Option".to_string(),
+                    type_args: vec![target],
                     variant: variant.to_string(),
                     fields,
                 });
                 self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
             }
 
+            Instruction::MakeTypeRep { dst, base, args } => {
+                let arg_ids = args
+                    .iter()
+                    .map(|op| self.eval_type_rep_operand(frame_index, op))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ctor = match base {
+                    TypeRepLit::Unit => TypeCtor::Unit,
+                    TypeRepLit::Bool => TypeCtor::Bool,
+                    TypeRepLit::Int => TypeCtor::Int,
+                    TypeRepLit::Float => TypeCtor::Float,
+                    TypeRepLit::String => TypeCtor::String,
+                    TypeRepLit::Bytes => TypeCtor::Bytes,
+                    TypeRepLit::Array => TypeCtor::Array,
+                    TypeRepLit::Tuple(arity) => TypeCtor::Tuple(arity),
+                    TypeRepLit::Struct(name) => TypeCtor::Struct(name),
+                    TypeRepLit::Enum(name) => TypeCtor::Enum(name),
+                    TypeRepLit::Interface(name) => TypeCtor::Interface(name),
+                    TypeRepLit::Fn => TypeCtor::Fn,
+                    TypeRepLit::Cont => TypeCtor::Cont,
+                };
+                let id = self.intern_type_rep(TypeRepNode {
+                    ctor,
+                    args: arg_ids,
+                });
+                self.stack[frame_index].write_local(dst, Value::TypeRep(id))?;
+            }
+
             Instruction::MakeStruct {
                 dst,
                 type_name,
+                type_args,
                 fields,
             } => {
+                let type_args = type_args
+                    .iter()
+                    .map(|op| self.eval_type_rep_operand(frame_index, op))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut map = BTreeMap::new();
                 for (k, op) in fields {
                     let v = self.eval_operand(frame_index, &op)?;
@@ -782,6 +976,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 }
                 let obj = HeapValue::Struct {
                     type_name,
+                    type_args,
                     fields: map,
                 };
                 let handle = self.alloc_heap(obj);
@@ -810,15 +1005,21 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             Instruction::MakeEnum {
                 dst,
                 enum_name,
+                type_args,
                 variant,
                 fields,
             } => {
+                let type_args = type_args
+                    .iter()
+                    .map(|op| self.eval_type_rep_operand(frame_index, op))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut values = Vec::with_capacity(fields.len());
                 for op in fields {
                     values.push(self.eval_operand(frame_index, &op)?);
                 }
                 let handle = self.alloc_heap(HeapValue::Enum {
                     enum_name,
+                    type_args,
                     variant,
                     fields: values,
                 });
@@ -1022,6 +1223,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 dst,
                 obj,
                 method,
+                method_type_args,
                 args,
             } => {
                 let recv = self.eval_operand(frame_index, &obj)?;
@@ -1032,9 +1234,17 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: recv.kind(),
                     });
                 };
-                let type_name = match self.heap_get(r.handle)? {
-                    HeapValue::Struct { type_name, .. } => type_name.clone(),
-                    HeapValue::Enum { enum_name, .. } => enum_name.clone(),
+                let (type_name, type_args) = match self.heap_get(r.handle)? {
+                    HeapValue::Struct {
+                        type_name,
+                        type_args,
+                        ..
+                    } => (type_name.clone(), type_args.clone()),
+                    HeapValue::Enum {
+                        enum_name,
+                        type_args,
+                        ..
+                    } => (enum_name.clone(), type_args.clone()),
                     _ => {
                         return Err(RuntimeError::TypeError {
                             op: "vcall",
@@ -1050,7 +1260,15 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     });
                 };
                 let fn_name = fn_name.clone();
-                let mut arg_values = Vec::with_capacity(args.len() + 1);
+                let mut arg_values =
+                    Vec::with_capacity(type_args.len() + method_type_args.len() + args.len() + 1);
+                for id in type_args {
+                    arg_values.push(Value::TypeRep(id));
+                }
+                for op in method_type_args {
+                    let id = self.eval_type_rep_operand(frame_index, &op)?;
+                    arg_values.push(Value::TypeRep(id));
+                }
                 arg_values.push(recv);
                 arg_values.extend(self.eval_args(frame_index, &args)?);
                 self.call_function(frame_index, dst, &fn_name, arg_values)?;
@@ -1061,9 +1279,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 clauses,
             } => {
                 let owner_depth = frame_index;
-                // Validate handler blocks have `binds + 1` params.
+                // Validate handler blocks have `binds + 1` params and materialize runtime effect ids.
                 let function = self.function(&self.stack[frame_index].func)?.clone();
-                for clause in &clauses {
+                let mut runtime_clauses = Vec::with_capacity(clauses.len());
+                for clause in clauses {
                     let bind_count = count_binds_in_patterns(&clause.arg_patterns);
                     let block = self.block(&function, clause.target)?;
                     let expected = bind_count + 1;
@@ -1076,10 +1295,26 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                             ),
                         });
                     }
+
+                    let interface_args = clause
+                        .effect
+                        .interface_args
+                        .iter()
+                        .map(|op| self.eval_type_rep_operand(frame_index, op))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    runtime_clauses.push(RuntimeHandlerClause {
+                        effect: RuntimeEffectId {
+                            interface: clause.effect.interface,
+                            interface_args,
+                            method: clause.effect.method,
+                        },
+                        arg_patterns: clause.arg_patterns,
+                        target: clause.target,
+                    });
                 }
                 self.handlers.push(HandlerEntry {
                     owner_depth,
-                    clauses,
+                    clauses: runtime_clauses,
                 });
             }
             Instruction::PopHandler => {
@@ -1171,17 +1406,28 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn perform_effect(
         &mut self,
-        _frame_index: usize,
+        frame_index: usize,
         dst: Option<Local>,
-        effect: EffectId,
+        effect: EffectSpec,
         args: Vec<Value>,
     ) -> Result<(), RuntimeError> {
+        let interface_args = effect
+            .interface_args
+            .iter()
+            .map(|op| self.eval_type_rep_operand(frame_index, op))
+            .collect::<Result<Vec<_>, _>>()?;
+        let effect_id = RuntimeEffectId {
+            interface: effect.interface,
+            interface_args,
+            method: effect.method,
+        };
+
         let Some((handler_index, clause_index, binds)) =
-            self.find_handler_for_effect(&effect, &args)?
+            self.find_handler_for_effect(&effect_id, &args)?
         else {
             return Err(RuntimeError::UnhandledEffect {
-                interface: effect.interface,
-                method: effect.method,
+                interface: effect_id.interface,
+                method: effect_id.method,
             });
         };
 
@@ -1211,8 +1457,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             let top = captured_stack
                 .last_mut()
                 .ok_or(RuntimeError::UnhandledEffect {
-                    interface: effect.interface.clone(),
-                    method: effect.method.clone(),
+                    interface: effect_id.interface.clone(),
+                    method: effect_id.method.clone(),
                 })?;
             top.clear_local(dst_local)?;
         }
@@ -1252,7 +1498,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn find_handler_for_effect(
         &mut self,
-        effect: &EffectId,
+        effect: &RuntimeEffectId,
         args: &[Value],
     ) -> Result<Option<(usize, usize, Vec<Value>)>, RuntimeError> {
         for (handler_index, handler) in self.handlers.iter().enumerate().rev() {
@@ -1466,10 +1712,24 @@ impl Frame {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeEffectId {
+    interface: String,
+    interface_args: Vec<TypeRepId>,
+    method: String,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeHandlerClause {
+    effect: RuntimeEffectId,
+    arg_patterns: Vec<Pattern>,
+    target: BlockId,
+}
+
 #[derive(Clone)]
 struct HandlerEntry {
     owner_depth: usize,
-    clauses: Vec<HandlerClause>,
+    clauses: Vec<RuntimeHandlerClause>,
 }
 
 struct InterpreterRoots<'a> {
@@ -1509,6 +1769,7 @@ impl Trace for Value {
             | Value::Float(_)
             | Value::String(_)
             | Value::Bytes(_)
+            | Value::TypeRep(_)
             | Value::Function(_) => {}
         }
     }
@@ -1632,6 +1893,7 @@ fn match_pattern<GC: GcHeap>(
                     enum_name,
                     variant,
                     fields,
+                    ..
                 } => (enum_name.clone(), variant.clone(), fields.clone()),
                 _ => return Ok(false),
             };
@@ -1734,7 +1996,9 @@ fn match_pattern<GC: GcHeap>(
                 .get(r.handle)
                 .ok_or(RuntimeError::DanglingRef { handle: r.handle })?
             {
-                HeapValue::Struct { type_name, fields } => (type_name.clone(), fields.clone()),
+                HeapValue::Struct {
+                    type_name, fields, ..
+                } => (type_name.clone(), fields.clone()),
                 _ => return Ok(false),
             };
             if actual_ty != *type_name {

@@ -81,6 +81,7 @@ fn struct_fields_can_be_read_and_written() {
                     Instruction::MakeStruct {
                         dst: l(0),
                         type_name: "Point".to_string(),
+                        type_args: Vec::new(),
                         fields,
                     },
                     Instruction::GetField {
@@ -131,6 +132,7 @@ fn readonly_write_traps() {
                     Instruction::MakeStruct {
                         dst: l(0),
                         type_name: "Box".to_string(),
+                        type_args: Vec::new(),
                         fields,
                     },
                     Instruction::AsReadonly {
@@ -275,6 +277,7 @@ fn make_enum_allocates_with_runtime_fields() {
                         Instruction::MakeEnum {
                             dst: l(1),
                             enum_name: "Option".to_string(),
+                            type_args: Vec::new(),
                             variant: "Some".to_string(),
                             fields: vec![Operand::Local(l(0))],
                         },
@@ -518,16 +521,18 @@ fn effects_perform_and_resume() {
                 instructions: vec![
                     Instruction::Perform {
                         dst: None,
-                        effect: EffectId {
+                        effect: EffectSpec {
                             interface: "Logger".to_string(),
+                            interface_args: Vec::new(),
                             method: "log".to_string(),
                         },
                         args: vec![Operand::Literal(ConstValue::String("hi".to_string()))],
                     },
                     Instruction::Perform {
                         dst: None,
-                        effect: EffectId {
+                        effect: EffectSpec {
                             interface: "Logger".to_string(),
+                            interface_args: Vec::new(),
                             method: "log".to_string(),
                         },
                         args: vec![Operand::Literal(ConstValue::String("bye".to_string()))],
@@ -566,8 +571,9 @@ fn effects_perform_and_resume() {
                         Instruction::PushHandler {
                             handler_id: "H0".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "Logger".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "log".to_string(),
                                 },
                                 arg_patterns: vec![Pattern::Bind],
@@ -862,12 +868,14 @@ fn vcall_invokes_resolved_method() {
                     Instruction::MakeStruct {
                         dst: l(0),
                         type_name: "Point".to_string(),
+                        type_args: Vec::new(),
                         fields: vec![("x".to_string(), Operand::Literal(ConstValue::Int(5)))],
                     },
                     Instruction::VCall {
                         dst: Some(l(1)),
                         obj: Operand::Local(l(0)),
                         method: "get_x".to_string(),
+                        method_type_args: Vec::new(),
                         args: vec![],
                     },
                 ],
@@ -900,6 +908,7 @@ fn get_field_missing_field_is_error() {
                     Instruction::MakeStruct {
                         dst: l(0),
                         type_name: "S".to_string(),
+                        type_args: Vec::new(),
                         fields: vec![("x".to_string(), Operand::Literal(ConstValue::Int(1)))],
                     },
                     Instruction::GetField {
@@ -1079,8 +1088,9 @@ fn push_handler_validates_target_param_arity() {
                     instructions: vec![Instruction::PushHandler {
                         handler_id: "H0".to_string(),
                         clauses: vec![HandlerClause {
-                            effect: EffectId {
+                            effect: EffectSpec {
                                 interface: "E".to_string(),
+                                interface_args: Vec::new(),
                                 method: "op".to_string(),
                             },
                             arg_patterns: vec![Pattern::Bind],
@@ -1129,16 +1139,18 @@ fn effect_handler_clause_order_and_arg_patterns_work() {
                 instructions: vec![
                     Instruction::Perform {
                         dst: None,
-                        effect: EffectId {
+                        effect: EffectSpec {
                             interface: "E".to_string(),
+                            interface_args: Vec::new(),
                             method: "op".to_string(),
                         },
                         args: vec![Operand::Literal(ConstValue::Int(1))],
                     },
                     Instruction::Perform {
                         dst: None,
-                        effect: EffectId {
+                        effect: EffectSpec {
                             interface: "E".to_string(),
+                            interface_args: Vec::new(),
                             method: "op".to_string(),
                         },
                         args: vec![Operand::Literal(ConstValue::Int(2))],
@@ -1167,16 +1179,18 @@ fn effect_handler_clause_order_and_arg_patterns_work() {
                             handler_id: "H0".to_string(),
                             clauses: vec![
                                 HandlerClause {
-                                    effect: EffectId {
+                                    effect: EffectSpec {
                                         interface: "E".to_string(),
+                                        interface_args: Vec::new(),
                                         method: "op".to_string(),
                                     },
                                     arg_patterns: vec![Pattern::Literal(ConstValue::Int(1))],
                                     target: b(1),
                                 },
                                 HandlerClause {
-                                    effect: EffectId {
+                                    effect: EffectSpec {
                                         interface: "E".to_string(),
+                                        interface_args: Vec::new(),
                                         method: "op".to_string(),
                                     },
                                     arg_patterns: vec![Pattern::Bind],
@@ -1273,8 +1287,9 @@ fn nested_handlers_prefer_innermost() {
                 params: vec![],
                 instructions: vec![Instruction::Perform {
                     dst: None,
-                    effect: EffectId {
+                    effect: EffectSpec {
                         interface: "E".to_string(),
+                        interface_args: Vec::new(),
                         method: "op".to_string(),
                     },
                     args: vec![],
@@ -1301,8 +1316,9 @@ fn nested_handlers_prefer_innermost() {
                         Instruction::PushHandler {
                             handler_id: "H1".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "E".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "op".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -1358,8 +1374,9 @@ fn nested_handlers_prefer_innermost() {
                         Instruction::PushHandler {
                             handler_id: "H0".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "E".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "op".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -1435,8 +1452,9 @@ fn handler_can_skip_continuation_by_not_resuming() {
                 instructions: vec![
                     Instruction::Perform {
                         dst: None,
-                        effect: EffectId {
+                        effect: EffectSpec {
                             interface: "E".to_string(),
+                            interface_args: Vec::new(),
                             method: "op".to_string(),
                         },
                         args: vec![],
@@ -1469,8 +1487,9 @@ fn handler_can_skip_continuation_by_not_resuming() {
                         Instruction::PushHandler {
                             handler_id: "H0".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "E".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "op".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -1532,8 +1551,9 @@ fn can_resume_continuation_from_host_and_it_is_one_shot() {
                         Instruction::PushHandler {
                             handler_id: "H0".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "E".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "op".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -1542,8 +1562,9 @@ fn can_resume_continuation_from_host_and_it_is_one_shot() {
                         },
                         Instruction::Perform {
                             dst: Some(l(0)),
-                            effect: EffectId {
+                            effect: EffectSpec {
                                 interface: "E".to_string(),
+                                interface_args: Vec::new(),
                                 method: "op".to_string(),
                             },
                             args: vec![],
@@ -1758,6 +1779,7 @@ fn set_field_missing_field_is_error() {
                     Instruction::MakeStruct {
                         dst: l(0),
                         type_name: "S".to_string(),
+                        type_args: Vec::new(),
                         fields: vec![("x".to_string(), Operand::Literal(ConstValue::Int(1)))],
                     },
                     Instruction::SetField {
@@ -1876,12 +1898,14 @@ fn vcall_unresolved_method_is_trap() {
                     Instruction::MakeStruct {
                         dst: l(0),
                         type_name: "Point".to_string(),
+                        type_args: Vec::new(),
                         fields: vec![("x".to_string(), Operand::Literal(ConstValue::Int(1)))],
                     },
                     Instruction::VCall {
                         dst: Some(l(1)),
                         obj: Operand::Local(l(0)),
                         method: "nope".to_string(),
+                        method_type_args: Vec::new(),
                         args: vec![],
                     },
                 ],
@@ -1937,8 +1961,9 @@ fn pop_handler_in_non_owner_frame_is_error() {
                         Instruction::PushHandler {
                             handler_id: "H0".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "E".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "op".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -2030,8 +2055,9 @@ fn unhandled_effect_traps() {
                 params: vec![],
                 instructions: vec![Instruction::Perform {
                     dst: None,
-                    effect: EffectId {
+                    effect: EffectSpec {
                         interface: "Logger".to_string(),
+                        interface_args: Vec::new(),
                         method: "log".to_string(),
                     },
                     args: vec![Operand::Literal(ConstValue::String("x".to_string()))],
@@ -2073,8 +2099,9 @@ fn continuation_is_one_shot() {
                         Instruction::PushHandler {
                             handler_id: "H0".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "E".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "op".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -2083,8 +2110,9 @@ fn continuation_is_one_shot() {
                         },
                         Instruction::Perform {
                             dst: None,
-                            effect: EffectId {
+                            effect: EffectSpec {
                                 interface: "E".to_string(),
+                                interface_args: Vec::new(),
                                 method: "op".to_string(),
                             },
                             args: vec![],

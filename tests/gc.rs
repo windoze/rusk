@@ -139,6 +139,7 @@ fn gc_traces_through_nested_heap_graphs() {
                     Instruction::MakeStruct {
                         dst: l(1),
                         type_name: "Box".to_string(),
+                        type_args: Vec::new(),
                         fields: vec![("inner".to_string(), Operand::Local(l(0)))],
                     },
                 ],
@@ -223,8 +224,9 @@ fn gc_roots_values_captured_in_continuations() {
                         Instruction::PushHandler {
                             handler_id: "H".to_string(),
                             clauses: vec![HandlerClause {
-                                effect: EffectId {
+                                effect: EffectSpec {
                                     interface: "Test".to_string(),
+                                    interface_args: Vec::new(),
                                     method: "suspend".to_string(),
                                 },
                                 arg_patterns: vec![],
@@ -233,8 +235,9 @@ fn gc_roots_values_captured_in_continuations() {
                         },
                         Instruction::Perform {
                             dst: None,
-                            effect: EffectId {
+                            effect: EffectSpec {
                                 interface: "Test".to_string(),
+                                interface_args: Vec::new(),
                                 method: "suspend".to_string(),
                             },
                             args: vec![],
@@ -300,6 +303,7 @@ fn gc_prevents_stale_handle_use_after_reuse() {
             instructions: vec![Instruction::MakeStruct {
                 dst: l(0),
                 type_name: "Box".to_string(),
+                type_args: Vec::new(),
                 fields: vec![("x".to_string(), Operand::Literal(ConstValue::Int(x)))],
             }],
             terminator: Terminator::Return {

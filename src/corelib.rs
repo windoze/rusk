@@ -34,15 +34,21 @@ fn register_string_fns(interp: &mut Interpreter) {
 
 fn register_to_string(interp: &mut Interpreter) {
     interp.register_host_fn("core::intrinsics::to_string", |_interp, args| match args {
-        [Value::Unit] => Ok(Value::String("()".to_string())),
-        [Value::Bool(v)] => Ok(Value::String(v.to_string())),
-        [Value::Int(v)] => Ok(Value::String(v.to_string())),
-        [Value::Float(v)] => Ok(Value::String(v.to_string())),
-        [Value::String(v)] => Ok(Value::String(v.clone())),
-        [Value::Bytes(v)] => Ok(Value::String(format!("bytes(len={})", v.len()))),
-        [Value::Ref(r)] => Ok(Value::String(format!("{:?}", Value::Ref(r.clone())))),
-        [Value::Function(name)] => Ok(Value::String(format!("fn({name})"))),
-        [Value::Continuation(_)] => Ok(Value::String("continuation(..)".to_string())),
+        [Value::TypeRep(_), Value::Unit] => Ok(Value::String("()".to_string())),
+        [Value::TypeRep(_), Value::Bool(v)] => Ok(Value::String(v.to_string())),
+        [Value::TypeRep(_), Value::Int(v)] => Ok(Value::String(v.to_string())),
+        [Value::TypeRep(_), Value::Float(v)] => Ok(Value::String(v.to_string())),
+        [Value::TypeRep(_), Value::String(v)] => Ok(Value::String(v.clone())),
+        [Value::TypeRep(_), Value::Bytes(v)] => {
+            Ok(Value::String(format!("bytes(len={})", v.len())))
+        }
+        [Value::TypeRep(_), Value::Ref(r)] => {
+            Ok(Value::String(format!("{:?}", Value::Ref(r.clone()))))
+        }
+        [Value::TypeRep(_), Value::Function(name)] => Ok(Value::String(format!("fn({name})"))),
+        [Value::TypeRep(_), Value::Continuation(_)] => {
+            Ok(Value::String("continuation(..)".to_string()))
+        }
         other => Err(RuntimeError::Trap {
             message: format!("core::intrinsics::to_string: bad args: {other:?}"),
         }),
@@ -261,7 +267,7 @@ fn register_bytes_string_unit_eq(interp: &mut Interpreter) {
 
 fn register_iterator_fns(interp: &mut Interpreter) {
     interp.register_host_fn("core::intrinsics::into_iter", |interp, args| match args {
-        [Value::Ref(arr)] => {
+        [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
             let HeapValue::Array(_) = interp.heap_value(arr)? else {
                 return Err(RuntimeError::Trap {
                     message: "core::intrinsics::into_iter: expected an array".to_string(),
@@ -271,7 +277,7 @@ fn register_iterator_fns(interp: &mut Interpreter) {
             let mut fields = BTreeMap::new();
             fields.insert(ARRAY_ITER_FIELD_ARRAY.to_string(), Value::Ref(arr.clone()));
             fields.insert(ARRAY_ITER_FIELD_INDEX.to_string(), Value::Int(0));
-            Ok(interp.alloc_struct(ARRAY_ITER_TYPE, fields))
+            Ok(interp.alloc_struct_typed(ARRAY_ITER_TYPE, vec![*elem_rep], fields))
         }
         other => Err(RuntimeError::Trap {
             message: format!("core::intrinsics::into_iter: bad args: {other:?}"),
@@ -279,12 +285,15 @@ fn register_iterator_fns(interp: &mut Interpreter) {
     });
 
     interp.register_host_fn("core::intrinsics::next", |interp, args| match args {
-        [Value::Ref(iter)] => {
+        [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
             if iter.is_readonly() {
                 return Err(RuntimeError::ReadonlyWrite);
             }
 
-            let HeapValue::Struct { type_name, fields } = interp.heap_value(iter)? else {
+            let HeapValue::Struct {
+                type_name, fields, ..
+            } = interp.heap_value(iter)?
+            else {
                 return Err(RuntimeError::Trap {
                     message: "core::intrinsics::next: expected iterator struct".to_string(),
                 });
@@ -328,9 +337,9 @@ fn register_iterator_fns(interp: &mut Interpreter) {
                 if arr_ref.is_readonly() {
                     item = item.into_readonly_view();
                 }
-                interp.alloc_enum("Option", "Some", vec![item])
+                interp.alloc_enum_typed("Option", vec![*elem_rep], "Some", vec![item])
             } else {
-                interp.alloc_enum("Option", "None", vec![])
+                interp.alloc_enum_typed("Option", vec![*elem_rep], "None", vec![])
             };
 
             let HeapValue::Struct { fields, .. } = interp.heap_value_mut(iter)? else {
@@ -349,7 +358,7 @@ fn register_iterator_fns(interp: &mut Interpreter) {
 
 fn register_panic(interp: &mut Interpreter) {
     interp.register_host_fn("core::intrinsics::panic", |_interp, args| match args {
-        [Value::String(msg)] => Err(RuntimeError::Trap {
+        [Value::TypeRep(_), Value::String(msg)] => Err(RuntimeError::Trap {
             message: format!("panic: {msg}"),
         }),
         other => Err(RuntimeError::Trap {

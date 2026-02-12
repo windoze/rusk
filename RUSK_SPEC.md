@@ -217,9 +217,9 @@ Kinds in v0.4 are restricted to:
 
 ```
 GenericParams  := "<" GenericParam ("," GenericParam)* (",")? ">" ;
-GenericParam   := Ident | Ident "<" ("_"
-                                  | "_" ("," "_")+
-                                  ) ">" ;
+GenericParam   := Ident HktArity? Bounds? ;
+HktArity       := "<" "_" ("," "_")* ">" ;
+Bounds         := ":" PathType ("+" PathType)* ;
 
 GenericArgs    := "<" Type ("," Type)* (",")? ">" ;
 ```
@@ -254,7 +254,9 @@ PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
 
 Notes:
 - `PathType` is used for nominal types (structs/enums/interfaces) and associated names.
-- For this implementation, generic type arguments are **erased at runtime** (they do not affect runtime representation).
+- This implementation reifies arity-0 type arguments (kind `Type`) at runtime as an internal
+  `TypeRep` for operations that require type-precise behavior (notably `is` / `as?` and effect
+  identity). `readonly` remains a compile-time view and is not a distinct runtime type.
 - `readonly T` is a *view type* for reference-like values (arrays/structs/enums/tuples). Writing through a `readonly` view is a compile-time error and also traps at runtime.
 - Tuples use Rust-like comma disambiguation: `(T)` is a parenthesized type, `(T,)` is a 1-tuple type, and `()` is `unit`.
 
@@ -346,7 +348,7 @@ PrimaryExpr    := Literal
 
 PathExpr       := Ident ("::" Ident)* ;
 
-EffectCall     := "@" PathExpr "." Ident "(" ArgList? ")" ;
+EffectCall     := "@" PathType "." Ident "(" ArgList? ")" ;
 
 TupleLit       := "(" Expr "," ArgList? ")" ;
 ```
@@ -362,13 +364,13 @@ it preserves `readonly` views.
 
 `expr is T` performs the same runtime type test but returns `bool`.
 
-In v0.4, the target type `T` for `is` / `as?` must be a **runtime-checkable nominal type**:
+The target type `T` for `is` / `as?` must be a **runtime-checkable nominal type**:
 
-- an arity-0 `struct` type, or
-- an arity-0 `enum` type, or
-- a (non-generic) `interface` type.
+- a `struct` type (possibly instantiated, e.g. `Pair<int, bool>`), or
+- an `enum` type (possibly instantiated, e.g. `Option<int>`), or
+- an `interface` type (possibly instantiated, e.g. `Iterator<int>`).
 
-Type arguments are erased at runtime in v0.4, so `is` / `as?` reject targets with type arguments.
+`readonly` is not a runtime type and is rejected as an `is` / `as?` target.
 
 #### 3.6.1 Literals
 
@@ -474,7 +476,7 @@ MatchExpr      := "match" Expr "{" MatchArm* "}" ;
 MatchArm       := (EffectPat | ValuePat) "=>" BlockOrExpr ","? ;
 BlockOrExpr    := Block | Expr ;
 ValuePat       := Pattern ;
-EffectPat      := "@" PathExpr "." Ident "(" PatList? ")" ("->" Ident)? ;
+EffectPat      := "@" PathType "." Ident "(" PatList? ")" ("->" Ident)? ;
 PatList        := Pattern ("," Pattern)* (",")? ;
 ```
 
@@ -720,6 +722,18 @@ interface J: I { fn bar() -> unit; }
 interface L: J + K { fn boo() -> unit; }
 ```
 
+Interfaces may be generic:
+
+```rust
+interface Boxed<T> { fn get() -> T; }
+```
+
+Interface methods may also be generic:
+
+```rust
+interface Pair<T> { fn pair<U>(u: U) -> (T, U); }
+```
+
 Rules:
 
 - An interface’s *full* method set includes all methods declared in its transitive super-interfaces.
@@ -729,6 +743,12 @@ Rules:
 - `impl X for T { ... }` must implement every method in `X`’s full method set (including inherited ones).
 - `expr as I` performs an explicit upcast to an interface type. Upcasts are the primary mechanism for
   producing interface-typed values without introducing implicit subtyping into inference.
+
+Initial-stage coherence restriction (“no specialization yet”):
+
+- An interface impl header must not select an impl body by choosing concrete interface type arguments.
+  In particular, `impl I<int> for S { ... }` is rejected; only “forall instantiations” headers such as
+  `impl<T> I<T> for S<T> { ... }` are accepted in this stage.
 
 ---
 
@@ -744,9 +764,30 @@ An effect call is written:
 
 and is distinct from a normal interface method call.
 
-For inherited interface methods, effect identity is based on the **origin interface** and method
-name. For example, if `J: I` and `foo` is declared in `I`, then `@J.foo(...)` is the same effect as
-`@I.foo(...)`.
+Effect calls may also name an instantiated interface type:
+
+```rust
+@Yield<int>.yield(1)
+```
+
+If the interface type arguments can be inferred from the operation signature and arguments, they
+may be omitted:
+
+```rust
+@Yield.yield(1) // infers `Yield<int>`
+```
+
+Effect identity is based on:
+
+- the **origin interface** of the method,
+- the instantiated interface type arguments, and
+- the method name.
+
+For inherited interface methods, the origin interface is used for identity. For example, if
+`J<T>: I<T>` and `foo` is declared in `I`, then `@J<int>.foo(...)` is treated as the same effect as
+`@I<int>.foo(...)` (origin canonicalization + the same instantiated arguments).
+
+Method-generic effect operations such as `@I.foo<U>(...)` are deferred in the initial stage.
 
 Semantics:
 
@@ -840,8 +881,9 @@ This is a semantic requirement of the source language.
 
 ## 8. Type System
 
-Rusk has a static type system with global checking at compile time. Types are erased
-at runtime.
+Rusk has a static type system with global checking at compile time. Most types are erased at
+runtime; however, instantiated arity-0 type arguments are reified internally (as `TypeRep`) where
+type-precise runtime behavior is required (e.g. `is` / `as?` and effect identity).
 
 ### 8.1 Design Goals
 
@@ -907,13 +949,21 @@ Where inference cannot determine a unique type, an explicit annotation is requir
 
 ### 8.6 Interfaces as Constraints
 
-An `interface` can be used as a constraint in a generic parameter list:
+One or more `interface` bounds can be used as constraints in a generic parameter list:
 
 ```rust
-fn log_all<T: Logger>(xs: [T]) -> unit { ... }
+fn log_all<T: Logger + Show>(xs: [T]) -> unit { ... }
 ```
 
-Constraint satisfaction is based on the existence of an `impl Logger for T`.
+Rules:
+
+- Bounds use `+` as a separator: `T: I + J + K`.
+- Each bound element must resolve to an interface type (possibly instantiated), e.g. `Iterator<int>`.
+- Bounds are supported only on arity-0 type parameters in `fn`/method generics (bounds on HKTs and
+  on `impl`/`struct`/`enum`/`interface` generics are deferred).
+
+Constraint satisfaction is based on the existence of an `impl` of each bound interface for the
+chosen type.
 
 Interface inheritance is respected for constraints: if `J` inherits from `I`, then `T: J` also
 satisfies `T: I`.
@@ -935,6 +985,18 @@ Then:
   implicit binder `resume`) is well-typed if the patterns bind values of the declared
   argument types, and if the continuation is called consistently:
   - `k(v)` requires `v: unit` (the declared return type of the effect).
+
+For generic interfaces used as effects, the same rules apply after instantiation. For example:
+
+```rust
+interface Yield<T> { fn yield(value: T) -> unit; }
+```
+
+- `@Yield<int>.yield(e)` has type `unit` and requires `e: int`.
+- `@Yield.yield(e)` is allowed only if `T` can be inferred; otherwise explicit type arguments are
+  required.
+- `@Yield<int>.yield(...)` and `@Yield<string>.yield(...)` are distinct effect operations at
+  runtime.
 
 The type of the overall `match` expression is determined by the value arms and
 effect arms collectively (all arms must unify to a single result type).
