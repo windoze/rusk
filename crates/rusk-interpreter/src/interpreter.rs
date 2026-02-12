@@ -1,10 +1,19 @@
 extern crate alloc;
 
-#[cfg(feature = "no_std")]
-use hashbrown::HashMap;
+pub mod hashmap {
+    #[cfg(feature = "std")]
+    pub use std::collections::HashMap;
 
-#[cfg(not(feature = "no_std"))]
-use std::collections::HashMap;
+    #[cfg(all(not(feature = "std"), feature = "hashbrown"))]
+    pub use hashbrown::HashMap;
+
+    #[cfg(not(any(feature = "std", feature = "hashbrown")))]
+    compile_error!(
+        "You must enable either the 'std' feature or the 'hashbrown' feature for rusk-interpreter."
+    );
+}
+
+use hashmap::HashMap;
 
 use alloc::collections::BTreeMap;
 use alloc::fmt;

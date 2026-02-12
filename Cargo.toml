@@ -1,4 +1,6 @@
 [workspace]
+package.version = "0.1.0"
+package.edition = "2024"
 members = [
     "crates/rusk-mir",
     "crates/rusk-compiler",
@@ -7,8 +9,8 @@ members = [
 
 [package]
 name = "rusk"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 rusk-compiler = { path = "crates/rusk-compiler" }

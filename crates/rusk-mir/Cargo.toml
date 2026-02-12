@@ -1,10 +1,15 @@
 [package]
 name = "rusk-mir"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
+serde = { version = "1", default-features = false, optional = true, features = [
+    "derive",
+    "alloc",
+] }
 
 [features]
-default = ["std"]
-std = []
+default = ["std", "serde"]
+std = ["serde?/std"]
+serde = ["dep:serde"]

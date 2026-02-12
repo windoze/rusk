@@ -9,16 +9,25 @@ use alloc::{
     vec::Vec,
 };
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// A local slot index within a MIR function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct Local(pub usize);
 
 /// A basic block index within a MIR function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct BlockId(pub usize);
 
 /// A MIR module: a set of functions plus optional method-resolution metadata.
 #[derive(Clone, Debug, Default)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct Module {
     /// MIR functions by name.
     pub functions: BTreeMap<String, Function>,
@@ -34,6 +43,8 @@ pub struct Module {
 
 /// A MIR function body.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct Function {
     pub name: String,
     pub params: Vec<Param>,
@@ -53,6 +64,8 @@ impl Function {
 
 /// A function parameter.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct Param {
     pub local: Local,
     pub mutability: Mutability,
@@ -61,6 +74,8 @@ pub struct Param {
 
 /// Parameter / binding mutability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum Mutability {
     Mutable,
     Readonly,
@@ -68,6 +83,8 @@ pub enum Mutability {
 
 /// Optional type annotation.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum Type {
     Unit,
     Bool,
@@ -89,6 +106,8 @@ pub enum Type {
 ///
 /// Applied types are constructed via [`Instruction::MakeTypeRep`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum TypeRepLit {
     Unit,
     Bool,
@@ -107,6 +126,8 @@ pub enum TypeRepLit {
 
 /// A basic block: params, instructions, and a terminator.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct BasicBlock {
     pub label: String,
     pub params: Vec<Local>,
@@ -116,6 +137,8 @@ pub struct BasicBlock {
 
 /// An operand: a local or a literal.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum Operand {
     Local(Local),
     Literal(ConstValue),
@@ -125,6 +148,8 @@ pub enum Operand {
 ///
 /// Composite literals allocate fresh runtime objects when evaluated.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum ConstValue {
     Unit,
     Bool(bool),
@@ -152,6 +177,8 @@ pub enum ConstValue {
 
 /// A pattern for `switch` and effect handler clauses.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum Pattern {
     /// `_`
     Wildcard,
@@ -201,6 +228,8 @@ pub enum Pattern {
 /// The `interface_args` are runtime `TypeRep` values represented as operands; they are evaluated
 /// when pushing a handler and when performing an effect.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct EffectSpec {
     pub interface: String,
     pub interface_args: Vec<Operand>,
@@ -209,6 +238,8 @@ pub struct EffectSpec {
 
 /// A handler clause for a single effect.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub struct HandlerClause {
     pub effect: EffectSpec,
     pub arg_patterns: Vec<Pattern>,
@@ -217,6 +248,8 @@ pub struct HandlerClause {
 
 /// A MIR instruction.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum Instruction {
     Const {
         dst: Local,
@@ -344,6 +377,8 @@ pub enum Instruction {
 
 /// A terminator instruction.
 #[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
 pub enum Terminator {
     Br {
         target: BlockId,
@@ -370,7 +405,8 @@ pub enum Terminator {
 }
 
 /// A single `switch` case.
-#[derive(Clone, Debug)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SwitchCase {
     pub pattern: Pattern,
     pub target: BlockId,

@@ -1,12 +1,25 @@
 [package]
 name = "rusk-interpreter"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+
 
 [dependencies]
 rusk-mir = { path = "../rusk-mir", default-features = false }
-hashbrown = { version = "0.16", default-features = false,  features = ["alloc", "default-hasher"], optional = true }
+hashbrown = { version = "0.16", default-features = false,  features = ["inline-more", "alloc", "default-hasher"], optional = true }
+bitcode = { version = "0.6", default-features = false, optional = true, features = [] }
+serde = { version = "1", default-features = false, optional = true, features = [
+    "derive",
+    "alloc",
+] }
 
 [features]
-default = ["rusk-mir/std"]
-no_std = ["hashbrown"]
+default = ["std", "serde"]
+
+std = ["serde?/std", "bitcode?/std", "rusk-mir/std"]
+
+# Enable serde support, can be used in both std and no-std builds.
+serde = ["dep:serde", "bitcode/serde"]
+
+# Must be enabled when `std` is disabled.
+hashbrown = ["dep:hashbrown"]

@@ -17,3 +17,22 @@ pub mod source;
 
 /// Source map for tracking source locations.
 pub mod source_map;
+
+#[cfg(feature = "serde")]
+#[derive(Debug)]
+pub struct SaveError(bitcode::Error);
+
+#[cfg(feature = "serde")]
+impl core::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "failed to save module: {}", self.0)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl core::error::Error for SaveError {}
+
+#[cfg(feature = "serde")]
+pub fn save_module(module: &rusk_mir::Module) -> Result<Vec<u8>, SaveError> {
+    bitcode::serialize(module).map_err(SaveError)
+}

@@ -1,12 +1,18 @@
 [package]
 name = "rusk-compiler"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 rusk-mir = { path = "../rusk-mir" }
 unicode-ident = { version = "1", optional = true }
+bitcode = { version = "0.6", default-features = false, optional = true, features = ["serde"] }
+serde = { version = "1", default-features = false, optional = true, features = [
+    "derive",
+    "alloc",
+] }
 
 [features]
-default = ["std"]
-std = ["unicode-ident"]
+default = ["std", "serde"]
+serde = ["dep:serde", "bitcode/serde"]
+std = ["unicode-ident", "rusk-mir/std", "bitcode?/std", "serde?/std"]

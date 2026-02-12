@@ -3,6 +3,7 @@
         "arities",
         "backedge",
         "binop",
+        "bitcode",
         "combinators",
         "corelib",
         "dedup",
