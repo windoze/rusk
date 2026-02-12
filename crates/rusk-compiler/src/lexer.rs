@@ -1034,22 +1034,22 @@ fn digit_value(ch: char, base: u32) -> Option<u32> {
 }
 
 fn is_ident_start(ch: char) -> bool {
-    #[cfg(feature = "unicode")]
+    #[cfg(feature = "std")]
     {
         ch == '_' || unicode_ident::is_xid_start(ch)
     }
-    #[cfg(not(feature = "unicode"))]
+    #[cfg(not(feature = "std"))]
     {
         ch == '_' || ch.is_ascii_alphabetic()
     }
 }
 
 fn is_ident_continue(ch: char) -> bool {
-    #[cfg(feature = "unicode")]
+    #[cfg(feature = "std")]
     {
         ch == '_' || unicode_ident::is_xid_continue(ch)
     }
-    #[cfg(not(feature = "unicode"))]
+    #[cfg(not(feature = "std"))]
     {
         ch == '_' || ch.is_ascii_alphanumeric()
     }

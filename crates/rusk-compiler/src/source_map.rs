@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 /// A display name for a source (either a filesystem path or a virtual label like "<string>").
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceName {
+pub enum SourceName {
     Path(PathBuf),
     Virtual(String),
 }
@@ -61,16 +61,16 @@ impl SourceFile {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SourceMap {
+pub struct SourceMap {
     files: Vec<SourceFile>,
 }
 
 impl SourceMap {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn add_source(&mut self, name: SourceName, src: Arc<str>, base_offset: usize) {
+    pub fn add_source(&mut self, name: SourceName, src: Arc<str>, base_offset: usize) {
         let line_starts = compute_line_starts(&src);
         if let Some(prev) = self.files.last() {
             debug_assert!(
@@ -86,7 +86,7 @@ impl SourceMap {
         });
     }
 
-    pub(crate) fn lookup_span(&self, span: Span) -> Option<SourceRange> {
+    pub fn lookup_span(&self, span: Span) -> Option<SourceRange> {
         if self.files.is_empty() {
             return None;
         }
@@ -116,27 +116,27 @@ impl SourceMap {
         })
     }
 
-    pub(crate) fn render_span_location(&self, span: Span) -> Option<String> {
+    pub fn render_span_location(&self, span: Span) -> Option<String> {
         let range = self.lookup_span(span)?;
         Some(range.render_location())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LineCol {
-    pub(crate) line: usize,
-    pub(crate) col: usize,
+pub struct LineCol {
+    pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceRange {
-    pub(crate) name: SourceName,
-    pub(crate) start: LineCol,
-    pub(crate) end: LineCol,
+pub struct SourceRange {
+    pub name: SourceName,
+    pub start: LineCol,
+    pub end: LineCol,
 }
 
 impl SourceRange {
-    pub(crate) fn render_location(&self) -> String {
+    pub fn render_location(&self) -> String {
         format!(
             "{}: <{}:{}> - <{}:{}>",
             self.name.render(),

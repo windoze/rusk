@@ -1,12 +1,25 @@
+extern crate alloc;
+
+#[cfg(feature = "no_std")]
+use hashbrown::HashMap;
+
+#[cfg(not(feature = "no_std"))]
+use std::collections::HashMap;
+
+use alloc::collections::BTreeMap;
+use alloc::fmt;
+use alloc::format;
+use alloc::rc::Rc;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::{cell::RefCell, mem};
+
 use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
-use crate::mir::{
+use rusk_mir::{
     BasicBlock, BlockId, ConstValue, EffectSpec, Function, Instruction, Local, Module, Mutability,
     Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
 };
-use std::collections::{BTreeMap, HashMap};
-use std::fmt;
-use std::rc::Rc;
-use std::{cell::RefCell, mem};
 
 /// An internal runtime type representation identifier.
 ///
@@ -310,7 +323,7 @@ impl fmt::Display for RuntimeError {
     }
 }
 
-impl std::error::Error for RuntimeError {}
+impl core::error::Error for RuntimeError {}
 
 type HostFunction<GC> =
     Rc<dyn Fn(&mut InterpreterImpl<GC>, &[Value]) -> Result<Value, RuntimeError> + 'static>;

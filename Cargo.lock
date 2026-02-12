@@ -3,11 +3,55 @@
 version = 4
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "foldhash",
+ "rustc-std-workspace-alloc",
+]
+
+[[package]]
 name = "rusk"
 version = "0.1.0"
 dependencies = [
+ "rusk-compiler",
+ "rusk-interpreter",
+ "rusk-mir",
+]
+
+[[package]]
+name = "rusk-compiler"
+version = "0.1.0"
+dependencies = [
+ "rusk-mir",
  "unicode-ident",
 ]
+
+[[package]]
+name = "rusk-interpreter"
+version = "0.1.0"
+dependencies = [
+ "hashbrown",
+ "rusk-mir",
+]
+
+[[package]]
+name = "rusk-mir"
+version = "0.1.0"
+
+[[package]]
+name = "rustc-std-workspace-alloc"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d441c3b2ebf55cebf796bfdc265d67fa09db17b7bb6bd4be75c509e1e8fec3"
 
 [[package]]
 name = "unicode-ident"

@@ -1,2 +1,136 @@
+# Rust 编译产物
 /target
+**/target/
+Cargo.lock.bak
+
+# 调试和分析文件
+*.pdb
+*.prof
+perf.data
+perf.data.old
+flamegraph.svg
+
+# 测试覆盖率
+*.profraw
+*.profdata
+coverage/
+
+# 临时文件
 /tmp
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Rust 备份文件
+**/*.rs.bk
+*.orig
+
+# IDE 和编辑器
+## VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+## IntelliJ IDEA / CLion / RustRover
+.idea/
+*.iml
+*.ipr
+*.iws
+.idea_modules/
+
+## Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+.netrwhist
+
+## Emacs
+\#*\#
+.\#*
+*~
+
+## Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# 操作系统文件
+## macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+## Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+## Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# 环境和配置文件
+.env
+.env.local
+.env.*.local
+*.log
+
+# 依赖和包管理
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 构建和分发
+dist/
+build/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Rust 特定
+# 如果使用 rust-toolchain.toml，可能需要取消注释以下行
+# rust-toolchain.toml
+
+# 如果生成文档
+doc/
+
+# Benchmarking 和性能测试
+criterion/
+benchmarks/target/

@@ -1,5 +1,9 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::cell::Cell;
+
 use crate::interpreter::HeapValue;
-use std::cell::Cell;
 
 /// A handle to a GC-managed heap object.
 ///

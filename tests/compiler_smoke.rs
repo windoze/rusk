@@ -1,5 +1,5 @@
-use rusk::compiler::compile_to_mir;
-use rusk::{Interpreter, Value};
+use rusk_compiler::compile_to_mir;
+use rusk_interpreter::{Interpreter, Value};
 
 #[test]
 fn compiles_and_runs_a_minimal_program() {

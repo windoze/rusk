@@ -2,15 +2,15 @@ use crate::ast::{
     BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, ImplHeader, ImplItem, Item, MatchArm,
     MatchPat, MethodReceiverKind, PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
 };
-use crate::mir::{
-    BasicBlock, BlockId, ConstValue, EffectSpec, Function, HandlerClause, Instruction, Local,
-    Module, Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type, TypeRepLit,
-};
 use crate::modules::{DefKind, ModuleLoader, ModulePath};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
 use crate::source_map::{SourceMap, SourceName};
 use crate::typeck::{self, ProgramEnv, Ty, TypeError as TypeckError, TypeInfo};
+use rusk_mir::{
+    BasicBlock, BlockId, ConstValue, EffectSpec, Function, HandlerClause, Instruction, Local,
+    Module, Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type, TypeRepLit,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;

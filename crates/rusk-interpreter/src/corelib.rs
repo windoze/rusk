@@ -1,5 +1,11 @@
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
+
 use crate::interpreter::{HeapValue, Interpreter, RuntimeError, Value};
-use std::collections::BTreeMap;
 
 const ARRAY_ITER_TYPE: &str = "core::intrinsics::ArrayIter";
 const ARRAY_ITER_FIELD_ARRAY: &str = "arr";

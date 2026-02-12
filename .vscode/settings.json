@@ -12,8 +12,10 @@
         "fixpoint",
         "Fixpoints",
         "fnptr",
+        "hashbrown",
         "icall",
         "iface",
+        "ifaces",
         "impls",
         "interp",
         "kinded",
@@ -28,6 +30,7 @@
         "typeck",
         "typerep",
         "uninit",
+        "usize",
         "vcall"
     ]
 }

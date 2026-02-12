@@ -1,0 +1,12 @@
+[package]
+name = "rusk-compiler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusk-mir = { path = "../rusk-mir" }
+unicode-ident = { version = "1", optional = true }
+
+[features]
+default = ["std"]
+std = ["unicode-ident"]

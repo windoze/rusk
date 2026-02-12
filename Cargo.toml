@@ -1,11 +1,18 @@
+[workspace]
+members = [
+    "crates/rusk-mir",
+    "crates/rusk-compiler",
+    "crates/rusk-interpreter",
+]
+
 [package]
 name = "rusk"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-unicode-ident = { version = "1", optional = true}
+rusk-compiler = { path = "crates/rusk-compiler" }
+rusk-interpreter = { path = "crates/rusk-interpreter" }
 
-[features]
-default = ["unicode"]
-unicode = ["unicode-ident"]
+[dev-dependencies]
+rusk-mir = { path = "crates/rusk-mir" }

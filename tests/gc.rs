@@ -1,5 +1,5 @@
-use rusk::mir::*;
-use rusk::{Interpreter, RuntimeError, Value};
+use rusk_interpreter::{Interpreter, RuntimeError, Value};
+use rusk_mir::*;
 
 fn l(i: usize) -> Local {
     Local(i)

@@ -1,6 +1,5 @@
-use rusk::compiler::compile_file_to_mir;
-use rusk::corelib::register_core_host_fns;
-use rusk::{Interpreter, Value};
+use rusk_compiler::compile_file_to_mir;
+use rusk_interpreter::{Interpreter, Value, register_core_host_fns};
 use std::env;
 use std::path::Path;
 use std::process;

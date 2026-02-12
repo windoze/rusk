@@ -1,6 +1,6 @@
-use rusk::compiler::{compile_file_to_mir, compile_to_mir};
-use rusk::corelib::register_core_host_fns;
-use rusk::{Interpreter, Value};
+use rusk_compiler::{compile_file_to_mir, compile_to_mir};
+use rusk_interpreter::corelib::register_core_host_fns;
+use rusk_interpreter::{Interpreter, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 

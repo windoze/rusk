@@ -1,5 +1,5 @@
-use rusk::mir::*;
-use rusk::{Interpreter, RuntimeError, Value};
+use rusk_interpreter::{Interpreter, RuntimeError, Value};
+use rusk_mir::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -1007,7 +1007,7 @@ fn len_on_non_array_is_type_error() {
         RuntimeError::TypeError {
             op: "len",
             expected: "ref(array)",
-            got: rusk::interpreter::ValueKind::Int
+            got: rusk_interpreter::interpreter::ValueKind::Int
         }
     );
 }
@@ -1728,7 +1728,7 @@ fn cond_br_requires_bool_condition() {
         RuntimeError::TypeError {
             op: "cond_br",
             expected: "bool",
-            got: rusk::interpreter::ValueKind::Int
+            got: rusk_interpreter::interpreter::ValueKind::Int
         }
     );
 }
@@ -2035,7 +2035,7 @@ fn icall_with_non_function_value_is_type_error() {
         RuntimeError::TypeError {
             op: "icall",
             expected: "fn reference",
-            got: rusk::interpreter::ValueKind::Int
+            got: rusk_interpreter::interpreter::ValueKind::Int
         }
     );
 }

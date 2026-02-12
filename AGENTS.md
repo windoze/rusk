@@ -2,8 +2,14 @@
 
 ## Project Structure & Module Organization
 
-- `src/`: Rust library source (entry point: `src/lib.rs`).
-- `tests/`: Integration tests (create as needed; not present yet).
+- `Cargo.toml`: Workspace definition plus root `rusk` package.
+- `src/`: Root binary crate source (entry point: `src/main.rs`).
+- `crates/`: Workspace member crates.
+- `crates/rusk-compiler/`: Compiler crate (entry point: `crates/rusk-compiler/src/lib.rs`).
+- `crates/rusk-interpreter/`: Interpreter crate (entry point: `crates/rusk-interpreter/src/lib.rs`).
+- `crates/rusk-mir/`: MIR crate (entry point: `crates/rusk-mir/src/lib.rs`).
+- `tests/`: Integration tests for the workspace.
+- `fixtures/`: Test fixtures and sample inputs.
 - `RUSK_SPEC.md`, `MIR_SPEC.md`: Design/spec notes—update these when behavior changes.
 - `target/`: Build artifacts (gitignored; do not commit).
 - `proposals/`: RFC-style design proposals for major features/changes.
@@ -16,6 +22,7 @@
 - `cargo build`: Build the crate (debug by default).
 - `cargo test`: Run unit + integration tests.
 - `cargo test <name>`: Run a single test (substring match).
+- `cargo test -p <crate>`: Run tests for a specific workspace crate.
 - `cargo fmt`: Format code with `rustfmt`.
 - `cargo clippy -- -D warnings`: Lint and fail on warnings (preferred for PRs).
 - `cargo doc --open`: Generate and view local API docs.

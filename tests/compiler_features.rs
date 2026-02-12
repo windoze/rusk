@@ -1,6 +1,6 @@
-use rusk::compiler::compile_to_mir;
-use rusk::corelib::register_core_host_fns;
-use rusk::{Interpreter, RuntimeError, Value};
+use rusk_compiler::compile_to_mir;
+use rusk_interpreter::corelib::register_core_host_fns;
+use rusk_interpreter::{Interpreter, RuntimeError, Value};
 
 fn run0(src: &str, fn_name: &str) -> Result<Value, RuntimeError> {
     let module = compile_to_mir(src).map_err(|e| RuntimeError::Trap {

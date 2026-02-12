@@ -1,6 +1,6 @@
-use rusk::compiler::compile_to_mir;
-use rusk::corelib::register_core_host_fns;
-use rusk::{Interpreter, Value};
+use rusk_compiler::compile_to_mir;
+use rusk_interpreter::corelib::register_core_host_fns;
+use rusk_interpreter::{Interpreter, Value};
 
 #[test]
 fn for_loop_iterates_using_iterator_protocol() {

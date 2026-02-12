@@ -1,4 +1,4 @@
-use rusk::compiler::{compile_file_to_mir, compile_to_mir};
+use rusk_compiler::{compile_file_to_mir, compile_to_mir};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
