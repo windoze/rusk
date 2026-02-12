@@ -3,6 +3,7 @@ use crate::ast::{
     Ident, ImplHeader, ImplItem, InterfaceItem, Item, MatchArm, MatchPat, MethodReceiverKind,
     PatLiteral, Pattern, PrimType, Program, StructItem, TypeExpr, UnaryOp, Visibility,
 };
+use crate::host::{CompileOptions, HostVisibility};
 use crate::modules::{ModulePath, ModuleResolver};
 use crate::source::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -287,8 +288,11 @@ pub(crate) struct TypeInfo {
     pub(crate) effect_interface_args: HashMap<(Span, String), Vec<Ty>>,
 }
 
-pub(crate) fn build_env(program: &Program) -> Result<ProgramEnv, TypeError> {
-    let modules = ModuleResolver::build(program).map_err(|e| TypeError {
+pub(crate) fn build_env(
+    program: &Program,
+    options: &CompileOptions,
+) -> Result<ProgramEnv, TypeError> {
+    let modules = ModuleResolver::build(program, &options.host_modules).map_err(|e| TypeError {
         message: e.message,
         span: e.span,
     })?;
@@ -298,6 +302,7 @@ pub(crate) fn build_env(program: &Program) -> Result<ProgramEnv, TypeError> {
         ..Default::default()
     };
     add_prelude(&mut env);
+    add_host_modules(&mut env, options)?;
 
     // First pass: declare nominal types.
     walk_module_items(
@@ -350,6 +355,78 @@ pub(crate) fn build_env(program: &Program) -> Result<ProgramEnv, TypeError> {
     )?;
 
     Ok(env)
+}
+
+fn add_host_modules(env: &mut ProgramEnv, options: &CompileOptions) -> Result<(), TypeError> {
+    for (module_name, module) in &options.host_modules {
+        let defining_module = ModulePath::root().child(module_name);
+        for func in &module.functions {
+            let full_name = format!("{module_name}::{}", func.name);
+            if env.functions.contains_key(&full_name) {
+                return Err(TypeError {
+                    message: format!("duplicate function `{full_name}`"),
+                    span: Span::new(0, 0),
+                });
+            }
+
+            let vis = match func.visibility {
+                HostVisibility::Private => Visibility::Private,
+                HostVisibility::Public => Visibility::Public {
+                    span: Span::new(0, 0),
+                },
+            };
+
+            let params = func
+                .sig
+                .params
+                .iter()
+                .map(ty_from_host_type)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|message| TypeError {
+                    message: format!("host function `{full_name}`: {message}"),
+                    span: Span::new(0, 0),
+                })?;
+            let ret = ty_from_host_type(&func.sig.ret).map_err(|message| TypeError {
+                message: format!("host function `{full_name}`: {message}"),
+                span: Span::new(0, 0),
+            })?;
+
+            env.functions.insert(
+                full_name.clone(),
+                FnSig {
+                    name: full_name,
+                    vis,
+                    defining_module: defining_module.clone(),
+                    generics: Vec::new(),
+                    params,
+                    ret,
+                    span: Span::new(0, 0),
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn ty_from_host_type(ty: &rusk_mir::HostType) -> Result<Ty, String> {
+    match ty {
+        rusk_mir::HostType::Any => Err("unsupported host type: `any`".to_string()),
+        rusk_mir::HostType::Unit => Ok(Ty::Unit),
+        rusk_mir::HostType::Bool => Ok(Ty::Bool),
+        rusk_mir::HostType::Int => Ok(Ty::Int),
+        rusk_mir::HostType::Float => Ok(Ty::Float),
+        rusk_mir::HostType::String => Ok(Ty::String),
+        rusk_mir::HostType::Bytes => Ok(Ty::Bytes),
+        rusk_mir::HostType::TypeRep => Err("unsupported host type: `typerep`".to_string()),
+        rusk_mir::HostType::Array(elem) => Ok(Ty::Array(Box::new(ty_from_host_type(elem)?))),
+        rusk_mir::HostType::Tuple(items) => Ok(Ty::Tuple(
+            items
+                .iter()
+                .map(ty_from_host_type)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+    }
 }
 
 fn walk_module_items(
@@ -554,10 +631,6 @@ fn add_prelude(env: &mut ProgramEnv) {
         )],
         Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
     );
-
-    // Host / platform functions (not part of `core`).
-    add_fn("std::print", Vec::new(), vec![Ty::String], Ty::Unit);
-    add_fn("std::println", Vec::new(), vec![Ty::String], Ty::Unit);
 }
 
 fn declare_struct(

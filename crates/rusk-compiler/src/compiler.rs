@@ -2,6 +2,7 @@ use crate::ast::{
     BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, ImplHeader, ImplItem, Item, MatchArm,
     MatchPat, MethodReceiverKind, PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
 };
+use crate::host::CompileOptions;
 use crate::modules::{DefKind, ModuleLoader, ModulePath};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
@@ -11,7 +12,7 @@ use rusk_mir::{
     BasicBlock, BlockId, ConstValue, EffectSpec, Function, HandlerClause, Instruction, Local,
     Module, Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type, TypeRepLit,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
@@ -112,6 +113,14 @@ impl From<crate::modules::LoadError> for CompileError {
 ///
 /// This is the front-end entrypoint used by tests and the CLI.
 pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
+    compile_to_mir_with_options(source, &CompileOptions::default())
+}
+
+/// Compiles a single Rusk source file into MIR with host-module declarations.
+pub fn compile_to_mir_with_options(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<Module, CompileError> {
     let mut source_map = SourceMap::new();
     source_map.add_source(
         SourceName::Virtual("<string>".to_string()),
@@ -122,7 +131,7 @@ pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
     let result = (|| {
         let mut parser = Parser::new(source)?;
         let program = parser.parse_program()?;
-        compile_program_to_mir(&program)
+        compile_program_to_mir(&program, options)
     })();
 
     result.map_err(|e| e.with_source_map(&source_map))
@@ -130,6 +139,15 @@ pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
 
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR.
 pub fn compile_file_to_mir(entry_path: &Path) -> Result<Module, CompileError> {
+    compile_file_to_mir_with_options(entry_path, &CompileOptions::default())
+}
+
+/// Compiles an entry file (and its `mod foo;` dependencies) into MIR with host-module
+/// declarations.
+pub fn compile_file_to_mir_with_options(
+    entry_path: &Path,
+    options: &CompileOptions,
+) -> Result<Module, CompileError> {
     let mut loader = ModuleLoader::new();
     let program = match loader.load_program_from_file(entry_path) {
         Ok(program) => program,
@@ -148,11 +166,14 @@ pub fn compile_file_to_mir(entry_path: &Path) -> Result<Module, CompileError> {
         }
     };
 
-    compile_program_to_mir(&program).map_err(|e| e.with_source_map(loader.source_map()))
+    compile_program_to_mir(&program, options).map_err(|e| e.with_source_map(loader.source_map()))
 }
 
-fn compile_program_to_mir(program: &Program) -> Result<Module, CompileError> {
-    let env = typeck::build_env(program)?;
+fn compile_program_to_mir(
+    program: &Program,
+    options: &CompileOptions,
+) -> Result<Module, CompileError> {
+    let env = typeck::build_env(program, options)?;
     let types = typeck::typecheck_program(program, &env)?;
     Compiler::new(env, types).compile_program(program)
 }
@@ -163,6 +184,119 @@ struct Compiler {
     types: TypeInfo,
     next_internal_id: u64,
     fn_value_wrappers: BTreeMap<String, String>,
+}
+
+fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
+    use rusk_mir::{HostFnSig, HostType};
+
+    let sig = |params: Vec<HostType>, ret: HostType| HostFnSig { params, ret };
+
+    match name {
+        // f-string helpers.
+        "core::intrinsics::string_concat" => Some(sig(
+            vec![HostType::String, HostType::String],
+            HostType::String,
+        )),
+        "core::intrinsics::to_string" => Some(sig(
+            vec![HostType::TypeRep, HostType::Any],
+            HostType::String,
+        )),
+        // Panic.
+        "core::intrinsics::panic" => Some(sig(
+            vec![HostType::TypeRep, HostType::String],
+            HostType::Any,
+        )),
+        // Boolean.
+        "core::intrinsics::bool_not" => Some(sig(vec![HostType::Bool], HostType::Bool)),
+        "core::intrinsics::bool_eq" | "core::intrinsics::bool_ne" => {
+            Some(sig(vec![HostType::Bool, HostType::Bool], HostType::Bool))
+        }
+        // Integer arithmetic & comparisons.
+        "core::intrinsics::int_add"
+        | "core::intrinsics::int_sub"
+        | "core::intrinsics::int_mul"
+        | "core::intrinsics::int_div"
+        | "core::intrinsics::int_mod" => {
+            Some(sig(vec![HostType::Int, HostType::Int], HostType::Int))
+        }
+        "core::intrinsics::int_eq"
+        | "core::intrinsics::int_ne"
+        | "core::intrinsics::int_lt"
+        | "core::intrinsics::int_le"
+        | "core::intrinsics::int_gt"
+        | "core::intrinsics::int_ge" => {
+            Some(sig(vec![HostType::Int, HostType::Int], HostType::Bool))
+        }
+        // Float arithmetic & comparisons.
+        "core::intrinsics::float_add"
+        | "core::intrinsics::float_sub"
+        | "core::intrinsics::float_mul"
+        | "core::intrinsics::float_div"
+        | "core::intrinsics::float_mod" => {
+            Some(sig(vec![HostType::Float, HostType::Float], HostType::Float))
+        }
+        "core::intrinsics::float_eq"
+        | "core::intrinsics::float_ne"
+        | "core::intrinsics::float_lt"
+        | "core::intrinsics::float_le"
+        | "core::intrinsics::float_gt"
+        | "core::intrinsics::float_ge" => {
+            Some(sig(vec![HostType::Float, HostType::Float], HostType::Bool))
+        }
+        // Primitive equality helpers.
+        "core::intrinsics::string_eq" | "core::intrinsics::string_ne" => Some(sig(
+            vec![HostType::String, HostType::String],
+            HostType::Bool,
+        )),
+        "core::intrinsics::bytes_eq" | "core::intrinsics::bytes_ne" => {
+            Some(sig(vec![HostType::Bytes, HostType::Bytes], HostType::Bool))
+        }
+        "core::intrinsics::unit_eq" | "core::intrinsics::unit_ne" => {
+            Some(sig(vec![HostType::Unit, HostType::Unit], HostType::Bool))
+        }
+        // Iterator protocol.
+        "core::intrinsics::into_iter" => Some(sig(
+            vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
+            HostType::Any,
+        )),
+        "core::intrinsics::next" => {
+            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
+        }
+
+        _ => None,
+    }
+}
+
+fn host_fn_sig_from_fn_sig(sig: &typeck::FnSig) -> Result<rusk_mir::HostFnSig, String> {
+    let params = sig
+        .params
+        .iter()
+        .map(host_type_from_ty)
+        .collect::<Result<Vec<_>, _>>()?;
+    let ret = host_type_from_ty(&sig.ret)?;
+    Ok(rusk_mir::HostFnSig { params, ret })
+}
+
+fn host_type_from_ty(ty: &Ty) -> Result<rusk_mir::HostType, String> {
+    use rusk_mir::HostType;
+
+    match ty {
+        Ty::Unit => Ok(HostType::Unit),
+        Ty::Bool => Ok(HostType::Bool),
+        Ty::Int => Ok(HostType::Int),
+        Ty::Float => Ok(HostType::Float),
+        Ty::String => Ok(HostType::String),
+        Ty::Bytes => Ok(HostType::Bytes),
+        Ty::Readonly(inner) => host_type_from_ty(inner),
+        Ty::Array(elem) => Ok(HostType::Array(Box::new(host_type_from_ty(elem)?))),
+        Ty::Tuple(items) => Ok(HostType::Tuple(
+            items
+                .iter()
+                .map(host_type_from_ty)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        other => Err(format!("unsupported host type: {other:?}")),
+    }
 }
 
 impl Compiler {
@@ -186,8 +320,48 @@ impl Compiler {
         self.compile_module_items(&ModulePath::root(), &program.items)?;
         self.populate_interface_dispatch_table()?;
         self.populate_interface_impl_table();
+        self.populate_host_imports()?;
 
         Ok(self.module)
+    }
+
+    fn populate_host_imports(&mut self) -> Result<(), CompileError> {
+        let mut used = BTreeSet::<String>::new();
+
+        for func in self.module.functions.values() {
+            for block in &func.blocks {
+                for instr in &block.instructions {
+                    let Instruction::Call { func, .. } = instr else {
+                        continue;
+                    };
+                    if !self.module.functions.contains_key(func) {
+                        used.insert(func.clone());
+                    }
+                }
+            }
+        }
+
+        for name in used {
+            let sig = if let Some(sig) = core_intrinsic_host_sig(&name) {
+                sig
+            } else {
+                let fn_sig = self.env.functions.get(&name).ok_or_else(|| {
+                    CompileError::new(
+                        format!("internal error: missing signature for host function `{name}`"),
+                        Span::new(0, 0),
+                    )
+                })?;
+                host_fn_sig_from_fn_sig(fn_sig).map_err(|message| {
+                    CompileError::new(
+                        format!("internal error: host import signature for `{name}`: {message}"),
+                        Span::new(0, 0),
+                    )
+                })?
+            };
+            self.module.host_imports.insert(name, sig);
+        }
+
+        Ok(())
     }
 
     fn populate_interface_dispatch_table(&mut self) -> Result<(), CompileError> {

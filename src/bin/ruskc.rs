@@ -1,4 +1,5 @@
-use rusk_compiler::{compile_file_to_mir, to_bytes};
+use rusk_compiler::{CompileOptions, compile_file_to_mir_with_options, to_bytes};
+use rusk_host::std_io;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -16,7 +17,9 @@ fn main() {
     }
 
     let input_path = Path::new(&path);
-    let module = match compile_file_to_mir(input_path) {
+    let mut options = CompileOptions::default();
+    std_io::register_host_module(&mut options);
+    let module = match compile_file_to_mir_with_options(input_path, &options) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("compile error: {e}");

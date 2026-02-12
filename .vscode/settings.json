@@ -23,6 +23,7 @@
         "lowerer",
         "Lvalues",
         "mutabilities",
+        "println",
         "scrut",
         "scrutinee",
         "scrutinees",

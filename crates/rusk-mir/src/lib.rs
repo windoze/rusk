@@ -39,6 +39,13 @@ pub struct Module {
     ///
     /// Used by checked casts / runtime type tests for `interface` targets.
     pub interface_impls: BTreeMap<String, BTreeSet<String>>,
+
+    /// Declared host function imports required by this module.
+    ///
+    /// The interpreter can validate that all declared host functions are installed before
+    /// executing any MIR.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub host_imports: BTreeMap<String, HostFnSig>,
 }
 
 /// A MIR function body.
@@ -100,6 +107,37 @@ pub enum Type {
     Cont,
     Interface(String),
     TypeRep,
+}
+
+/// A host function signature (parameter and return types).
+///
+/// This is a *host ABI surface* description for tooling and validation, not the full Rusk type
+/// system. It is intentionally small and (in v0.1) monomorphic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
+pub struct HostFnSig {
+    pub params: Vec<HostType>,
+    pub ret: HostType,
+}
+
+/// A host ABI type used in [`HostFnSig`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
+pub enum HostType {
+    /// A dynamically typed value. Used when a more precise type is not available.
+    Any,
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    /// A runtime type representation (`typerep`), used by some core intrinsics.
+    TypeRep,
+    Array(Box<HostType>),
+    Tuple(Vec<HostType>),
 }
 
 /// A compile-time type constructor used to build runtime [`Type::TypeRep`] values.

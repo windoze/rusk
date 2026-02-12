@@ -57,6 +57,7 @@ A module contains:
 - functions (required)
 - optional interface/type metadata (optional, for tooling/validation/optimization)
 - optional method-resolution metadata (optional, for `vcall`)
+- optional declared host imports (optional, for embedding/validation)
 
 In this implementation, method-resolution metadata is represented as a lookup table:
 
@@ -66,6 +67,10 @@ Additionally, checked casts / runtime type tests against `interface` targets may
 interface-implementation metadata:
 
 - `(dynamic_type_name, interface_name) -> bool`
+
+Finally, a module may include a set of **declared host function imports** (e.g. `std::println`),
+including their (monomorphic) signatures. An interpreter may validate that all declared imports
+are installed before executing any MIR.
 
 ### 3.2 Function
 

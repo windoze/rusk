@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod ast;
+pub mod host;
 mod lexer;
 mod modules;
 mod parser;
@@ -10,7 +11,12 @@ mod typeck;
 pub mod compiler;
 
 // Re-export commonly used types
-pub use compiler::{CompileError, compile_file_to_mir, compile_to_mir};
+pub use compiler::{
+    CompileError, compile_file_to_mir, compile_file_to_mir_with_options, compile_to_mir,
+    compile_to_mir_with_options,
+};
+pub use host::{CompileOptions, HostFunctionDecl, HostModuleDecl, HostVisibility};
+pub use rusk_mir::{HostFnSig, HostType};
 
 /// Source text span utilities used by the front-end.
 pub mod source;

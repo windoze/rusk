@@ -1,6 +1,14 @@
 # Rusk Host Functions: Prototypes + Implementations
 
-Status: Draft (proposal only; no code changes in this document)
+Status: Implemented (2026-02-12)
+
+This document describes the architecture that is now implemented in the repository. The primary
+entrypoints are:
+
+- `rusk_compiler::CompileOptions` + `compile_*_with_options(...)` (compiler-visible prototypes)
+- `rusk_mir::Module::host_imports` (declared imports carried in MIR)
+- `rusk_interpreter::Interpreter::register_host_fn(...)` + strict preflight validation
+- `crates/rusk-host/` (reusable host sets, e.g. `std_io` for `std::print` / `std::println`)
 
 ## Problem
 
@@ -166,8 +174,20 @@ How host module declarations should affect compilation:
   - Host functions are always registered **inside a module**, not at the crate root.
   - Registering a host module creates a module binding at the crate root with the requested
     visibility.
+  - Host modules behave like **normal modules** for privacy and path resolution:
+    - they participate in the same `pub`/private accessibility rules as source-defined modules,
+    - from inside a nested module, accessing a host module at the crate root uses normal paths
+      (e.g. `crate::std::println` or `use crate::std;`), unless the language later adds an
+      extern-prelude mechanism for host modules.
   - There is **no special-casing of `std`**. Any host module name (e.g. `std`, `wasi`, `env`,
     `device`) is treated the same way.
+  - For simplicity (v1), **nested host modules are forbidden**: the host can only register
+    crate-root modules with a single identifier name (no `::` in the module name).
+    - If the host wants a nested namespace like `wasi::io`, the suggested pattern is:
+      1. register a single flat host module name (e.g. `_wasi_io_host`) containing the raw host
+         functions, and then
+      2. provide a wrapper module in Rusk source that re-exports those functions into the desired
+         namespace (e.g. `mod wasi { pub mod io { pub use crate::_wasi_io_host::read; } }`).
   - Conflicts are **compile-time errors** because host module registration happens before compiling:
     - If the source program declares a module with the same name as a host module (either inline
       `mod std { ... }` or file module `mod std;`), that is an error.
@@ -345,7 +365,5 @@ The embedded host can:
 
 ## Open Questions
 
-- Should host modules behave like normal modules for privacy and `pub` checking, or should they be
-  treated as “extern” definitions?
-- Should host module registration support nested module paths (e.g. `wasi::io`), and if so, how do
-  we make parent-module visibility explicit and conflict-safe?
+- Do we want an “extern prelude” mechanism for host modules (like the built-in `core::...`) so
+  that host modules can be referenced as `std::...` from anywhere without `crate::` / `use`?

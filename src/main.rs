@@ -1,47 +1,10 @@
-use rusk_compiler::compile_file_to_mir;
-use rusk_interpreter::{Interpreter, RuntimeError, Value, from_bytes, register_core_host_fns};
+use rusk_compiler::{CompileOptions, compile_file_to_mir_with_options};
+use rusk_host::std_io;
+use rusk_interpreter::{Interpreter, Value, from_bytes, register_core_host_fns};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
 use std::path::Path;
 use std::process;
-
-fn register_std_host_fns(interp: &mut Interpreter) {
-    interp.register_host_fn("std::print", |_interp, args| match args {
-        [Value::String(s)] => {
-            let mut stdout = io::stdout();
-            stdout
-                .write_all(s.as_bytes())
-                .map_err(|e| RuntimeError::Trap {
-                    message: format!("std::print: io error: {e}"),
-                })?;
-            stdout.flush().ok();
-            Ok(Value::Unit)
-        }
-        other => Err(RuntimeError::Trap {
-            message: format!("std::print: bad args: {other:?}"),
-        }),
-    });
-
-    interp.register_host_fn("std::println", |_interp, args| match args {
-        [Value::String(s)] => {
-            let mut stdout = io::stdout();
-            stdout
-                .write_all(s.as_bytes())
-                .map_err(|e| RuntimeError::Trap {
-                    message: format!("std::println: io error: {e}"),
-                })?;
-            stdout.write_all(b"\n").map_err(|e| RuntimeError::Trap {
-                message: format!("std::println: io error: {e}"),
-            })?;
-            stdout.flush().ok();
-            Ok(Value::Unit)
-        }
-        other => Err(RuntimeError::Trap {
-            message: format!("std::println: bad args: {other:?}"),
-        }),
-    });
-}
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -77,7 +40,9 @@ fn main() {
         }
         Some("rusk") => {
             // 编译 .rusk 文件
-            match compile_file_to_mir(input_path) {
+            let mut options = CompileOptions::default();
+            std_io::register_host_module(&mut options);
+            match compile_file_to_mir_with_options(input_path, &options) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("compile error: {e}");
@@ -93,7 +58,7 @@ fn main() {
 
     let mut interp = Interpreter::new(module);
     register_core_host_fns(&mut interp);
-    register_std_host_fns(&mut interp);
+    std_io::install(&mut interp);
 
     match interp.run_function("main", vec![]) {
         Ok(Value::Unit) => {}

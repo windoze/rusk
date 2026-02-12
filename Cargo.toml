@@ -5,6 +5,7 @@ members = [
     "crates/rusk-mir",
     "crates/rusk-compiler",
     "crates/rusk-interpreter",
+    "crates/rusk-host",
 ]
 
 [package]
@@ -15,6 +16,7 @@ edition.workspace = true
 [dependencies]
 rusk-compiler = { path = "crates/rusk-compiler" }
 rusk-interpreter = { path = "crates/rusk-interpreter" }
+rusk-host = { path = "crates/rusk-host" }
 
 [dev-dependencies]
 rusk-mir = { path = "crates/rusk-mir" }

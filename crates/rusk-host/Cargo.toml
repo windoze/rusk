@@ -1,0 +1,9 @@
+[package]
+name = "rusk-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusk-compiler = { path = "../rusk-compiler" }
+rusk-interpreter = { path = "../rusk-interpreter" }
+

@@ -1,4 +1,5 @@
 use crate::ast::{Item, ModItem, ModKind, Program, UseItem, Visibility};
+use crate::host::{HostModuleDecl, HostVisibility};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
 use crate::source_map::{SourceMap, SourceName};
@@ -169,13 +170,16 @@ pub(crate) struct ModuleResolver {
 }
 
 impl ModuleResolver {
-    pub(crate) fn build(program: &Program) -> Result<Self, ResolveError> {
+    pub(crate) fn build(
+        program: &Program,
+        host_modules: &[(String, HostModuleDecl)],
+    ) -> Result<Self, ResolveError> {
         let mut resolver = Self::default();
         resolver.collect_module(&ModulePath::root(), &program.items)?;
 
         resolver.inject_builtin_option()?;
         resolver.inject_builtin_core()?;
-        resolver.inject_builtin_std()?;
+        resolver.inject_host_modules(host_modules)?;
         resolver.resolve_all_uses()?;
         Ok(resolver)
     }
@@ -416,7 +420,7 @@ impl ModuleResolver {
         item: &ModItem,
     ) -> Result<(), ResolveError> {
         let local_name = item.name.name.clone();
-        if local_name == "core" || local_name == "std" {
+        if local_name == "core" {
             return Err(ResolveError {
                 message: format!("module name `{local_name}` is reserved"),
                 span: item.name.span,
@@ -747,80 +751,156 @@ impl ModuleResolver {
         Ok(())
     }
 
-    fn inject_builtin_std(&mut self) -> Result<(), ResolveError> {
-        // Inject a built-in `std` module, available from every module (extern-prelude-like).
-        //
-        // Unlike `core`, the `std` surface is expected to be host/platform-specific. This
-        // reference implementation provides `std::print` / `std::println` in the `rusk` CLI
-        // binary (not in `rusk-interpreter`) so that the core runtime stays portable.
-        let std_path = ModulePath::root().child("std");
-        if self.scopes.contains_key(&std_path) {
+    fn inject_host_modules(
+        &mut self,
+        host_modules: &[(String, HostModuleDecl)],
+    ) -> Result<(), ResolveError> {
+        let root_path = ModulePath::root();
+        if !self.scopes.contains_key(&root_path) {
             return Err(ResolveError {
-                message: "module path `std` is reserved".to_string(),
+                message: "internal error: missing root module scope".to_string(),
                 span: Span::new(0, 0),
             });
         }
 
-        self.defs.insert(
-            std_path.fqn(),
-            DefDecl {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: ModulePath::root(),
-            },
-        );
-
-        let std_binding = Binding {
-            vis: Visibility::Public {
-                span: Span::new(0, 0),
-            },
-            defining_module: ModulePath::root(),
-            span: Span::new(0, 0),
-            target: BindingTarget::Module(std_path.clone()),
-        };
-        for scope in self.scopes.values_mut() {
-            if scope.modules.contains_key("std") {
+        for (module_name, decl) in host_modules {
+            if module_name.is_empty() {
                 return Err(ResolveError {
-                    message: "module name `std` is reserved".to_string(),
+                    message: "host module name cannot be empty".to_string(),
                     span: Span::new(0, 0),
                 });
             }
-            scope.modules.insert("std".to_string(), std_binding.clone());
-        }
-
-        let mut std_scope = ModuleScope {
-            path: std_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-
-        for (local, target) in [("print", "std::print"), ("println", "std::println")] {
-            std_scope.values.insert(
-                local.to_string(),
-                Binding {
-                    vis: Visibility::Public {
-                        span: Span::new(0, 0),
-                    },
-                    defining_module: std_path.clone(),
+            if module_name.contains("::") {
+                return Err(ResolveError {
+                    message: format!(
+                        "nested host modules are not supported: `{module_name}` contains `::`"
+                    ),
                     span: Span::new(0, 0),
-                    target: BindingTarget::Function(target.to_string()),
+                });
+            }
+            if module_name == "core" {
+                return Err(ResolveError {
+                    message: "host module name `core` is reserved".to_string(),
+                    span: Span::new(0, 0),
+                });
+            }
+            if self
+                .scopes
+                .get(&root_path)
+                .is_some_and(|scope| scope.modules.contains_key(module_name))
+            {
+                return Err(ResolveError {
+                    message: format!(
+                        "host module `{module_name}` conflicts with an existing source module"
+                    ),
+                    span: Span::new(0, 0),
+                });
+            }
+
+            let module_vis = match decl.visibility {
+                HostVisibility::Private => Visibility::Private,
+                HostVisibility::Public => Visibility::Public {
+                    span: Span::new(0, 0),
                 },
-            );
-            self.defs.insert(
-                target.to_string(),
-                DefDecl {
-                    vis: Visibility::Public {
+            };
+            let module_path = root_path.child(module_name);
+
+            {
+                let root_scope = self
+                    .scopes
+                    .get_mut(&root_path)
+                    .ok_or_else(|| ResolveError {
+                        message: "internal error: missing root module scope".to_string(),
+                        span: Span::new(0, 0),
+                    })?;
+                root_scope.modules.insert(
+                    module_name.clone(),
+                    Binding {
+                        vis: module_vis,
+                        defining_module: root_path.clone(),
+                        span: Span::new(0, 0),
+                        target: BindingTarget::Module(module_path.clone()),
+                    },
+                );
+            }
+
+            if self
+                .defs
+                .insert(
+                    module_path.fqn(),
+                    DefDecl {
+                        vis: module_vis,
+                        defining_module: root_path.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(ResolveError {
+                    message: format!("duplicate module `{}`", module_path.fqn()),
+                    span: Span::new(0, 0),
+                });
+            }
+
+            let mut scope = ModuleScope {
+                path: module_path.clone(),
+                modules: BTreeMap::new(),
+                types: BTreeMap::new(),
+                values: BTreeMap::new(),
+                pending_uses: Vec::new(),
+            };
+
+            for func in &decl.functions {
+                let func_vis = match func.visibility {
+                    HostVisibility::Private => Visibility::Private,
+                    HostVisibility::Public => Visibility::Public {
                         span: Span::new(0, 0),
                     },
-                    defining_module: std_path.clone(),
-                },
-            );
+                };
+
+                if scope.values.contains_key(&func.name) {
+                    return Err(ResolveError {
+                        message: format!("duplicate host function `{module_name}::{}`", func.name),
+                        span: Span::new(0, 0),
+                    });
+                }
+
+                let fqn = format!("{module_name}::{}", func.name);
+                scope.values.insert(
+                    func.name.clone(),
+                    Binding {
+                        vis: func_vis,
+                        defining_module: module_path.clone(),
+                        span: Span::new(0, 0),
+                        target: BindingTarget::Function(fqn.clone()),
+                    },
+                );
+
+                if self
+                    .defs
+                    .insert(
+                        fqn.clone(),
+                        DefDecl {
+                            vis: func_vis,
+                            defining_module: module_path.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(ResolveError {
+                        message: format!("duplicate function `{fqn}`"),
+                        span: Span::new(0, 0),
+                    });
+                }
+            }
+
+            if self.scopes.insert(module_path, scope).is_some() {
+                return Err(ResolveError {
+                    message: format!("duplicate host module `{module_name}`"),
+                    span: Span::new(0, 0),
+                });
+            }
         }
 
-        self.scopes.insert(std_path, std_scope);
         Ok(())
     }
 
@@ -1382,7 +1462,7 @@ impl ModuleLoader {
 
     fn inline_mod_item(&mut self, item: ModItem, module_dir: &Path) -> Result<ModItem, LoadError> {
         let name = item.name.name.clone();
-        if name == "core" || name == "std" {
+        if name == "core" {
             return Err(LoadError {
                 message: format!("module name `{name}` is reserved"),
                 span: item.name.span,

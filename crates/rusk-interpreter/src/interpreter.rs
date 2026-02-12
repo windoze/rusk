@@ -247,6 +247,9 @@ pub enum RuntimeError {
     UnknownFunction {
         name: String,
     },
+    MissingHostFunctions {
+        names: Vec<String>,
+    },
     InvalidLocal {
         local: Local,
         locals: usize,
@@ -292,6 +295,16 @@ impl fmt::Display for RuntimeError {
         match self {
             RuntimeError::Trap { message } => write!(f, "trap: {message}"),
             RuntimeError::UnknownFunction { name } => write!(f, "unknown function: {name}"),
+            RuntimeError::MissingHostFunctions { names } => {
+                write!(f, "missing host functions: ")?;
+                for (idx, name) in names.iter().enumerate() {
+                    if idx > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}")?;
+                }
+                Ok(())
+            }
             RuntimeError::InvalidLocal { local, locals } => {
                 write!(f, "invalid local {:?} (locals={locals})", local.0)
             }
@@ -473,6 +486,25 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         self.host_functions.insert(name.into(), Rc::new(f));
     }
 
+    /// Returns the names of all currently registered host functions.
+    pub fn host_function_names(&self) -> impl Iterator<Item = &str> {
+        self.host_functions.keys().map(|name| name.as_str())
+    }
+
+    fn validate_declared_host_functions(&self) -> Result<(), RuntimeError> {
+        let mut missing = Vec::new();
+        for name in self.module.host_imports.keys() {
+            if !self.host_functions.contains_key(name) {
+                missing.push(name.clone());
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::MissingHostFunctions { names: missing })
+        }
+    }
+
     /// Allocates a heap array and returns it as a value.
     pub fn alloc_array(&mut self, items: Vec<Value>) -> Value {
         let handle = self.alloc_heap(HeapValue::Array(items));
@@ -545,6 +577,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         self.stack.clear();
         self.handlers.clear();
 
+        self.validate_declared_host_functions()?;
+
         let function = self
             .module
             .functions
@@ -570,6 +604,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         token: ContinuationToken,
         value: Value,
     ) -> Result<Value, RuntimeError> {
+        self.validate_declared_host_functions()?;
+
         let Some(mut cont) = token.take_state() else {
             return Err(RuntimeError::InvalidResume);
         };

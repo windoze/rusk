@@ -9,8 +9,18 @@ It aims to combine:
   async, generators, etc.).
 
 This repository is a reference implementation that compiles `.rusk` source code into a small
-mid-level IR (“MIR”) and then executes that MIR with an interpreter. The interpreter provides a
-set of *host functions* that act as the minimal “standard library” used by compiler desugarings.
+mid-level IR (“MIR”) and then executes that MIR with an interpreter.
+
+Rusk is designed to be embedded (CLI, WASM, embedded devices), so I/O and platform integration are
+provided via **host functions**:
+
+- The **compiler** is given host *prototypes* (names + signatures) before compilation, so name
+  resolution and typechecking can succeed.
+- The **interpreter** is given concrete host implementations at runtime; it will error before
+  execution if the MIR declares host imports that are not installed.
+
+In this repo, the `rusk` CLI registers a minimal host-defined `std` module with
+`std::print(string) -> unit` and `std::println(string) -> unit`.
 
 ## The Language
 
@@ -32,7 +42,8 @@ fn main() -> int {
 - `src/main.rs`: `rusk` CLI (`rusk <file.rusk|file.mir>`)
 - `crates/rusk-compiler/`: parser/typechecker + lowering from Rusk → MIR
 - `crates/rusk-mir/`: MIR data structures (and optional serialization)
-- `crates/rusk-interpreter/`: MIR interpreter + GC + core host functions
+- `crates/rusk-interpreter/`: MIR interpreter + GC + core runtime intrinsics
+- `crates/rusk-host/`: reusable host-module declarations + installers (e.g. `std::print`)
 - `fixtures/` and `tests/`: executable fixtures and regression tests
 
 ## Quick Start
