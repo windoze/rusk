@@ -1,7 +1,7 @@
 use crate::ast::{
-    BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, GenericParam, Ident,
-    ImplHeader, ImplItem, InterfaceItem, Item, MatchArm, MatchPat, PatLiteral, Pattern, PrimType,
-    Program, StructItem, TypeExpr, UnaryOp, Visibility,
+    BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, FnItemKind, GenericParam,
+    Ident, ImplHeader, ImplItem, InterfaceItem, Item, MatchArm, MatchPat, MethodReceiverKind,
+    PatLiteral, Pattern, PrimType, Program, StructItem, TypeExpr, UnaryOp, Visibility,
 };
 use crate::modules::{ModulePath, ModuleResolver};
 use crate::source::Span;
@@ -182,8 +182,17 @@ pub(crate) struct InterfaceMethodSig {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct InterfaceMethodDecl {
+    pub(crate) receiver_readonly: bool,
+    pub(crate) has_default: bool,
+    pub(crate) sig: InterfaceMethodSig,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct InterfaceMethod {
     pub(crate) origin: String,
+    pub(crate) receiver_readonly: bool,
+    pub(crate) has_default: bool,
     pub(crate) sig: InterfaceMethodSig,
 }
 
@@ -193,7 +202,7 @@ pub(crate) struct InterfaceDef {
     pub(crate) generics: Vec<GenericParamInfo>,
     pub(crate) supers: Vec<Ty>,
     /// Methods declared directly in this interface (not including inherited ones).
-    pub(crate) methods: BTreeMap<String, InterfaceMethodSig>,
+    pub(crate) methods: BTreeMap<String, InterfaceMethodDecl>,
     /// Full method set including inherited ones, with canonical origin interface IDs.
     pub(crate) all_methods: BTreeMap<String, InterfaceMethod>,
     pub(crate) span: Span,
@@ -210,6 +219,12 @@ pub(crate) struct FnSig {
     pub(crate) span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InherentMethodKind {
+    Instance { readonly: bool },
+    Static,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProgramEnv {
     pub(crate) modules: ModuleResolver,
@@ -224,6 +239,10 @@ pub(crate) struct ProgramEnv {
     /// - inherent methods: `Type::method`
     /// - core intrinsics: `core::intrinsics::int_add`
     pub(crate) functions: BTreeMap<String, FnSig>,
+
+    /// Metadata for inherent methods declared in `impl Type { ... }`, keyed by the resolved
+    /// function name `Type::method`.
+    pub(crate) inherent_method_kinds: BTreeMap<String, InherentMethodKind>,
 
     /// Interface impl method table keyed by canonical interface method id:
     ///
@@ -686,6 +705,133 @@ fn declare_function_sig(
     Ok(())
 }
 
+fn declare_method_sig_with_receiver(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    generic_prefix: &[GenericParamInfo],
+    method: &FnItem,
+    name: String,
+    receiver: Ty,
+) -> Result<(), TypeError> {
+    if env.functions.contains_key(&name) {
+        return Err(TypeError {
+            message: format!("duplicate function `{name}`"),
+            span: method.name.span,
+        });
+    }
+
+    let method_generics =
+        lower_generic_params_in_scope(env, module, generic_prefix, &method.generics, true)?;
+    let mut generics: Vec<GenericParamInfo> = generic_prefix.to_vec();
+    generics.extend(method_generics);
+    let scope = GenericScope::new(&generics)?;
+
+    let mut params = Vec::with_capacity(method.params.len() + 1);
+    params.push(receiver);
+    params.extend(
+        method
+            .params
+            .iter()
+            .map(|p| lower_type_expr(env, module, &scope, &p.ty))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let ret = lower_type_expr(env, module, &scope, &method.ret)?;
+
+    env.functions.insert(
+        name.clone(),
+        FnSig {
+            name,
+            vis: method.vis,
+            defining_module: module.clone(),
+            generics,
+            params,
+            ret,
+            span: method.span,
+        },
+    );
+    Ok(())
+}
+
+struct InterfaceDefaultWrapperSigDecl<'a> {
+    iface_arity: usize,
+    receiver_ty: Ty,
+    method_info: &'a InterfaceMethod,
+    name: String,
+    span: Span,
+}
+
+fn declare_synthetic_interface_default_wrapper_sig(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    impl_generics: &[GenericParamInfo],
+    decl: InterfaceDefaultWrapperSigDecl<'_>,
+) -> Result<(), TypeError> {
+    let InterfaceDefaultWrapperSigDecl {
+        iface_arity,
+        receiver_ty,
+        method_info,
+        name,
+        span,
+    } = decl;
+    if env.functions.contains_key(&name) {
+        return Err(TypeError {
+            message: format!("duplicate function `{name}`"),
+            span,
+        });
+    }
+
+    let impl_arity = impl_generics.len();
+    if impl_arity < iface_arity {
+        return Err(TypeError {
+            message: "internal error: interface arity exceeds impl arity".to_string(),
+            span,
+        });
+    }
+    let shift = impl_arity - iface_arity;
+
+    let mut generics: Vec<GenericParamInfo> = impl_generics.to_vec();
+    for g in &method_info.sig.generics {
+        let bounds = g
+            .bounds
+            .iter()
+            .cloned()
+            .map(|b| shift_method_generics(b, iface_arity, shift))
+            .collect();
+        generics.push(GenericParamInfo {
+            name: g.name.clone(),
+            arity: g.arity,
+            bounds,
+            span: g.span,
+        });
+    }
+
+    let mut params = Vec::with_capacity(method_info.sig.params.len() + 1);
+    params.push(receiver_ty);
+    params.extend(
+        method_info
+            .sig
+            .params
+            .iter()
+            .cloned()
+            .map(|t| shift_method_generics(t, iface_arity, shift)),
+    );
+    let ret = shift_method_generics(method_info.sig.ret.clone(), iface_arity, shift);
+
+    env.functions.insert(
+        name.clone(),
+        FnSig {
+            name,
+            vis: Visibility::Private,
+            defining_module: module.clone(),
+            generics,
+            params,
+            ret,
+            span,
+        },
+    );
+    Ok(())
+}
+
 fn fill_struct(
     env: &mut ProgramEnv,
     module: &ModulePath,
@@ -844,12 +990,47 @@ fn fill_interface(
         let ret = lower_type_expr(env, module, &scope, &member.ret)?;
         methods.insert(
             mname.clone(),
-            InterfaceMethodSig {
-                generics: method_generics,
-                params,
-                ret,
+            InterfaceMethodDecl {
+                receiver_readonly: member.readonly,
+                has_default: member.body.is_some(),
+                sig: InterfaceMethodSig {
+                    generics: method_generics,
+                    params: params.clone(),
+                    ret: ret.clone(),
+                },
             },
         );
+
+        // If this method has a default body, declare an internal function for it.
+        if member.body.is_some() {
+            let default_fn_name = format!("$default::{full_name}::{mname}");
+            if env.functions.contains_key(&default_fn_name) {
+                return Err(TypeError {
+                    message: format!("duplicate function `{default_fn_name}`"),
+                    span: member.span,
+                });
+            }
+            let iface_args = (0..generics.len()).map(Ty::Gen).collect::<Vec<_>>();
+            let mut receiver_ty = Ty::App(TyCon::Named(full_name.clone()), iface_args);
+            if member.readonly {
+                receiver_ty = Ty::Readonly(Box::new(receiver_ty));
+            }
+            let mut fn_params = Vec::with_capacity(params.len() + 1);
+            fn_params.push(receiver_ty);
+            fn_params.extend(params);
+            env.functions.insert(
+                default_fn_name.clone(),
+                FnSig {
+                    name: default_fn_name,
+                    vis: Visibility::Private,
+                    defining_module: module.clone(),
+                    generics: combined,
+                    params: fn_params,
+                    ret,
+                    span: member.span,
+                },
+            );
+        }
     }
     env.interfaces
         .get_mut(&full_name)
@@ -944,12 +1125,14 @@ fn compute_interface_all_methods(
     }
 
     let mut all: BTreeMap<String, InterfaceMethod> = BTreeMap::new();
-    for (name, sig) in own_methods {
+    for (name, decl) in own_methods {
         all.insert(
             name,
             InterfaceMethod {
                 origin: iface.to_string(),
-                sig,
+                receiver_readonly: decl.receiver_readonly,
+                has_default: decl.has_default,
+                sig: decl.sig,
             },
         );
     }
@@ -980,6 +1163,8 @@ fn compute_interface_all_methods(
                 rewrite_interface_method_sig(&meth.sig, &iface_subst, sup_arity, iface_arity);
             let rewritten = InterfaceMethod {
                 origin: meth.origin,
+                receiver_readonly: meth.receiver_readonly,
+                has_default: meth.has_default,
                 sig: rewritten_sig,
             };
 
@@ -1155,6 +1340,42 @@ fn rewrite_con_for_inherited_method(
     con
 }
 
+fn pattern_binds_name(pat: &Pattern, name: &str) -> bool {
+    match pat {
+        Pattern::Wildcard { .. } => false,
+        Pattern::Bind { name: ident, .. } => ident.name == name,
+        Pattern::Literal { .. } => false,
+        Pattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+            ..
+        } => {
+            prefix.iter().any(|p| pattern_binds_name(p, name))
+                || suffix.iter().any(|p| pattern_binds_name(p, name))
+                || rest
+                    .as_ref()
+                    .is_some_and(|r| r.binding.as_ref().is_some_and(|ident| ident.name == name))
+        }
+        Pattern::Enum { fields, .. } => fields.iter().any(|p| pattern_binds_name(p, name)),
+        Pattern::Struct { fields, .. } => {
+            fields.iter().any(|(_field, p)| pattern_binds_name(p, name))
+        }
+        Pattern::Array {
+            prefix,
+            rest,
+            suffix,
+            ..
+        } => {
+            prefix.iter().any(|p| pattern_binds_name(p, name))
+                || suffix.iter().any(|p| pattern_binds_name(p, name))
+                || rest
+                    .as_ref()
+                    .is_some_and(|r| r.binding.as_ref().is_some_and(|ident| ident.name == name))
+        }
+    }
+}
+
 fn process_impl_item(
     env: &mut ProgramEnv,
     module: &ModulePath,
@@ -1187,7 +1408,54 @@ fn process_impl_item(
 
             for method in &item.members {
                 let qual_name = format!("{type_name}::{}", method.name.name);
-                declare_function_sig(env, module, &impl_generics, method, Some(qual_name))?;
+                if method
+                    .params
+                    .iter()
+                    .any(|p| pattern_binds_name(&p.pat, "self"))
+                {
+                    return Err(TypeError {
+                        message: "explicit `self` parameters are not allowed in methods; use the implicit receiver"
+                            .to_string(),
+                        span: method.span,
+                    });
+                }
+
+                let FnItemKind::Method { receiver } = method.kind else {
+                    return Err(TypeError {
+                        message: "internal error: expected method item in impl".to_string(),
+                        span: method.span,
+                    });
+                };
+
+                match receiver {
+                    MethodReceiverKind::Static => {
+                        declare_function_sig(
+                            env,
+                            module,
+                            &impl_generics,
+                            method,
+                            Some(qual_name.clone()),
+                        )?;
+                        env.inherent_method_kinds
+                            .insert(qual_name, InherentMethodKind::Static);
+                    }
+                    MethodReceiverKind::Instance { readonly } => {
+                        let mut recv = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+                        if readonly {
+                            recv = Ty::Readonly(Box::new(recv));
+                        }
+                        declare_method_sig_with_receiver(
+                            env,
+                            module,
+                            &impl_generics,
+                            method,
+                            qual_name.clone(),
+                            recv,
+                        )?;
+                        env.inherent_method_kinds
+                            .insert(qual_name, InherentMethodKind::Instance { readonly });
+                    }
+                }
             }
         }
         ImplHeader::InterfaceForType {
@@ -1257,6 +1525,25 @@ fn process_impl_item(
             let mut impl_methods_by_name: BTreeMap<String, &FnItem> = BTreeMap::new();
             for method in &item.members {
                 let mname = method.name.name.clone();
+                if method
+                    .params
+                    .iter()
+                    .any(|p| pattern_binds_name(&p.pat, "self"))
+                {
+                    return Err(TypeError {
+                        message: "explicit `self` parameters are not allowed in methods; use the implicit receiver"
+                            .to_string(),
+                        span: method.span,
+                    });
+                }
+                if let FnItemKind::Method { receiver } = method.kind
+                    && matches!(receiver, MethodReceiverKind::Static)
+                {
+                    return Err(TypeError {
+                        message: "`static fn` is not allowed in interface impl blocks".to_string(),
+                        span: method.span,
+                    });
+                }
                 if impl_methods_by_name.insert(mname.clone(), method).is_some() {
                     return Err(TypeError {
                         message: format!("duplicate method `{mname}` in impl"),
@@ -1265,15 +1552,57 @@ fn process_impl_item(
                 }
             }
             for (mname, info) in &iface_methods {
-                let Some(method) = impl_methods_by_name.get(mname) else {
-                    return Err(TypeError {
-                        message: format!(
-                            "missing method `{mname}` required by interface `{}`",
-                            iface_def_name
-                        ),
-                        span: item.span,
-                    });
+                let method = impl_methods_by_name.get(mname).copied();
+
+                let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
+
+                let expected_recv_base =
+                    Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+                let receiver_ty = if info.receiver_readonly {
+                    Ty::Readonly(Box::new(expected_recv_base.clone()))
+                } else {
+                    expected_recv_base.clone()
                 };
+
+                let key = (type_name.clone(), info.origin.clone(), mname.clone());
+
+                let Some(method) = method else {
+                    if !info.has_default {
+                        return Err(TypeError {
+                            message: format!(
+                                "missing method `{mname}` required by interface `{}`",
+                                iface_def_name
+                            ),
+                            span: item.span,
+                        });
+                    }
+
+                    declare_synthetic_interface_default_wrapper_sig(
+                        env,
+                        module,
+                        &impl_generics,
+                        InterfaceDefaultWrapperSigDecl {
+                            iface_arity,
+                            receiver_ty,
+                            method_info: info,
+                            name: impl_fn_name.clone(),
+                            span: item.span,
+                        },
+                    )?;
+
+                    if env.interface_methods.contains_key(&key) {
+                        return Err(TypeError {
+                            message: format!(
+                                "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
+                                origin = info.origin
+                            ),
+                            span: item.span,
+                        });
+                    }
+                    env.interface_methods.insert(key, impl_fn_name);
+                    continue;
+                };
+
                 if method.generics.len() != info.sig.generics.len() {
                     return Err(TypeError {
                         message: format!(
@@ -1283,27 +1612,47 @@ fn process_impl_item(
                         span: method.name.span,
                     });
                 }
-                let expected_params = info.sig.params.len() + 1;
+                let FnItemKind::Method { receiver } = method.kind else {
+                    return Err(TypeError {
+                        message: "internal error: expected method item in impl".to_string(),
+                        span: method.span,
+                    });
+                };
+                let MethodReceiverKind::Instance { readonly } = receiver else {
+                    return Err(TypeError {
+                        message: "internal error: interface impl methods must be instance methods"
+                            .to_string(),
+                        span: method.span,
+                    });
+                };
+                if readonly != info.receiver_readonly {
+                    return Err(TypeError {
+                        message: format!(
+                            "method `{mname}` receiver mutability does not match interface `{iface_def_name}`"
+                        ),
+                        span: method.name.span,
+                    });
+                }
+
+                let expected_params = info.sig.params.len();
                 if method.params.len() != expected_params {
                     return Err(TypeError {
                         message: format!(
-                            "method `{}` must take {} parameter(s): receiver + {} arg(s)",
-                            mname,
-                            expected_params,
-                            info.sig.params.len()
+                            "method `{}` must take {} parameter(s)",
+                            mname, expected_params
                         ),
                         span: method.name.span,
                     });
                 }
 
                 // Declare the implementing function with a stable internal name.
-                let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                declare_function_sig(
+                declare_method_sig_with_receiver(
                     env,
                     module,
                     &impl_generics,
                     method,
-                    Some(impl_fn_name.clone()),
+                    impl_fn_name.clone(),
+                    receiver_ty,
                 )?;
 
                 // Validate the declared signature matches the interface contract.
@@ -1321,16 +1670,6 @@ fn process_impl_item(
                     });
                 }
                 // Receiver type must match the impl target type.
-                if impl_sig
-                    .params
-                    .first()
-                    .is_some_and(|t| nominal_type_name(t).is_none())
-                {
-                    return Err(TypeError {
-                        message: format!("method `{mname}` must be an instance method"),
-                        span: method.name.span,
-                    });
-                }
                 if let Some(recv_ty) = impl_sig.params.first() {
                     let expected_recv = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
                     if strip_readonly(recv_ty) != strip_readonly(&expected_recv) {
@@ -1338,7 +1677,7 @@ fn process_impl_item(
                             message: format!(
                                 "method `{mname}` receiver type mismatch: expected `{expected_recv}`, got `{recv_ty}`"
                             ),
-                            span: method.params.first().map(|p| p.span).unwrap_or(method.span),
+                            span: method.span,
                         });
                     }
                 }
@@ -1436,7 +1775,6 @@ fn process_impl_item(
                     });
                 }
 
-                let key = (type_name.clone(), info.origin.clone(), mname.clone());
                 if env.interface_methods.contains_key(&key) {
                     return Err(TypeError {
                         message: format!(
@@ -2172,6 +2510,43 @@ pub(crate) fn typecheck_program(
                     .extend(fn_info.effect_interface_args);
                 Ok(())
             }
+            Item::Interface(iface) => {
+                let iface_name = module.qualify(&iface.name.name);
+                for member in &iface.members {
+                    let Some(body) = &member.body else {
+                        continue;
+                    };
+                    let default_fn_name = format!("$default::{iface_name}::{}", member.name.name);
+                    let sig = env.functions.get(&default_fn_name).ok_or(TypeError {
+                        message: format!(
+                            "internal error: missing signature for `{default_fn_name}`"
+                        ),
+                        span: member.span,
+                    })?;
+
+                    let synthetic = FnItem {
+                        vis: Visibility::Private,
+                        kind: FnItemKind::Method {
+                            receiver: MethodReceiverKind::Instance {
+                                readonly: member.readonly,
+                            },
+                        },
+                        name: member.name.clone(),
+                        generics: member.generics.clone(),
+                        params: member.params.clone(),
+                        ret: member.ret.clone(),
+                        body: body.clone(),
+                        span: member.span,
+                    };
+                    let fn_info = typecheck_function_body(env, module, sig, &synthetic)?;
+                    info.expr_types.extend(fn_info.expr_types);
+                    info.call_type_args.extend(fn_info.call_type_args);
+                    info.method_type_args.extend(fn_info.method_type_args);
+                    info.effect_interface_args
+                        .extend(fn_info.effect_interface_args);
+                }
+                Ok(())
+            }
             Item::Impl(imp) => {
                 let fn_info = typecheck_impl_item(env, module, imp)?;
                 info.expr_types.extend(fn_info.expr_types);
@@ -2274,18 +2649,64 @@ fn typecheck_function_body(
 ) -> Result<TypeInfo, TypeError> {
     let mut tc = FnTypechecker::new(env, module.clone(), sig);
 
+    let has_implicit_receiver = matches!(
+        func.kind,
+        FnItemKind::Method {
+            receiver: MethodReceiverKind::Instance { .. }
+        }
+    );
+    if matches!(func.kind, FnItemKind::Method { .. }) {
+        tc.reserved_names.insert("self".to_string());
+    }
+
     // Parameters are immutable bindings.
-    for (param, ty) in func.params.iter().zip(sig.params.iter()) {
-        let binds = tc.typecheck_pattern(&param.pat, ty.clone())?;
-        for (name, bind_ty) in binds {
-            tc.bind_local(
-                &name,
-                LocalInfo {
-                    ty: bind_ty,
-                    kind: BindingKind::Const,
-                    span: name.span,
-                },
-            )?;
+    if has_implicit_receiver {
+        if sig.params.is_empty() || sig.params.len() != func.params.len() + 1 {
+            return Err(TypeError {
+                message: "internal error: method signature arity mismatch".to_string(),
+                span: func.span,
+            });
+        }
+        tc.bind_reserved_local(
+            "self",
+            LocalInfo {
+                ty: sig.params[0].clone(),
+                kind: BindingKind::Const,
+                span: func.span,
+            },
+        )?;
+        for (param, ty) in func.params.iter().zip(sig.params.iter().skip(1)) {
+            let binds = tc.typecheck_pattern(&param.pat, ty.clone())?;
+            for (name, bind_ty) in binds {
+                tc.bind_local(
+                    &name,
+                    LocalInfo {
+                        ty: bind_ty,
+                        kind: BindingKind::Const,
+                        span: name.span,
+                    },
+                )?;
+            }
+        }
+    } else {
+        if func.params.len() != sig.params.len() {
+            return Err(TypeError {
+                message: "internal error: function signature arity mismatch".to_string(),
+                span: func.span,
+            });
+        }
+        for (param, ty) in func.params.iter().zip(sig.params.iter()) {
+            let binds = tc.typecheck_pattern(&param.pat, ty.clone())?;
+            for (name, bind_ty) in binds {
+                tc.bind_local(
+                    &name,
+                    LocalInfo {
+                        ty: bind_ty,
+                        kind: BindingKind::Const,
+                        span: name.span,
+                    },
+                )?;
+            }
         }
     }
 
@@ -3997,6 +4418,14 @@ impl<'a> FnTypechecker<'a> {
 
         let recv_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
         let recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        if !method_info.receiver_readonly && matches!(recv_ty_resolved, Ty::Readonly(_)) {
+            return Err(TypeError {
+                message: format!(
+                    "cannot call mutable interface method `{iface_name}::{method_name}` on a readonly receiver"
+                ),
+                span: args[0].span(),
+            });
+        }
         let iface_args = self
             .infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
             .ok_or(TypeError {
@@ -4036,11 +4465,16 @@ impl<'a> FnTypechecker<'a> {
     ) -> Result<Ty, TypeError> {
         let recv_ty = self.typecheck_expr(receiver, ExprUse::Value)?;
         let recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        let receiver_is_readonly = matches!(recv_ty_resolved, Ty::Readonly(_));
+        let mut static_inherent: Option<String> = None;
 
         // Inherent method wins whenever the receiver has a nominal name.
         if let Some(type_name) = nominal_type_name(&recv_ty_resolved) {
             let inherent_name = format!("{type_name}::{}", method.name);
-            if let Some(sig) = self.env.functions.get(&inherent_name) {
+            let inherent_kind = self.env.inherent_method_kinds.get(&inherent_name).copied();
+            if matches!(inherent_kind, Some(InherentMethodKind::Static)) {
+                static_inherent = Some(inherent_name);
+            } else if let Some(sig) = self.env.functions.get(&inherent_name) {
                 if !sig.vis.is_public() && !self.module.is_descendant_of(&sig.defining_module) {
                     return Err(TypeError {
                         message: format!("method `{inherent_name}` is private"),
@@ -4056,9 +4490,27 @@ impl<'a> FnTypechecker<'a> {
                         span,
                     });
                 }
-                let receiver_expected = inst.params[0].clone();
-                self.infer
-                    .unify(receiver_expected, recv_ty, receiver.span())?;
+                let readonly_receiver = matches!(
+                    inherent_kind,
+                    Some(InherentMethodKind::Instance { readonly: true })
+                );
+                if !readonly_receiver && receiver_is_readonly {
+                    return Err(TypeError {
+                        message: format!(
+                            "cannot call mutable method `{inherent_name}` on a readonly receiver"
+                        ),
+                        span: receiver.span(),
+                    });
+                }
+                if readonly_receiver {
+                    let expected = strip_readonly(&inst.params[0]).clone();
+                    let got = strip_readonly(&recv_ty_resolved).clone();
+                    self.infer.unify(expected, got, receiver.span())?;
+                } else {
+                    let receiver_expected = inst.params[0].clone();
+                    self.infer
+                        .unify(receiver_expected, recv_ty, receiver.span())?;
+                }
                 if args.len() != inst.params.len() - 1 {
                     return Err(TypeError {
                         message: format!(
@@ -4101,6 +4553,7 @@ impl<'a> FnTypechecker<'a> {
             // Collect candidates named `method`, dedup by canonical origin interface id.
             let mut candidates: BTreeMap<String, (String, Vec<Ty>, InterfaceMethodSig)> =
                 BTreeMap::new();
+            let mut saw_mutable_candidate = false;
             for bound in &gp.bounds {
                 let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
                     continue;
@@ -4111,12 +4564,25 @@ impl<'a> FnTypechecker<'a> {
                 let Some(info) = iface_def.all_methods.get(&method.name) else {
                     continue;
                 };
+                if receiver_is_readonly && !info.receiver_readonly {
+                    saw_mutable_candidate = true;
+                    continue;
+                }
                 candidates
                     .entry(info.origin.clone())
                     .or_insert_with(|| (bound_iface.clone(), bound_args.clone(), info.sig.clone()));
             }
 
             if candidates.is_empty() {
+                if receiver_is_readonly && saw_mutable_candidate {
+                    return Err(TypeError {
+                        message: format!(
+                            "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                            method.name
+                        ),
+                        span: method.span,
+                    });
+                }
                 return Err(TypeError {
                     message: format!("unknown method `{}` on `{recv_ty_resolved}`", method.name),
                     span: method.span,
@@ -4177,6 +4643,15 @@ impl<'a> FnTypechecker<'a> {
                     span: method.span,
                 });
             };
+            if receiver_is_readonly && !info.receiver_readonly {
+                return Err(TypeError {
+                    message: format!(
+                        "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                        method.name
+                    ),
+                    span: method.span,
+                });
+            }
             let inst = instantiate_interface_method_sig(
                 &info.sig,
                 iface_args,
@@ -4218,6 +4693,7 @@ impl<'a> FnTypechecker<'a> {
         };
 
         let mut origins: BTreeMap<String, (String, Vec<Ty>)> = BTreeMap::new();
+        let mut saw_mutable_candidate = false;
         for (iface_name, iface) in &self.env.interfaces {
             if let Some(def) = self.env.modules.def(iface_name)
                 && !def.vis.is_public()
@@ -4228,6 +4704,10 @@ impl<'a> FnTypechecker<'a> {
             let Some(method_info) = iface.all_methods.get(&method.name) else {
                 continue;
             };
+            if receiver_is_readonly && !method_info.receiver_readonly {
+                saw_mutable_candidate = true;
+                continue;
+            }
             if let Some(iface_args) =
                 self.infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
             {
@@ -4238,6 +4718,23 @@ impl<'a> FnTypechecker<'a> {
         }
 
         if origins.is_empty() {
+            if let Some(static_name) = static_inherent {
+                return Err(TypeError {
+                    message: format!(
+                        "static method `{static_name}` must be called as `{static_name}(...)`"
+                    ),
+                    span: method.span,
+                });
+            }
+            if receiver_is_readonly && saw_mutable_candidate {
+                return Err(TypeError {
+                    message: format!(
+                        "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                        method.name
+                    ),
+                    span: method.span,
+                });
+            }
             return Err(TypeError {
                 message: format!("unknown method `{}` on `{type_name}`", method.name),
                 span: method.span,

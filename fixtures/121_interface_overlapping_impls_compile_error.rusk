@@ -6,13 +6,12 @@ interface J: I { fn bar() -> int; }
 struct S {}
 
 impl I for S {
-    fn foo(self: S) -> int { 1 }
+    fn foo() -> int { 1 }
 }
 
 impl J for S {
-    fn foo(self: S) -> int { 2 }
-    fn bar(self: S) -> int { 3 }
+    fn foo() -> int { 2 }
+    fn bar() -> int { 3 }
 }
 
 fn main() -> int { 0 }
-

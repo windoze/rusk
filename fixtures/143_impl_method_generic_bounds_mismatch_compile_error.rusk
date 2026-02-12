@@ -10,11 +10,11 @@ interface Pair<T> {
 struct Box<T> { v: T }
 struct S { x: int }
 
-impl Show for S { fn show(self: S) -> string { "S" } }
-impl Hash for S { fn hash(self: S) -> int { self.x } }
+impl Show for S { fn show() -> string { "S" } }
+impl Hash for S { fn hash() -> int { self.x } }
 
 impl<T> Pair<T> for Box<T> {
-    fn pair<U: Hash>(self: Box<T>, u: U) -> (T, U) { (self.v, u) }
+    fn pair<U: Hash>(u: U) -> (T, U) { (self.v, u) }
 }
 
 fn main() -> int { 0 }

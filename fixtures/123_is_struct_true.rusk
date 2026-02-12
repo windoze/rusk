@@ -5,11 +5,10 @@ interface Animal { fn kind() -> int; }
 struct Dog {}
 struct Cat {}
 
-impl Animal for Dog { fn kind(self: Dog) -> int { 1 } }
-impl Animal for Cat { fn kind(self: Cat) -> int { 2 } }
+impl Animal for Dog { fn kind() -> int { 1 } }
+impl Animal for Cat { fn kind() -> int { 2 } }
 
 fn main() -> bool {
     let a = (Dog {} as Animal);
     a is Dog
 }
-

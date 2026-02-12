@@ -3,7 +3,7 @@
 struct Point { x: int, y: int }
 
 impl Point {
-    fn sum(self: Point) -> int { self.x + self.y }
+    fn sum() -> int { self.x + self.y }
 }
 
 interface Add {
@@ -11,7 +11,7 @@ interface Add {
 }
 
 impl Add for Point {
-    fn add(self: Point, n: int) -> int { self.sum() + n }
+    fn add(n: int) -> int { self.sum() + n }
 }
 
 fn main() -> int {
@@ -19,4 +19,3 @@ fn main() -> int {
     p.x = 10;
     p.sum() + Add::add(p, 5) + p.add(7)
 }
-

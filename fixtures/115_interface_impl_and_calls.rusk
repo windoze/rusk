@@ -9,14 +9,14 @@ interface CounterOps {
 }
 
 impl CounterOps for Counter {
-    fn get(self: Counter) -> int { self.n }
+    fn get() -> int { self.n }
 
-    fn add(self: Counter, delta: int) -> int {
+    fn add(delta: int) -> int {
         self.n = self.n + delta;
         self.n
     }
 
-    fn reset(self: Counter) {
+    fn reset() {
         self.n = 0;
     }
 }
@@ -32,4 +32,3 @@ fn main() -> int {
 
     a * 1000 + b * 100 + c2 * 10 + d
 }
-

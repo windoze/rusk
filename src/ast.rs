@@ -58,12 +58,29 @@ pub struct Path {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnItem {
     pub vis: Visibility,
+    pub kind: FnItemKind,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub ret: TypeExpr,
     pub body: Block,
     pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FnItemKind {
+    /// A normal, top-level function item: `fn f(...) { ... }`.
+    Function,
+    /// A method inside an `impl` block.
+    Method { receiver: MethodReceiverKind },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MethodReceiverKind {
+    /// An instance method with an implicit `self` receiver.
+    Instance { readonly: bool },
+    /// A `static fn` method with no receiver.
+    Static,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -142,10 +159,13 @@ pub struct UseItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceMember {
+    pub readonly: bool,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub ret: TypeExpr,
+    /// Optional default implementation body.
+    pub body: Option<Block>,
     pub span: Span,
 }
 

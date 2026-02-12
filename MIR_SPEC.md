@@ -374,6 +374,15 @@ Argument passing respects Rusk’s value/reference semantics:
 - reference values are passed by reference (cloned reference)
 - readonly parameters create readonly views in the callee
 
+Notes for the Rusk front-end (source-level methods):
+
+- An instance method is lowered to a normal MIR function where the **first value parameter** is the receiver.
+- A `readonly fn` method is represented by giving the receiver parameter a readonly view type, so the corresponding MIR parameter is marked `readonly` and runtime writes through it trap.
+- A `static fn` method is lowered as a normal function with **no receiver parameter** (direct `call`).
+- Default interface methods may be compiled by generating:
+  - a private function for the default body, and
+  - a per-`impl` wrapper used in the method-resolution table when the impl omits that method.
+
 ---
 
 ## 8. Terminators (Control Flow)

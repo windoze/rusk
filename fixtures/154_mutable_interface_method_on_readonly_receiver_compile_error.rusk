@@ -1,0 +1,22 @@
+// expect: compile_error cannot call mutable method
+
+interface I {
+    fn bump();
+}
+
+struct S { n: int }
+
+impl I for S {
+    fn bump() {
+        self.n = self.n + 1;
+        ()
+    }
+}
+
+fn main() -> int {
+    let s = S { n: 0 };
+    readonly i = s as I;
+    i.bump();
+    0
+}
+

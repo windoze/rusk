@@ -9,10 +9,10 @@ interface Pair<T> {
 struct Box<T> { v: T }
 struct S { x: int }
 
-impl Show for S { fn show(self: S) -> string { "S" } }
+impl Show for S { fn show() -> string { "S" } }
 
 impl<T> Pair<T> for Box<T> {
-    fn pair<U: Show>(self: Box<T>, u: U) -> (T, U) { (self.v, u) }
+    fn pair<U: Show>(u: U) -> (T, U) { (self.v, u) }
 }
 
 fn main() -> int {

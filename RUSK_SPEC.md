@@ -51,11 +51,17 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `struct`, `enum`, `interface`, `impl`
+`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `impl`
 
 Control flow:
 
 `if`, `else`, `match`, `return`, `loop`, `while`, `for`, `in`, `break`, `continue`
+
+Reserved identifiers:
+
+- In an **instance method** body (including default interface method bodies), `self` is a reserved identifier that refers to the implicit receiver. It cannot be declared or shadowed by locals, parameters, or patterns within that method.
+- In a `static fn` body, `self` is not in scope.
+- `self::...` in paths continues to mean “relative to the current module” (§3.2.7); this is distinct from the receiver `self` value, which is accessed as an expression (`self`), field (`self.x`), or method call (`self.m(...)`).
 
 ### 2.3 Operators and Delimiters
 
@@ -145,11 +151,14 @@ Interfaces define:
 InterfaceItem  := "interface" Ident GenericParams?
                  ( ":" PathType ( "+" PathType )* )?
                  "{" InterfaceMember* "}" ;
-InterfaceMember:= "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? ";" ;
+InterfaceMember:= ("readonly")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
+                  ( ";" | Block ) ;
 ```
 
 Notes:
 - If `ReturnType` is omitted in an interface member, it defaults to `unit`.
+- `interface` members are always instance methods (they take an implicit receiver). `static fn` is not allowed in interfaces.
+- An interface member with a body (`{ ... }`) is a **default method**. An `impl` may omit methods that have defaults.
 - `interface` items may inherit from one or more super-interfaces using `: A + B + ...`.
 - Super-interfaces must resolve to interfaces (not structs/enums).
 - Cycles in the interface inheritance graph are rejected.
@@ -163,8 +172,14 @@ ImplItem       := "impl" ImplHeader "{" ImplMember* "}" ;
 ImplHeader     := Ident GenericArgs?                    // inherent impl: impl Type { ... }
                | Ident GenericArgs? "for" Ident GenericArgs? ; // interface impl: impl Interface for Type { ... }
 
-ImplMember     := FnItem ;
+ImplMember     := ("readonly" | "static")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? Block ;
 ```
+
+Notes:
+- In `impl Type { ... }`, `fn` defines an instance method with an implicit receiver (`self`).
+- `readonly fn` defines an instance method whose receiver is a readonly view inside the method body.
+- `static fn` defines a receiver-less static method, callable only as `Type::method(...)`.
+- In `impl Interface for Type { ... }`, `static fn` is forbidden and method receiver mutability (`readonly` vs non-`readonly`) must match the interface declaration.
 
 #### 3.2.6 Modules
 
@@ -668,6 +683,17 @@ statement position (ends with `;`), in which case missing `else` yields `unit`.
 Rusk uses `interface` + `impl` similarly to Rust traits, but also reuses interfaces
 as effect namespaces (see §7).
 
+Methods have an **implicit receiver**:
+
+- In an **instance method**, the receiver is in scope as `self` inside the method body.
+- The receiver is **not written** in the method’s parameter list. Calls pass the receiver separately:
+  - `I::m(recv, args...)` (explicit qualification), or
+  - `recv.m(args...)` (method-call sugar, if unambiguous).
+- `readonly fn m(...)` declares that `self` is a readonly view inside `m`.
+- A non-`readonly` (mutable) method cannot be called on a `readonly T` receiver; a `readonly fn` method can be called on both `T` and `readonly T` receivers.
+- `static fn m(...)` declares a receiver-less method, callable only as `Type::m(...)`. Static methods are allowed only in inherent `impl Type { ... }` blocks.
+- Interface members may provide a body (`{ ... }`) as a **default method**. An `impl` may omit methods that have defaults.
+
 ### 6.1 Interface Methods (non-effect calls)
 
 Interface methods are called using explicit qualification:
@@ -675,6 +701,16 @@ Interface methods are called using explicit qualification:
 ```rust
 Logger::log(console, "hello");
 ```
+
+If `Logger` is declared as:
+
+```rust
+interface Logger { fn log(msg: string) -> unit; }
+```
+
+then the call `Logger::log(console, "hello")` passes:
+- `console` as the implicit receiver (`self` inside the implementation),
+- `"hello"` as the `msg` parameter.
 
 If the static receiver type is a concrete nominal type (struct/enum), this may be statically
 resolved by the compiler based on the selected `impl`.
@@ -703,6 +739,12 @@ Inherent methods are defined with `impl Type { ... }` and called as:
 Point::new(1, 2)
 point.len()
 ```
+
+Within an inherent impl:
+
+- `fn m(...) { ... }` declares an instance method with an implicit receiver `self`.
+- `readonly fn m(...) { ... }` declares an instance method whose receiver is a readonly view.
+- `static fn m(...) { ... }` declares a static method with no receiver.
 
 Resolution rules:
 
@@ -751,7 +793,7 @@ Rules:
 - Interface methods are identified by their **origin interface** and method name. In diamond graphs,
   inherited methods with the same origin are treated as a single method.
 - In v0.4, multiple inheritance is rejected if two unrelated origins introduce the same method name.
-- `impl X for T { ... }` must implement every method in `X`’s full method set (including inherited ones).
+- `impl X for T { ... }` must implement every method in `X`’s full method set (including inherited ones), **except** methods that have a default body in the origin interface.
 - `expr as I` performs an explicit upcast to an interface type. Upcasts are the primary mechanism for
   producing interface-typed values without introducing implicit subtyping into inference.
 

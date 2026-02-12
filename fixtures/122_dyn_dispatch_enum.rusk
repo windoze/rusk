@@ -5,7 +5,7 @@ interface I { fn val() -> int; }
 enum E { A, B }
 
 impl I for E {
-    fn val(self: E) -> int {
+    fn val() -> int {
         match self {
             E::A => 1,
             E::B => 2,
@@ -18,4 +18,3 @@ fn main() -> int {
     let i = e as I;
     i.val()
 }
-

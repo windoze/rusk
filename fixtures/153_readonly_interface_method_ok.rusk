@@ -1,0 +1,27 @@
+// expect: ok int 7777
+
+interface I {
+    readonly fn get() -> int;
+}
+
+struct S { x: int }
+
+impl I for S {
+    readonly fn get() -> int { self.x }
+}
+
+fn main() -> int {
+    let s = S { x: 7 };
+
+    let a = s.get();
+    readonly rs = s;
+    let b = rs.get();
+
+    let i = s as I;
+    let c = i.get();
+    readonly ri = s as I;
+    let d = ri.get();
+
+    a + b * 10 + c * 100 + d * 1000
+}
+

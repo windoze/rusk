@@ -6,9 +6,9 @@ interface Drawable { fn draw() -> int; }
 struct Dog {}
 struct Rock {}
 
-impl Animal for Dog { fn kind(self: Dog) -> int { 1 } }
-impl Drawable for Dog { fn draw(self: Dog) -> int { 10 } }
-impl Drawable for Rock { fn draw(self: Rock) -> int { 20 } }
+impl Animal for Dog { fn kind() -> int { 1 } }
+impl Drawable for Dog { fn draw() -> int { 10 } }
+impl Drawable for Rock { fn draw() -> int { 20 } }
 
 fn main() -> int {
     let d1 = (Dog {} as Drawable);
@@ -19,4 +19,3 @@ fn main() -> int {
 
     a * 10 + b
 }
-

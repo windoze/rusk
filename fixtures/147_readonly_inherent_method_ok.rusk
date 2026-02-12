@@ -1,0 +1,14 @@
+// expect: ok int 77
+
+struct S { x: int }
+
+impl S {
+    readonly fn get() -> int { self.x }
+}
+
+fn main() -> int {
+    let s = S { x: 7 };
+    readonly r = s;
+    s.get() + r.get() * 10
+}
+

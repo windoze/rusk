@@ -66,6 +66,9 @@ impl<'a> Parser<'a> {
         let vis = self.parse_visibility()?;
         match self.lookahead.kind {
             TokenKind::KwFn => Ok(Item::Function(self.parse_fn_item(vis)?)),
+            TokenKind::KwStatic => {
+                Err(self.error_here("`static fn` is only allowed inside `impl` blocks"))
+            }
             TokenKind::KwStruct => Ok(Item::Struct(self.parse_struct_item(vis)?)),
             TokenKind::KwEnum => Ok(Item::Enum(self.parse_enum_item(vis)?)),
             TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface_item(vis)?)),
@@ -114,6 +117,7 @@ impl<'a> Parser<'a> {
         let end = body.span.end;
         Ok(FnItem {
             vis,
+            kind: FnItemKind::Function,
             name,
             generics,
             params,
@@ -224,7 +228,22 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace)?;
         let mut members = Vec::new();
         while !matches!(self.lookahead.kind, TokenKind::RBrace) {
-            let m_start = self.expect(TokenKind::KwFn)?.span.start;
+            let m_start = self.lookahead.span.start;
+            let mut readonly = false;
+            match self.lookahead.kind {
+                TokenKind::KwReadonly => {
+                    readonly = true;
+                    self.bump()?;
+                }
+                TokenKind::KwStatic => {
+                    return Err(self.error_here("`static fn` is not allowed in interfaces"));
+                }
+                _ => {}
+            }
+            if readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
+                return Err(self.error_here("`static fn` is not allowed in interfaces"));
+            }
+            self.expect(TokenKind::KwFn)?;
             let m_name = self.expect_ident()?;
             let m_generics = self.parse_generic_params()?;
             self.expect(TokenKind::LParen)?;
@@ -244,12 +263,21 @@ impl<'a> Parser<'a> {
                     span: rparen.span,
                 }
             };
-            let m_end = self.expect(TokenKind::Semi)?.span.end;
+            let (body, m_end) = if matches!(self.lookahead.kind, TokenKind::Semi) {
+                let end = self.bump()?.span.end;
+                (None, end)
+            } else {
+                let body = self.parse_block()?;
+                let end = body.span.end;
+                (Some(body), end)
+            };
             members.push(InterfaceMember {
+                readonly,
                 name: m_name,
                 generics: m_generics,
                 params,
                 ret,
+                body,
                 span: Span::new(m_start, m_end),
             });
         }
@@ -335,10 +363,42 @@ impl<'a> Parser<'a> {
         let mut members = Vec::new();
         while !matches!(self.lookahead.kind, TokenKind::RBrace) {
             let vis = self.parse_visibility()?;
+            let method_start = self.lookahead.span.start;
+            let mut saw_readonly = false;
+            let mut saw_static = false;
+            match self.lookahead.kind {
+                TokenKind::KwReadonly => {
+                    saw_readonly = true;
+                    self.bump()?;
+                }
+                TokenKind::KwStatic => {
+                    saw_static = true;
+                    self.bump()?;
+                }
+                _ => {}
+            }
+            if saw_readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
+                return Err(self.error_here("`readonly static fn` is not allowed"));
+            }
+            if saw_static && matches!(self.lookahead.kind, TokenKind::KwReadonly) {
+                return Err(self.error_here("`static readonly fn` is not allowed"));
+            }
             if !matches!(self.lookahead.kind, TokenKind::KwFn) {
                 return Err(self.error_here("expected `fn` in `impl` body"));
             }
-            members.push(self.parse_fn_item(vis)?);
+            let mut func = self.parse_fn_item(vis)?;
+            func.kind = FnItemKind::Method {
+                receiver: if saw_static {
+                    MethodReceiverKind::Static
+                } else {
+                    MethodReceiverKind::Instance {
+                        readonly: saw_readonly,
+                    }
+                },
+            };
+            // Expand the span to include the qualifier token if present.
+            func.span = Span::new(method_start, func.span.end);
+            members.push(func);
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(ImplItem {

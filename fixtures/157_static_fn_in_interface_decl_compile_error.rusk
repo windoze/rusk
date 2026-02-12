@@ -1,0 +1,8 @@
+// expect: compile_error static fn
+
+interface I {
+    static fn foo() -> int;
+}
+
+fn main() -> int { 0 }
+

@@ -5,7 +5,7 @@ interface I { fn foo() -> int; }
 struct S {}
 
 impl I for S {
-    fn foo(self: S) -> int { 7 }
+    fn foo() -> int { 7 }
 }
 
 fn call_foo<T: I>(x: T) -> int { I::foo(x) }
@@ -14,4 +14,3 @@ fn main() -> int {
     let s = S {};
     call_foo(s)
 }
-

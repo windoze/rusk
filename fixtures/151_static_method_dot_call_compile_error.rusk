@@ -1,0 +1,13 @@
+// expect: compile_error static method
+
+struct S {}
+
+impl S {
+    static fn foo(n: int) -> int { n + 1 }
+}
+
+fn main() -> int {
+    let s = S {};
+    s.foo(1)
+}
+

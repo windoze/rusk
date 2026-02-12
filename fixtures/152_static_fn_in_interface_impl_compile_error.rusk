@@ -1,0 +1,11 @@
+// expect: compile_error static fn
+
+interface I { fn foo() -> int; }
+struct S {}
+
+impl I for S {
+    static fn foo() -> int { 1 }
+}
+
+fn main() -> int { 0 }
+

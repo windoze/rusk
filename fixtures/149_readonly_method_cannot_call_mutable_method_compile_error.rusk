@@ -1,0 +1,18 @@
+// expect: compile_error cannot call mutable method
+
+struct Counter { n: int }
+
+impl Counter {
+    fn inc() {
+        self.n = self.n + 1;
+        ()
+    }
+
+    readonly fn bump() {
+        self.inc();
+        ()
+    }
+}
+
+fn main() -> int { 0 }
+

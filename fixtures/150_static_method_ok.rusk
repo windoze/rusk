@@ -1,0 +1,15 @@
+// expect: ok int 13
+
+struct S {}
+
+impl S {
+    static fn foo(n: int) -> int { n + 1 }
+
+    fn bar() -> int { S::foo(1) }
+}
+
+fn main() -> int {
+    let s = S {};
+    s.bar() + S::foo(10)
+}
+

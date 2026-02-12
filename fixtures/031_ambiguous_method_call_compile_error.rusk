@@ -5,11 +5,10 @@ struct S { x: int }
 interface A { fn foo() -> int; }
 interface B { fn foo() -> int; }
 
-impl A for S { fn foo(self: S) -> int { self.x + 1 } }
-impl B for S { fn foo(self: S) -> int { self.x + 2 } }
+impl A for S { fn foo() -> int { self.x + 1 } }
+impl B for S { fn foo() -> int { self.x + 2 } }
 
 fn main() -> int {
     let s = S { x: 0 };
     s.foo()
 }
-

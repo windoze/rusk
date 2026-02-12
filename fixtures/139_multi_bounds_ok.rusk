@@ -5,8 +5,8 @@ interface Show { fn show() -> string; }
 
 struct S { x: int }
 
-impl Hash for S { fn hash(self: S) -> int { self.x } }
-impl Show for S { fn show(self: S) -> string { "S" } }
+impl Hash for S { fn hash() -> int { self.x } }
+impl Show for S { fn show() -> string { "S" } }
 
 fn show_and_hash<T: Hash + Show>(x: T) -> int {
     if x.show() == "S" { x.hash() } else { 0 }

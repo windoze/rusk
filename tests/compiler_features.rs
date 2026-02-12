@@ -86,7 +86,7 @@ fn supports_structs_fields_and_methods() {
         struct Point { x: int, y: int }
 
         impl Point {
-            fn sum(self: Point) -> int { self.x + self.y }
+            fn sum() -> int { self.x + self.y }
         }
 
         interface Add {
@@ -94,7 +94,7 @@ fn supports_structs_fields_and_methods() {
         }
 
         impl Add for Point {
-            fn add(self: Point, n: int) -> int { self.sum() + n }
+            fn add(n: int) -> int { self.sum() + n }
         }
 
         fn test() -> int {
@@ -117,8 +117,8 @@ fn method_call_sugar_is_ambiguous_error() {
         interface A { fn foo() -> int; }
         interface B { fn foo() -> int; }
 
-        impl A for S { fn foo(self: S) -> int { self.x + 1 } }
-        impl B for S { fn foo(self: S) -> int { self.x + 2 } }
+        impl A for S { fn foo() -> int { self.x + 1 } }
+        impl B for S { fn foo() -> int { self.x + 2 } }
 
         fn test() -> int {
             let s = S { x: 0 };
@@ -206,7 +206,7 @@ fn interface_method_signatures_can_omit_unit_return_type() {
         }
 
         impl I for S {
-            fn bar(self: S, n: int) {
+            fn bar(n: int) {
                 ()
             }
         }

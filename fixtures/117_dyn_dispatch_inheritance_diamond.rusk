@@ -8,10 +8,10 @@ interface L: J + K { fn boo() -> int; }
 struct S {}
 
 impl L for S {
-    fn foo(self: S) -> int { 10 }
-    fn bar(self: S) -> int { 20 }
-    fn baz(self: S) -> int { 30 }
-    fn boo(self: S) -> int { 40 }
+    fn foo() -> int { 10 }
+    fn bar() -> int { 20 }
+    fn baz() -> int { 30 }
+    fn boo() -> int { 40 }
 }
 
 fn main() -> int {
@@ -25,4 +25,3 @@ fn main() -> int {
     let g = (s as L).boo();
     a * 1000000 + b * 100000 + c * 10000 + d * 1000 + e * 100 + f * 10 + g
 }
-

@@ -7,7 +7,7 @@ interface Boxed<T> {
 struct Box<T> { v: T }
 
 impl<T> Boxed<T> for Box<T> {
-    fn get(self: Box<T>) -> T { self.v }
+    fn get() -> T { self.v }
 }
 
 fn use_interface<T>(x: Boxed<T>) -> T { x.get() }

@@ -1,0 +1,35 @@
+// expect: ok int 1017272
+
+interface I {
+    fn base(n: int) -> int;
+
+    fn double(n: int) -> int {
+        self.base(n) + self.base(n)
+    }
+}
+
+struct A { x: int }
+struct B { x: int }
+
+impl I for A {
+    fn base(n: int) -> int { self.x + n }
+}
+
+impl I for B {
+    fn base(n: int) -> int { self.x + n }
+    fn double(n: int) -> int { 1000 + self.base(n) }
+}
+
+fn main() -> int {
+    let a = A { x: 5 };
+    let b = B { x: 5 };
+
+    let r1 = a.double(1);
+    let r2 = (a as I).double(1);
+
+    let r3 = b.double(1);
+    let r4 = (b as I).double(1);
+
+    r1 + r2 * 100 + r3 * 10 + r4 * 1000
+}
+

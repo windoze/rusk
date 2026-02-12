@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, BindingKind, Block, Expr, FnItem, ImplHeader, ImplItem, Item, MatchArm, MatchPat,
-    PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
+    BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, ImplHeader, ImplItem, Item, MatchArm,
+    MatchPat, MethodReceiverKind, PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
 };
 use crate::mir::{
     BasicBlock, BlockId, ConstValue, EffectSpec, Function, HandlerClause, Instruction, Local,
@@ -244,7 +244,32 @@ impl Compiler {
                         }
                     }
                 }
-                Item::Struct(_) | Item::Enum(_) | Item::Interface(_) | Item::Use(_) => {}
+                Item::Interface(iface) => {
+                    let iface_name = module.qualify(&iface.name.name);
+                    for member in &iface.members {
+                        let Some(body) = &member.body else {
+                            continue;
+                        };
+                        let default_fn_name =
+                            format!("$default::{iface_name}::{}", member.name.name);
+                        let synthetic = FnItem {
+                            vis: crate::ast::Visibility::Private,
+                            kind: FnItemKind::Method {
+                                receiver: MethodReceiverKind::Instance {
+                                    readonly: member.readonly,
+                                },
+                            },
+                            name: member.name.clone(),
+                            generics: member.generics.clone(),
+                            params: member.params.clone(),
+                            ret: member.ret.clone(),
+                            body: body.clone(),
+                            span: member.span,
+                        };
+                        self.compile_real_function(module, &synthetic, Some(default_fn_name))?;
+                    }
+                }
+                Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {}
             }
         }
         Ok(())
@@ -292,8 +317,171 @@ impl Compiler {
                     let name_override = format!("impl::{iface_name}::for::{type_name}::{mname}");
                     self.compile_real_function(module, method, Some(name_override))?;
                 }
+
+                // Synthesize wrappers for omitted default interface methods.
+                let Some(iface_def) = self.env.interfaces.get(&iface_name) else {
+                    return Err(CompileError::new(
+                        format!("internal error: unknown interface `{iface_name}`"),
+                        imp.span,
+                    ));
+                };
+                let implemented: std::collections::BTreeSet<&str> =
+                    imp.members.iter().map(|m| m.name.name.as_str()).collect();
+                let all_methods: Vec<(String, typeck::InterfaceMethod)> = iface_def
+                    .all_methods
+                    .iter()
+                    .map(|(name, info)| (name.clone(), info.clone()))
+                    .collect();
+                for (mname, info) in all_methods {
+                    if !info.has_default || implemented.contains(mname.as_str()) {
+                        continue;
+                    }
+                    let wrapper_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
+                    if self.module.functions.contains_key(&wrapper_name) {
+                        continue;
+                    }
+                    let default_name = format!("$default::{}::{mname}", info.origin);
+                    let origin_arity = self
+                        .env
+                        .interfaces
+                        .get(&info.origin)
+                        .map(|d| d.generics.len())
+                        .unwrap_or(0);
+                    self.compile_default_method_wrapper(
+                        module,
+                        &wrapper_name,
+                        &default_name,
+                        origin_arity,
+                        info.sig.generics.len(),
+                    )?;
+                }
             }
         }
+        Ok(())
+    }
+
+    fn compile_default_method_wrapper(
+        &mut self,
+        module: &ModulePath,
+        wrapper_name: &str,
+        default_target: &str,
+        origin_iface_arity: usize,
+        method_generics_len: usize,
+    ) -> Result<(), CompileError> {
+        let sig = self.env.functions.get(wrapper_name).ok_or_else(|| {
+            CompileError::new(
+                format!("internal error: missing signature for `{wrapper_name}`"),
+                Span::new(0, 0),
+            )
+        })?;
+        let sig = sig.clone();
+
+        if !self.env.functions.contains_key(default_target) {
+            return Err(CompileError::new(
+                format!("internal error: missing default method `{default_target}`"),
+                Span::new(0, 0),
+            ));
+        }
+
+        let value_param_mutabilities: Vec<Mutability> = sig
+            .params
+            .iter()
+            .map(|ty| match ty {
+                Ty::Readonly(_) => Mutability::Readonly,
+                _ => Mutability::Mutable,
+            })
+            .collect();
+        let value_param_types: Vec<Option<Type>> = {
+            let env = &self.env;
+            sig.params
+                .iter()
+                .map(|ty| mir_type_from_ty(env, ty))
+                .collect()
+        };
+
+        let mut lowerer = FunctionLowerer::new(
+            self,
+            FnKind::Real,
+            module.clone(),
+            wrapper_name.to_string(),
+            sig.generics.clone(),
+        );
+        lowerer.bind_type_rep_params_for_signature();
+
+        let mut value_param_locals = Vec::with_capacity(sig.params.len());
+        for (mutability, ty) in value_param_mutabilities
+            .into_iter()
+            .zip(value_param_types.into_iter())
+        {
+            let local = lowerer.alloc_local();
+            lowerer.params.push(Param {
+                local,
+                mutability,
+                ty,
+            });
+            value_param_locals.push(local);
+        }
+
+        let impl_arity = sig
+            .generics
+            .len()
+            .checked_sub(method_generics_len)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "internal error: wrapper method generics length mismatch",
+                    Span::new(0, 0),
+                )
+            })?;
+
+        let mut call_args = Vec::new();
+        for gen_idx in 0..origin_iface_arity {
+            let Some(local) = lowerer.generic_type_reps.get(gen_idx).and_then(|l| *l) else {
+                return Err(CompileError::new(
+                    "internal error: missing interface generic type rep in wrapper",
+                    Span::new(0, 0),
+                ));
+            };
+            call_args.push(Operand::Local(local));
+        }
+        for i in 0..method_generics_len {
+            let gen_idx = impl_arity + i;
+            if sig.generics.get(gen_idx).is_some_and(|gp| gp.arity == 0) {
+                let Some(local) = lowerer.generic_type_reps.get(gen_idx).and_then(|l| *l) else {
+                    return Err(CompileError::new(
+                        "internal error: missing method generic type rep in wrapper",
+                        Span::new(0, 0),
+                    ));
+                };
+                call_args.push(Operand::Local(local));
+            }
+        }
+
+        let Some((&recv_local, arg_locals)) = value_param_locals.split_first() else {
+            return Err(CompileError::new(
+                "internal error: wrapper missing receiver param",
+                Span::new(0, 0),
+            ));
+        };
+        call_args.push(Operand::Local(recv_local));
+        for &local in arg_locals {
+            call_args.push(Operand::Local(local));
+        }
+
+        let dst = lowerer.alloc_local();
+        lowerer.emit(Instruction::Call {
+            dst: Some(dst),
+            func: default_target.to_string(),
+            args: call_args,
+        });
+        lowerer.set_terminator(Terminator::Return {
+            value: Operand::Local(dst),
+        })?;
+
+        let mut mir_fn = lowerer.finish()?;
+        mir_fn.ret_type = mir_type_from_ty(&self.env, &sig.ret);
+        self.module
+            .functions
+            .insert(wrapper_name.to_string(), mir_fn);
         Ok(())
     }
 
@@ -738,7 +926,18 @@ impl<'a> FunctionLowerer<'a> {
         param_mutabilities: &[Mutability],
         param_types: &[Option<Type>],
     ) -> Result<(), CompileError> {
-        if func.params.len() != param_mutabilities.len() || func.params.len() != param_types.len() {
+        let implicit_receiver = matches!(
+            func.kind,
+            FnItemKind::Method {
+                receiver: MethodReceiverKind::Instance { .. }
+            }
+        );
+        let expected_params = if implicit_receiver {
+            func.params.len() + 1
+        } else {
+            func.params.len()
+        };
+        if expected_params != param_mutabilities.len() || expected_params != param_types.len() {
             return Err(CompileError::new(
                 "internal error: function signature arity mismatch",
                 func.span,
@@ -746,13 +945,35 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         let mut trap_block: Option<BlockId> = None;
-        for (idx, p) in func.params.iter().enumerate() {
+        // Optional implicit receiver param (`self`).
+        let start_idx = if implicit_receiver {
             let local = self.alloc_local();
-            let mutability = param_mutabilities[idx];
+            let mutability = param_mutabilities[0];
             self.params.push(Param {
                 local,
                 mutability,
-                ty: param_types[idx].clone(),
+                ty: param_types[0].clone(),
+            });
+            self.bind_var(
+                "self",
+                VarInfo {
+                    local,
+                    kind: BindingKind::Const,
+                },
+            );
+            1usize
+        } else {
+            0usize
+        };
+
+        for (idx, p) in func.params.iter().enumerate() {
+            let sig_idx = start_idx + idx;
+            let local = self.alloc_local();
+            let mutability = param_mutabilities[sig_idx];
+            self.params.push(Param {
+                local,
+                mutability,
+                ty: param_types[sig_idx].clone(),
             });
 
             match &p.pat {
@@ -2926,7 +3147,7 @@ impl<'a> FunctionLowerer<'a> {
             ));
         }
 
-        let (origin_iface, method_id) = {
+        let (origin_iface, method_id, receiver_readonly) = {
             let Some(iface_def) = self.compiler.env.interfaces.get(&iface_name) else {
                 return Err(CompileError::new(
                     format!("internal error: unknown interface `{iface_name}`"),
@@ -2943,7 +3164,7 @@ impl<'a> FunctionLowerer<'a> {
             };
             let origin = method_info.origin.clone();
             let method_id = format!("{origin}::{method_name}");
-            (origin, method_id)
+            (origin, method_id, method_info.receiver_readonly)
         };
 
         let recv_ty = self
@@ -2992,7 +3213,19 @@ impl<'a> FunctionLowerer<'a> {
             for ty in &method_type_args {
                 call_args.push(self.lower_type_rep_for_ty(ty, span)?);
             }
-            for a in args {
+            let recv_local = self.lower_expr(&args[0])?;
+            let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+                let ro = self.alloc_local();
+                self.emit(Instruction::AsReadonly {
+                    dst: ro,
+                    src: recv_local,
+                });
+                ro
+            } else {
+                recv_local
+            };
+            call_args.push(Operand::Local(recv_local));
+            for a in &args[1..] {
                 let v = self.lower_expr(a)?;
                 call_args.push(Operand::Local(v));
             }
@@ -3007,6 +3240,16 @@ impl<'a> FunctionLowerer<'a> {
 
         // Otherwise, lower to dynamic dispatch (`vcall`).
         let recv_local = self.lower_expr(&args[0])?;
+        let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+            let ro = self.alloc_local();
+            self.emit(Instruction::AsReadonly {
+                dst: ro,
+                src: recv_local,
+            });
+            ro
+        } else {
+            recv_local
+        };
         let method_type_args = self
             .compiler
             .types
@@ -3054,8 +3297,32 @@ impl<'a> FunctionLowerer<'a> {
         // Inherent methods first (if the receiver has a nominal type name).
         if let Some(recv_nom) = nominal_type_name(&recv_ty) {
             let inherent_name = format!("{recv_nom}::{}", method.name);
-            if self.compiler.env.functions.contains_key(&inherent_name) {
+            let inherent_kind = self
+                .compiler
+                .env
+                .inherent_method_kinds
+                .get(&inherent_name)
+                .copied();
+            if matches!(
+                inherent_kind,
+                Some(typeck::InherentMethodKind::Instance { .. })
+            ) && self.compiler.env.functions.contains_key(&inherent_name)
+            {
                 let recv_local = self.lower_expr(receiver)?;
+                let recv_local = if matches!(
+                    inherent_kind,
+                    Some(typeck::InherentMethodKind::Instance { readonly: true })
+                ) && !matches!(recv_ty, Ty::Readonly(_))
+                {
+                    let ro = self.alloc_local();
+                    self.emit(Instruction::AsReadonly {
+                        dst: ro,
+                        src: recv_local,
+                    });
+                    ro
+                } else {
+                    recv_local
+                };
                 let call_key = (span, inherent_name.clone());
                 let type_args = self
                     .compiler
@@ -3196,6 +3463,13 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         let origin_iface = origins.into_keys().next().expect("origins.len()==1");
+        let receiver_readonly = self
+            .compiler
+            .env
+            .interfaces
+            .get(&origin_iface)
+            .and_then(|d| d.all_methods.get(&method.name))
+            .is_some_and(|m| m.receiver_readonly);
         let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
             recv_nom.to_string(),
             origin_iface.clone(),
@@ -3212,6 +3486,16 @@ impl<'a> FunctionLowerer<'a> {
         let impl_fn = impl_fn.clone();
 
         let recv_local = self.lower_expr(receiver)?;
+        let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+            let ro = self.alloc_local();
+            self.emit(Instruction::AsReadonly {
+                dst: ro,
+                src: recv_local,
+            });
+            ro
+        } else {
+            recv_local
+        };
         let recv_type_args = match self.strip_readonly_ty(&recv_ty) {
             Ty::App(typeck::TyCon::Named(_), args) => args.clone(),
             _ => Vec::new(),
@@ -3255,21 +3539,45 @@ impl<'a> FunctionLowerer<'a> {
         args: &[Expr],
         span: Span,
     ) -> Result<Local, CompileError> {
-        let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
-            return Err(CompileError::new(
-                format!("internal error: unknown interface `{iface_name}`"),
-                span,
-            ));
+        let (method_id, receiver_readonly) = {
+            let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
+                return Err(CompileError::new(
+                    format!("internal error: unknown interface `{iface_name}`"),
+                    span,
+                ));
+            };
+            let Some(info) = iface_def.all_methods.get(method_name) else {
+                return Err(CompileError::new(
+                    format!("unknown method `{method_name}` on `{iface_name}`"),
+                    span,
+                ));
+            };
+            (
+                format!("{}::{method_name}", info.origin),
+                info.receiver_readonly,
+            )
         };
-        let Some(info) = iface_def.all_methods.get(method_name) else {
-            return Err(CompileError::new(
-                format!("unknown method `{method_name}` on `{iface_name}`"),
-                span,
-            ));
-        };
-        let method_id = format!("{}::{method_name}", info.origin);
 
+        let recv_ty = self
+            .expr_ty(receiver)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "internal error: missing type for vcall receiver",
+                    receiver.span(),
+                )
+            })?
+            .clone();
         let recv_local = self.lower_expr(receiver)?;
+        let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+            let ro = self.alloc_local();
+            self.emit(Instruction::AsReadonly {
+                dst: ro,
+                src: recv_local,
+            });
+            ro
+        } else {
+            recv_local
+        };
         let method_type_args = self
             .compiler
             .types

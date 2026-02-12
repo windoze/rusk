@@ -1,0 +1,29 @@
+// expect: ok int 1812
+
+interface I {
+    fn base(n: int) -> int;
+
+    fn double(n: int) -> int {
+        self.base(n) + self.base(n)
+    }
+}
+
+interface J: I {
+    fn triple(n: int) -> int {
+        self.double(n) + self.base(n)
+    }
+}
+
+struct S { x: int }
+
+impl J for S {
+    fn base(n: int) -> int { self.x + n }
+}
+
+fn main() -> int {
+    let s = S { x: 5 };
+    let a = (s as I).double(1); // 12
+    let b = (s as J).triple(1); // 18
+    a + b * 100
+}
+
