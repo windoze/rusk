@@ -9,7 +9,8 @@ Rusk already supports **patterns** in:
 - function parameters
 
 This proposal extends `let` statements so the left-hand side can be a **pattern**, enabling
-destructuring bindings such as tuples/arrays/structs/enums/new-type structs directly in locals.
+destructuring bindings such as tuples/arrays/**named-field structs**/enums/new-type structs directly
+in locals.
 
 ## Motivation
 
@@ -17,7 +18,7 @@ destructuring bindings such as tuples/arrays/structs/enums/new-type structs dire
 - **Consistency**: reuse the *existing* pattern syntax and semantics already implemented for
   parameters and `match`.
 - **Expressiveness**: allow concise binding of multiple locals, including “rest” patterns (`..`) and
-  new-type struct patterns.
+  new-type struct patterns, plus named-field struct patterns with field shorthands / renames.
 
 ## Proposed Syntax
 
@@ -51,6 +52,11 @@ Rusk’s existing rest pattern syntax is:
 - `..name` to bind the middle/rest
 
 So the “rest binding” examples in this proposal use `..a` / `..rest` (consistent with §3.7).
+
+For **named-field struct patterns**, `..` is supported only as an ignore marker (per §3.7):
+
+- allowed: `Point{x, ..}` (ignore unspecified fields)
+- rejected: `Point{..rest}` (struct `..` cannot bind)
 
 ## Semantics
 
@@ -117,6 +123,17 @@ New-type struct destructuring (constructor pattern):
 ```rusk
 struct UserId(int);
 let UserId(a) = UserId(123);         // a = 123
+```
+
+Named-field struct destructuring:
+
+```rusk
+struct S { x: int, y: int }
+
+let S{x: a, y: b} = S{x: 1, y: 2};   // a = 1, b = 2
+
+// Field shorthand + ignoring the rest:
+let S{x, ..} = S{x: 1, y: 2};        // x = 1
 ```
 
 Nested patterns:
