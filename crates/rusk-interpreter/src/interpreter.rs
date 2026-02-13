@@ -1429,10 +1429,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     "resume must execute in the top frame"
                 );
 
-                let bottom = cont
-                    .stack
-                    .first_mut()
-                    .ok_or(RuntimeError::InvalidResume)?;
+                let bottom = cont.stack.first_mut().ok_or(RuntimeError::InvalidResume)?;
                 bottom.return_dst = dst;
 
                 for handler in &mut cont.handlers {

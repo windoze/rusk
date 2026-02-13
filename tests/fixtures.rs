@@ -12,7 +12,11 @@ enum Expectation {
 }
 
 fn parse_expectation(source: &str, path: &Path) -> Expectation {
-    for line in source.lines() {
+    for (line_idx, line) in source.lines().enumerate() {
+        // Allow Unix-style shebang on the first line (e.g. `#!/usr/bin/env rusk`).
+        if line_idx == 0 && line.starts_with("#!") {
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;

@@ -48,6 +48,15 @@ impl<'a> Parser<'a> {
         Ok(Self { lexer, lookahead })
     }
 
+    pub fn with_base_offset_no_shebang(
+        src: &'a str,
+        base_offset: usize,
+    ) -> Result<Self, ParseError> {
+        let mut lexer = Lexer::with_base_offset_no_shebang(src, base_offset);
+        let lookahead = lexer.next_token()?;
+        Ok(Self { lexer, lookahead })
+    }
+
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut items = Vec::new();
         while !matches!(self.lookahead.kind, TokenKind::Eof) {
@@ -2216,7 +2225,7 @@ impl<'a> Parser<'a> {
                     });
                 }
                 FStringPart::Expr { src, base_offset } => {
-                    let mut nested = Parser::with_base_offset(&src, base_offset)?;
+                    let mut nested = Parser::with_base_offset_no_shebang(&src, base_offset)?;
                     let value_expr = nested.parse_expr_eof()?;
                     let to_string = self.core_intrinsic_call1(span, "to_string", value_expr);
                     expr = Some(match expr {

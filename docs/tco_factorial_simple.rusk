@@ -1,0 +1,52 @@
+// 使用 Effect 实现手动尾调用优化（TCO）的阶乘示例（简化版）
+// expect: ok int 3628800
+
+// 定义尾调用 effect
+interface TailCall {
+    fn call(n: int, acc: int) -> int;
+}
+
+// 尾递归风格的阶乘实现
+fn factorial_tail(n: int, acc: int) -> int {
+    if n <= 1 {
+        acc
+    } else {
+        // 执行 effect 而不是直接递归
+        @TailCall.call(n - 1, n * acc)
+    }
+}
+
+// TCO 循环处理器：将递归转换为循环
+fn factorial(initial_n: int) -> int {
+    let n = initial_n;
+    let acc = 1;
+    let result = 0;
+    let done = false;
+
+    // 用循环不断处理尾调用 effect
+    while !done {
+        // 每次迭代调用 factorial_tail
+        let _ = match factorial_tail(n, acc) {
+            // 捕获尾调用的参数，更新状态，继续循环
+            @TailCall.call(next_n, next_acc) => {
+                n = next_n;
+                acc = next_acc;
+                0  // 继续循环
+            }
+            // 当返回最终结果时（base case）
+            value => {
+                result = value;
+                done = true;
+                0  // 退出循环
+            }
+        };
+    };
+
+    result
+}
+
+fn main() -> int {
+    // 计算 10! = 3628800
+    // 即使 n 很大也不会栈溢出，因为递归被转换为循环
+    factorial(10)
+}

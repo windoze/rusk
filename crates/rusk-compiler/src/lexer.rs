@@ -112,6 +112,7 @@ pub struct Lexer<'a> {
     src: &'a str,
     pos: usize,
     base_offset: usize,
+    allow_shebang: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -120,6 +121,7 @@ impl<'a> Lexer<'a> {
             src,
             pos: 0,
             base_offset: 0,
+            allow_shebang: true,
         }
     }
 
@@ -128,6 +130,16 @@ impl<'a> Lexer<'a> {
             src,
             pos: 0,
             base_offset,
+            allow_shebang: true,
+        }
+    }
+
+    pub fn with_base_offset_no_shebang(src: &'a str, base_offset: usize) -> Self {
+        Self {
+            src,
+            pos: 0,
+            base_offset,
+            allow_shebang: false,
         }
     }
 
@@ -940,6 +952,10 @@ impl<'a> Lexer<'a> {
 
     fn skip_ws_and_comments(&mut self) -> Result<(), LexError> {
         loop {
+            if self.allow_shebang && self.pos == 0 && self.peek_str("#!") {
+                self.skip_shebang_line();
+                continue;
+            }
             while self.peek_char().is_some_and(|c| c.is_whitespace()) {
                 self.bump_char();
             }
@@ -954,6 +970,17 @@ impl<'a> Lexer<'a> {
             break;
         }
         Ok(())
+    }
+
+    fn skip_shebang_line(&mut self) {
+        debug_assert!(self.pos == 0);
+        debug_assert!(self.peek_str("#!"));
+        while let Some(ch) = self.peek_char() {
+            self.bump_char();
+            if ch == '\n' {
+                break;
+            }
+        }
     }
 
     fn skip_line_comment(&mut self) {

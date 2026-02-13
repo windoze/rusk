@@ -1,0 +1,76 @@
+// 使用 Effect 实现手动尾调用优化（TCO）的阶乘示例
+// expect: ok int 3628800
+
+// 用于表示计算状态的辅助 enum
+enum TailCallResult {
+    Continue(int, int),  // 继续循环，携带新的参数 (n, acc)
+    Done(int)            // 完成，携带最终结果
+}
+
+// 定义尾调用 effect
+interface TailCall<R> {
+    fn call(n: int, acc: int) -> R;
+}
+
+// 尾递归风格的阶乘实现
+// 注意：这里不直接递归调用，而是通过 effect 实现
+fn factorial_tail(n: int, acc: int) -> int {
+    if n <= 1 {
+        acc
+    } else {
+        // 不是直接调用 factorial_tail(n - 1, n * acc)
+        // 而是执行一个 effect
+        @TailCall<int>.call(n - 1, n * acc)
+    }
+}
+
+// TCO 循环处理器：将递归转换为循环
+// 关键：用 match 捕获 effect，在处理器中不调用 resume，
+// 而是直接返回一个信号让外层循环继续或结束
+fn with_tco(initial_n: int, initial_acc: int) -> int {
+    let n = initial_n;
+    let acc = initial_acc;
+    let result = 0;
+    let running = true;
+
+    // 用循环不断处理尾调用 effect
+    while running {
+        let status = match factorial_tail(n, acc) {
+            // 当函数执行 @TailCall.call 时，捕获参数
+            @TailCall<int>.call(next_n, next_acc) => {
+                // 不调用 resume，直接返回 Continue 信号
+                TailCallResult::Continue(next_n, next_acc)
+            }
+            // 当函数返回最终结果时（不执行 effect）
+            value => {
+                TailCallResult::Done(value)
+            }
+        };
+
+        // 根据状态决定继续还是结束
+        match status {
+            TailCallResult::Continue(next_n, next_acc) => {
+                n = next_n;
+                acc = next_acc;
+                ()
+            }
+            TailCallResult::Done(value) => {
+                result = value;
+                running = false;
+                ()
+            }
+        };
+    };
+
+    result
+}
+
+// 使用 TCO 计算阶乘
+fn factorial(n: int) -> int {
+    with_tco(n, 1)
+}
+
+fn main() -> int {
+    // 计算 10! = 3628800
+    factorial(10)
+}

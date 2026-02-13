@@ -33,6 +33,7 @@ Source files are UTF-8.
 - Whitespace separates tokens but is otherwise insignificant (except inside string/bytes literals).
 - Line comments: `// ...` until end-of-line.
 - Block comments: `/* ... */` may nest.
+- A Unix-style “shebang” line is permitted as the first line of a source file: if the file begins with `#!`, the rest of that line is ignored (treated like a line comment).
 
 ---
 

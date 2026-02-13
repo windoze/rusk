@@ -1,0 +1,6 @@
+#!/usr/bin/env rusk
+// expect: ok int 3
+
+fn main() -> int {
+    1 + 2
+}
