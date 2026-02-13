@@ -167,6 +167,22 @@ This is a common early-stage design, but it increases:
 
 ### Phase 0 — Measurement First (Bench + Profiling)
 
+Status: **DONE** (implemented in-tree)
+
+Implemented artifacts:
+
+- Compiler timing API:
+  - `rusk_compiler::CompileMetrics`
+  - `compile_to_mir_with_options_and_metrics`
+  - `compile_file_to_mir_with_options_and_metrics`
+- Interpreter counters:
+  - `rusk_interpreter::InterpreterMetrics`
+  - `Interpreter::{metrics, reset_metrics, take_metrics}`
+- Measurement runner binary:
+  - `src/bin/rusk-measure.rs` (`--json`, `--warmup N`, `--iters N`)
+- Smoke tests to keep the instrumentation wired up:
+  - `tests/phase0_metrics.rs`
+
 Add a small, stable set of benchmarks and counters to track:
 
 **Compiler metrics**
@@ -199,6 +215,20 @@ Notes:
   no-std constraints out of core crates.
 
 ### Phase 1 — Interpreter: Eliminate Large MIR Clones
+
+Status: **DONE** (implemented in-tree)
+
+Implemented artifacts:
+
+- Interpreter stores the loaded MIR module as `Rc<Module>` and exposes `Interpreter::new_shared`
+  for cheap reuse across runs.
+- Hot loop executes borrowed MIR:
+  - `execute_instruction(&Instruction)`
+  - `execute_terminator(&Terminator)`
+- Call/branch paths no longer clone full `Function` bodies (including handler dispatch and block
+  entry).
+- `Frame` stores function identifiers as `Rc<str>` so the hot loop avoids allocating/cloning
+  function name strings per step.
 
 The interpreter should treat the loaded `Module` as immutable program data and avoid cloning it on
 execution paths.

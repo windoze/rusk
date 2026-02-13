@@ -23,6 +23,8 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::{cell::RefCell, mem};
+#[cfg(feature = "std")]
+use std::time::Instant;
 
 use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
 use rusk_mir::{
@@ -381,7 +383,7 @@ pub type Interpreter = InterpreterImpl<MarkSweepHeap>;
 /// collectors. Most users should use the `Interpreter` type alias, which uses
 /// `MarkSweepHeap`.
 pub struct InterpreterImpl<GC: GcHeap> {
-    module: Module,
+    module: Rc<Module>,
     type_reps: Vec<TypeRepNode>,
     type_rep_intern: HashMap<TypeRepNode, TypeRepId>,
     host_functions: BTreeMap<String, HostFunction<GC>>,
@@ -392,12 +394,49 @@ pub struct InterpreterImpl<GC: GcHeap> {
     free_roots: Vec<u32>,
     gc_threshold: usize,
     allocations_since_gc: usize,
+    metrics: InterpreterMetrics,
+}
+
+/// Runtime execution counters for profiling and benchmarking.
+///
+/// These counters are intended to be cheap to maintain and work in both `std` and `no_std`
+/// builds. Time-based fields are best-effort: `gc_nanos` is only populated when the `std` feature
+/// is enabled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InterpreterMetrics {
+    pub executed_instructions: u64,
+    pub executed_terminators: u64,
+    pub block_entries: u64,
+
+    pub allocations: u64,
+    pub gc_cycles: u64,
+    pub gc_nanos: u128,
+
+    pub call_instructions: u64,
+    pub icall_instructions: u64,
+    pub vcall_instructions: u64,
+    pub host_calls: u64,
+    pub mir_calls: u64,
+
+    pub br_terminators: u64,
+    pub cond_br_terminators: u64,
+    pub switch_terminators: u64,
+    pub return_terminators: u64,
+    pub trap_terminators: u64,
 }
 
 impl<GC: GcHeap + Default> InterpreterImpl<GC> {
     /// Creates a new interpreter instance for the given MIR module.
     pub fn new(module: Module) -> Self {
         Self::with_heap(module, GC::default())
+    }
+
+    /// Creates a new interpreter instance for a shared MIR module.
+    ///
+    /// This avoids cloning large `Module` values when repeatedly creating interpreter instances
+    /// for benchmarking or embedding.
+    pub fn new_shared(module: Rc<Module>) -> Self {
+        Self::with_heap_shared(module, GC::default())
     }
 }
 
@@ -406,6 +445,12 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     /// Creates a new interpreter instance using an explicit GC heap implementation.
     pub fn with_heap(module: Module, heap: GC) -> Self {
+        Self::with_heap_shared(Rc::new(module), heap)
+    }
+
+    /// Creates a new interpreter instance using an explicit GC heap implementation and a shared
+    /// MIR module.
+    pub fn with_heap_shared(module: Rc<Module>, heap: GC) -> Self {
         Self {
             module,
             type_reps: Vec::new(),
@@ -418,7 +463,23 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             free_roots: Vec::new(),
             gc_threshold: Self::DEFAULT_GC_THRESHOLD,
             allocations_since_gc: 0,
+            metrics: InterpreterMetrics::default(),
         }
+    }
+
+    /// Returns a snapshot of the current interpreter metrics.
+    pub fn metrics(&self) -> &InterpreterMetrics {
+        &self.metrics
+    }
+
+    /// Resets all interpreter metrics to zero.
+    pub fn reset_metrics(&mut self) {
+        self.metrics = InterpreterMetrics::default();
+    }
+
+    /// Takes the current metrics, resetting them to zero.
+    pub fn take_metrics(&mut self) -> InterpreterMetrics {
+        mem::take(&mut self.metrics)
     }
 
     /// Pins `value` as an external GC root.
@@ -471,11 +532,21 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     /// Forces a garbage collection using the current interpreter roots.
     pub fn collect_garbage_now(&mut self) {
         self.allocations_since_gc = 0;
+        self.metrics.gc_cycles = self.metrics.gc_cycles.saturating_add(1);
+        #[cfg(feature = "std")]
+        let gc_start = Instant::now();
         let roots = InterpreterRoots {
             stack: &self.stack,
             roots: &self.roots,
         };
         self.heap.collect_garbage(&roots);
+        #[cfg(feature = "std")]
+        {
+            self.metrics.gc_nanos = self
+                .metrics
+                .gc_nanos
+                .saturating_add(gc_start.elapsed().as_nanos());
+        }
     }
 
     /// Registers a host function callable via `call <name>(...)`.
@@ -579,19 +650,19 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
         self.validate_declared_host_functions()?;
 
-        let function = self
-            .module
-            .functions
-            .get(fn_name)
-            .ok_or_else(|| RuntimeError::UnknownFunction {
-                name: fn_name.to_string(),
-            })?
-            .clone();
+        let module = Rc::clone(&self.module);
+        let function =
+            module
+                .functions
+                .get(fn_name)
+                .ok_or_else(|| RuntimeError::UnknownFunction {
+                    name: fn_name.to_string(),
+                })?;
 
-        let mut frame = Frame::new(function, None);
-        self.init_params(&mut frame, &args)?;
+        let mut frame = Frame::new(Rc::from(fn_name), function.locals, None);
+        self.init_params(&mut frame, function, &args)?;
         self.stack.push(frame);
-        self.run_loop()
+        self.run_loop_with_module(module.as_ref())
     }
 
     /// Resumes a previously captured continuation token, injecting `value` as the result of the
@@ -634,11 +705,15 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     /// Returns an immutable view of the loaded MIR module.
     pub fn module(&self) -> &Module {
-        &self.module
+        self.module.as_ref()
     }
 
-    fn init_params(&self, frame: &mut Frame, args: &[Value]) -> Result<(), RuntimeError> {
-        let function = self.function(&frame.func)?;
+    fn init_params(
+        &self,
+        frame: &mut Frame,
+        function: &Function,
+        args: &[Value],
+    ) -> Result<(), RuntimeError> {
         if args.len() != function.params.len() {
             return Err(RuntimeError::Trap {
                 message: format!(
@@ -661,6 +736,11 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     }
 
     fn run_loop(&mut self) -> Result<Value, RuntimeError> {
+        let module = Rc::clone(&self.module);
+        self.run_loop_with_module(module.as_ref())
+    }
+
+    fn run_loop_with_module(&mut self, module: &Module) -> Result<Value, RuntimeError> {
         loop {
             let Some(frame_index) = self.stack.len().checked_sub(1) else {
                 return Err(RuntimeError::Trap {
@@ -670,30 +750,33 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
             let (func_name, block_id, ip) = {
                 let frame = &self.stack[frame_index];
-                (frame.func.clone(), frame.block, frame.ip)
+                (Rc::clone(&frame.func), frame.block, frame.ip)
             };
 
-            let function = self.function(&func_name)?;
-            let block = self.block(function, block_id)?;
+            let function = Self::function(module, func_name.as_ref())?;
+            let block = Self::block(function, block_id)?;
 
             if ip < block.instructions.len() {
-                let instr = block.instructions[ip].clone();
+                let instr = &block.instructions[ip];
                 // Advance before executing so calls/perform capture the "after" PC.
                 self.stack[frame_index].ip += 1;
-                self.execute_instruction(frame_index, instr)?;
+                self.metrics.executed_instructions =
+                    self.metrics.executed_instructions.saturating_add(1);
+                self.execute_instruction(module, frame_index, instr)?;
                 self.maybe_collect_garbage();
                 continue;
             }
 
-            let term = block.terminator.clone();
-            if let Some(final_value) = self.execute_terminator(frame_index, term)? {
+            let term = &block.terminator;
+            self.metrics.executed_terminators = self.metrics.executed_terminators.saturating_add(1);
+            if let Some(final_value) = self.execute_terminator(module, frame_index, term)? {
                 return Ok(final_value);
             }
         }
     }
 
-    fn function(&self, name: &str) -> Result<&Function, RuntimeError> {
-        self.module
+    fn function<'m>(module: &'m Module, name: &str) -> Result<&'m Function, RuntimeError> {
+        module
             .functions
             .get(name)
             .ok_or_else(|| RuntimeError::UnknownFunction {
@@ -701,11 +784,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             })
     }
 
-    fn block<'f>(
-        &self,
-        function: &'f Function,
-        block: BlockId,
-    ) -> Result<&'f BasicBlock, RuntimeError> {
+    fn block(function: &Function, block: BlockId) -> Result<&BasicBlock, RuntimeError> {
         function
             .blocks
             .get(block.0)
@@ -729,6 +808,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn alloc_heap(&mut self, value: HeapValue) -> GcRef {
         self.allocations_since_gc = self.allocations_since_gc.saturating_add(1);
+        self.metrics.allocations = self.metrics.allocations.saturating_add(1);
         self.heap.alloc(value)
     }
 
@@ -859,7 +939,12 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
-    fn type_test(&mut self, value: &Value, target: TypeRepId) -> Result<bool, RuntimeError> {
+    fn type_test(
+        &mut self,
+        module: &Module,
+        value: &Value,
+        target: TypeRepId,
+    ) -> Result<bool, RuntimeError> {
         let target = self.type_rep_node(target);
 
         Ok(match &target.ctor {
@@ -921,8 +1006,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     _ => return Ok(false),
                 };
 
-                let implements_iface = self
-                    .module
+                let implements_iface = module
                     .interface_impls
                     .get(dyn_type)
                     .is_some_and(|ifaces| ifaces.contains(iface.as_str()));
@@ -944,38 +1028,39 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn execute_instruction(
         &mut self,
+        module: &Module,
         frame_index: usize,
-        instr: Instruction,
+        instr: &Instruction,
     ) -> Result<(), RuntimeError> {
         match instr {
             Instruction::Const { dst, value } => {
-                let v = self.eval_const(&value);
-                self.stack[frame_index].write_local(dst, v)?;
+                let v = self.eval_const(value);
+                self.stack[frame_index].write_local(*dst, v)?;
             }
             Instruction::Copy { dst, src } => {
-                let v = self.stack[frame_index].read_local(src)?;
-                self.stack[frame_index].write_local(dst, v)?;
+                let v = self.stack[frame_index].read_local(*src)?;
+                self.stack[frame_index].write_local(*dst, v)?;
             }
             Instruction::Move { dst, src } => {
-                let v = self.stack[frame_index].take_local(src)?;
-                self.stack[frame_index].write_local(dst, v)?;
+                let v = self.stack[frame_index].take_local(*src)?;
+                self.stack[frame_index].write_local(*dst, v)?;
             }
             Instruction::AsReadonly { dst, src } => {
                 let v = self.stack[frame_index]
-                    .read_local(src)?
+                    .read_local(*src)?
                     .into_readonly_view();
-                self.stack[frame_index].write_local(dst, v)?;
+                self.stack[frame_index].write_local(*dst, v)?;
             }
             Instruction::IsType { dst, value, ty } => {
-                let v = self.eval_operand(frame_index, &value)?;
-                let target = self.eval_type_rep_operand(frame_index, &ty)?;
-                let ok = self.type_test(&v, target)?;
-                self.stack[frame_index].write_local(dst, Value::Bool(ok))?;
+                let v = self.eval_operand(frame_index, value)?;
+                let target = self.eval_type_rep_operand(frame_index, ty)?;
+                let ok = self.type_test(module, &v, target)?;
+                self.stack[frame_index].write_local(*dst, Value::Bool(ok))?;
             }
             Instruction::CheckedCast { dst, value, ty } => {
-                let v = self.eval_operand(frame_index, &value)?;
-                let target = self.eval_type_rep_operand(frame_index, &ty)?;
-                let ok = self.type_test(&v, target)?;
+                let v = self.eval_operand(frame_index, value)?;
+                let target = self.eval_type_rep_operand(frame_index, ty)?;
+                let ok = self.type_test(module, &v, target)?;
                 let (variant, fields) = if ok {
                     ("Some", vec![v])
                 } else {
@@ -987,7 +1072,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     variant: variant.to_string(),
                     fields,
                 });
-                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+                self.stack[frame_index].write_local(*dst, Value::Ref(RefValue::new(handle)))?;
             }
 
             Instruction::MakeTypeRep { dst, base, args } => {
@@ -1003,10 +1088,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     TypeRepLit::String => TypeCtor::String,
                     TypeRepLit::Bytes => TypeCtor::Bytes,
                     TypeRepLit::Array => TypeCtor::Array,
-                    TypeRepLit::Tuple(arity) => TypeCtor::Tuple(arity),
-                    TypeRepLit::Struct(name) => TypeCtor::Struct(name),
-                    TypeRepLit::Enum(name) => TypeCtor::Enum(name),
-                    TypeRepLit::Interface(name) => TypeCtor::Interface(name),
+                    TypeRepLit::Tuple(arity) => TypeCtor::Tuple(*arity),
+                    TypeRepLit::Struct(name) => TypeCtor::Struct(name.clone()),
+                    TypeRepLit::Enum(name) => TypeCtor::Enum(name.clone()),
+                    TypeRepLit::Interface(name) => TypeCtor::Interface(name.clone()),
                     TypeRepLit::Fn => TypeCtor::Fn,
                     TypeRepLit::Cont => TypeCtor::Cont,
                 };
@@ -1014,7 +1099,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     ctor,
                     args: arg_ids,
                 });
-                self.stack[frame_index].write_local(dst, Value::TypeRep(id))?;
+                self.stack[frame_index].write_local(*dst, Value::TypeRep(id))?;
             }
 
             Instruction::MakeStruct {
@@ -1028,37 +1113,37 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     .map(|op| self.eval_type_rep_operand(frame_index, op))
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut map = BTreeMap::new();
-                for (k, op) in fields {
-                    let v = self.eval_operand(frame_index, &op)?;
-                    map.insert(k, v);
+                for (k, op) in fields.iter() {
+                    let v = self.eval_operand(frame_index, op)?;
+                    map.insert(k.clone(), v);
                 }
                 let obj = HeapValue::Struct {
-                    type_name,
+                    type_name: type_name.clone(),
                     type_args,
                     fields: map,
                 };
                 let handle = self.alloc_heap(obj);
-                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+                self.stack[frame_index].write_local(*dst, Value::Ref(RefValue::new(handle)))?;
             }
             Instruction::MakeArray { dst, items } => {
                 let mut values = Vec::with_capacity(items.len());
                 for op in items {
-                    values.push(self.eval_operand(frame_index, &op)?);
+                    values.push(self.eval_operand(frame_index, op)?);
                 }
                 let handle = self.alloc_heap(HeapValue::Array(values));
-                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+                self.stack[frame_index].write_local(*dst, Value::Ref(RefValue::new(handle)))?;
             }
             Instruction::MakeTuple { dst, items } => {
                 if items.is_empty() {
-                    self.stack[frame_index].write_local(dst, Value::Unit)?;
+                    self.stack[frame_index].write_local(*dst, Value::Unit)?;
                     return Ok(());
                 }
                 let mut values = Vec::with_capacity(items.len());
                 for op in items {
-                    values.push(self.eval_operand(frame_index, &op)?);
+                    values.push(self.eval_operand(frame_index, op)?);
                 }
                 let handle = self.alloc_heap(HeapValue::Tuple(values));
-                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+                self.stack[frame_index].write_local(*dst, Value::Ref(RefValue::new(handle)))?;
             }
             Instruction::MakeEnum {
                 dst,
@@ -1073,18 +1158,18 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut values = Vec::with_capacity(fields.len());
                 for op in fields {
-                    values.push(self.eval_operand(frame_index, &op)?);
+                    values.push(self.eval_operand(frame_index, op)?);
                 }
                 let handle = self.alloc_heap(HeapValue::Enum {
-                    enum_name,
+                    enum_name: enum_name.clone(),
                     type_args,
-                    variant,
+                    variant: variant.clone(),
                     fields: values,
                 });
-                self.stack[frame_index].write_local(dst, Value::Ref(RefValue::new(handle)))?;
+                self.stack[frame_index].write_local(*dst, Value::Ref(RefValue::new(handle)))?;
             }
             Instruction::GetField { dst, obj, field } => {
-                let v = self.eval_operand(frame_index, &obj)?;
+                let v = self.eval_operand(frame_index, obj)?;
                 let Value::Ref(r) = v else {
                     return Err(RuntimeError::TypeError {
                         op: "get_field",
@@ -1093,21 +1178,29 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     });
                 };
                 let value = match self.heap_get(r.handle)? {
-                    HeapValue::Struct { fields, .. } => fields
-                        .get(&field)
-                        .cloned()
-                        .ok_or(RuntimeError::MissingField { field })?,
+                    HeapValue::Struct { fields, .. } => {
+                        fields
+                            .get(field)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::MissingField {
+                                field: field.clone(),
+                            })?
+                    }
                     HeapValue::Tuple(items) => {
                         let Some(idx) = field
                             .strip_prefix('.')
                             .and_then(|s| s.parse::<usize>().ok())
                         else {
-                            return Err(RuntimeError::MissingField { field });
+                            return Err(RuntimeError::MissingField {
+                                field: field.clone(),
+                            });
                         };
                         items
                             .get(idx)
                             .cloned()
-                            .ok_or(RuntimeError::MissingField { field })?
+                            .ok_or_else(|| RuntimeError::MissingField {
+                                field: field.clone(),
+                            })?
                     }
                     _ => {
                         return Err(RuntimeError::TypeError {
@@ -1117,10 +1210,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         });
                     }
                 };
-                self.stack[frame_index].write_local(dst, value)?;
+                self.stack[frame_index].write_local(*dst, value)?;
             }
             Instruction::SetField { obj, field, value } => {
-                let obj_v = self.eval_operand(frame_index, &obj)?;
+                let obj_v = self.eval_operand(frame_index, obj)?;
                 let Value::Ref(r) = obj_v else {
                     return Err(RuntimeError::TypeError {
                         op: "set_field",
@@ -1131,23 +1224,29 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 if r.readonly {
                     return Err(RuntimeError::ReadonlyWrite);
                 }
-                let val = self.eval_operand(frame_index, &value)?;
+                let val = self.eval_operand(frame_index, value)?;
                 match self.heap_get_mut(r.handle)? {
                     HeapValue::Struct { fields, .. } => {
-                        if !fields.contains_key(&field) {
-                            return Err(RuntimeError::MissingField { field });
-                        }
-                        fields.insert(field, val);
+                        let Some(slot) = fields.get_mut(field) else {
+                            return Err(RuntimeError::MissingField {
+                                field: field.clone(),
+                            });
+                        };
+                        *slot = val;
                     }
                     HeapValue::Tuple(items) => {
                         let Some(idx) = field
                             .strip_prefix('.')
                             .and_then(|s| s.parse::<usize>().ok())
                         else {
-                            return Err(RuntimeError::MissingField { field });
+                            return Err(RuntimeError::MissingField {
+                                field: field.clone(),
+                            });
                         };
                         let Some(slot) = items.get_mut(idx) else {
-                            return Err(RuntimeError::MissingField { field });
+                            return Err(RuntimeError::MissingField {
+                                field: field.clone(),
+                            });
                         };
                         *slot = val;
                     }
@@ -1162,7 +1261,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             }
 
             Instruction::IndexGet { dst, arr, idx } => {
-                let arr_v = self.eval_operand(frame_index, &arr)?;
+                let arr_v = self.eval_operand(frame_index, arr)?;
                 let Value::Ref(r) = arr_v else {
                     return Err(RuntimeError::TypeError {
                         op: "index_get",
@@ -1170,7 +1269,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: arr_v.kind(),
                     });
                 };
-                let idx_v = self.eval_operand(frame_index, &idx)?;
+                let idx_v = self.eval_operand(frame_index, idx)?;
                 let Value::Int(i) = idx_v else {
                     return Err(RuntimeError::TypeError {
                         op: "index_get",
@@ -1196,10 +1295,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         });
                     }
                 };
-                self.stack[frame_index].write_local(dst, element)?;
+                self.stack[frame_index].write_local(*dst, element)?;
             }
             Instruction::IndexSet { arr, idx, value } => {
-                let arr_v = self.eval_operand(frame_index, &arr)?;
+                let arr_v = self.eval_operand(frame_index, arr)?;
                 let Value::Ref(r) = arr_v else {
                     return Err(RuntimeError::TypeError {
                         op: "index_set",
@@ -1210,7 +1309,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 if r.readonly {
                     return Err(RuntimeError::ReadonlyWrite);
                 }
-                let idx_v = self.eval_operand(frame_index, &idx)?;
+                let idx_v = self.eval_operand(frame_index, idx)?;
                 let Value::Int(i) = idx_v else {
                     return Err(RuntimeError::TypeError {
                         op: "index_set",
@@ -1218,7 +1317,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: idx_v.kind(),
                     });
                 };
-                let val = self.eval_operand(frame_index, &value)?;
+                let val = self.eval_operand(frame_index, value)?;
                 let HeapValue::Array(items) = self.heap_get_mut(r.handle)? else {
                     return Err(RuntimeError::TypeError {
                         op: "index_set",
@@ -1240,7 +1339,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 items[idx_usize] = val;
             }
             Instruction::Len { dst, arr } => {
-                let arr_v = self.eval_operand(frame_index, &arr)?;
+                let arr_v = self.eval_operand(frame_index, arr)?;
                 let Value::Ref(r) = arr_v else {
                     return Err(RuntimeError::TypeError {
                         op: "len",
@@ -1258,15 +1357,17 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         });
                     }
                 };
-                self.stack[frame_index].write_local(dst, Value::Int(len as i64))?;
+                self.stack[frame_index].write_local(*dst, Value::Int(len as i64))?;
             }
 
             Instruction::Call { dst, func, args } => {
-                let arg_values = self.eval_args(frame_index, &args)?;
-                self.call_function(frame_index, dst, &func, arg_values)?;
+                self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
+                let arg_values = self.eval_args(frame_index, args)?;
+                self.call_function(module, frame_index, *dst, func.as_str(), arg_values)?;
             }
             Instruction::ICall { dst, fnptr, args } => {
-                let fn_value = self.eval_operand(frame_index, &fnptr)?;
+                self.metrics.icall_instructions = self.metrics.icall_instructions.saturating_add(1);
+                let fn_value = self.eval_operand(frame_index, fnptr)?;
                 let Value::Function(name) = fn_value else {
                     return Err(RuntimeError::TypeError {
                         op: "icall",
@@ -1274,8 +1375,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: fn_value.kind(),
                     });
                 };
-                let arg_values = self.eval_args(frame_index, &args)?;
-                self.call_function(frame_index, dst, &name, arg_values)?;
+                let arg_values = self.eval_args(frame_index, args)?;
+                self.call_function(module, frame_index, *dst, name.as_str(), arg_values)?;
             }
             Instruction::VCall {
                 dst,
@@ -1284,7 +1385,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 method_type_args,
                 args,
             } => {
-                let recv = self.eval_operand(frame_index, &obj)?;
+                self.metrics.vcall_instructions = self.metrics.vcall_instructions.saturating_add(1);
+                let recv = self.eval_operand(frame_index, obj)?;
                 let Value::Ref(r) = &recv else {
                     return Err(RuntimeError::TypeError {
                         op: "vcall",
@@ -1312,24 +1414,23 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     }
                 };
                 let lookup_key = (type_name.clone(), method.clone());
-                let Some(fn_name) = self.module.methods.get(&lookup_key) else {
+                let Some(fn_name) = module.methods.get(&lookup_key) else {
                     return Err(RuntimeError::Trap {
                         message: format!("unresolved vcall method: {method} on {type_name}"),
                     });
                 };
-                let fn_name = fn_name.clone();
                 let mut arg_values =
                     Vec::with_capacity(type_args.len() + method_type_args.len() + args.len() + 1);
                 for id in type_args {
                     arg_values.push(Value::TypeRep(id));
                 }
                 for op in method_type_args {
-                    let id = self.eval_type_rep_operand(frame_index, &op)?;
+                    let id = self.eval_type_rep_operand(frame_index, op)?;
                     arg_values.push(Value::TypeRep(id));
                 }
                 arg_values.push(recv);
-                arg_values.extend(self.eval_args(frame_index, &args)?);
-                self.call_function(frame_index, dst, &fn_name, arg_values)?;
+                arg_values.extend(self.eval_args(frame_index, args)?);
+                self.call_function(module, frame_index, *dst, fn_name.as_str(), arg_values)?;
             }
 
             Instruction::PushHandler {
@@ -1338,11 +1439,12 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             } => {
                 let owner_depth = frame_index;
                 // Validate handler blocks have `binds + 1` params and materialize runtime effect ids.
-                let function = self.function(&self.stack[frame_index].func)?.clone();
+                let func_name = Rc::clone(&self.stack[frame_index].func);
+                let function = Self::function(module, func_name.as_ref())?;
                 let mut runtime_clauses = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     let bind_count = count_binds_in_patterns(&clause.arg_patterns);
-                    let block = self.block(&function, clause.target)?;
+                    let block = Self::block(function, clause.target)?;
                     let expected = bind_count + 1;
                     let got = block.params.len();
                     if expected != got {
@@ -1362,11 +1464,11 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         .collect::<Result<Vec<_>, _>>()?;
                     runtime_clauses.push(RuntimeHandlerClause {
                         effect: RuntimeEffectId {
-                            interface: clause.effect.interface,
+                            interface: clause.effect.interface.clone(),
                             interface_args,
-                            method: clause.effect.method,
+                            method: clause.effect.method.clone(),
                         },
-                        arg_patterns: clause.arg_patterns,
+                        arg_patterns: clause.arg_patterns.clone(),
                         target: clause.target,
                     });
                 }
@@ -1386,15 +1488,15 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             }
 
             Instruction::Perform { dst, effect, args } => {
-                let arg_values = self.eval_args(frame_index, &args)?;
-                self.perform_effect(frame_index, dst, effect, arg_values)?;
+                let arg_values = self.eval_args(frame_index, args)?;
+                self.perform_effect(module, frame_index, *dst, effect, arg_values)?;
             }
             Instruction::Resume { dst, k, value } => {
-                let k_value = self.eval_operand(frame_index, &k)?;
+                let k_value = self.eval_operand(frame_index, k)?;
                 let Value::Continuation(token) = k_value else {
                     return Err(RuntimeError::InvalidResume);
                 };
-                let v = self.eval_operand(frame_index, &value)?;
+                let v = self.eval_operand(frame_index, value)?;
                 let Some(mut cont) = token.take_state() else {
                     return Err(RuntimeError::InvalidResume);
                 };
@@ -1430,7 +1532,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 );
 
                 let bottom = cont.stack.first_mut().ok_or(RuntimeError::InvalidResume)?;
-                bottom.return_dst = dst;
+                bottom.return_dst = *dst;
 
                 for handler in &mut cont.handlers {
                     handler.owner_depth = handler.owner_depth.saturating_add(base_depth);
@@ -1457,6 +1559,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn call_function(
         &mut self,
+        module: &Module,
         frame_index: usize,
         dst: Option<Local>,
         func: &str,
@@ -1464,6 +1567,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     ) -> Result<(), RuntimeError> {
         let host = self.host_functions.get(func).cloned();
         if let Some(host) = host {
+            self.metrics.host_calls = self.metrics.host_calls.saturating_add(1);
             let value = host(self, &args)?;
             if let Some(dst_local) = dst {
                 self.stack[frame_index].write_local(dst_local, value)?;
@@ -1471,18 +1575,20 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             return Ok(());
         }
 
-        let callee = self.function(func)?.clone();
-        let mut new_frame = Frame::new(callee, dst);
-        self.init_params(&mut new_frame, &args)?;
+        self.metrics.mir_calls = self.metrics.mir_calls.saturating_add(1);
+        let callee = Self::function(module, func)?;
+        let mut new_frame = Frame::new(Rc::from(func), callee.locals, dst);
+        self.init_params(&mut new_frame, callee, &args)?;
         self.stack.push(new_frame);
         Ok(())
     }
 
     fn perform_effect(
         &mut self,
+        module: &Module,
         frame_index: usize,
         dst: Option<Local>,
-        effect: EffectSpec,
+        effect: &EffectSpec,
         args: Vec<Value>,
     ) -> Result<(), RuntimeError> {
         let interface_args = effect
@@ -1491,17 +1597,17 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             .map(|op| self.eval_type_rep_operand(frame_index, op))
             .collect::<Result<Vec<_>, _>>()?;
         let effect_id = RuntimeEffectId {
-            interface: effect.interface,
+            interface: effect.interface.clone(),
             interface_args,
-            method: effect.method,
+            method: effect.method.clone(),
         };
 
         let Some((handler_index, clause_index, binds)) =
             self.find_handler_for_effect(&effect_id, &args)?
         else {
             return Err(RuntimeError::UnhandledEffect {
-                interface: effect_id.interface,
-                method: effect_id.method,
+                interface: effect_id.interface.clone(),
+                method: effect_id.method.clone(),
             });
         };
 
@@ -1550,10 +1656,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
         // Transfer control to handler block in the now-top frame.
         let handler_frame_index = self.stack.len() - 1;
-        let handler_func_name = self.stack[handler_frame_index].func.clone();
-        let function = self.function(&handler_func_name)?.clone();
-        let clause = self.handlers[handler_index].clauses[clause_index].clone();
-        let handler_block = self.block(&function, clause.target)?;
+        let handler_func_name = Rc::clone(&self.stack[handler_frame_index].func);
+        let function = Self::function(module, handler_func_name.as_ref())?;
+        let clause = &self.handlers[handler_index].clauses[clause_index];
+        let handler_block = Self::block(function, clause.target)?;
         let expected_params = binds.len() + 1;
         let got_params = handler_block.params.len();
         if expected_params != got_params {
@@ -1566,7 +1672,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
         let mut block_args = binds;
         block_args.push(Value::Continuation(token));
-        self.enter_block(handler_frame_index, clause.target, block_args)?;
+        self.enter_block(module, handler_frame_index, clause.target, block_args)?;
         Ok(())
     }
 
@@ -1607,13 +1713,15 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn enter_block(
         &mut self,
+        module: &Module,
         frame_index: usize,
         target: BlockId,
         args: Vec<Value>,
     ) -> Result<(), RuntimeError> {
-        let func_name = self.stack[frame_index].func.clone();
-        let function = self.function(&func_name)?.clone();
-        let block = self.block(&function, target)?;
+        self.metrics.block_entries = self.metrics.block_entries.saturating_add(1);
+        let func_name = Rc::clone(&self.stack[frame_index].func);
+        let function = Self::function(module, func_name.as_ref())?;
+        let block = Self::block(function, target)?;
 
         if args.len() != block.params.len() {
             return Err(RuntimeError::InvalidBlockArgs {
@@ -1634,13 +1742,15 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
     fn execute_terminator(
         &mut self,
+        module: &Module,
         frame_index: usize,
-        term: Terminator,
+        term: &Terminator,
     ) -> Result<Option<Value>, RuntimeError> {
         match term {
             Terminator::Br { target, args } => {
-                let vals = self.eval_args(frame_index, &args)?;
-                self.enter_block(frame_index, target, vals)?;
+                self.metrics.br_terminators = self.metrics.br_terminators.saturating_add(1);
+                let vals = self.eval_args(frame_index, args)?;
+                self.enter_block(module, frame_index, *target, vals)?;
                 Ok(None)
             }
             Terminator::CondBr {
@@ -1650,7 +1760,9 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 else_target,
                 else_args,
             } => {
-                let c = self.eval_operand(frame_index, &cond)?;
+                self.metrics.cond_br_terminators =
+                    self.metrics.cond_br_terminators.saturating_add(1);
+                let c = self.eval_operand(frame_index, cond)?;
                 let Value::Bool(flag) = c else {
                     return Err(RuntimeError::TypeError {
                         op: "cond_br",
@@ -1659,12 +1771,12 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     });
                 };
                 let (target, args) = if flag {
-                    (then_target, then_args)
+                    (*then_target, then_args.as_slice())
                 } else {
-                    (else_target, else_args)
+                    (*else_target, else_args.as_slice())
                 };
-                let vals = self.eval_args(frame_index, &args)?;
-                self.enter_block(frame_index, target, vals)?;
+                let vals = self.eval_args(frame_index, args)?;
+                self.enter_block(module, frame_index, target, vals)?;
                 Ok(None)
             }
             Terminator::Switch {
@@ -1672,25 +1784,27 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 cases,
                 default,
             } => {
-                let scrutinee = self.eval_operand(frame_index, &value)?;
+                self.metrics.switch_terminators = self.metrics.switch_terminators.saturating_add(1);
+                let scrutinee = self.eval_operand(frame_index, value)?;
                 for SwitchCase { pattern, target } in cases {
                     let mut binds = Vec::new();
                     if match_pattern(
                         &mut self.heap,
                         &mut self.allocations_since_gc,
-                        &pattern,
+                        pattern,
                         &scrutinee,
                         &mut binds,
                     )? {
-                        self.enter_block(frame_index, target, binds)?;
+                        self.enter_block(module, frame_index, *target, binds)?;
                         return Ok(None);
                     }
                 }
-                self.enter_block(frame_index, default, Vec::new())?;
+                self.enter_block(module, frame_index, *default, Vec::new())?;
                 Ok(None)
             }
             Terminator::Return { value } => {
-                let v = self.eval_operand(frame_index, &value)?;
+                self.metrics.return_terminators = self.metrics.return_terminators.saturating_add(1);
+                let v = self.eval_operand(frame_index, value)?;
                 let returning = self
                     .stack
                     .pop()
@@ -1705,7 +1819,12 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 }
                 Ok(None)
             }
-            Terminator::Trap { message } => Err(RuntimeError::Trap { message }),
+            Terminator::Trap { message } => {
+                self.metrics.trap_terminators = self.metrics.trap_terminators.saturating_add(1);
+                Err(RuntimeError::Trap {
+                    message: message.clone(),
+                })
+            }
         }
     }
 
@@ -1722,7 +1841,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
 #[derive(Clone)]
 struct Frame {
-    func: String,
+    func: Rc<str>,
     block: BlockId,
     ip: usize,
     locals: Vec<Option<Value>>,
@@ -1730,10 +1849,10 @@ struct Frame {
 }
 
 impl Frame {
-    fn new(function: Function, return_dst: Option<Local>) -> Self {
-        let locals = vec![None; function.locals];
+    fn new(func: Rc<str>, locals_count: usize, return_dst: Option<Local>) -> Self {
+        let locals = vec![None; locals_count];
         Self {
-            func: function.name,
+            func,
             block: BlockId(0),
             ip: 0,
             locals,

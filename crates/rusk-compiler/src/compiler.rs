@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const INTERNAL_CELL_STRUCT: &str = "$Cell";
 const CELL_FIELD_SET: &str = "set";
@@ -109,6 +110,30 @@ impl From<crate::modules::LoadError> for CompileError {
     }
 }
 
+/// Compile-time measurements for the compiler pipeline.
+///
+/// These are intended for local benchmarking/profiling. Values are best-effort and may vary
+/// across platforms (timer resolution, scheduling, etc.).
+#[derive(Clone, Debug, Default)]
+pub struct CompileMetrics {
+    /// Time spent loading module files from disk (only for `*_file_*` entrypoints).
+    pub load_time: Duration,
+    /// Number of `.rusk` files read by the module loader.
+    pub files_read: usize,
+    /// Total bytes read across all loaded `.rusk` files.
+    pub bytes_read: usize,
+    /// Time spent reading module files from disk.
+    pub read_time: Duration,
+    /// Time spent parsing source text into an AST.
+    pub parse_time: Duration,
+    /// Time spent building the environment + typechecking.
+    pub typecheck_time: Duration,
+    /// Time spent lowering typed AST into MIR.
+    pub lower_time: Duration,
+    /// Total wall time of the compile entrypoint.
+    pub total_time: Duration,
+}
+
 /// Compiles a single Rusk source file into MIR.
 ///
 /// This is the front-end entrypoint used by tests and the CLI.
@@ -135,6 +160,45 @@ pub fn compile_to_mir_with_options(
     })();
 
     result.map_err(|e| e.with_source_map(&source_map))
+}
+
+/// Compiles a single Rusk source string into MIR, returning pipeline timing metrics.
+pub fn compile_to_mir_with_options_and_metrics(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<(Module, CompileMetrics), CompileError> {
+    let total_start = Instant::now();
+    let mut metrics = CompileMetrics::default();
+
+    let mut source_map = SourceMap::new();
+    source_map.add_source(
+        SourceName::Virtual("<string>".to_string()),
+        Arc::<str>::from(source),
+        0,
+    );
+
+    let result: Result<Module, CompileError> = (|| {
+        let parse_start = Instant::now();
+        let mut parser = Parser::new(source)?;
+        let program = parser.parse_program()?;
+        metrics.parse_time = parse_start.elapsed();
+
+        let typecheck_start = Instant::now();
+        let env = typeck::build_env(&program, options)?;
+        let types = typeck::typecheck_program(&program, &env)?;
+        metrics.typecheck_time = typecheck_start.elapsed();
+
+        let lower_start = Instant::now();
+        let module = Compiler::new(env, types).compile_program(&program)?;
+        metrics.lower_time = lower_start.elapsed();
+
+        Ok(module)
+    })();
+
+    metrics.total_time = total_start.elapsed();
+    result
+        .map(|module| (module, metrics))
+        .map_err(|e| e.with_source_map(&source_map))
 }
 
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR.
@@ -167,6 +231,59 @@ pub fn compile_file_to_mir_with_options(
     };
 
     compile_program_to_mir(&program, options).map_err(|e| e.with_source_map(loader.source_map()))
+}
+
+/// Compiles an entry file (and its `mod foo;` dependencies) into MIR with timing metrics.
+pub fn compile_file_to_mir_with_options_and_metrics(
+    entry_path: &Path,
+    options: &CompileOptions,
+) -> Result<(Module, CompileMetrics), CompileError> {
+    let total_start = Instant::now();
+    let mut metrics = CompileMetrics::default();
+
+    let load_start = Instant::now();
+    let mut loader = ModuleLoader::new();
+    let program = match loader.load_program_from_file(entry_path) {
+        Ok(program) => program,
+        Err(err) => {
+            let mut err = CompileError::from(err).with_source_map(loader.source_map());
+            if err.rendered_location.is_none() {
+                let mut fallback = SourceMap::new();
+                fallback.add_source(
+                    SourceName::Path(entry_path.to_path_buf()),
+                    Arc::<str>::from(""),
+                    0,
+                );
+                err = err.with_source_map(&fallback);
+            }
+            return Err(err);
+        }
+    };
+    metrics.load_time = load_start.elapsed();
+
+    let loader_metrics = loader.metrics();
+    metrics.files_read = loader_metrics.files_read;
+    metrics.bytes_read = loader_metrics.bytes_read;
+    metrics.read_time = loader_metrics.read_time;
+    metrics.parse_time = loader_metrics.parse_time;
+
+    let result: Result<Module, CompileError> = (|| {
+        let typecheck_start = Instant::now();
+        let env = typeck::build_env(&program, options)?;
+        let types = typeck::typecheck_program(&program, &env)?;
+        metrics.typecheck_time = typecheck_start.elapsed();
+
+        let lower_start = Instant::now();
+        let module = Compiler::new(env, types).compile_program(&program)?;
+        metrics.lower_time = lower_start.elapsed();
+
+        Ok(module)
+    })();
+
+    metrics.total_time = total_start.elapsed();
+    result
+        .map(|module| (module, metrics))
+        .map_err(|e| e.with_source_map(loader.source_map()))
 }
 
 fn compile_program_to_mir(

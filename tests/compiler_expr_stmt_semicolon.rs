@@ -44,4 +44,3 @@ fn let_statement_still_requires_a_semicolon_even_with_block_initializer() {
         "unexpected error message: {err:?}"
     );
 }
-

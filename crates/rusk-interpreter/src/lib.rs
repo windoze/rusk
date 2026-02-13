@@ -13,7 +13,7 @@ pub mod corelib;
 // Re-export commonly used types
 pub use corelib::register_core_host_fns;
 pub use gc::{GcHeap, GcRef, MarkSweepHeap};
-pub use interpreter::{Interpreter, RuntimeError, Value};
+pub use interpreter::{Interpreter, InterpreterMetrics, RuntimeError, Value};
 
 #[cfg(feature = "serde")]
 #[derive(Debug)]

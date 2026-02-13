@@ -8,6 +8,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadError {
@@ -1403,6 +1404,15 @@ pub(crate) struct ModuleLoader {
     next_base_offset: usize,
     loaded_files: BTreeSet<PathBuf>,
     source_map: SourceMap,
+    metrics: ModuleLoaderMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ModuleLoaderMetrics {
+    pub(crate) files_read: usize,
+    pub(crate) bytes_read: usize,
+    pub(crate) read_time: Duration,
+    pub(crate) parse_time: Duration,
 }
 
 impl ModuleLoader {
@@ -1411,11 +1421,16 @@ impl ModuleLoader {
             next_base_offset: 0,
             loaded_files: BTreeSet::new(),
             source_map: SourceMap::new(),
+            metrics: ModuleLoaderMetrics::default(),
         }
     }
 
     pub(crate) fn source_map(&self) -> &SourceMap {
         &self.source_map
+    }
+
+    pub(crate) fn metrics(&self) -> ModuleLoaderMetrics {
+        self.metrics
     }
 
     pub(crate) fn load_program_from_file(
@@ -1424,10 +1439,14 @@ impl ModuleLoader {
     ) -> Result<Program, LoadError> {
         let display_path = entry_path.to_path_buf();
 
+        let read_start = Instant::now();
         let source = fs::read_to_string(entry_path).map_err(|e| LoadError {
             message: format!("failed to read `{}`: {e}", entry_path.display()),
             span: Span::new(0, 0),
         })?;
+        self.metrics.files_read += 1;
+        self.metrics.bytes_read = self.metrics.bytes_read.saturating_add(source.len());
+        self.metrics.read_time += read_start.elapsed();
 
         let canon_entry = entry_path
             .canonicalize()
@@ -1442,8 +1461,10 @@ impl ModuleLoader {
             base_offset,
         );
 
+        let parse_start = Instant::now();
         let mut parser = Parser::with_base_offset(&src, base_offset)?;
         let mut program = parser.parse_program()?;
+        self.metrics.parse_time += parse_start.elapsed();
 
         let module_dir = display_path
             .parent()
@@ -1532,10 +1553,14 @@ impl ModuleLoader {
                     });
                 }
 
+                let read_start = Instant::now();
                 let source = fs::read_to_string(&canon).map_err(|e| LoadError {
                     message: format!("failed to read `{}`: {e}", canon.display()),
                     span: item.span,
                 })?;
+                self.metrics.files_read += 1;
+                self.metrics.bytes_read = self.metrics.bytes_read.saturating_add(source.len());
+                self.metrics.read_time += read_start.elapsed();
                 let src: Arc<str> = Arc::from(source);
                 let base_offset = self.alloc_base_offset(&src);
                 self.source_map.add_source(
@@ -1543,8 +1568,10 @@ impl ModuleLoader {
                     Arc::clone(&src),
                     base_offset,
                 );
+                let parse_start = Instant::now();
                 let mut parser = Parser::with_base_offset(&src, base_offset)?;
                 let mut program = parser.parse_program()?;
+                self.metrics.parse_time += parse_start.elapsed();
                 program.items = self.inline_modules(program.items, &child_dir)?;
 
                 Ok(ModItem {

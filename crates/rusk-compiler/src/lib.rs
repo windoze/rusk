@@ -12,8 +12,9 @@ pub mod compiler;
 
 // Re-export commonly used types
 pub use compiler::{
-    CompileError, compile_file_to_mir, compile_file_to_mir_with_options, compile_to_mir,
-    compile_to_mir_with_options,
+    CompileError, CompileMetrics, compile_file_to_mir, compile_file_to_mir_with_options,
+    compile_file_to_mir_with_options_and_metrics, compile_to_mir, compile_to_mir_with_options,
+    compile_to_mir_with_options_and_metrics,
 };
 pub use host::{CompileOptions, HostFunctionDecl, HostModuleDecl, HostVisibility};
 pub use rusk_mir::{HostFnSig, HostType};

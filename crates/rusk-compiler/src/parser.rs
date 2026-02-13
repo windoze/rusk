@@ -1208,7 +1208,10 @@ impl<'a> Parser<'a> {
     }
 
     fn is_trailing_closure_callee(expr: &Expr) -> bool {
-        matches!(expr, Expr::Call { .. } | Expr::Path { .. } | Expr::Field { .. })
+        matches!(
+            expr,
+            Expr::Call { .. } | Expr::Path { .. } | Expr::Field { .. }
+        )
     }
 
     fn parse_expr_bp_no_struct_lit(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
