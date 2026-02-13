@@ -23,7 +23,6 @@ Local commands run (results summarized below):
 
 - `cargo test` ✅
 - `cargo clippy -- -D warnings` ✅
-- Feature/build matrix spot-checks (see “P0”): several ❌ failures
 
 ---
 
