@@ -51,6 +51,55 @@ fn on_cleanup(cleanup_fn: fn()) {
     @Cleanup.on_cleanup(cleanup_fn)
 }
 
+// React-like effect handlers, corresponding to useState and useEffect behavior
+
+// Handler that manages state
+fn with_state<T>(initial: T, component: fn()) {
+    let state = initial;
+
+    match component() {
+        @State<T>.get() => {
+            resume(state)
+        }
+        @State<T>.set(new_value) => {
+            state = new_value;
+            resume(())
+        }
+        _ => {}
+    }
+}
+
+// Handler for data subscriptions, and tracks cleanup callbacks.
+//
+// Note: in Rusk, effect handlers installed by `match` are scoped to the scrutinee evaluation.
+// When a handler resumes a continuation, any *outer* handlers are not active in the resumed
+// computation. That means effects that occur *after* `subscribe(...)` must be handled here.
+fn with_subscriptions<T>(source: fn(string) -> T, component: fn()) {
+    let cleanups: [fn()] = [];
+
+    match component() {
+        @Subscribe<T>.subscribe(source_name) => {
+            // Simulate fetching data from source
+            let data = source(source_name);
+            std::println(f"  [Subscription] Fetching: {source_name}");
+            resume(data)
+        }
+        @Cleanup.on_cleanup(cleanup_fn) => {
+            array_push(cleanups, cleanup_fn);
+            resume(())
+        }
+        _ => {}
+    };
+
+    // Run all cleanup functions
+    std::println("  [Handler] Running cleanup functions...");
+    for cleanup in cleanups {
+        cleanup()
+    }
+}
+
+// Sample components demonstrating React-like state management with effects
+
 // Example 1: Simple counter with side effect
 // In React: useEffect with dependency array [count]
 // Here: Direct effect call, no dependency tracking needed
@@ -58,11 +107,10 @@ fn counter_component() {
     let count: int = get_state();
     std::println(f"Counter component render: count = {count}");
 
-    if count > 0 {
-        std::println(f"  [Effect] Count changed to {count}");
-    };
-
     set_state(count + 1);
+
+    count = get_state();
+    std::println(f"  Updated count: {count}");
 }
 
 // Example 2: Subscription with automatic cleanup
@@ -110,54 +158,10 @@ fn complex_component() {
     std::println(f"  Loaded posts: {posts}");
 }
 
-// Handler that manages state
-fn with_state<T>(initial: T, component: fn()) {
-    let state = initial;
-
-    match component() {
-        @State<T>.get() => {
-            resume(state)
-        }
-        @State<T>.set(new_value) => {
-            state = new_value;
-            resume(())
-        }
-        _ => {}
-    }
-}
-
-// Handler that simulates data subscriptions, and tracks cleanup callbacks.
-//
-// Note: in Rusk, effect handlers installed by `match` are scoped to the scrutinee evaluation.
-// When a handler resumes a continuation, any *outer* handlers are not active in the resumed
-// computation. That means effects that occur *after* `subscribe(...)` must be handled here.
-fn with_subscriptions(component: fn()) {
-    let cleanups: [fn()] = [];
-
-    match component() {
-        @Subscribe<string>.subscribe(source) => {
-            // Simulate fetching data from source
-            let data = f"<data from {source}>";
-            std::println(f"  [Subscription] Fetching: {source}");
-            resume(data)
-        }
-        @Subscribe<int>.subscribe(source) => {
-            resume(42)
-        }
-        @Cleanup.on_cleanup(cleanup_fn) => {
-            array_push(cleanups, cleanup_fn);
-            resume(())
-        }
-        _ => {}
-    };
-
-    // Run all cleanup functions
-    std::println("  [Handler] Running cleanup functions...");
-    let i = 0;
-    while i < array_len(cleanups) {
-        cleanups[i]();
-        i = i + 1;
-    }
+// Sample data source function
+fn sample_string_source(source_name: string) -> string {
+    std::println(f"    (Simulated fetch from {source_name})");
+    f"data-from-{source_name}"
 }
 
 fn main() {
@@ -171,7 +175,7 @@ fn main() {
     std::println("\n==================================================");
 
     std::println("\nExample 2: Subscription with auto cleanup");
-    with_subscriptions {
+    with_subscriptions(sample_string_source) {
         subscription_component()
     };
 
@@ -179,7 +183,7 @@ fn main() {
 
     std::println("\nExample 3: Complex component with multiple effects");
     with_state(123) {
-        with_subscriptions {
+        with_subscriptions(sample_string_source) {
             complex_component()
         }
     };

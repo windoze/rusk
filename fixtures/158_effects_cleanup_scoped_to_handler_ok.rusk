@@ -1,0 +1,73 @@
+// expect: ok int 242
+
+// Regression test derived from `examples/17-effects-state-management.rusk`.
+//
+// In Rusk, `match` effect arms are scoped to evaluating the scrutinee expression. When an effect
+// handler resumes a continuation, any *outer* handlers are not active in the resumed computation.
+// Therefore, effects that occur after resuming must be handled by the same handler that resumed.
+//
+// This fixture ensures `Cleanup.on_cleanup` is handled in the same `match` that handles
+// `Subscribe.subscribe`, and that cleanup callbacks run after the handled computation finishes.
+
+use core::intrinsics::array_len;
+use core::intrinsics::array_push;
+
+interface Subscribe<T> {
+    fn subscribe(source: string) -> T;
+}
+
+interface Cleanup {
+    fn on_cleanup(cleanup_fn: fn());
+}
+
+fn subscribe<T>(source: string) -> T {
+    @Subscribe<T>.subscribe(source)
+}
+
+fn on_cleanup(cleanup_fn: fn()) {
+    @Cleanup.on_cleanup(cleanup_fn)
+}
+
+fn with_subscriptions<T>(component: fn() -> T) -> T {
+    let cleanups: [fn()] = [];
+
+    let result = match component() {
+        @Subscribe<int>.subscribe(source) => {
+            let _ = source;
+            resume(42)
+        }
+        @Cleanup.on_cleanup(cleanup_fn) => {
+            array_push(cleanups, cleanup_fn);
+            resume(())
+        }
+        v => v
+    };
+
+    let i = 0;
+    while i < array_len(cleanups) {
+        cleanups[i]();
+        i = i + 1;
+    };
+
+    result
+}
+
+fn main() -> int {
+    let cleaned = 0;
+
+    let value = with_subscriptions {
+        let v: int = subscribe("user-data");
+        on_cleanup {
+            cleaned = cleaned + 1
+        };
+        on_cleanup {
+            cleaned = cleaned + 1
+        };
+        v
+    };
+
+    // Ensure:
+    // - the subscription produced the expected value (42)
+    // - both cleanup callbacks ran exactly once (cleaned == 2)
+    value + cleaned * 100
+}
