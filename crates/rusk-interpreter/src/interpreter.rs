@@ -1408,20 +1408,39 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     top_frame.write_local(perform_dst, v)?;
                 }
 
-                let saved_stack = mem::take(&mut self.stack);
-                let saved_handlers = mem::take(&mut self.handlers);
+                // Resume by *splicing* the captured stack segment onto the current stack, rather
+                // than replacing the entire interpreter state.
+                //
+                // This is essential for nested effect handlers: an inner continuation may perform
+                // effects that are handled by outer handlers, which live below the captured
+                // segment. Replacing the whole stack would drop those handlers.
+                //
+                // We treat the continuation like a function call:
+                // - push the captured frames on top of the current stack
+                // - shift captured handler owner depths accordingly
+                // - patch the bottom-most captured frame to return into the caller's `dst` local
+                //
+                // When the bottom-most frame returns, the interpreter's normal `return` logic
+                // unwinds the captured segment and writes the final value into `dst`.
+                let base_depth = self.stack.len();
+                debug_assert_eq!(
+                    base_depth,
+                    frame_index + 1,
+                    "resume must execute in the top frame"
+                );
 
-                self.stack = cont.stack;
-                self.handlers = cont.handlers;
-                let result = self.run_loop();
+                let bottom = cont
+                    .stack
+                    .first_mut()
+                    .ok_or(RuntimeError::InvalidResume)?;
+                bottom.return_dst = dst;
 
-                self.stack = saved_stack;
-                self.handlers = saved_handlers;
-
-                let final_value = result?;
-                if let Some(dst_local) = dst {
-                    self.stack[frame_index].write_local(dst_local, final_value)?;
+                for handler in &mut cont.handlers {
+                    handler.owner_depth = handler.owner_depth.saturating_add(base_depth);
                 }
+
+                self.stack.extend(cont.stack);
+                self.handlers.extend(cont.handlers);
             }
         }
         Ok(())

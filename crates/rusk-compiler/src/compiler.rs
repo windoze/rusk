@@ -1430,31 +1430,30 @@ impl<'a> FunctionLowerer<'a> {
                         .modules
                         .try_resolve_type_fqn(&self.module, prefix, path.span)
                         .map_err(|e| CompileError::new(e.message, e.span))?
+                        && kind == DefKind::Enum
                     {
-                        if kind == DefKind::Enum {
-                            let Some(def) = self.compiler.env.enums.get(&enum_name) else {
-                                return Err(CompileError::new(
-                                    format!("internal error: unknown enum `{enum_name}`"),
-                                    path.span,
-                                ));
-                            };
-                            if !def.variants.contains_key(last) {
-                                return Err(CompileError::new(
-                                    format!(
-                                        "internal error: unknown enum variant `{enum_name}::{last}`"
-                                    ),
-                                    last_ident.span,
-                                ));
-                            }
-                            return Ok((
-                                Pattern::Enum {
-                                    enum_name,
-                                    variant: last_ident.name.clone(),
-                                    fields: out_args,
-                                },
-                                binds,
+                        let Some(def) = self.compiler.env.enums.get(&enum_name) else {
+                            return Err(CompileError::new(
+                                format!("internal error: unknown enum `{enum_name}`"),
+                                path.span,
+                            ));
+                        };
+                        if !def.variants.contains_key(last) {
+                            return Err(CompileError::new(
+                                format!(
+                                    "internal error: unknown enum variant `{enum_name}::{last}`"
+                                ),
+                                last_ident.span,
                             ));
                         }
+                        return Ok((
+                            Pattern::Enum {
+                                enum_name,
+                                variant: last_ident.name.clone(),
+                                fields: out_args,
+                            },
+                            binds,
+                        ));
                     }
                 }
 
@@ -3328,40 +3327,38 @@ impl<'a> FunctionLowerer<'a> {
                 .modules
                 .try_resolve_type_fqn(&self.module, &segments, path.span)
                 .map_err(|e| CompileError::new(e.message, e.span))?
+                && kind == DefKind::Struct
+                && let Some(def) = self.compiler.env.structs.get(&type_fqn)
+                && def.is_newtype
             {
-                if kind == DefKind::Struct
-                    && let Some(def) = self.compiler.env.structs.get(&type_fqn)
-                    && def.is_newtype
-                {
-                    if args.len() != 1 {
-                        return Err(CompileError::new(
-                            "new-type struct constructor takes exactly one argument",
-                            span,
-                        ));
-                    }
-                    let inner = self.lower_expr(&args[0])?;
-
-                    let type_args = match self.compiler.types.expr_types.get(&span) {
-                        Some(ty) => match self.strip_readonly_ty(ty) {
-                            Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
-                            _ => Vec::new(),
-                        },
-                        None => Vec::new(),
-                    };
-                    let mut type_arg_reps = Vec::with_capacity(type_args.len());
-                    for arg in &type_args {
-                        type_arg_reps.push(self.lower_type_rep_for_ty(arg, span)?);
-                    }
-
-                    let dst = self.alloc_local();
-                    self.emit(Instruction::MakeStruct {
-                        dst,
-                        type_name: type_fqn,
-                        type_args: type_arg_reps,
-                        fields: vec![(".0".to_string(), Operand::Local(inner))],
-                    });
-                    return Ok(dst);
+                if args.len() != 1 {
+                    return Err(CompileError::new(
+                        "new-type struct constructor takes exactly one argument",
+                        span,
+                    ));
                 }
+                let inner = self.lower_expr(&args[0])?;
+
+                let type_args = match self.compiler.types.expr_types.get(&span) {
+                    Some(ty) => match self.strip_readonly_ty(ty) {
+                        Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
+                let mut type_arg_reps = Vec::with_capacity(type_args.len());
+                for arg in &type_args {
+                    type_arg_reps.push(self.lower_type_rep_for_ty(arg, span)?);
+                }
+
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeStruct {
+                    dst,
+                    type_name: type_fqn,
+                    type_args: type_arg_reps,
+                    fields: vec![(".0".to_string(), Operand::Local(inner))],
+                });
+                return Ok(dst);
             }
             let mut func_name: Option<String> = None;
 

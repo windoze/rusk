@@ -4450,7 +4450,7 @@ impl<'a> FnTypechecker<'a> {
 
                 let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
                 let con_subst: HashMap<GenId, TyCon> = HashMap::new();
-                let Some((_fname, field_ty)) = def.fields.get(0) else {
+                let Some((_fname, field_ty)) = def.fields.first() else {
                     return Err(TypeError {
                         message: "internal error: malformed new-type struct definition".to_string(),
                         span: path.span,
@@ -4793,7 +4793,7 @@ impl<'a> FnTypechecker<'a> {
             });
         }
 
-        let Some((_fname, field_ty_template)) = def.fields.get(0) else {
+        let Some((_fname, field_ty_template)) = def.fields.first() else {
             return Err(TypeError {
                 message: "internal error: malformed new-type struct definition".to_string(),
                 span,
@@ -5403,7 +5403,7 @@ impl<'a> FnTypechecker<'a> {
                                 span: *idx_span,
                             });
                         }
-                        let Some((_fname, field_ty)) = def.fields.get(0) else {
+                        let Some((_fname, field_ty)) = def.fields.first() else {
                             return Err(TypeError {
                                 message: "internal error: malformed new-type struct definition"
                                     .to_string(),
@@ -5674,7 +5674,7 @@ impl<'a> FnTypechecker<'a> {
                                         span: *idx_span,
                                     });
                                 }
-                                let Some((_fname, field_ty)) = def.fields.get(0) else {
+                                let Some((_fname, field_ty)) = def.fields.first() else {
                                     return Err(TypeError {
                                         message:
                                             "internal error: malformed new-type struct definition"

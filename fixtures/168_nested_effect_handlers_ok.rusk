@@ -1,0 +1,50 @@
+// expect: ok int 95
+
+interface State<T> {
+    fn get() -> T;
+    fn set(value: T);
+}
+
+fn get_state<T>() -> T {
+    @State<T>.get()
+}
+
+fn set_state<T>(value: T) {
+    @State<T>.set(value)
+}
+
+fn with_state<T>(initial: T, component: fn() -> int) -> int {
+    let state = initial;
+
+    match component() {
+        @State<T>.get() => {
+            resume(state)
+        }
+        @State<T>.set(new_value) => {
+            state = new_value;
+            resume(())
+        }
+        result => result,
+    }
+}
+
+struct UserId(int);
+struct PostId(int);
+
+fn counter() -> int {
+    let u = get_state::<UserId>().0;
+    set_state(UserId(u + 1));
+
+    let p = get_state::<PostId>().0;
+    set_state(PostId(p + 10));
+
+    u + p
+}
+
+fn main() -> int {
+    with_state(UserId(0)) {
+        with_state(PostId(42)) {
+            counter() + counter()
+        }
+    }
+}
