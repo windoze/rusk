@@ -2433,7 +2433,12 @@ impl<'a> FunctionLowerer<'a> {
 
             Expr::Block { block, .. } => self.lower_block_expr(block),
 
-            Expr::Call { callee, args, span } => self.lower_call_expr(callee, args, *span),
+            Expr::Call {
+                callee,
+                type_args: _,
+                args,
+                span,
+            } => self.lower_call_expr(callee, args, *span),
             Expr::Field { base, name, .. } => self.lower_field_expr(base, name),
             Expr::Index { base, index, .. } => self.lower_index_expr(base, index),
             Expr::Unary { op, expr, span } => self.lower_unary_expr(*op, expr, *span),

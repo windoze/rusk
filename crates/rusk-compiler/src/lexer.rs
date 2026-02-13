@@ -58,6 +58,8 @@ pub enum TokenKind {
     Dot,
     DotDot,
     ColonColon,
+    /// Rust-like turbofish introducer: `::<`
+    Turbofish,
 
     // Operators.
     Arrow,
@@ -212,7 +214,12 @@ impl<'a> Lexer<'a> {
                 self.bump_char();
                 if self.peek_char() == Some(':') {
                     self.bump_char();
-                    TokenKind::ColonColon
+                    if self.peek_char() == Some('<') {
+                        self.bump_char();
+                        TokenKind::Turbofish
+                    } else {
+                        TokenKind::ColonColon
+                    }
                 } else {
                     TokenKind::Colon
                 }

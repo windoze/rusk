@@ -313,7 +313,7 @@ Rusk expressions are Rust-like: blocks, `if`, and `match` are expressions.
 
 Precedence (high → low):
 
-1. postfix: call, field, index
+1. postfix: type-args, call, field, index
 2. unary: `!` `-`
 3. cast: `as`, `as?`
 4. multiplicative: `*` `/` `%`
@@ -340,8 +340,9 @@ CastExpr       := UnaryExpr ( "as" ("?")? Type )* ;
 UnaryExpr      := ( "!" | "-" ) UnaryExpr | PostfixExpr ;
 
 PostfixExpr    := PrimaryExpr Postfix* ;
-Postfix        := Call | Field | Index ;
+Postfix        := TypeArgs | Call | Field | Index ;
 
+TypeArgs       := "::<" TypeList? ">" ;
 Call           := "(" ArgList? ")" ;
 ArgList        := Expr ("," Expr)* (",")? ;
 Field          := "." (Ident | IntLit) ;
@@ -369,6 +370,10 @@ EffectCall     := "@" PathType "." Ident "(" ArgList? ")" ;
 
 TupleLit       := "(" Expr "," ArgList? ")" ;
 ```
+
+`::<...>` is a Rust-style *turbofish* that supplies explicit type arguments for a generic call.
+It is only valid immediately before a call (either `(...)` or the trailing-closure call sugar
+`callee { ... }`).
 
 `expr as I` performs an explicit interface upcast. The RHS must be an `interface` type. The cast
 does not allocate and does not change runtime representation; it only changes the static type, and
@@ -996,6 +1001,8 @@ Rusk uses a deliberately implementable form of local type inference:
   `enum`, `interface`).
 - Generic arguments in function calls are inferred by unifying argument types with the
   callee’s parameter types (TypeScript-like “generic argument inference”).
+- If inference cannot determine type arguments for a generic call, they may be supplied explicitly
+  using a Rust-style turbofish: `f::<T>(...)`.
 - Lambda parameter types may be inferred from an expected function type; otherwise they
   must be annotated.
 

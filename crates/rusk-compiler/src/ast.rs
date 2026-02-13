@@ -400,6 +400,10 @@ pub enum Expr {
 
     Call {
         callee: Box<Expr>,
+        /// Explicit generic type arguments supplied at the call site (Rust-like turbofish).
+        ///
+        /// Empty means no explicit type arguments; type arguments may still be inferred.
+        type_args: Vec<TypeExpr>,
         args: Vec<Expr>,
         span: Span,
     },

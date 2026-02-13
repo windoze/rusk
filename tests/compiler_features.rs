@@ -237,6 +237,53 @@ fn generic_functions_infer_type_arguments() {
 }
 
 #[test]
+fn generic_calls_error_when_type_arguments_cannot_be_inferred() {
+    let src = r#"
+        fn marker<T>() { () }
+
+        fn test() -> unit {
+            marker();
+            ()
+        }
+    "#;
+
+    let err = compile_to_mir(src).expect_err("should fail");
+    assert!(
+        err.message
+            .contains("cannot infer type arguments for generic call"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn generic_calls_support_explicit_type_arguments_with_turbofish() {
+    let src = r#"
+        mod m {
+            pub fn marker<T>() { () }
+        }
+
+        struct S {}
+
+        impl S {
+            static fn id<T>(x: T) -> T { x }
+
+            fn id_instance<T>(x: T) -> T { x }
+        }
+
+        fn test() -> int {
+            m::marker::<int>();
+
+            let s = S {};
+            let a = S::id::<int>(123);
+            let b = s.id_instance::<int>(a);
+            b
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), Value::Int(123));
+}
+
+#[test]
 fn traps_on_uninitialized_local_read() {
     let src = r#"
         fn bad() -> int {

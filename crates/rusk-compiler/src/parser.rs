@@ -716,6 +716,23 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
+    fn parse_turbofish_args(&mut self) -> Result<Vec<TypeExpr>, ParseError> {
+        let mut args = Vec::new();
+        while !matches!(self.lookahead.kind, TokenKind::Gt) {
+            args.push(self.parse_type()?);
+            if matches!(self.lookahead.kind, TokenKind::Comma) {
+                self.bump()?;
+                if matches!(self.lookahead.kind, TokenKind::Gt) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::Gt)?;
+        Ok(args)
+    }
+
     fn parse_block(&mut self) -> Result<Block, ParseError> {
         let start = self.expect(TokenKind::LBrace)?.span.start;
         let mut stmts = Vec::new();
@@ -840,15 +857,36 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_prefix()?;
+        let mut pending_type_args: Option<Vec<TypeExpr>> = None;
 
         loop {
+            if pending_type_args.is_some()
+                && !matches!(self.lookahead.kind, TokenKind::LParen | TokenKind::LBrace)
+            {
+                return Err(self.error_here("type arguments must be followed by a call"));
+            }
+
             // Postfix operators: call, field, index.
             match self.lookahead.kind {
+                TokenKind::Turbofish => {
+                    if pending_type_args.is_some() {
+                        return Err(self.error_here("duplicate type argument list"));
+                    }
+                    if !matches!(lhs, Expr::Path { .. } | Expr::Field { .. }) {
+                        return Err(self.error_here(
+                            "type arguments can only be applied to a function or method name",
+                        ));
+                    }
+                    self.bump()?; // ::<
+                    pending_type_args = Some(self.parse_turbofish_args()?);
+                    continue;
+                }
                 TokenKind::LParen => {
                     let start = lhs.span().start;
                     let (args, end) = self.parse_call_args()?;
                     lhs = Expr::Call {
                         callee: Box::new(lhs),
+                        type_args: pending_type_args.take().unwrap_or_default(),
                         args,
                         span: Span::new(start, end),
                     };
@@ -873,7 +911,12 @@ impl<'a> Parser<'a> {
                     };
 
                     lhs = match lhs {
-                        Expr::Call { callee, args, span } => {
+                        Expr::Call {
+                            callee,
+                            type_args,
+                            args,
+                            span,
+                        } => {
                             // Detect `name = expr` bind list.
                             let is_named_bind_arg = |arg: &Expr| -> bool {
                                 matches!(
@@ -942,6 +985,7 @@ impl<'a> Parser<'a> {
                                 let call_span = Span::new(span.start, closure_span.end);
                                 let call_expr = Expr::Call {
                                     callee,
+                                    type_args,
                                     args: call_args,
                                     span: call_span,
                                 };
@@ -958,6 +1002,7 @@ impl<'a> Parser<'a> {
                                 new_args.push(closure);
                                 Expr::Call {
                                     callee,
+                                    type_args,
                                     args: new_args,
                                     span: Span::new(span.start, closure_span.end),
                                 }
@@ -965,6 +1010,7 @@ impl<'a> Parser<'a> {
                         }
                         other => Expr::Call {
                             callee: Box::new(other),
+                            type_args: pending_type_args.take().unwrap_or_default(),
                             args: vec![closure],
                             span: Span::new(start, closure_span.end),
                         },
@@ -1115,15 +1161,34 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_bp_no_struct_lit(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_prefix_no_struct_lit()?;
+        let mut pending_type_args: Option<Vec<TypeExpr>> = None;
 
         loop {
+            if pending_type_args.is_some() && !matches!(self.lookahead.kind, TokenKind::LParen) {
+                return Err(self.error_here("type arguments must be followed by a call"));
+            }
+
             // Postfix operators: call, field, index.
             match self.lookahead.kind {
+                TokenKind::Turbofish => {
+                    if pending_type_args.is_some() {
+                        return Err(self.error_here("duplicate type argument list"));
+                    }
+                    if !matches!(lhs, Expr::Path { .. } | Expr::Field { .. }) {
+                        return Err(self.error_here(
+                            "type arguments can only be applied to a function or method name",
+                        ));
+                    }
+                    self.bump()?; // ::<
+                    pending_type_args = Some(self.parse_turbofish_args()?);
+                    continue;
+                }
                 TokenKind::LParen => {
                     let start = lhs.span().start;
                     let (args, end) = self.parse_call_args()?;
                     lhs = Expr::Call {
                         callee: Box::new(lhs),
+                        type_args: pending_type_args.take().unwrap_or_default(),
                         args,
                         span: Span::new(start, end),
                     };
@@ -2157,6 +2222,7 @@ impl<'a> Parser<'a> {
         let callee = self.core_intrinsic_path_expr(span, name);
         Expr::Call {
             callee: Box::new(callee),
+            type_args: Vec::new(),
             args: vec![arg],
             span,
         }
@@ -2166,6 +2232,7 @@ impl<'a> Parser<'a> {
         let callee = self.core_intrinsic_path_expr(span, name);
         Expr::Call {
             callee: Box::new(callee),
+            type_args: Vec::new(),
             args: vec![a, b],
             span,
         }

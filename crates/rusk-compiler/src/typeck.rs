@@ -3279,9 +3279,12 @@ impl<'a> FnTypechecker<'a> {
             } => self.typecheck_for(binding, iter, body, *span)?,
             Expr::Block { block, .. } => self.typecheck_block(block, use_kind)?,
 
-            Expr::Call { callee, args, span } => {
-                self.typecheck_call(callee, args, use_kind, *span)?
-            }
+            Expr::Call {
+                callee,
+                type_args,
+                args,
+                span,
+            } => self.typecheck_call(callee, type_args, args, use_kind, *span)?,
             Expr::Field { base, name, span } => self.typecheck_field(base, name, *span)?,
             Expr::Index { base, index, span } => self.typecheck_index(base, index, *span)?,
             Expr::Unary { op, expr, span } => self.typecheck_unary(*op, expr, *span)?,
@@ -4367,6 +4370,7 @@ impl<'a> FnTypechecker<'a> {
     fn typecheck_call(
         &mut self,
         callee: &Expr,
+        explicit_type_args: &[TypeExpr],
         args: &[Expr],
         use_kind: ExprUse,
         span: Span,
@@ -4380,6 +4384,14 @@ impl<'a> FnTypechecker<'a> {
             if path.segments.len() == 1 {
                 let local_name = path.segments[0].name.as_str();
                 if let Some(local) = self.lookup_local(local_name) {
+                    if !explicit_type_args.is_empty() {
+                        return Err(TypeError {
+                            message:
+                                "type arguments are only allowed on named function and method calls"
+                                    .to_string(),
+                            span,
+                        });
+                    }
                     let local_ty = local.ty.clone();
                     self.expr_types.insert(*callee_span, local_ty.clone());
                     return self.typecheck_call_via_fn_value(local_ty, args, span);
@@ -4419,7 +4431,11 @@ impl<'a> FnTypechecker<'a> {
                         }
                         crate::modules::DefKind::Interface => {
                             return self.typecheck_interface_method_call(
-                                &type_fqn, last_ident, args, span,
+                                &type_fqn,
+                                last_ident,
+                                explicit_type_args,
+                                args,
+                                span,
                             );
                         }
                         crate::modules::DefKind::Struct => {
@@ -4457,6 +4473,13 @@ impl<'a> FnTypechecker<'a> {
                 });
             }
             let inst = instantiate_fn(sig, &mut self.infer);
+            self.apply_explicit_type_args(
+                explicit_type_args,
+                &sig.generics,
+                &inst.reified_type_args,
+                &sig.name,
+                span,
+            )?;
             if args.len() != inst.params.len() {
                 return Err(TypeError {
                     message: format!(
@@ -4476,7 +4499,10 @@ impl<'a> FnTypechecker<'a> {
             // `panic<T>(...)` is diverging, so in statement position we can safely pick `T := unit`
             // to avoid unconstrained inference variables that would otherwise block runtime `TypeRep`
             // passing.
-            if use_kind == ExprUse::Stmt && sig.name == "core::intrinsics::panic" {
+            if explicit_type_args.is_empty()
+                && use_kind == ExprUse::Stmt
+                && sig.name == "core::intrinsics::panic"
+            {
                 let _ = self.infer.unify(inst.ret.clone(), Ty::Unit, span)?;
             }
 
@@ -4494,11 +4520,59 @@ impl<'a> FnTypechecker<'a> {
             ..
         } = callee
         {
-            return self.typecheck_method_call(base, name, args, span);
+            return self.typecheck_method_call(base, name, explicit_type_args, args, span);
         }
 
+        if !explicit_type_args.is_empty() {
+            return Err(TypeError {
+                message: "type arguments are only allowed on named function and method calls"
+                    .to_string(),
+                span,
+            });
+        }
         let callee_ty = self.typecheck_expr(callee, ExprUse::Value)?;
         self.typecheck_call_via_fn_value(callee_ty, args, span)
+    }
+
+    fn apply_explicit_type_args(
+        &mut self,
+        explicit_type_args: &[TypeExpr],
+        generics: &[GenericParamInfo],
+        reified_type_args: &[Ty],
+        target: &str,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        if explicit_type_args.is_empty() {
+            return Ok(());
+        }
+
+        if generics.iter().any(|g| g.arity != 0) {
+            return Err(TypeError {
+                message:
+                    "explicit type arguments for higher-kinded generics are not supported in this stage"
+                        .to_string(),
+                span,
+            });
+        }
+
+        if reified_type_args.len() != explicit_type_args.len() {
+            return Err(TypeError {
+                message: format!(
+                    "type argument arity mismatch for `{target}`: expected {}, got {}",
+                    reified_type_args.len(),
+                    explicit_type_args.len()
+                ),
+                span,
+            });
+        }
+
+        let scope = GenericScope::new(&self.sig.generics)?;
+        for (idx, ty_expr) in explicit_type_args.iter().enumerate() {
+            let explicit_ty = lower_type_expr(self.env, &self.module, &scope, ty_expr)?;
+            self.infer
+                .unify(reified_type_args[idx].clone(), explicit_ty, ty_expr.span())?;
+        }
+        Ok(())
     }
 
     fn typecheck_call_via_fn_value(
@@ -4548,6 +4622,7 @@ impl<'a> FnTypechecker<'a> {
         &mut self,
         iface_name: &str,
         method: &Ident,
+        explicit_type_args: &[TypeExpr],
         args: &[Expr],
         span: Span,
     ) -> Result<Ty, TypeError> {
@@ -4608,6 +4683,14 @@ impl<'a> FnTypechecker<'a> {
             iface_arity,
             &mut self.infer,
         );
+        let target_name = format!("{iface_name}::{method_name}");
+        self.apply_explicit_type_args(
+            explicit_type_args,
+            &method_info.sig.generics,
+            &inst.reified_type_args,
+            &target_name,
+            span,
+        )?;
         let target_iface = Ty::App(TyCon::Named(iface_name.to_string()), iface_args);
         self.ensure_implements_interface_type(&recv_ty_resolved, &target_iface, args[0].span())?;
 
@@ -4627,6 +4710,7 @@ impl<'a> FnTypechecker<'a> {
         &mut self,
         receiver: &Expr,
         method: &Ident,
+        explicit_type_args: &[TypeExpr],
         args: &[Expr],
         span: Span,
     ) -> Result<Ty, TypeError> {
@@ -4649,6 +4733,13 @@ impl<'a> FnTypechecker<'a> {
                     });
                 }
                 let inst = instantiate_fn(sig, &mut self.infer);
+                self.apply_explicit_type_args(
+                    explicit_type_args,
+                    &sig.generics,
+                    &inst.reified_type_args,
+                    &inherent_name,
+                    span,
+                )?;
                 if inst.params.is_empty() {
                     return Err(TypeError {
                         message: format!(
@@ -4776,6 +4867,14 @@ impl<'a> FnTypechecker<'a> {
                 iface_def.generics.len(),
                 &mut self.infer,
             );
+            let target_name = format!("{origin}::{}", method.name);
+            self.apply_explicit_type_args(
+                explicit_type_args,
+                &sig_template.generics,
+                &inst.reified_type_args,
+                &target_name,
+                span,
+            )?;
 
             if args.len() != inst.params.len() {
                 return Err(TypeError {
@@ -4825,6 +4924,14 @@ impl<'a> FnTypechecker<'a> {
                 iface_def.generics.len(),
                 &mut self.infer,
             );
+            let target_name = format!("{}::{}", info.origin, method.name);
+            self.apply_explicit_type_args(
+                explicit_type_args,
+                &info.sig.generics,
+                &inst.reified_type_args,
+                &target_name,
+                span,
+            )?;
             if args.len() != inst.params.len() {
                 return Err(TypeError {
                     message: format!(
@@ -4931,6 +5038,14 @@ impl<'a> FnTypechecker<'a> {
             iface_def.generics.len(),
             &mut self.infer,
         );
+        let target_name = format!("{}::{}", info.origin, method.name);
+        self.apply_explicit_type_args(
+            explicit_type_args,
+            &info.sig.generics,
+            &inst.reified_type_args,
+            &target_name,
+            span,
+        )?;
         if args.len() != inst.params.len() {
             return Err(TypeError {
                 message: format!(
