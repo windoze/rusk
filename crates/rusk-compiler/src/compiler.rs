@@ -501,9 +501,37 @@ impl Compiler {
         self.compile_module_items(&ModulePath::root(), &program.items)?;
         self.populate_interface_dispatch_table()?;
         self.populate_interface_impl_table();
+        self.populate_struct_layouts();
         self.populate_host_imports()?;
 
         Ok(self.module)
+    }
+
+    fn populate_struct_layouts(&mut self) {
+        for (type_name, def) in &self.env.structs {
+            self.module.struct_layouts.insert(
+                type_name.clone(),
+                def.fields
+                    .iter()
+                    .map(|(field_name, _)| field_name.clone())
+                    .collect(),
+            );
+        }
+
+        // Internal lowering-only structs that are not declared in the source program.
+        self.module
+            .struct_layouts
+            .entry(INTERNAL_CELL_STRUCT.to_string())
+            .or_insert_with(|| vec![CELL_FIELD_SET.to_string(), CELL_FIELD_VALUE.to_string()]);
+        self.module
+            .struct_layouts
+            .entry(INTERNAL_CLOSURE_STRUCT.to_string())
+            .or_insert_with(|| {
+                vec![
+                    CLOSURE_FIELD_FUNC.to_string(),
+                    CLOSURE_FIELD_ENV.to_string(),
+                ]
+            });
     }
 
     fn populate_host_imports(&mut self) -> Result<(), CompileError> {
@@ -2104,10 +2132,10 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         let set_local = self.alloc_local();
-        self.emit(Instruction::GetField {
+        self.emit(Instruction::StructGet {
             dst: set_local,
             obj: Operand::Local(cell),
-            field: CELL_FIELD_SET.to_string(),
+            idx: 0,
         });
 
         let then_block = self.new_block(format!("cell_read_{name}_ok"));
@@ -2126,10 +2154,10 @@ impl<'a> FunctionLowerer<'a> {
 
         self.set_current(then_block);
         let value_local = self.alloc_local();
-        self.emit(Instruction::GetField {
+        self.emit(Instruction::StructGet {
             dst: value_local,
             obj: Operand::Local(cell),
-            field: CELL_FIELD_VALUE.to_string(),
+            idx: 1,
         });
         self.set_terminator(Terminator::Br {
             target: join_block,
@@ -2147,14 +2175,14 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn write_cell(&mut self, cell: Local, value: Local) {
-        self.emit(Instruction::SetField {
+        self.emit(Instruction::StructSet {
             obj: Operand::Local(cell),
-            field: CELL_FIELD_VALUE.to_string(),
+            idx: 1,
             value: Operand::Local(value),
         });
-        self.emit(Instruction::SetField {
+        self.emit(Instruction::StructSet {
             obj: Operand::Local(cell),
-            field: CELL_FIELD_SET.to_string(),
+            idx: 0,
             value: Operand::Literal(ConstValue::Bool(true)),
         });
     }
@@ -2172,6 +2200,17 @@ impl<'a> FunctionLowerer<'a> {
             Ty::Readonly(inner) => inner.as_ref(),
             other => other,
         }
+    }
+
+    fn resolve_struct_field_index(&self, base: &Expr, field: &str) -> Option<usize> {
+        let ty = self.strip_readonly_ty(self.expr_ty(base)?);
+        let Ty::App(typeck::TyCon::Named(type_name), _args) = ty else {
+            return None;
+        };
+        let def = self.compiler.env.structs.get(type_name)?;
+        def.fields
+            .iter()
+            .position(|(field_name, _)| field_name == field)
     }
 
     fn lower_type_rep_for_ty(&mut self, ty: &Ty, span: Span) -> Result<Operand, CompileError> {
@@ -3092,16 +3131,53 @@ impl<'a> FunctionLowerer<'a> {
         name: &crate::ast::FieldName,
     ) -> Result<Local, CompileError> {
         let base_local = self.lower_expr(base)?;
-        let field = match name {
-            crate::ast::FieldName::Named(name) => name.name.clone(),
-            crate::ast::FieldName::Index { index, .. } => format!(".{index}"),
-        };
         let dst = self.alloc_local();
-        self.emit(Instruction::GetField {
-            dst,
-            obj: Operand::Local(base_local),
-            field,
-        });
+
+        match name {
+            crate::ast::FieldName::Named(name) => {
+                if let Some(idx) = self.resolve_struct_field_index(base, name.name.as_str()) {
+                    self.emit(Instruction::StructGet {
+                        dst,
+                        obj: Operand::Local(base_local),
+                        idx,
+                    });
+                } else {
+                    self.emit(Instruction::GetField {
+                        dst,
+                        obj: Operand::Local(base_local),
+                        field: name.name.clone(),
+                    });
+                }
+            }
+            crate::ast::FieldName::Index { index, .. } => {
+                let is_tuple = self
+                    .expr_ty(base)
+                    .is_some_and(|ty| matches!(self.strip_readonly_ty(ty), Ty::Tuple(_)));
+                if is_tuple {
+                    self.emit(Instruction::TupleGet {
+                        dst,
+                        tup: Operand::Local(base_local),
+                        idx: *index,
+                    });
+                } else {
+                    let field = format!(".{index}");
+                    if let Some(idx) = self.resolve_struct_field_index(base, field.as_str()) {
+                        self.emit(Instruction::StructGet {
+                            dst,
+                            obj: Operand::Local(base_local),
+                            idx,
+                        });
+                    } else {
+                        self.emit(Instruction::GetField {
+                            dst,
+                            obj: Operand::Local(base_local),
+                            field,
+                        });
+                    }
+                }
+            }
+        }
+
         if self.expr_is_readonly(base) {
             self.emit(Instruction::AsReadonly { dst, src: dst });
         }
@@ -3315,15 +3391,52 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Field { base, name, .. } => {
                 let obj = self.lower_expr(base)?;
                 let rhs = self.lower_expr(value)?;
-                let field = match name {
-                    crate::ast::FieldName::Named(name) => name.name.clone(),
-                    crate::ast::FieldName::Index { index, .. } => format!(".{index}"),
-                };
-                self.emit(Instruction::SetField {
-                    obj: Operand::Local(obj),
-                    field,
-                    value: Operand::Local(rhs),
-                });
+                match name {
+                    crate::ast::FieldName::Named(name) => {
+                        if let Some(idx) = self.resolve_struct_field_index(base, name.name.as_str())
+                        {
+                            self.emit(Instruction::StructSet {
+                                obj: Operand::Local(obj),
+                                idx,
+                                value: Operand::Local(rhs),
+                            });
+                        } else {
+                            self.emit(Instruction::SetField {
+                                obj: Operand::Local(obj),
+                                field: name.name.clone(),
+                                value: Operand::Local(rhs),
+                            });
+                        }
+                    }
+                    crate::ast::FieldName::Index { index, .. } => {
+                        let is_tuple = self
+                            .expr_ty(base)
+                            .is_some_and(|ty| matches!(self.strip_readonly_ty(ty), Ty::Tuple(_)));
+                        if is_tuple {
+                            self.emit(Instruction::TupleSet {
+                                tup: Operand::Local(obj),
+                                idx: *index,
+                                value: Operand::Local(rhs),
+                            });
+                        } else {
+                            let field = format!(".{index}");
+                            if let Some(idx) = self.resolve_struct_field_index(base, field.as_str())
+                            {
+                                self.emit(Instruction::StructSet {
+                                    obj: Operand::Local(obj),
+                                    idx,
+                                    value: Operand::Local(rhs),
+                                });
+                            } else {
+                                self.emit(Instruction::SetField {
+                                    obj: Operand::Local(obj),
+                                    field,
+                                    value: Operand::Local(rhs),
+                                });
+                            }
+                        }
+                    }
+                }
                 Ok(self.alloc_unit())
             }
             Expr::Index { base, index, .. } => {
@@ -3599,17 +3712,17 @@ impl<'a> FunctionLowerer<'a> {
         let closure_val = self.lower_expr(callee)?;
 
         let fnptr = self.alloc_local();
-        self.emit(Instruction::GetField {
+        self.emit(Instruction::StructGet {
             dst: fnptr,
             obj: Operand::Local(closure_val),
-            field: CLOSURE_FIELD_FUNC.to_string(),
+            idx: 0,
         });
 
         let env = self.alloc_local();
-        self.emit(Instruction::GetField {
+        self.emit(Instruction::StructGet {
             dst: env,
             obj: Operand::Local(closure_val),
-            field: CLOSURE_FIELD_ENV.to_string(),
+            idx: 1,
         });
 
         let mut call_args = Vec::with_capacity(args.len() + 1);

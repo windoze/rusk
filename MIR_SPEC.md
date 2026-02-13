@@ -68,6 +68,11 @@ interface-implementation metadata:
 
 - `(dynamic_type_name, interface_name) -> bool`
 
+Finally, a module may include optional **struct field layout metadata** to support
+index-based struct storage and fast field operations:
+
+- `type_name -> [field_name...]` (field order)
+
 Finally, a module may include a set of **declared host function imports** (e.g. `std::println`),
 including their (monomorphic) signatures. An interpreter may validate that all declared imports
 are installed before executing any MIR.
@@ -331,6 +336,26 @@ Some instructions are statement-like and produce no value.
     - for structs: write the named field
     - for tuples: `field` must be of the form `".<n>"` and writes element `n` (0-based)
   - Trap: readonly reference, non-struct/non-tuple, missing field / out-of-bounds.
+
+- `struct_get`:
+  - Syntax: `%dst = struct_get <op_obj> <idx>`
+  - Semantics: read struct field by a lowering-time resolved 0-based index.
+  - Trap: non-struct, missing field / out-of-bounds.
+
+- `struct_set`:
+  - Syntax: `struct_set <op_obj> <idx> <op_val>`
+  - Semantics: write struct field by a lowering-time resolved 0-based index.
+  - Trap: readonly reference, non-struct, missing field / out-of-bounds.
+
+- `tuple_get`:
+  - Syntax: `%dst = tuple_get <op_tup> <idx>`
+  - Semantics: read tuple element `idx` (0-based).
+  - Trap: non-tuple, out-of-bounds.
+
+- `tuple_set`:
+  - Syntax: `tuple_set <op_tup> <idx> <op_val>`
+  - Semantics: write tuple element `idx` (0-based).
+  - Trap: readonly reference, non-tuple, out-of-bounds.
 
 - `index_get`:
   - Syntax: `%dst = index_get <op_arr> <op_idx>`

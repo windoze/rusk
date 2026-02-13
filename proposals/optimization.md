@@ -265,7 +265,35 @@ Risk level:
 
 Goal: make “object operations” fast without needing pervasive compiler optimizations.
 
-Candidate changes:
+Status: **DONE** (implemented in-tree)
+
+Implemented artifacts:
+
+- MIR module metadata:
+  - `rusk_mir::Module::struct_layouts` (per-type field order)
+- New MIR ops for index-based access:
+  - `Instruction::StructGet` / `Instruction::StructSet`
+  - `Instruction::TupleGet` / `Instruction::TupleSet`
+- Interpreter runtime object representation:
+  - heap `Struct` fields are stored as `Vec<Value>` in layout order (no per-object map)
+  - `StructGet`/`StructSet` and `TupleGet`/`TupleSet` execute as direct `Vec` indexing fast paths
+- Compiler lowering:
+  - tuple `.n` lowering emits `TupleGet`/`TupleSet` (no runtime string parsing)
+  - struct field lowering emits `StructGet`/`StructSet` with resolved field indices
+  - internal lowering-only structs (`$Cell`, `$Closure`) also use `StructGet`/`StructSet`
+
+Benchmark (local, `rusk-measure`, release build):
+
+- Input: `benchmarks/phase2_object_access.rusk`
+- Command:
+  - `cargo run --release --bin rusk-measure -- --json --warmup 2 --iters 10 benchmarks/phase2_object_access.rusk`
+- Baseline (before Phase 2):
+  - `run.avg_ns = 479302895` (≈ 479ms)
+- After Phase 2:
+  - `run.avg_ns = 435812016` (≈ 436ms)
+  - ≈ **9.1% faster** on this benchmark on this machine
+
+Planned changes (now implemented):
 
 1. **Replace struct fields `BTreeMap<String, Value>` with index-based storage**
    - Store struct fields as `Vec<Value>` in field order.

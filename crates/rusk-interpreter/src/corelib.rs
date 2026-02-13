@@ -298,10 +298,7 @@ fn register_iterator_fns(interp: &mut Interpreter) {
                 return Err(RuntimeError::ReadonlyWrite);
             }
 
-            let HeapValue::Struct {
-                type_name, fields, ..
-            } = interp.heap_value(iter)?
-            else {
+            let HeapValue::Struct { type_name, .. } = interp.heap_value(iter)? else {
                 return Err(RuntimeError::Trap {
                     message: "core::intrinsics::next: expected iterator struct".to_string(),
                 });
@@ -314,19 +311,20 @@ fn register_iterator_fns(interp: &mut Interpreter) {
                 });
             }
 
-            let Some(Value::Ref(arr_ref)) = fields.get(ARRAY_ITER_FIELD_ARRAY) else {
+            let Value::Ref(arr_ref) = interp.read_struct_field(iter, ARRAY_ITER_FIELD_ARRAY)?
+            else {
                 return Err(RuntimeError::Trap {
                     message: "core::intrinsics::next: iterator missing `arr` field".to_string(),
                 });
             };
-            let Some(Value::Int(idx)) = fields.get(ARRAY_ITER_FIELD_INDEX) else {
+            let Value::Int(idx) = interp.read_struct_field(iter, ARRAY_ITER_FIELD_INDEX)? else {
                 return Err(RuntimeError::Trap {
                     message: "core::intrinsics::next: iterator missing `idx` field".to_string(),
                 });
             };
-            let idx: i64 = *idx;
+            let idx: i64 = idx;
 
-            let HeapValue::Array(items) = interp.heap_value(arr_ref)? else {
+            let HeapValue::Array(items) = interp.heap_value(&arr_ref)? else {
                 return Err(RuntimeError::Trap {
                     message: "core::intrinsics::next: iterator `arr` is not an array".to_string(),
                 });
@@ -350,12 +348,7 @@ fn register_iterator_fns(interp: &mut Interpreter) {
                 interp.alloc_enum_typed("Option", vec![*elem_rep], "None", vec![])
             };
 
-            let HeapValue::Struct { fields, .. } = interp.heap_value_mut(iter)? else {
-                return Err(RuntimeError::Trap {
-                    message: "core::intrinsics::next: iterator mutated into non-struct".to_string(),
-                });
-            };
-            fields.insert(ARRAY_ITER_FIELD_INDEX.to_string(), Value::Int(idx + 1));
+            interp.write_struct_field(iter, ARRAY_ITER_FIELD_INDEX, Value::Int(idx + 1))?;
             Ok(out)
         }
         other => Err(RuntimeError::Trap {

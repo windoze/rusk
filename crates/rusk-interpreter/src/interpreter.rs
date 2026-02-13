@@ -196,7 +196,7 @@ pub enum HeapValue {
     Struct {
         type_name: String,
         type_args: Vec<TypeRepId>,
-        fields: BTreeMap<String, Value>,
+        fields: Vec<Value>,
     },
     Array(Vec<Value>),
     Tuple(Vec<Value>),
@@ -349,6 +349,29 @@ impl fmt::Display for RuntimeError {
 
 impl core::error::Error for RuntimeError {}
 
+#[derive(Clone, Debug)]
+struct StructLayout {
+    fields: Vec<String>,
+    index_by_name: HashMap<String, usize>,
+}
+
+impl StructLayout {
+    fn new(fields: Vec<String>) -> Self {
+        let mut index_by_name = HashMap::new();
+        for (idx, name) in fields.iter().enumerate() {
+            index_by_name.insert(name.clone(), idx);
+        }
+        Self {
+            fields,
+            index_by_name,
+        }
+    }
+
+    fn field_index(&self, name: &str) -> Option<usize> {
+        self.index_by_name.get(name).copied()
+    }
+}
+
 type HostFunction<GC> =
     Rc<dyn Fn(&mut InterpreterImpl<GC>, &[Value]) -> Result<Value, RuntimeError> + 'static>;
 
@@ -386,6 +409,7 @@ pub struct InterpreterImpl<GC: GcHeap> {
     module: Rc<Module>,
     type_reps: Vec<TypeRepNode>,
     type_rep_intern: HashMap<TypeRepNode, TypeRepId>,
+    struct_layouts: HashMap<String, StructLayout>,
     host_functions: BTreeMap<String, HostFunction<GC>>,
     stack: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
@@ -451,10 +475,16 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     /// Creates a new interpreter instance using an explicit GC heap implementation and a shared
     /// MIR module.
     pub fn with_heap_shared(module: Rc<Module>, heap: GC) -> Self {
+        let mut struct_layouts = HashMap::new();
+        for (type_name, fields) in module.struct_layouts.iter() {
+            struct_layouts.insert(type_name.clone(), StructLayout::new(fields.clone()));
+        }
+
         Self {
             module,
             type_reps: Vec::new(),
             type_rep_intern: HashMap::new(),
+            struct_layouts,
             host_functions: BTreeMap::new(),
             stack: Vec::new(),
             handlers: Vec::new(),
@@ -598,12 +628,102 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         type_args: Vec<TypeRepId>,
         fields: BTreeMap<String, Value>,
     ) -> Value {
+        let type_name: String = type_name.into();
+        let fields: Vec<(String, Value)> = fields.into_iter().collect();
+        let observed_fields: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+        let module = Rc::clone(&self.module);
+        let (field_count, field_indices, in_layout_order) = self
+            .struct_layout_indices(module.as_ref(), type_name.as_str(), &observed_fields)
+            .expect("alloc_struct_typed: inconsistent struct layout");
+
+        let values = if in_layout_order {
+            fields.into_iter().map(|(_, v)| v).collect()
+        } else {
+            let mut out: Vec<Option<Value>> = vec![None; field_count];
+            for ((field_name, value), idx) in fields.into_iter().zip(field_indices.iter().copied())
+            {
+                if out[idx].is_some() {
+                    panic!("alloc_struct_typed: duplicate field `{field_name}`");
+                }
+                out[idx] = Some(value);
+            }
+            let layout = self
+                .struct_layouts
+                .get(type_name.as_str())
+                .expect("struct layout inserted");
+            out.into_iter()
+                .enumerate()
+                .map(|(idx, v)| {
+                    v.unwrap_or_else(|| {
+                        panic!("alloc_struct_typed: missing `{}`", layout.fields[idx])
+                    })
+                })
+                .collect()
+        };
+
         let handle = self.alloc_heap(HeapValue::Struct {
-            type_name: type_name.into(),
+            type_name,
             type_args,
-            fields,
+            fields: values,
         });
         Value::Ref(RefValue::new(handle))
+    }
+
+    pub(crate) fn read_struct_field(
+        &mut self,
+        r: &RefValue,
+        field: &str,
+    ) -> Result<Value, RuntimeError> {
+        let HeapValue::Struct {
+            type_name, fields, ..
+        } = self.heap_get(r.handle)?
+        else {
+            return Err(RuntimeError::TypeError {
+                op: "struct_get",
+                expected: "struct",
+                got: ValueKind::Ref,
+            });
+        };
+        let idx = self.struct_field_index_by_type(type_name.as_str(), field)?;
+        fields
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| RuntimeError::MissingField {
+                field: field.to_string(),
+            })
+    }
+
+    pub(crate) fn write_struct_field(
+        &mut self,
+        r: &RefValue,
+        field: &str,
+        value: Value,
+    ) -> Result<(), RuntimeError> {
+        if r.readonly {
+            return Err(RuntimeError::ReadonlyWrite);
+        }
+        let idx = match self.heap_get(r.handle)? {
+            HeapValue::Struct { type_name, .. } => {
+                self.struct_field_index_by_type(type_name.as_str(), field)?
+            }
+            _ => {
+                return Err(RuntimeError::TypeError {
+                    op: "struct_set",
+                    expected: "struct",
+                    got: ValueKind::Ref,
+                });
+            }
+        };
+        let HeapValue::Struct { fields, .. } = self.heap_get_mut(r.handle)? else {
+            unreachable!("struct arm checked above");
+        };
+        let Some(slot) = fields.get_mut(idx) else {
+            return Err(RuntimeError::MissingField {
+                field: field.to_string(),
+            });
+        };
+        *slot = value;
+        Ok(())
     }
 
     /// Allocates a heap enum value and returns it as a value.
@@ -887,6 +1007,89 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
+    fn ensure_struct_layout(
+        &mut self,
+        module: &Module,
+        type_name: &str,
+        observed_fields: Option<&[&str]>,
+    ) -> Result<(), RuntimeError> {
+        if self.struct_layouts.contains_key(type_name) {
+            return Ok(());
+        }
+
+        let fields = if let Some(fields) = module.struct_layouts.get(type_name) {
+            fields.clone()
+        } else if let Some(observed) = observed_fields {
+            observed.iter().map(|name| (*name).to_string()).collect()
+        } else {
+            return Err(RuntimeError::Trap {
+                message: format!("missing struct layout for `{type_name}`"),
+            });
+        };
+
+        self.struct_layouts
+            .insert(type_name.to_string(), StructLayout::new(fields));
+        Ok(())
+    }
+
+    fn struct_layout_indices(
+        &mut self,
+        module: &Module,
+        type_name: &str,
+        observed_fields: &[&str],
+    ) -> Result<(usize, Vec<usize>, bool), RuntimeError> {
+        self.ensure_struct_layout(module, type_name, Some(observed_fields))?;
+        let layout = self
+            .struct_layouts
+            .get(type_name)
+            .expect("struct layout inserted");
+
+        if layout.fields.len() != observed_fields.len() {
+            return Err(RuntimeError::Trap {
+                message: format!(
+                    "struct `{type_name}` layout mismatch: expected {} fields, got {}",
+                    layout.fields.len(),
+                    observed_fields.len()
+                ),
+            });
+        }
+
+        let in_layout_order = layout
+            .fields
+            .iter()
+            .map(|name| name.as_str())
+            .eq(observed_fields.iter().copied());
+
+        let mut indices = Vec::with_capacity(observed_fields.len());
+        for field in observed_fields {
+            let Some(idx) = layout.field_index(field) else {
+                return Err(RuntimeError::MissingField {
+                    field: (*field).to_string(),
+                });
+            };
+            indices.push(idx);
+        }
+
+        Ok((layout.fields.len(), indices, in_layout_order))
+    }
+
+    fn struct_field_index_by_type(
+        &self,
+        type_name: &str,
+        field: &str,
+    ) -> Result<usize, RuntimeError> {
+        let Some(layout) = self.struct_layouts.get(type_name) else {
+            return Err(RuntimeError::Trap {
+                message: format!("missing struct layout for `{type_name}`"),
+            });
+        };
+        layout
+            .field_index(field)
+            .ok_or_else(|| RuntimeError::MissingField {
+                field: field.to_string(),
+            })
+    }
+
     fn eval_const(&mut self, lit: &ConstValue) -> Value {
         match lit {
             ConstValue::Unit => Value::Unit,
@@ -911,10 +1114,33 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 Value::Ref(RefValue::new(handle))
             }
             ConstValue::Struct { type_name, fields } => {
-                let mut values = BTreeMap::new();
-                for (k, v) in fields {
-                    values.insert(k.clone(), self.eval_const(v));
-                }
+                let observed_fields: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+                let module = Rc::clone(&self.module);
+                let (field_count, field_indices, in_layout_order) = self
+                    .struct_layout_indices(module.as_ref(), type_name.as_str(), &observed_fields)
+                    .expect("ConstValue::Struct produced inconsistent layout");
+
+                let values = if in_layout_order {
+                    fields.iter().map(|(_, v)| self.eval_const(v)).collect()
+                } else {
+                    let mut out: Vec<Option<Value>> = vec![None; field_count];
+                    for ((_, v), idx) in fields.iter().zip(field_indices.iter().copied()) {
+                        out[idx] = Some(self.eval_const(v));
+                    }
+                    let layout = self
+                        .struct_layouts
+                        .get(type_name.as_str())
+                        .expect("struct layout inserted");
+                    out.into_iter()
+                        .enumerate()
+                        .map(|(idx, v)| {
+                            v.unwrap_or_else(|| {
+                                panic!("ConstValue::Struct missing field `{}`", layout.fields[idx])
+                            })
+                        })
+                        .collect()
+                };
+
                 let handle = self.alloc_heap(HeapValue::Struct {
                     type_name: type_name.clone(),
                     type_args: Vec::new(),
@@ -1112,15 +1338,48 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     .iter()
                     .map(|op| self.eval_type_rep_operand(frame_index, op))
                     .collect::<Result<Vec<_>, _>>()?;
-                let mut map = BTreeMap::new();
-                for (k, op) in fields.iter() {
-                    let v = self.eval_operand(frame_index, op)?;
-                    map.insert(k.clone(), v);
-                }
+                let observed_fields: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+                let (field_count, field_indices, in_layout_order) =
+                    self.struct_layout_indices(module, type_name, &observed_fields)?;
+
+                let values = if in_layout_order {
+                    let mut out = Vec::with_capacity(field_count);
+                    for (_, op) in fields.iter() {
+                        out.push(self.eval_operand(frame_index, op)?);
+                    }
+                    out
+                } else {
+                    let mut out: Vec<Option<Value>> = vec![None; field_count];
+                    for ((field_name, op), idx) in fields.iter().zip(field_indices.iter().copied())
+                    {
+                        if out[idx].is_some() {
+                            return Err(RuntimeError::Trap {
+                                message: format!(
+                                    "duplicate field `{}` in `{}` literal",
+                                    field_name, type_name
+                                ),
+                            });
+                        }
+                        out[idx] = Some(self.eval_operand(frame_index, op)?);
+                    }
+                    let layout = self
+                        .struct_layouts
+                        .get(type_name.as_str())
+                        .expect("struct layout inserted");
+                    out.into_iter()
+                        .enumerate()
+                        .map(|(idx, v)| {
+                            v.ok_or_else(|| RuntimeError::MissingField {
+                                field: layout.fields[idx].clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+
                 let obj = HeapValue::Struct {
                     type_name: type_name.clone(),
                     type_args,
-                    fields: map,
+                    fields: values,
                 };
                 let handle = self.alloc_heap(obj);
                 self.stack[frame_index].write_local(*dst, Value::Ref(RefValue::new(handle)))?;
@@ -1177,10 +1436,14 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: v.kind(),
                     });
                 };
+
                 let value = match self.heap_get(r.handle)? {
-                    HeapValue::Struct { fields, .. } => {
+                    HeapValue::Struct {
+                        type_name, fields, ..
+                    } => {
+                        let idx = self.struct_field_index_by_type(type_name.as_str(), field)?;
                         fields
-                            .get(field)
+                            .get(idx)
                             .cloned()
                             .ok_or_else(|| RuntimeError::MissingField {
                                 field: field.clone(),
@@ -1225,35 +1488,167 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     return Err(RuntimeError::ReadonlyWrite);
                 }
                 let val = self.eval_operand(frame_index, value)?;
-                match self.heap_get_mut(r.handle)? {
-                    HeapValue::Struct { fields, .. } => {
-                        let Some(slot) = fields.get_mut(field) else {
-                            return Err(RuntimeError::MissingField {
-                                field: field.clone(),
-                            });
-                        };
-                        *slot = val;
+                let struct_field_idx = match self.heap_get(r.handle)? {
+                    HeapValue::Struct { type_name, .. } => {
+                        Some(self.struct_field_index_by_type(type_name.as_str(), field)?)
                     }
-                    HeapValue::Tuple(items) => {
-                        let Some(idx) = field
-                            .strip_prefix('.')
-                            .and_then(|s| s.parse::<usize>().ok())
-                        else {
-                            return Err(RuntimeError::MissingField {
-                                field: field.clone(),
-                            });
+                    HeapValue::Tuple(_) => None,
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "set_field",
+                            expected: "struct/tuple",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+
+                if let Some(idx) = struct_field_idx {
+                    let HeapValue::Struct { fields, .. } = self.heap_get_mut(r.handle)? else {
+                        unreachable!("struct arm checked above");
+                    };
+                    let Some(slot) = fields.get_mut(idx) else {
+                        return Err(RuntimeError::MissingField {
+                            field: field.clone(),
+                        });
+                    };
+                    *slot = val;
+                } else {
+                    let Some(idx) = field
+                        .strip_prefix('.')
+                        .and_then(|s| s.parse::<usize>().ok())
+                    else {
+                        return Err(RuntimeError::MissingField {
+                            field: field.clone(),
+                        });
+                    };
+                    let HeapValue::Tuple(items) = self.heap_get_mut(r.handle)? else {
+                        unreachable!("tuple arm checked above");
+                    };
+                    let Some(slot) = items.get_mut(idx) else {
+                        return Err(RuntimeError::MissingField {
+                            field: field.clone(),
+                        });
+                    };
+                    *slot = val;
+                }
+            }
+
+            Instruction::StructGet { dst, obj, idx } => {
+                let v = self.eval_operand(frame_index, obj)?;
+                let Value::Ref(r) = v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "struct_get",
+                        expected: "ref(struct)",
+                        got: v.kind(),
+                    });
+                };
+                let value = match self.heap_get(r.handle)? {
+                    HeapValue::Struct {
+                        type_name, fields, ..
+                    } => {
+                        let Some(value) = fields.get(*idx) else {
+                            let field = module
+                                .struct_layouts
+                                .get(type_name.as_str())
+                                .and_then(|names| names.get(*idx))
+                                .cloned()
+                                .unwrap_or_else(|| format!("#{idx}"));
+                            return Err(RuntimeError::MissingField { field });
                         };
-                        let Some(slot) = items.get_mut(idx) else {
+                        value.clone()
+                    }
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "struct_get",
+                            expected: "struct",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+                self.stack[frame_index].write_local(*dst, value)?;
+            }
+            Instruction::StructSet { obj, idx, value } => {
+                let obj_v = self.eval_operand(frame_index, obj)?;
+                let Value::Ref(r) = obj_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "struct_set",
+                        expected: "ref(struct)",
+                        got: obj_v.kind(),
+                    });
+                };
+                if r.readonly {
+                    return Err(RuntimeError::ReadonlyWrite);
+                }
+                let val = self.eval_operand(frame_index, value)?;
+                let HeapValue::Struct { fields, .. } = self.heap_get_mut(r.handle)? else {
+                    return Err(RuntimeError::TypeError {
+                        op: "struct_set",
+                        expected: "struct",
+                        got: ValueKind::Ref,
+                    });
+                };
+                let Some(slot) = fields.get_mut(*idx) else {
+                    return Err(RuntimeError::MissingField {
+                        field: format!("#{idx}"),
+                    });
+                };
+                *slot = val;
+            }
+
+            Instruction::TupleGet { dst, tup, idx } => {
+                let v = self.eval_operand(frame_index, tup)?;
+                let Value::Ref(r) = v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "tuple_get",
+                        expected: "ref(tuple)",
+                        got: v.kind(),
+                    });
+                };
+                let value = match self.heap_get(r.handle)? {
+                    HeapValue::Tuple(items) => {
+                        items
+                            .get(*idx)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::MissingField {
+                                field: format!(".{idx}"),
+                            })?
+                    }
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "tuple_get",
+                            expected: "tuple",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+                self.stack[frame_index].write_local(*dst, value)?;
+            }
+            Instruction::TupleSet { tup, idx, value } => {
+                let tup_v = self.eval_operand(frame_index, tup)?;
+                let Value::Ref(r) = tup_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "tuple_set",
+                        expected: "ref(tuple)",
+                        got: tup_v.kind(),
+                    });
+                };
+                if r.readonly {
+                    return Err(RuntimeError::ReadonlyWrite);
+                }
+                let val = self.eval_operand(frame_index, value)?;
+                match self.heap_get_mut(r.handle)? {
+                    HeapValue::Tuple(items) => {
+                        let Some(slot) = items.get_mut(*idx) else {
                             return Err(RuntimeError::MissingField {
-                                field: field.clone(),
+                                field: format!(".{idx}"),
                             });
                         };
                         *slot = val;
                     }
                     _ => {
                         return Err(RuntimeError::TypeError {
-                            op: "set_field",
-                            expected: "struct/tuple",
+                            op: "tuple_set",
+                            expected: "tuple",
                             got: ValueKind::Ref,
                         });
                     }
@@ -1695,6 +2090,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     if !match_pattern(
                         &mut self.heap,
                         &mut self.allocations_since_gc,
+                        &self.struct_layouts,
                         pat,
                         arg,
                         &mut binds,
@@ -1791,6 +2187,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     if match_pattern(
                         &mut self.heap,
                         &mut self.allocations_since_gc,
+                        &self.struct_layouts,
                         pattern,
                         &scrutinee,
                         &mut binds,
@@ -1971,11 +2368,7 @@ impl Trace for Value {
 impl Trace for HeapValue {
     fn trace(&self, tracer: &mut dyn Tracer) {
         match self {
-            HeapValue::Struct { fields, .. } => {
-                for value in fields.values() {
-                    value.trace(tracer);
-                }
-            }
+            HeapValue::Struct { fields, .. } => fields.iter().for_each(|value| value.trace(tracer)),
             HeapValue::Array(items) => {
                 for value in items {
                     value.trace(tracer);
@@ -2050,6 +2443,7 @@ fn count_binds_in_pattern(p: &Pattern) -> usize {
 fn match_pattern<GC: GcHeap>(
     heap: &mut GC,
     allocations_since_gc: &mut usize,
+    struct_layouts: &HashMap<String, StructLayout>,
     pat: &Pattern,
     value: &Value,
     binds: &mut Vec<Value>,
@@ -2099,7 +2493,14 @@ fn match_pattern<GC: GcHeap>(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                if !match_pattern(
+                    heap,
+                    allocations_since_gc,
+                    struct_layouts,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2137,7 +2538,14 @@ fn match_pattern<GC: GcHeap>(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                if !match_pattern(
+                    heap,
+                    allocations_since_gc,
+                    struct_layouts,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2175,7 +2583,14 @@ fn match_pattern<GC: GcHeap>(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                if !match_pattern(
+                    heap,
+                    allocations_since_gc,
+                    struct_layouts,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2197,8 +2612,18 @@ fn match_pattern<GC: GcHeap>(
             if actual_ty != *type_name {
                 return Ok(false);
             }
+            let Some(layout) = struct_layouts.get(actual_ty.as_str()) else {
+                return Err(RuntimeError::Trap {
+                    message: format!("missing struct layout for `{actual_ty}`"),
+                });
+            };
             for (field_name, field_pat) in fields.iter() {
-                let Some(field_value) = actual_fields.get(field_name) else {
+                let Some(idx) = layout.field_index(field_name.as_str()) else {
+                    return Err(RuntimeError::MissingField {
+                        field: field_name.clone(),
+                    });
+                };
+                let Some(field_value) = actual_fields.get(idx) else {
                     return Err(RuntimeError::MissingField {
                         field: field_name.clone(),
                     });
@@ -2208,7 +2633,14 @@ fn match_pattern<GC: GcHeap>(
                 } else {
                     field_value.clone()
                 };
-                if !match_pattern(heap, allocations_since_gc, field_pat, &field_value, binds)? {
+                if !match_pattern(
+                    heap,
+                    allocations_since_gc,
+                    struct_layouts,
+                    field_pat,
+                    &field_value,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2246,7 +2678,14 @@ fn match_pattern<GC: GcHeap>(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                if !match_pattern(
+                    heap,
+                    allocations_since_gc,
+                    struct_layouts,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2279,7 +2718,14 @@ fn match_pattern<GC: GcHeap>(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(heap, allocations_since_gc, p, &actual, binds)? {
+                if !match_pattern(
+                    heap,
+                    allocations_since_gc,
+                    struct_layouts,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }

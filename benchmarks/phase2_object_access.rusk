@@ -1,0 +1,39 @@
+// Microbenchmark for Phase 2 (runtime object layout + field/index fast paths).
+//
+// The intent is to stress tuple + struct field get/set operations in tight loops so
+// `rusk-measure` can capture meaningful deltas.
+//
+// Expected return (n=100_000): 45_001_350_000
+
+struct Point { x: int, y: int }
+
+fn tuple_loop(n: int) -> int {
+    let t = (1, 2, 3);
+    let i = 0;
+    let sum = 0;
+    while i < n {
+        t.0 = t.0 + 1;
+        t.1 = t.1 + 2;
+        t.2 = t.2 + 3;
+        sum = sum + t.0 + t.1 + t.2;
+        i = i + 1;
+    };
+    sum
+}
+
+fn struct_loop(n: int) -> int {
+    let p = Point { x: 1, y: 2 };
+    let i = 0;
+    let sum = 0;
+    while i < n {
+        p.x = p.x + 1;
+        p.y = p.y + 2;
+        sum = sum + p.x + p.y;
+        i = i + 1;
+    };
+    sum
+}
+
+fn main() -> int {
+    struct_loop(100000) + tuple_loop(100000)
+}

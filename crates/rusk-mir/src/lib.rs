@@ -37,6 +37,13 @@ pub struct Module {
     /// Used by checked casts / runtime type tests for `interface` targets.
     pub interface_impls: BTreeMap<String, BTreeSet<String>>,
 
+    /// Optional struct field layouts: `type_name -> [field_name...]` in storage order.
+    ///
+    /// The interpreter can use this to allocate and access struct objects via field indices
+    /// (backed by `Vec<Value>`) rather than map lookups on hot paths.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub struct_layouts: BTreeMap<String, Vec<String>>,
+
     /// Declared host function imports required by this module.
     ///
     /// The interpreter can validate that all declared host functions are installed before
@@ -338,6 +345,28 @@ pub enum Instruction {
     SetField {
         obj: Operand,
         field: String,
+        value: Operand,
+    },
+
+    StructGet {
+        dst: Local,
+        obj: Operand,
+        idx: usize,
+    },
+    StructSet {
+        obj: Operand,
+        idx: usize,
+        value: Operand,
+    },
+
+    TupleGet {
+        dst: Local,
+        tup: Operand,
+        idx: usize,
+    },
+    TupleSet {
+        tup: Operand,
+        idx: usize,
         value: Operand,
     },
 
