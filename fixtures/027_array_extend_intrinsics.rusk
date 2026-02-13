@@ -1,0 +1,10 @@
+// expect: ok int 1304
+
+fn main() -> int {
+    let xs = [1];
+    let ys = [2, 3];
+    core::intrinsics::array_extend(xs, ys);
+    core::intrinsics::array_extend(xs, [4]);
+    xs[0] * 1000 + xs[2] * 100 + xs[3]
+}
+

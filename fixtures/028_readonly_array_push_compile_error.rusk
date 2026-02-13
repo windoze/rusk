@@ -1,0 +1,8 @@
+// expect: compile_error got `readonly [int]`
+
+fn main() -> unit {
+    readonly xs = [1, 2, 3];
+    core::intrinsics::array_push(xs, 4);
+    ()
+}
+

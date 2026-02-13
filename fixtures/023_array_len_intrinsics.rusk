@@ -1,0 +1,8 @@
+// expect: ok int 6
+
+fn main() -> int {
+    let xs = [1, 2, 3];
+    readonly rxs = xs;
+    core::intrinsics::array_len(xs) + core::intrinsics::array_len_ro(rxs)
+}
+

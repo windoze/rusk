@@ -1,0 +1,19 @@
+// expect: ok int 2346
+
+fn main() -> int {
+    let a = [1, 2];
+    let b = [3, 4];
+    let c = core::intrinsics::array_concat(a, b);
+    let l = core::intrinsics::array_len(c);
+    let s = core::intrinsics::array_slice(c, 1, 3);
+    let t = s[0] * 1000 + s[1] * 100 + c[3] * 10 + l;
+
+    readonly ra = a;
+    readonly rb = b;
+    let cr = core::intrinsics::array_concat_ro(ra, rb);
+    readonly rcr = cr;
+    let sr = core::intrinsics::array_slice_ro(rcr, 0, 2);
+
+    t + sr[1]
+}
+

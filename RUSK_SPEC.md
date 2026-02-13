@@ -1158,6 +1158,46 @@ so `panic("...")` is available unqualified.
 
 ---
 
+### 9.6 Arrays (Library Intrinsics)
+
+Rusk arrays (`[T]`) are heap-allocated, reference-like dynamic arrays. Indexing (`xs[i]`) and
+assignment (`xs[i] = v`) are core syntax, but operations that change the array length are provided
+as intrinsic host functions in `core::intrinsics`.
+
+Required array intrinsics (v0.4 reference implementation):
+
+- Length:
+  - `core::intrinsics::array_len<T>(xs: [T]) -> int`
+  - `core::intrinsics::array_len_ro<T>(xs: readonly [T]) -> int`
+- Push/pop:
+  - `core::intrinsics::array_push<T>(xs: [T], value: T) -> unit`
+  - `core::intrinsics::array_pop<T>(xs: [T]) -> Option<T>` (returns `Option::None` if empty)
+- Insert/remove:
+  - `core::intrinsics::array_insert<T>(xs: [T], idx: int, value: T) -> unit`
+  - `core::intrinsics::array_remove<T>(xs: [T], idx: int) -> T`
+- Resize/clear/extend:
+  - `core::intrinsics::array_clear<T>(xs: [T]) -> unit`
+  - `core::intrinsics::array_resize<T>(xs: [T], new_len: int, fill: T) -> unit`
+    - if `new_len < len(xs)`: truncates
+    - if `new_len > len(xs)`: appends `fill` copies
+  - `core::intrinsics::array_extend<T>(xs: [T], other: [T]) -> unit` (shallow element copies)
+- Construction from existing arrays:
+  - `core::intrinsics::array_concat<T>(a: [T], b: [T]) -> [T]`
+  - `core::intrinsics::array_concat_ro<T>(a: readonly [T], b: readonly [T]) -> [readonly T]`
+  - `core::intrinsics::array_slice<T>(xs: [T], start: int, end: int) -> [T]`
+  - `core::intrinsics::array_slice_ro<T>(xs: readonly [T], start: int, end: int) -> [readonly T]`
+
+Error behavior:
+
+- The mutating intrinsics (`array_push`, `array_pop`, `array_insert`, `array_remove`, `array_clear`,
+  `array_resize`, `array_extend`) cannot be called with a `readonly [T]` receiver (type error), and
+  also trap at runtime if a readonly reference is somehow passed.
+- `array_insert` traps if `idx` is out of bounds (`idx < 0` or `idx > len(xs)`).
+- `array_remove` traps if `idx` is out of bounds (`idx < 0` or `idx >= len(xs)`).
+- `array_slice`/`array_slice_ro` trap if `start` or `end` is out of bounds (`start < 0`,
+  `end < 0`, `end > len(xs)`) or if `start > end`.
+
+
 ## 10. Compilation to MIR (Normative)
 
 The compiler lowers Rusk to MIR as defined in `MIR_SPEC.md`.

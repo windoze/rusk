@@ -1,0 +1,28 @@
+// expect: ok int 33210
+
+fn main() -> int {
+    let xs = [1, 2];
+    core::intrinsics::array_push(xs, 3);
+    let l1 = core::intrinsics::array_len(xs);
+
+    let a = match core::intrinsics::array_pop(xs) {
+        Option::Some(n) => n
+        Option::None => 0
+    };
+    let b = match core::intrinsics::array_pop(xs) {
+        Option::Some(n) => n
+        Option::None => 0
+    };
+    let c = match core::intrinsics::array_pop(xs) {
+        Option::Some(n) => n
+        Option::None => 0
+    };
+    let d = match core::intrinsics::array_pop(xs) {
+        Option::Some(n) => n
+        Option::None => 0
+    };
+
+    let l2 = core::intrinsics::array_len(xs);
+    l1 * 10000 + a * 1000 + b * 100 + c * 10 + d + l2
+}
+

@@ -1,0 +1,192 @@
+// 17 - React-like state management with effects
+//
+// This example demonstrates how algebraic effects can provide a better alternative
+// to React's useEffect, overcoming many of its typical restrictions:
+//
+// React useEffect problems:
+// 1. Dependency array hell - easy to forget dependencies, causing stale closures
+// 2. Cleanup complexity - must return cleanup function, easy to get wrong
+// 3. Can't use async/await directly
+// 4. Effects run after render - timing is indirect
+// 5. Race conditions with multiple effects
+//
+// With algebraic effects, we can:
+// 1. No dependency arrays needed - effects capture current values naturally
+// 2. Automatic cleanup tracking through handlers
+// 3. Direct control flow - clearer execution model
+// 4. Type-safe side effects with generics
+// 5. Composable effect handlers
+
+use core::intrinsics::array_len;
+use core::intrinsics::array_push;
+
+// Effect interfaces
+interface State<T> {
+    fn get() -> T;
+    fn set(value: T);
+}
+
+interface Subscribe<T> {
+    fn subscribe(source: string) -> T;
+}
+
+interface Cleanup {
+    fn on_cleanup(cleanup_fn: fn());
+}
+
+// Helper functions for cleaner syntax
+fn get_state<T>() -> T {
+    @State<T>.get()
+}
+
+fn set_state<T>(value: T) {
+    @State<T>.set(value)
+}
+
+fn subscribe<T>(source: string) -> T {
+    @Subscribe<T>.subscribe(source)
+}
+
+fn on_cleanup(cleanup_fn: fn()) {
+    @Cleanup.on_cleanup(cleanup_fn)
+}
+
+// Example 1: Simple counter with side effect
+// In React: useEffect with dependency array [count]
+// Here: Direct effect call, no dependency tracking needed
+fn counter_component() {
+    let count: int = get_state();
+    std::println(f"Counter component render: count = {count}");
+
+    if count > 0 {
+        std::println(f"  [Effect] Count changed to {count}");
+    };
+
+    set_state(count + 1);
+}
+
+// Example 2: Subscription with automatic cleanup
+// In React: useEffect with cleanup function return
+// Here: Explicit cleanup registration, tracked by handler
+fn subscription_component() {
+    std::println("\nSubscription component:");
+
+    // Subscribe to data source
+    let data: string = subscribe("user-data");
+    std::println(f"  Received data: {data}");
+
+    // Register cleanup - will be called when component unmounts
+    on_cleanup {
+        std::println("  [Cleanup] Unsubscribing from user-data")
+    };
+
+    std::println(f"  Processing: {data}")
+}
+
+// Example 3: Multiple effects compose naturally
+// In React: Multiple useEffect calls can race or conflict
+// Here: Clear sequential execution, explicit ordering
+fn complex_component() {
+    std::println("\nComplex component with multiple effects:");
+
+    let user_id: int = get_state();
+    std::println(f"  User ID: {user_id}");
+
+    // Effect 1: Fetch user data
+    let user_name: string = subscribe(f"user/{user_id}");
+    on_cleanup {
+        std::println(f"  [Cleanup 1] Cancel user/{user_id} subscription")
+    };
+
+    // Effect 2: Fetch user posts (depends on user data)
+    // In React: This dependency is tricky with useEffect
+    // Here: Natural sequential flow
+    let posts: string = subscribe(f"posts/{user_name}");
+    on_cleanup {
+        std::println(f"  [Cleanup 2] Cancel posts/{user_name} subscription")
+    };
+
+    std::println(f"  Loaded user: {user_name}");
+    std::println(f"  Loaded posts: {posts}");
+}
+
+// Handler that manages state
+fn with_state<T>(initial: T, component: fn()) {
+    let state = initial;
+    let cleanups: [fn()] = [];
+
+    match component() {
+        @State<T>.get() => {
+            resume(state)
+        }
+        @State<T>.set(new_value) => {
+            state = new_value;
+            resume(())
+        }
+        @Cleanup.on_cleanup(cleanup_fn) => {
+            array_push(cleanups, cleanup_fn);
+            resume(())
+        }
+        _ => {}
+    };
+
+    // Run all cleanup functions
+    std::println("  [Handler] Running cleanup functions...");
+    let i = 0;
+    while i < array_len(cleanups) {
+        cleanups[i]();
+        i = i + 1;
+    }
+}
+
+// Handler that simulates data subscriptions
+fn with_subscriptions(component: fn()) {
+    match component() {
+        @Subscribe<string>.subscribe(source) => {
+            // Simulate fetching data from source
+            let data = f"<data from {source}>";
+            std::println(f"  [Subscription] Fetching: {source}");
+            resume(data)
+        }
+        @Subscribe<int>.subscribe(source) => {
+            resume(42)
+        }
+        _ => {}
+    }
+}
+
+fn main() {
+    std::println("=== React-like State Management with Effects ===\n");
+
+    std::println("Example 1: Counter (no dependency array needed)");
+    with_state(0) {
+        counter_component()
+    };
+
+    std::println("\n==================================================");
+
+    std::println("\nExample 2: Subscription with auto cleanup");
+    // Note: `on_cleanup { ... }` performs the `Cleanup.on_cleanup` effect, so this example
+    // must be wrapped in a handler that captures cleanups (provided by `with_state`).
+    with_state(()) {
+        with_subscriptions {
+            subscription_component()
+        }
+    };
+
+    std::println("\n==================================================");
+
+    std::println("\nExample 3: Complex component with multiple effects");
+    with_state(123) {
+        with_subscriptions {
+            complex_component()
+        }
+    };
+
+    std::println("\n=== Key Advantages ===");
+    std::println("1. No dependency arrays - values captured naturally");
+    std::println("2. Explicit cleanup registration - harder to forget");
+    std::println("3. Clear execution order - no hidden timing issues");
+    std::println("4. Type-safe effects with generics");
+    std::println("5. Effects compose naturally without conflicts");
+}

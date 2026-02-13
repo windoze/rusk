@@ -263,6 +263,70 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
         }
 
+        // Array operations.
+        "core::intrinsics::array_len" | "core::intrinsics::array_len_ro" => Some(sig(
+            vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
+            HostType::Int,
+        )),
+        "core::intrinsics::array_push" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Any,
+            ],
+            HostType::Unit,
+        )),
+        "core::intrinsics::array_pop" => Some(sig(
+            vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
+            HostType::Any,
+        )),
+        "core::intrinsics::array_clear" => Some(sig(
+            vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
+            HostType::Unit,
+        )),
+        "core::intrinsics::array_resize" | "core::intrinsics::array_insert" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Int,
+                HostType::Any,
+            ],
+            HostType::Unit,
+        )),
+        "core::intrinsics::array_remove" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Int,
+            ],
+            HostType::Any,
+        )),
+        "core::intrinsics::array_extend" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Array(Box::new(HostType::Any)),
+            ],
+            HostType::Unit,
+        )),
+        "core::intrinsics::array_concat" | "core::intrinsics::array_concat_ro" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Array(Box::new(HostType::Any)),
+            ],
+            HostType::Array(Box::new(HostType::Any)),
+        )),
+        "core::intrinsics::array_slice" | "core::intrinsics::array_slice_ro" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Int,
+                HostType::Int,
+            ],
+            HostType::Array(Box::new(HostType::Any)),
+        )),
+
         _ => None,
     }
 }

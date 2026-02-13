@@ -631,6 +631,96 @@ fn add_prelude(env: &mut ProgramEnv) {
         )],
         Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
     );
+
+    // Array operations.
+    let array_generics = vec![GenericParamInfo {
+        name: "T".to_string(),
+        arity: 0,
+        bounds: Vec::new(),
+        span: Span::new(0, 0),
+    }];
+    let array_ty = |t: Ty| Ty::Array(Box::new(t));
+    let ro_array_ty = |t: Ty| Ty::Readonly(Box::new(Ty::Array(Box::new(t))));
+    let option_ty = |t: Ty| Ty::App(TyCon::Named("Option".to_string()), vec![t]);
+
+    add_fn(
+        "core::intrinsics::array_len",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0))],
+        Ty::Int,
+    );
+    add_fn(
+        "core::intrinsics::array_len_ro",
+        array_generics.clone(),
+        vec![ro_array_ty(Ty::Gen(0))],
+        Ty::Int,
+    );
+    add_fn(
+        "core::intrinsics::array_push",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), Ty::Gen(0)],
+        Ty::Unit,
+    );
+    add_fn(
+        "core::intrinsics::array_pop",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0))],
+        option_ty(Ty::Gen(0)),
+    );
+    add_fn(
+        "core::intrinsics::array_clear",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0))],
+        Ty::Unit,
+    );
+    add_fn(
+        "core::intrinsics::array_resize",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
+        Ty::Unit,
+    );
+    add_fn(
+        "core::intrinsics::array_insert",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
+        Ty::Unit,
+    );
+    add_fn(
+        "core::intrinsics::array_remove",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), Ty::Int],
+        Ty::Gen(0),
+    );
+    add_fn(
+        "core::intrinsics::array_extend",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), array_ty(Ty::Gen(0))],
+        Ty::Unit,
+    );
+    add_fn(
+        "core::intrinsics::array_concat",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), array_ty(Ty::Gen(0))],
+        array_ty(Ty::Gen(0)),
+    );
+    add_fn(
+        "core::intrinsics::array_concat_ro",
+        array_generics.clone(),
+        vec![ro_array_ty(Ty::Gen(0)), ro_array_ty(Ty::Gen(0))],
+        array_ty(Ty::Readonly(Box::new(Ty::Gen(0)))),
+    );
+    add_fn(
+        "core::intrinsics::array_slice",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), Ty::Int, Ty::Int],
+        array_ty(Ty::Gen(0)),
+    );
+    add_fn(
+        "core::intrinsics::array_slice_ro",
+        array_generics.clone(),
+        vec![ro_array_ty(Ty::Gen(0)), Ty::Int, Ty::Int],
+        array_ty(Ty::Readonly(Box::new(Ty::Gen(0)))),
+    );
 }
 
 fn declare_struct(

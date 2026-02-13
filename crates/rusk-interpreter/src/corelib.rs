@@ -23,6 +23,7 @@ pub fn register_core_host_fns(interp: &mut Interpreter) {
     register_int_fns(interp);
     register_float_fns(interp);
     register_bytes_string_unit_eq(interp);
+    register_array_fns(interp);
     register_iterator_fns(interp);
 }
 
@@ -369,6 +370,367 @@ fn register_panic(interp: &mut Interpreter) {
         }),
         other => Err(RuntimeError::Trap {
             message: format!("core::intrinsics::panic: bad args: {other:?}"),
+        }),
+    });
+}
+
+fn register_array_fns(interp: &mut Interpreter) {
+    interp.register_host_fn("core::intrinsics::array_len", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr)] => {
+            let HeapValue::Array(items) = interp.heap_value(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_len: expected an array".to_string(),
+                });
+            };
+            Ok(Value::Int(items.len() as i64))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_len: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_len_ro", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr)] => {
+            let HeapValue::Array(items) = interp.heap_value(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_len_ro: expected an array".to_string(),
+                });
+            };
+            Ok(Value::Int(items.len() as i64))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_len_ro: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_push", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), value] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_push: expected an array".to_string(),
+                });
+            };
+            items.push(value.clone());
+            Ok(Value::Unit)
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_push: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_pop", |interp, args| match args {
+        [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_pop: expected an array".to_string(),
+                });
+            };
+
+            match items.pop() {
+                Some(v) => Ok(interp.alloc_enum_typed(
+                    "Option",
+                    vec![*elem_rep],
+                    "Some",
+                    vec![v],
+                )),
+                None => Ok(interp.alloc_enum_typed(
+                    "Option",
+                    vec![*elem_rep],
+                    "None",
+                    vec![],
+                )),
+            }
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_pop: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_clear", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr)] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_clear: expected an array".to_string(),
+                });
+            };
+            items.clear();
+            Ok(Value::Unit)
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_clear: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_resize", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), Value::Int(new_len), fill] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+            if *new_len < 0 {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_resize: new_len must be >= 0".to_string(),
+                });
+            }
+            let new_len_usize: usize = (*new_len) as usize;
+
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_resize: expected an array".to_string(),
+                });
+            };
+
+            if new_len_usize <= items.len() {
+                items.truncate(new_len_usize);
+                return Ok(Value::Unit);
+            }
+
+            let extra = new_len_usize - items.len();
+            items.reserve(extra);
+            for _ in 0..extra {
+                items.push(fill.clone());
+            }
+            Ok(Value::Unit)
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_resize: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_insert", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), Value::Int(idx), value] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_insert: expected an array".to_string(),
+                });
+            };
+            let idx_usize: usize =
+                (*idx)
+                    .try_into()
+                    .map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: *idx,
+                        len: items.len(),
+                    })?;
+            if idx_usize > items.len() {
+                return Err(RuntimeError::IndexOutOfBounds {
+                    index: *idx,
+                    len: items.len(),
+                });
+            }
+            items.insert(idx_usize, value.clone());
+            Ok(Value::Unit)
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_insert: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_remove", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), Value::Int(idx)] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_remove: expected an array".to_string(),
+                });
+            };
+            let idx_usize: usize =
+                (*idx)
+                    .try_into()
+                    .map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: *idx,
+                        len: items.len(),
+                    })?;
+            if idx_usize >= items.len() {
+                return Err(RuntimeError::IndexOutOfBounds {
+                    index: *idx,
+                    len: items.len(),
+                });
+            }
+            Ok(items.remove(idx_usize))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_remove: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_extend", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), Value::Ref(other)] => {
+            if arr.is_readonly() {
+                return Err(RuntimeError::ReadonlyWrite);
+            }
+
+            let other_items = {
+                let HeapValue::Array(items) = interp.heap_value(other)? else {
+                    return Err(RuntimeError::Trap {
+                        message: "core::intrinsics::array_extend: expected an array for `other`"
+                            .to_string(),
+                    });
+                };
+                items.clone()
+            };
+
+            let HeapValue::Array(items) = interp.heap_value_mut(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_extend: expected an array for `arr`"
+                        .to_string(),
+                });
+            };
+            items.extend(other_items);
+            Ok(Value::Unit)
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_extend: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_concat", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(a), Value::Ref(b)] => {
+            let HeapValue::Array(a_items) = interp.heap_value(a)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_concat: expected an array for `a`"
+                        .to_string(),
+                });
+            };
+            let HeapValue::Array(b_items) = interp.heap_value(b)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_concat: expected an array for `b`"
+                        .to_string(),
+                });
+            };
+
+            let mut items = Vec::with_capacity(a_items.len() + b_items.len());
+            items.extend(a_items.iter().cloned());
+            items.extend(b_items.iter().cloned());
+            Ok(interp.alloc_array(items))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_concat: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_concat_ro", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(a), Value::Ref(b)] => {
+            let HeapValue::Array(a_items) = interp.heap_value(a)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_concat_ro: expected an array for `a`"
+                        .to_string(),
+                });
+            };
+            let HeapValue::Array(b_items) = interp.heap_value(b)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_concat_ro: expected an array for `b`"
+                        .to_string(),
+                });
+            };
+
+            let mut items = Vec::with_capacity(a_items.len() + b_items.len());
+            items.extend(a_items.iter().cloned().map(Value::into_readonly_view));
+            items.extend(b_items.iter().cloned().map(Value::into_readonly_view));
+            Ok(interp.alloc_array(items))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_concat_ro: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_slice", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), Value::Int(start), Value::Int(end)] => {
+            let HeapValue::Array(items) = interp.heap_value(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_slice: expected an array".to_string(),
+                });
+            };
+
+            let start_usize: usize =
+                (*start)
+                    .try_into()
+                    .map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: *start,
+                        len: items.len(),
+                    })?;
+            let end_usize: usize =
+                (*end)
+                    .try_into()
+                    .map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: *end,
+                        len: items.len(),
+                    })?;
+            if start_usize > end_usize {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_slice: start must be <= end".to_string(),
+                });
+            }
+            if end_usize > items.len() {
+                return Err(RuntimeError::IndexOutOfBounds {
+                    index: *end,
+                    len: items.len(),
+                });
+            }
+
+            Ok(interp.alloc_array(items[start_usize..end_usize].to_vec()))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_slice: bad args: {other:?}"),
+        }),
+    });
+
+    interp.register_host_fn("core::intrinsics::array_slice_ro", |interp, args| match args {
+        [Value::TypeRep(_), Value::Ref(arr), Value::Int(start), Value::Int(end)] => {
+            let HeapValue::Array(items) = interp.heap_value(arr)? else {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_slice_ro: expected an array".to_string(),
+                });
+            };
+
+            let start_usize: usize =
+                (*start)
+                    .try_into()
+                    .map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: *start,
+                        len: items.len(),
+                    })?;
+            let end_usize: usize =
+                (*end)
+                    .try_into()
+                    .map_err(|_| RuntimeError::IndexOutOfBounds {
+                        index: *end,
+                        len: items.len(),
+                    })?;
+            if start_usize > end_usize {
+                return Err(RuntimeError::Trap {
+                    message: "core::intrinsics::array_slice_ro: start must be <= end".to_string(),
+                });
+            }
+            if end_usize > items.len() {
+                return Err(RuntimeError::IndexOutOfBounds {
+                    index: *end,
+                    len: items.len(),
+                });
+            }
+
+            Ok(interp.alloc_array(
+                items[start_usize..end_usize]
+                    .iter()
+                    .cloned()
+                    .map(Value::into_readonly_view)
+                    .collect(),
+            ))
+        }
+        other => Err(RuntimeError::Trap {
+            message: format!("core::intrinsics::array_slice_ro: bad args: {other:?}"),
         }),
     });
 }

@@ -34,3 +34,6 @@ Notes:
 - `12-effects-basic.rusk`: algebraic effects + `match` effect handlers
 - `13-effects-typed.rusk`: typed (generic) effects
 - `14-type-tests-is-asq.rusk`: runtime type tests with `is` and `as?`
+- `15-effects-generator.rusk`: implementing generators using algebraic effects with `yield` and `resume`
+- `16-fixed-point-combinator.rusk`: Y-combinator and fixed-point recursion using generics and higher-order functions
+- `17-effects-state-management.rusk`: React-like state management, demonstrating how effects overcome `useEffect` limitations

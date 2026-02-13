@@ -1,0 +1,66 @@
+// 15 - Generator using effects
+//
+// This example demonstrates how to implement a simple generator using algebraic effects.
+// A generator can yield multiple values, and handlers can collect or process them.
+
+interface Yield<T> { fn yield(value: T); }
+
+fn yield<T>(value: T) {
+    @Yield<T>.yield(value);
+}
+
+// Generator function that yields numbers from start to end
+fn range(start: int, end: int) {
+    let i = start;
+    while i < end {
+        yield(i);
+        i = i + 1;
+    }
+}
+
+// Generator function that yields Fibonacci numbers
+fn fibonacci(count: int) {
+    let a = 0;
+    let b = 1;
+    let i = 0;
+
+    while i < count {
+        yield(a);
+        let next = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
+    }
+}
+
+fn main() {
+    std::println("=== Range Generator (0 to 5) ===");
+    match range(0, 5) {
+        @Yield<int>.yield(value) => {
+            std::println(f"  yielded: {value}");
+            resume(())
+        }
+        result => result
+    };
+
+    std::println("\n=== Fibonacci Generator (first 10 numbers) ===");
+    match fibonacci(10) {
+        @Yield<int>.yield(value) => {
+            std::println(f"  fib: {value}");
+            resume(())
+        }
+        result => result
+    };
+
+    std::println("\n=== Using Generator with Custom Logic ===");
+    let sum = 0;
+    match range(1, 6) {
+        @Yield<int>.yield(value) => {
+            sum = sum + value;
+            std::println(f"  current value: {value}, running sum: {sum}");
+            resume(())
+        }
+        _ => {}
+    };
+    std::println(f"Final sum: {sum}");
+}

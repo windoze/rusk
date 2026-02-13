@@ -677,6 +677,20 @@ impl ModuleResolver {
             // Iterator protocol.
             "core::intrinsics::into_iter",
             "core::intrinsics::next",
+            // Array operations.
+            "core::intrinsics::array_len",
+            "core::intrinsics::array_len_ro",
+            "core::intrinsics::array_push",
+            "core::intrinsics::array_pop",
+            "core::intrinsics::array_clear",
+            "core::intrinsics::array_resize",
+            "core::intrinsics::array_insert",
+            "core::intrinsics::array_remove",
+            "core::intrinsics::array_extend",
+            "core::intrinsics::array_concat",
+            "core::intrinsics::array_concat_ro",
+            "core::intrinsics::array_slice",
+            "core::intrinsics::array_slice_ro",
         ] {
             let local = name
                 .strip_prefix("core::intrinsics::")

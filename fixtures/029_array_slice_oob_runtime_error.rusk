@@ -1,0 +1,8 @@
+// expect: runtime_error index out of bounds
+
+fn main() -> unit {
+    let xs = [1, 2, 3];
+    let _s = core::intrinsics::array_slice(xs, 0, 999);
+    ()
+}
+

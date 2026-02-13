@@ -1,0 +1,92 @@
+// 16 - Fixed-point combinator (Y/Z-combinator concept)
+//
+// This example demonstrates the Y-combinator concept using generics and higher-order functions.
+// The Y-combinator allows defining recursive functions without explicit self-reference.
+//
+// In typed languages, we use a practical approximation that captures the essence of fixed-point recursion.
+
+// A function that takes itself as an argument
+// This is the key insight of the Y-combinator: passing the function to itself for recursion
+
+// Generic fixed-point combinator for functions of type (T) -> R
+// In practice, we use a wrapper approach since true Y-combinator needs recursive types
+fn fix<T, R>(f: fn(fn(T) -> R, T) -> R) -> fn(T) -> R {
+    |x| { f(fix(f), x) }
+}
+
+// Generic fixed-point combinator for functions with two parameters
+fn fix2<T1, T2, R>(f: fn(fn(T1, T2) -> R, T1, T2) -> R) -> fn(T1, T2) -> R {
+    |x, y| { f(fix2(f), x, y) }
+}
+
+fn main() {
+    std::println("=== Fixed-Point Combinator Examples ===\n");
+
+    // Example 1: Factorial using fix combinator
+    std::println("1. Factorial function (generic over recursion):");
+
+    let factorial_step = |self: fn(int) -> int, n: int| {
+        if n <= 1 {
+            1
+        } else {
+            n * self(n - 1)
+        }
+    };
+
+    let factorial = fix(factorial_step);
+    std::println(f"  factorial(5) = {factorial(5)}");
+    std::println(f"  factorial(10) = {factorial(10)}");
+
+    // Example 2: Fibonacci using fix combinator
+    std::println("\n2. Fibonacci function:");
+
+    let fib_step = |self: fn(int) -> int, n: int| {
+        if n <= 1 {
+            n
+        } else {
+            self(n - 1) + self(n - 2)
+        }
+    };
+
+    let fib = fix(fib_step);
+    std::println(f"  fib(0) = {fib(0)}");
+    std::println(f"  fib(1) = {fib(1)}");
+    std::println(f"  fib(7) = {fib(7)}");
+    std::println(f"  fib(10) = {fib(10)}");
+
+    // Example 3: Sum of integers from 1 to n
+    std::println("\n3. Sum function using fix combinator:");
+
+    let sum_step = |self: fn(int) -> int, n: int| {
+        if n <= 0 {
+            0
+        } else {
+            n + self(n - 1)
+        }
+    };
+
+    let sum = fix(sum_step);
+    std::println(f"  sum(1..5) = {sum(5)}");
+    std::println(f"  sum(1..10) = {sum(10)}");
+    std::println(f"  sum(1..100) = {sum(100)}");
+
+    // Example 4: GCD (greatest common divisor) using fix2 (two parameters)
+    std::println("\n4. GCD function with two parameters:");
+
+    let gcd_step = |self: fn(int, int) -> int, a: int, b: int| {
+        if b == 0 {
+            a
+        } else {
+            self(b, a % b)
+        }
+    };
+
+    let gcd = fix2(gcd_step);
+    std::println(f"  gcd(48, 18) = {gcd(48, 18)}");
+    std::println(f"  gcd(100, 35) = {gcd(100, 35)}");
+    std::println(f"  gcd(17, 19) = {gcd(17, 19)}");
+
+    std::println("\n=== Key Insight ===");
+    std::println("The fix combinator abstracts recursion into a higher-order function,");
+    std::println("demonstrating how generic functions can capture powerful programming patterns.");
+}

@@ -1,0 +1,14 @@
+// expect: ok int 1030
+
+fn main() -> int {
+    let xs = [1, 2, 3];
+    core::intrinsics::array_resize(xs, 5, 9);
+    core::intrinsics::array_insert(xs, 1, 7);
+    let removed = core::intrinsics::array_remove(xs, 3);
+    core::intrinsics::array_resize(xs, 3, 0);
+    let sum = xs[0] + xs[1] + xs[2];
+    core::intrinsics::array_clear(xs);
+    let l = core::intrinsics::array_len(xs);
+    sum * 100 + removed * 10 + l
+}
+
