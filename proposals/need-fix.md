@@ -47,57 +47,6 @@ Everything else below is lower severity, but worth tracking.
 
 ## Findings
 
-### P0 — `rusk-mir` feature gating makes the crate unusable without `serde`
-
-**What happens**
-
-- `rusk-mir` types like `Local`, `Module`, `Function`, etc. are compiled only when the `serde`
-  feature is enabled, due to `#[cfg(feature = "serde")]` placed on the items themselves (not just
-  on the derives).
-- There is also `impl Function { ... }` that is **not** `#[cfg]` gated, so when `Function` is
-  removed, the crate fails to compile.
-
-**Evidence / repro**
-
-These fail today:
-
-- `cargo check -p rusk-mir --no-default-features` ❌
-- `cargo check -p rusk-mir --no-default-features --features std` ❌
-- `cargo check -p rusk-interpreter` ❌ (because `rusk-interpreter` depends on `rusk-mir` with
-  `default-features = false`)
-- `cargo check -p rusk-interpreter --no-default-features --features hashbrown,serde` ❌
-
-This passes:
-
-- `cargo check -p rusk-mir --no-default-features --features serde` ✅
-
-**Where**
-
-- `crates/rusk-mir/src/lib.rs:15` (and throughout): items are gated behind `#[cfg(feature = "serde")]`
-- `crates/rusk-mir/src/lib.rs:65` (`impl Function`) is not gated but references gated types
-
-**Why it matters**
-
-- Any downstream user who wants to depend on `rusk-mir` or `rusk-interpreter` and disable `serde`
-  (to reduce deps / binary size / support no-std builds) will hit hard compilation failures.
-- Within this workspace, the issue is currently masked by feature unification when building the
-  full workspace (because `rusk-compiler` pulls in `rusk-mir` default features).
-
-**Suggested direction**
-
-- In `crates/rusk-mir/src/lib.rs`, remove `#[cfg(feature = "serde")]` from MIR item definitions and
-  instead use:
-  - `#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]`
-  - keep `#[cfg(feature = "serde")] use serde::{...};`
-  - keep existing `#[cfg_attr(feature = "serde", serde(default))]` field attrs
-- In `crates/rusk-interpreter/Cargo.toml`, consider making the `serde` feature also enable
-  `rusk-mir/serde` so `from_bytes` can work without relying on unrelated workspace members.
-- Add CI-style build checks (even as a local script at first) to exercise feature sets:
-  - `rusk-mir`: `--no-default-features`, `--no-default-features --features serde`
-  - `rusk-interpreter`: `--no-default-features --features hashbrown`, plus `serde` variants
-
----
-
 ### P1 — `rusk` can crash on crafted `.mir` via `panic!()` in interpreter
 
 **What happens**
@@ -267,8 +216,7 @@ structured `CompileError`/`RuntimeError`.
 
 If prioritizing for robustness + usability:
 
-1) Fix `rusk-mir` feature gating (P0), and add a minimal feature build matrix to avoid regressions.
-2) Replace the interpreter `panic!()` on invalid `TypeRepId` with a `RuntimeError` (P1).
-3) Improve the “dummy span” story so internal/builtin errors don’t point at `<file:1:1>` (P1).
-4) Decide whether host signatures are “metadata only” or should be enforced at runtime (P3).
+1) Replace the interpreter `panic!()` on invalid `TypeRepId` with a `RuntimeError` (P1).
+2) Improve the “dummy span” story so internal/builtin errors don’t point at `<file:1:1>` (P1).
+3) Decide whether host signatures are “metadata only” or should be enforced at runtime (P3).
 
