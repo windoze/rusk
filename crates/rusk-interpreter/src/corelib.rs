@@ -4,6 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::interpreter::{HeapValue, Interpreter, RuntimeError, Value};
 
