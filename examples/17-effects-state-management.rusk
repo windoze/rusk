@@ -113,7 +113,6 @@ fn complex_component() {
 // Handler that manages state
 fn with_state<T>(initial: T, component: fn()) {
     let state = initial;
-    let cleanups: [fn()] = [];
 
     match component() {
         @State<T>.get() => {
@@ -122,6 +121,28 @@ fn with_state<T>(initial: T, component: fn()) {
         @State<T>.set(new_value) => {
             state = new_value;
             resume(())
+        }
+        _ => {}
+    }
+}
+
+// Handler that simulates data subscriptions, and tracks cleanup callbacks.
+//
+// Note: in Rusk, effect handlers installed by `match` are scoped to the scrutinee evaluation.
+// When a handler resumes a continuation, any *outer* handlers are not active in the resumed
+// computation. That means effects that occur *after* `subscribe(...)` must be handled here.
+fn with_subscriptions(component: fn()) {
+    let cleanups: [fn()] = [];
+
+    match component() {
+        @Subscribe<string>.subscribe(source) => {
+            // Simulate fetching data from source
+            let data = f"<data from {source}>";
+            std::println(f"  [Subscription] Fetching: {source}");
+            resume(data)
+        }
+        @Subscribe<int>.subscribe(source) => {
+            resume(42)
         }
         @Cleanup.on_cleanup(cleanup_fn) => {
             array_push(cleanups, cleanup_fn);
@@ -139,22 +160,6 @@ fn with_state<T>(initial: T, component: fn()) {
     }
 }
 
-// Handler that simulates data subscriptions
-fn with_subscriptions(component: fn()) {
-    match component() {
-        @Subscribe<string>.subscribe(source) => {
-            // Simulate fetching data from source
-            let data = f"<data from {source}>";
-            std::println(f"  [Subscription] Fetching: {source}");
-            resume(data)
-        }
-        @Subscribe<int>.subscribe(source) => {
-            resume(42)
-        }
-        _ => {}
-    }
-}
-
 fn main() {
     std::println("=== React-like State Management with Effects ===\n");
 
@@ -166,12 +171,8 @@ fn main() {
     std::println("\n==================================================");
 
     std::println("\nExample 2: Subscription with auto cleanup");
-    // Note: `on_cleanup { ... }` performs the `Cleanup.on_cleanup` effect, so this example
-    // must be wrapped in a handler that captures cleanups (provided by `with_state`).
-    with_state(()) {
-        with_subscriptions {
-            subscription_component()
-        }
+    with_subscriptions {
+        subscription_component()
     };
 
     std::println("\n==================================================");
