@@ -28,15 +28,10 @@ Local commands run (results summarized below):
 
 ## Summary (What Looks Most Urgent)
 
-1) **Build configuration is currently broken** for non-default feature sets:
-   - `rusk-mir` does not compile without the `serde` feature, despite advertising it as optional.
-   - `rusk-interpreter` fails to build standalone because its `rusk-mir` dependency disables
-     default features.
-
-2) **Interpreter robustness**: there is at least one reachable `panic!()` on invalid MIR that can
+1) **Interpreter robustness**: there is at least one reachable `panic!()` on invalid MIR that can
    crash the process when executing a crafted `.mir` file.
 
-3) **Diagnostics quality**: many error paths use `Span::new(0, 0)` as a dummy span. With the current
+2) **Diagnostics quality**: many error paths use `Span::new(0, 0)` as a dummy span. With the current
    `SourceMap` behavior, this can render locations that misleadingly point at the beginning of the
    entry file.
 
