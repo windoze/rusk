@@ -799,6 +799,9 @@ impl<'a> Parser<'a> {
                     } else if matches!(self.lookahead.kind, TokenKind::RBrace) {
                         tail = Some(Box::new(expr));
                         break;
+                    } else if Self::is_expr_stmt_without_semi(&expr) {
+                        let span = expr.span();
+                        stmts.push(Stmt::Expr { span, expr });
                     } else {
                         return Err(self.error_here("expected `;` or `}` after expression"));
                     }
@@ -811,6 +814,18 @@ impl<'a> Parser<'a> {
             tail,
             span: Span::new(start, end),
         })
+    }
+
+    fn is_expr_stmt_without_semi(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::If { .. }
+                | Expr::Match { .. }
+                | Expr::Loop { .. }
+                | Expr::While { .. }
+                | Expr::For { .. }
+                | Expr::Block { .. }
+        )
     }
 
     fn parse_binding_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -922,6 +937,10 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 TokenKind::LBrace => {
+                    if !Self::is_trailing_closure_callee(&lhs) {
+                        break;
+                    }
+
                     // Trailing closure syntax sugar:
                     // - `foo(a, b) { ... }`  ==>  `foo(a, b, || { ... })`
                     // - `foo { ... }`       ==>  `foo(|| { ... })`
@@ -1186,6 +1205,10 @@ impl<'a> Parser<'a> {
         }
 
         Ok(lhs)
+    }
+
+    fn is_trailing_closure_callee(expr: &Expr) -> bool {
+        matches!(expr, Expr::Call { .. } | Expr::Path { .. } | Expr::Field { .. })
     }
 
     fn parse_expr_bp_no_struct_lit(&mut self, min_bp: u8) -> Result<Expr, ParseError> {

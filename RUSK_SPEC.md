@@ -313,6 +313,14 @@ BreakStmt      := "break" ";" ;
 ContinueStmt   := "continue" ";" ;
 
 ExprStmt       := Expr ";" ;
+               | BlockLikeExpr ";"? ;
+
+BlockLikeExpr  := Block
+               | IfExpr
+               | MatchExpr
+               | LoopExpr
+               | WhileExpr
+               | ForExpr ;
 ```
 
 Notes:
@@ -320,6 +328,8 @@ Notes:
 - `let x = e;` initializes `x`.
 - `const x = e;` prevents rebinding of `x` (but does not deep-freeze referenced objects).
 - `readonly x = e;` is equivalent to `const x = e;` plus a readonly view: it prevents rebinding and forbids mutation through `x`.
+- Like Rust, *block-like* expression statements (`if` / `match` / `loop` / `while` / `for` / `{ ... }`) may omit the trailing `;` when used as a statement inside a block.
+  - If such an expression appears in the final position of a block and does **not** have a trailing `;`, it is parsed as the block's tail expression and becomes the value of the block (`Block := "{" Stmt* Expr? "}"`).
 
 ### 3.6 Expressions
 
