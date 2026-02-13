@@ -122,12 +122,25 @@ Notes:
 #### 3.2.2 Structs
 
 ```
-StructItem     := "struct" Ident GenericParams? "{" FieldList? "}" ;
+StructItem     := "struct" Ident GenericParams? ( NamedStructBody | NewTypeStructBody ) ;
+
+NamedStructBody:= "{" FieldList? "}" ;
+NewTypeStructBody
+              := "(" Type ")" ";" ;
+
 FieldList      := Field ("," Field)* (",")? ;
 Field          := Ident ":" Type ;
 ```
 
-Struct values are heap-allocated objects with named fields.
+Struct values are heap-allocated objects.
+
+Rusk supports two struct body forms:
+
+- **named-field structs** (`struct Point { x: int, y: int }`) with named field access `p.x`.
+- **new-type structs** (`struct UserId(int);`) which are nominal wrappers around a single field:
+  - they are constructed with call syntax `UserId(value)` (not a struct literal)
+  - their single field is accessed by index `u.0`
+  - they do not introduce any implicit conversions to/from the underlying field type.
 
 #### 3.2.3 Enums
 
@@ -457,6 +470,9 @@ Notes:
 - Tuple literals use Rust-like comma disambiguation: `(x)` is a parenthesized expression, `(x,)` is a 1-tuple, and `()` is `unit`.
 - Struct literals are parsed only when `Ident` looks like a nominal type name (it must start with an ASCII uppercase letter, e.g. `Point { x: 1 }`).
 - A zero-field enum variant may be written without parentheses as `Enum::Variant`; this is sugar for `Enum::Variant()`.
+- New-type structs are **not** constructed with struct literals. Use call syntax:
+  - `UserId(42)` / `Box::<int>(123)`
+  - access the wrapped field via `.0` or by pattern destructuring (§3.7).
 
 #### 3.6.3 Lambdas
 
@@ -552,6 +568,7 @@ Pattern        := "_"                       // wildcard
                | Ident                     // binding
                | LiteralPat
                | TuplePat
+               | CtorPat
                | EnumPat
                | StructPat
                | ArrayPat ;
@@ -563,7 +580,9 @@ TuplePatItemList
               := TuplePatItem ("," TuplePatItem)* (",")? ;
 TuplePatItem   := Pattern | RestPat ;
 
-EnumPat        := Ident "::" Ident ("(" (Pattern ("," Pattern)*)? (",")? ")")? ;
+CtorPat        := PathExpr "(" (Pattern ("," Pattern)*)? (",")? ")" ;
+
+EnumPat        := Ident ("::" Ident)* "::" Ident ("(" (Pattern ("," Pattern)*)? (",")? ")")? ;
 StructPat      := Ident "{" (StructPatItem ("," StructPatItem)*)? (",")? "}" ;
 StructPatItem  := StructPatField | ".." ;
 StructPatField := Ident (":" Pattern)? ;
@@ -578,6 +597,9 @@ Notes:
 - `Ident` in a pattern always binds (there are no “constant patterns” for names).
 - Parentheses are Rust-like: `(p)` is a parenthesized pattern; a tuple pattern requires a comma and/or a `..` rest marker (e.g. `(p,)`, `(a, b)`, `(..rest)`).
 - A zero-field enum variant may be written without parentheses as `Enum::Variant`; this is sugar for `Enum::Variant()`.
+- `CtorPat` is resolved by name resolution:
+  - if `PathExpr` refers to an enum variant constructor, it is an enum pattern
+  - if `PathExpr` refers to a new-type struct, it destructures the single `.0` field.
 - Tuple and array patterns may contain `..` at most once; it matches “the rest”:
   - `(a, ..b, c)` binds `b` to the middle slice as a tuple (or `()` if empty).
   - `[a, ..b, c]` binds `b` to the middle slice as an array.
@@ -640,7 +662,7 @@ The left-hand side of `=` must be one of:
 
 - a local name: `x = expr` (only if `x` was declared with `let`, not `const`/`readonly`)
 - a struct field: `obj.field = expr`
-- a tuple field: `t.0 = expr`, `t.1 = expr`, ...
+- a tuple field (or new-type struct field): `t.0 = expr`, `t.1 = expr`, ...
 - an array slot: `arr[index] = expr`
 
 Evaluation order is left-to-right:

@@ -131,30 +131,50 @@ impl<'a> Parser<'a> {
         let start = self.expect(TokenKind::KwStruct)?.span.start;
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
-        self.expect(TokenKind::LBrace)?;
-        let mut fields = Vec::new();
-        while !matches!(self.lookahead.kind, TokenKind::RBrace) {
-            let field_name = self.expect_ident()?;
-            self.expect(TokenKind::Colon)?;
-            let ty = self.parse_type()?;
-            let span = Span::new(field_name.span.start, ty.span().end);
-            fields.push(FieldDecl {
-                name: field_name,
-                ty,
-                span,
-            });
-            if matches!(self.lookahead.kind, TokenKind::Comma) {
+        let (body, end) = match self.lookahead.kind {
+            TokenKind::LBrace => {
                 self.bump()?;
-            } else {
-                break;
+                let mut fields = Vec::new();
+                while !matches!(self.lookahead.kind, TokenKind::RBrace) {
+                    let field_name = self.expect_ident()?;
+                    self.expect(TokenKind::Colon)?;
+                    let ty = self.parse_type()?;
+                    let span = Span::new(field_name.span.start, ty.span().end);
+                    fields.push(FieldDecl {
+                        name: field_name,
+                        ty,
+                        span,
+                    });
+                    if matches!(self.lookahead.kind, TokenKind::Comma) {
+                        self.bump()?;
+                    } else {
+                        break;
+                    }
+                }
+                let end = self.expect(TokenKind::RBrace)?.span.end;
+                (StructBody::Named { fields }, end)
             }
-        }
-        let end = self.expect(TokenKind::RBrace)?.span.end;
+            TokenKind::LParen => {
+                self.bump()?;
+                let inner = self.parse_type()?;
+                if matches!(self.lookahead.kind, TokenKind::Comma) {
+                    return Err(self.error_here(
+                        "new-type structs take exactly one field type (tuple structs are not supported yet)",
+                    ));
+                }
+                self.expect(TokenKind::RParen)?;
+                let end = self.expect(TokenKind::Semi)?.span.end;
+                (StructBody::NewType { inner }, end)
+            }
+            _ => {
+                return Err(self.error_here("expected `{` or `(` after struct name"));
+            }
+        };
         Ok(StructItem {
             vis,
             name,
             generics,
-            fields,
+            body,
             span: Span::new(start, end),
         })
     }
@@ -2071,23 +2091,20 @@ impl<'a> Parser<'a> {
             segments.push(self.expect_ident()?);
         }
 
-        // Enum pattern: `EnumPath::Variant(...)` (note that `EnumPath` itself may be qualified).
+        // Constructor-like pattern (resolved during typechecking):
+        // - enum variant: `EnumPath::Variant(...)`
+        // - new-type struct: `TypePath(...)`
         if matches!(self.lookahead.kind, TokenKind::LParen) {
-            if segments.len() < 2 {
-                return Err(self.error_here("expected `Enum::Variant(...)` pattern"));
-            }
-            let variant = segments.pop().expect("len >= 2");
-            let enum_end = segments.last().map(|s| s.span.end).unwrap_or(start);
-            let enum_path = Path {
+            let path_end = segments.last().map(|s| s.span.end).unwrap_or(start);
+            let path = Path {
                 segments,
-                span: Span::new(start, enum_end),
+                span: Span::new(start, path_end),
             };
-
             self.expect(TokenKind::LParen)?;
-            let mut fields = Vec::new();
+            let mut args = Vec::new();
             if !matches!(self.lookahead.kind, TokenKind::RParen) {
                 loop {
-                    fields.push(self.parse_pattern()?);
+                    args.push(self.parse_pattern()?);
                     if matches!(self.lookahead.kind, TokenKind::Comma) {
                         self.bump()?;
                         if matches!(self.lookahead.kind, TokenKind::RParen) {
@@ -2099,10 +2116,9 @@ impl<'a> Parser<'a> {
                 }
             }
             let end = self.expect(TokenKind::RParen)?.span.end;
-            return Ok(Pattern::Enum {
-                enum_path,
-                variant,
-                fields,
+            return Ok(Pattern::Ctor {
+                path,
+                args,
                 span: Span::new(start, end),
             });
         }

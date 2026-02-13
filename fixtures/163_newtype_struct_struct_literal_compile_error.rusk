@@ -1,0 +1,9 @@
+// expect: compile_error must be constructed with call syntax
+
+struct UserId(int);
+
+fn main() -> unit {
+    let _ = UserId { v: 1 };
+    ()
+}
+

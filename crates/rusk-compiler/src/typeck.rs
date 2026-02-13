@@ -166,6 +166,7 @@ pub(crate) struct StructDef {
     pub(crate) name: String,
     pub(crate) generics: Vec<GenericParamInfo>,
     pub(crate) fields: Vec<(String, Ty)>,
+    pub(crate) is_newtype: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -488,6 +489,7 @@ fn add_prelude(env: &mut ProgramEnv) {
                 ("arr".to_string(), Ty::Array(Box::new(Ty::Gen(0)))),
                 ("idx".to_string(), Ty::Int),
             ],
+            is_newtype: false,
         },
     );
 
@@ -757,6 +759,7 @@ fn declare_struct(
             name,
             generics,
             fields: Vec::new(),
+            is_newtype: matches!(item.body, crate::ast::StructBody::NewType { .. }),
         },
     );
     Ok(())
@@ -1014,25 +1017,40 @@ fn fill_struct(
     let struct_name = full_name.clone();
     let scope = GenericScope::new(&generics)?;
     let mut seen = BTreeSet::new();
-    let mut fields = Vec::with_capacity(item.fields.len());
-    for field in &item.fields {
-        let field_name = field.name.name.clone();
-        if !seen.insert(field_name.clone()) {
-            return Err(TypeError {
-                message: format!(
-                    "duplicate field `{}` in struct `{}`",
-                    field_name, struct_name
-                ),
-                span: field.name.span,
-            });
+    let mut fields = Vec::new();
+    let is_newtype = match &item.body {
+        crate::ast::StructBody::Named { fields: decls } => {
+            fields.reserve(decls.len());
+            for field in decls {
+                let field_name = field.name.name.clone();
+                if !seen.insert(field_name.clone()) {
+                    return Err(TypeError {
+                        message: format!(
+                            "duplicate field `{}` in struct `{}`",
+                            field_name, struct_name
+                        ),
+                        span: field.name.span,
+                    });
+                }
+                let ty = lower_type_expr(env, module, &scope, &field.ty)?;
+                fields.push((field_name, ty));
+            }
+            false
         }
-        let ty = lower_type_expr(env, module, &scope, &field.ty)?;
-        fields.push((field_name, ty));
-    }
+        crate::ast::StructBody::NewType { inner } => {
+            let ty = lower_type_expr(env, module, &scope, inner)?;
+            fields.push((".0".to_string(), ty));
+            true
+        }
+    };
     env.structs
         .get_mut(&full_name)
         .expect("declared in first pass")
         .fields = fields;
+    env.structs
+        .get_mut(&full_name)
+        .expect("declared in first pass")
+        .is_newtype = is_newtype;
     Ok(())
 }
 
@@ -1528,6 +1546,7 @@ fn pattern_binds_name(pat: &Pattern, name: &str) -> bool {
         Pattern::Struct { fields, .. } => {
             fields.iter().any(|(_field, p)| pattern_binds_name(p, name))
         }
+        Pattern::Ctor { args, .. } => args.iter().any(|p| pattern_binds_name(p, name)),
         Pattern::Array {
             prefix,
             rest,
@@ -3441,6 +3460,15 @@ impl<'a> FnTypechecker<'a> {
                 span: type_path.span,
             });
         };
+        if def.is_newtype {
+            return Err(TypeError {
+                message: format!(
+                    "new-type struct `{}` must be constructed with call syntax: `{}`(value)",
+                    def.name, def.name
+                ),
+                span: type_path.span,
+            });
+        }
         if def.generics.iter().any(|g| g.arity != 0) {
             return Err(TypeError {
                 message: "higher-kinded generics on structs are not supported in v0.4".to_string(),
@@ -4290,6 +4318,150 @@ impl<'a> FnTypechecker<'a> {
                 }
                 Ok(binds)
             }
+            Pattern::Ctor { path, args, span } => {
+                // First attempt: enum variant constructor `EnumPath::Variant(...)`.
+                if path.segments.len() >= 2 {
+                    let enum_segments: Vec<String> = path.segments[..path.segments.len() - 1]
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    let variant = path.segments.last().expect("len >= 2");
+
+                    if let Some((kind, enum_name)) = self
+                        .env
+                        .modules
+                        .try_resolve_type_fqn(&self.module, &enum_segments, path.span)
+                        .map_err(|e| TypeError {
+                            message: e.message,
+                            span: e.span,
+                        })?
+                        && kind == crate::modules::DefKind::Enum
+                    {
+                        let Some(def) = self.env.enums.get(&enum_name) else {
+                            return Err(TypeError {
+                                message: format!("unknown enum `{enum_name}`"),
+                                span: path.span,
+                            });
+                        };
+                        let Some(variant_fields) = def.variants.get(&variant.name) else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "unknown variant `{}` on enum `{}`",
+                                    variant.name, def.name
+                                ),
+                                span: variant.span,
+                            });
+                        };
+                        if args.len() != variant_fields.len() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "wrong number of fields for pattern `{}::{}`: expected {}, got {}",
+                                    def.name,
+                                    variant.name,
+                                    variant_fields.len(),
+                                    args.len()
+                                ),
+                                span: *span,
+                            });
+                        }
+
+                        let mut type_args = Vec::with_capacity(def.generics.len());
+                        for _ in &def.generics {
+                            type_args.push(self.infer.fresh_type_var());
+                        }
+                        let expected_ty =
+                            Ty::App(TyCon::Named(def.name.clone()), type_args.clone());
+                        let (ro, inner_expected) = match expected {
+                            Ty::Readonly(inner) => (true, *inner),
+                            other => (false, other),
+                        };
+                        let _ = self.infer.unify(inner_expected, expected_ty, *span)?;
+
+                        let ty_subst: HashMap<GenId, Ty> =
+                            type_args.iter().cloned().enumerate().collect();
+                        let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                        let mut binds = Vec::new();
+                        for (subpat, fty) in args.iter().zip(variant_fields.iter()) {
+                            let mut fty = subst_ty(fty.clone(), &ty_subst, &con_subst);
+                            if ro {
+                                fty = fty.as_readonly_view();
+                            }
+                            binds.extend(self.typecheck_pattern(subpat, fty)?);
+                        }
+                        return Ok(binds);
+                    }
+                }
+
+                // Fallback: new-type struct constructor `TypePath(value)`.
+                let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+                let (kind, struct_name) = self
+                    .env
+                    .modules
+                    .resolve_type_fqn(&self.module, &segments, path.span)
+                    .map_err(|e| TypeError {
+                        message: e.message,
+                        span: e.span,
+                    })?;
+                if kind != crate::modules::DefKind::Struct {
+                    return Err(TypeError {
+                        message: format!(
+                            "expected an enum variant or new-type struct constructor, got `{struct_name}`"
+                        ),
+                        span: path.span,
+                    });
+                }
+                let Some(def) = self.env.structs.get(&struct_name) else {
+                    return Err(TypeError {
+                        message: format!("unknown struct `{struct_name}`"),
+                        span: path.span,
+                    });
+                };
+                if !def.is_newtype {
+                    return Err(TypeError {
+                        message: format!(
+                            "constructor pattern requires a new-type struct, got `{}`",
+                            def.name
+                        ),
+                        span: path.span,
+                    });
+                }
+                if args.len() != 1 {
+                    return Err(TypeError {
+                        message: format!(
+                            "wrong number of fields for pattern `{}`: expected 1, got {}",
+                            def.name,
+                            args.len()
+                        ),
+                        span: *span,
+                    });
+                }
+
+                let mut type_args = Vec::with_capacity(def.generics.len());
+                for _ in &def.generics {
+                    type_args.push(self.infer.fresh_type_var());
+                }
+                let expected_ty = Ty::App(TyCon::Named(def.name.clone()), type_args.clone());
+                let (ro, inner_expected) = match expected {
+                    Ty::Readonly(inner) => (true, *inner),
+                    other => (false, other),
+                };
+                let _ = self.infer.unify(inner_expected, expected_ty, *span)?;
+
+                let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+                let Some((_fname, field_ty)) = def.fields.get(0) else {
+                    return Err(TypeError {
+                        message: "internal error: malformed new-type struct definition".to_string(),
+                        span: path.span,
+                    });
+                };
+                let mut fty = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
+                if ro {
+                    fty = fty.as_readonly_view();
+                }
+                self.typecheck_pattern(&args[0], fty)
+            }
             Pattern::Enum {
                 enum_path,
                 variant,
@@ -4400,6 +4572,22 @@ impl<'a> FnTypechecker<'a> {
 
             let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
             let mut func_name: Option<String> = None;
+
+            // New-type struct constructor call: `Name(v)` / `mod::Name(v)`.
+            if let Some((kind, type_fqn)) = self
+                .env
+                .modules
+                .try_resolve_type_fqn(&self.module, &segments, span)
+                .map_err(|e| TypeError {
+                    message: e.message,
+                    span: e.span,
+                })?
+                && kind == crate::modules::DefKind::Struct
+                && let Some(def) = self.env.structs.get(&type_fqn)
+                && def.is_newtype
+            {
+                return self.typecheck_newtype_ctor_call(&type_fqn, explicit_type_args, args, span);
+            }
 
             if segments.len() >= 2 {
                 let prefix = &segments[..segments.len() - 1];
@@ -4573,6 +4761,64 @@ impl<'a> FnTypechecker<'a> {
                 .unify(reified_type_args[idx].clone(), explicit_ty, ty_expr.span())?;
         }
         Ok(())
+    }
+
+    fn typecheck_newtype_ctor_call(
+        &mut self,
+        struct_name: &str,
+        explicit_type_args: &[TypeExpr],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Ty, TypeError> {
+        let Some(def) = self.env.structs.get(struct_name) else {
+            return Err(TypeError {
+                message: format!("unknown struct `{struct_name}`"),
+                span,
+            });
+        };
+        if !def.is_newtype {
+            return Err(TypeError {
+                message: format!("`{struct_name}` is not a new-type struct"),
+                span,
+            });
+        }
+        if args.len() != 1 {
+            return Err(TypeError {
+                message: format!(
+                    "arity mismatch for `{}`: expected 1, got {}",
+                    def.name,
+                    args.len()
+                ),
+                span,
+            });
+        }
+
+        let Some((_fname, field_ty_template)) = def.fields.get(0) else {
+            return Err(TypeError {
+                message: "internal error: malformed new-type struct definition".to_string(),
+                span,
+            });
+        };
+
+        let mut type_args: Vec<Ty> = Vec::with_capacity(def.generics.len());
+        for _ in &def.generics {
+            type_args.push(self.infer.fresh_type_var());
+        }
+        self.apply_explicit_type_args(
+            explicit_type_args,
+            &def.generics,
+            &type_args,
+            &def.name,
+            span,
+        )?;
+
+        let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+        let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+        let expected_field = subst_ty(field_ty_template.clone(), &ty_subst, &con_subst);
+        let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
+        self.infer.unify(expected_field, got, args[0].span())?;
+
+        Ok(Ty::App(TyCon::Named(def.name.clone()), type_args))
     }
 
     fn typecheck_call_via_fn_value(
@@ -5134,6 +5380,41 @@ impl<'a> FnTypechecker<'a> {
                         message: format!("tuple index {idx} out of bounds (len={})", items.len()),
                         span: *idx_span,
                     })?,
+                    Ty::App(TyCon::Named(type_name), type_args) => {
+                        let Some(def) = self.env.structs.get(&type_name) else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "tuple field access requires a tuple or new-type struct, got `{type_name}`"
+                                ),
+                                span,
+                            });
+                        };
+                        if !def.is_newtype {
+                            return Err(TypeError {
+                                message: format!(
+                                    "tuple field access on non-tuple value of type `{type_name}`"
+                                ),
+                                span,
+                            });
+                        }
+                        if idx != 0 {
+                            return Err(TypeError {
+                                message: format!("tuple index {idx} out of bounds (len=1)"),
+                                span: *idx_span,
+                            });
+                        }
+                        let Some((_fname, field_ty)) = def.fields.get(0) else {
+                            return Err(TypeError {
+                                message: "internal error: malformed new-type struct definition"
+                                    .to_string(),
+                                span,
+                            });
+                        };
+                        let ty_subst: HashMap<GenId, Ty> =
+                            type_args.iter().cloned().enumerate().collect();
+                        let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+                        subst_ty(field_ty.clone(), &ty_subst, &con_subst)
+                    }
                     Ty::Var(_) => {
                         // Inference fallback: access `t.0` constrains `t` to a tuple of at least
                         // `idx + 1` elements, but tuples have fixed arity in Rusk; we pick the
@@ -5370,6 +5651,42 @@ impl<'a> FnTypechecker<'a> {
                                 ),
                                 span: *idx_span,
                             })?,
+                            Ty::App(TyCon::Named(type_name), type_args) => {
+                                let Some(def) = self.env.structs.get(&type_name) else {
+                                    return Err(TypeError {
+                                        message: format!(
+                                            "tuple field assignment requires a tuple or new-type struct, got `{type_name}`"
+                                        ),
+                                        span: base.span(),
+                                    });
+                                };
+                                if !def.is_newtype {
+                                    return Err(TypeError {
+                                        message: format!(
+                                            "tuple field assignment requires a tuple, got `{type_name}`"
+                                        ),
+                                        span: base.span(),
+                                    });
+                                }
+                                if idx != 0 {
+                                    return Err(TypeError {
+                                        message: format!("tuple index {idx} out of bounds (len=1)"),
+                                        span: *idx_span,
+                                    });
+                                }
+                                let Some((_fname, field_ty)) = def.fields.get(0) else {
+                                    return Err(TypeError {
+                                        message:
+                                            "internal error: malformed new-type struct definition"
+                                                .to_string(),
+                                        span: base.span(),
+                                    });
+                                };
+                                let ty_subst: HashMap<GenId, Ty> =
+                                    type_args.iter().cloned().enumerate().collect();
+                                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+                                subst_ty(field_ty.clone(), &ty_subst, &con_subst)
+                            }
                             other => {
                                 return Err(TypeError {
                                     message: format!(

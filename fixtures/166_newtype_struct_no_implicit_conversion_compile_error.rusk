@@ -1,0 +1,11 @@
+// expect: compile_error type mismatch: expected `int`, got `UserId`
+
+struct UserId(int);
+
+fn takes_int(x: int) -> int { x }
+
+fn main() -> int {
+    let id = UserId(1);
+    takes_int(id)
+}
+

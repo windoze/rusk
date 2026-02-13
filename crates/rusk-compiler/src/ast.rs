@@ -95,8 +95,14 @@ pub struct StructItem {
     pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
-    pub fields: Vec<FieldDecl>,
+    pub body: StructBody,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StructBody {
+    Named { fields: Vec<FieldDecl> },
+    NewType { inner: TypeExpr },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -565,6 +571,14 @@ pub enum Pattern {
         fields: Vec<Pattern>,
         span: Span,
     },
+    /// Constructor-like destructuring for enum variants and new-type structs.
+    ///
+    /// This is resolved during typechecking based on what `path` refers to.
+    Ctor {
+        path: Path,
+        args: Vec<Pattern>,
+        span: Span,
+    },
     Struct {
         type_path: Path,
         fields: Vec<(Ident, Pattern)>,
@@ -586,6 +600,7 @@ impl Pattern {
             | Pattern::Bind { span, .. }
             | Pattern::Literal { span, .. }
             | Pattern::Enum { span, .. }
+            | Pattern::Ctor { span, .. }
             | Pattern::Struct { span, .. }
             | Pattern::Tuple { span, .. }
             | Pattern::Array { span, .. } => *span,

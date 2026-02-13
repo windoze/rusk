@@ -1,0 +1,9 @@
+// expect: compile_error arity mismatch for `UserId`
+
+struct UserId(int);
+
+fn main() -> unit {
+    let _ = UserId(1, 2);
+    ()
+}
+

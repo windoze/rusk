@@ -1,0 +1,10 @@
+// expect: compile_error constructor pattern requires a new-type struct
+
+struct Point { x: int }
+
+fn main() -> int {
+    match (Point { x: 1 }) {
+        Point(n) => n
+        _ => 0
+    }
+}

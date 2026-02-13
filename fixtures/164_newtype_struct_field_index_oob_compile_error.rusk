@@ -1,0 +1,9 @@
+// expect: compile_error tuple index 1 out of bounds (len=1)
+
+struct UserId(int);
+
+fn main() -> int {
+    let id = UserId(1);
+    id.1
+}
+

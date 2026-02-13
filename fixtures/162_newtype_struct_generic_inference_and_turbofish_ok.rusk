@@ -1,0 +1,10 @@
+// expect: ok int 246
+
+struct Box<T>(T);
+
+fn main() -> int {
+    let a = Box(123);
+    let b = Box::<int>(123);
+    a.0 + b.0
+}
+

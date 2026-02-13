@@ -1,0 +1,12 @@
+// expect: ok int 3
+
+mod m {
+    pub struct UserId(int);
+}
+
+fn main() -> int {
+    match m::UserId(3) {
+        m::UserId(n) => n
+        _ => 0
+    }
+}
