@@ -1,0 +1,22 @@
+// Microbenchmark for Phase 4 (symbol interning / ID-based call dispatch).
+//
+// Stresses:
+// - MIR calls (calling `inc`)
+// - host calls (the `+` intrinsic inside `inc`, plus loop arithmetic)
+//
+// Expected return (n=500_000): 500_000
+
+fn inc(x: int) -> int {
+    x + 1
+}
+
+fn main() -> int {
+    let i = 0;
+    let acc = 0;
+    while i < 500000 {
+        acc = inc(acc);
+        i = i + 1;
+    };
+    acc
+}
+

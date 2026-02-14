@@ -11,11 +11,15 @@ fn b(i: usize) -> BlockId {
     BlockId(i)
 }
 
+fn add_fn(module: &mut Module, func: Function) {
+    module.add_function(func).unwrap();
+}
+
 #[test]
 fn runs_simple_host_call() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -67,8 +71,8 @@ fn struct_fields_can_be_read_and_written() {
         ("y".to_string(), Operand::Literal(ConstValue::Int(2))),
     ];
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -118,8 +122,8 @@ fn readonly_write_traps() {
 
     let fields = vec![("x".to_string(), Operand::Literal(ConstValue::Int(1)))];
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -160,8 +164,8 @@ fn readonly_write_traps() {
 #[test]
 fn array_len_index_get_and_set_work() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -214,8 +218,8 @@ fn array_len_index_get_and_set_work() {
 #[test]
 fn make_array_allocates_with_runtime_elements() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -258,8 +262,8 @@ fn make_array_allocates_with_runtime_elements() {
 #[test]
 fn make_enum_allocates_with_runtime_fields() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -323,8 +327,8 @@ fn make_enum_allocates_with_runtime_fields() {
 #[test]
 fn switch_binds_values_into_target_block_params() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -401,8 +405,8 @@ fn switch_binds_values_into_target_block_params() {
 #[test]
 fn br_passes_block_arguments() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -441,8 +445,8 @@ fn br_passes_block_arguments() {
 #[test]
 fn move_clears_the_source_local() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -480,8 +484,8 @@ fn move_clears_the_source_local() {
 #[test]
 fn pop_handler_without_push_is_an_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -508,8 +512,8 @@ fn effects_perform_and_resume() {
     let mut module = Module::default();
 
     // fn process() -> unit { perform Logger.log("hi"); perform Logger.log("bye"); return unit }
-    module.functions.insert(
-        "process".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "process".to_string(),
             params: vec![],
@@ -556,8 +560,8 @@ fn effects_perform_and_resume() {
     //   %r = resume %k unit
     //   return %r
     // }
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -640,8 +644,8 @@ fn effects_perform_and_resume() {
 #[test]
 fn cond_br_selects_then_and_else() {
     let mut module = Module::default();
-    module.functions.insert(
-        "choose".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "choose".to_string(),
             params: vec![Param {
@@ -702,8 +706,8 @@ fn cond_br_selects_then_and_else() {
 #[test]
 fn trap_terminator_produces_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -733,8 +737,8 @@ fn trap_terminator_produces_error() {
 #[test]
 fn call_unknown_function_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -769,8 +773,8 @@ fn call_unknown_function_is_error() {
 fn icall_invokes_function_reference() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "callee".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "callee".to_string(),
             params: vec![],
@@ -787,8 +791,8 @@ fn icall_invokes_function_reference() {
         },
     );
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![Param {
@@ -813,9 +817,10 @@ fn icall_invokes_function_reference() {
         },
     );
 
+    let callee_id = module.function_id("callee").unwrap();
     let mut interp = Interpreter::new(module);
     let out = interp
-        .run_function("main", vec![Value::Function("callee".to_string())])
+        .run_function("main", vec![Value::Function(callee_id)])
         .unwrap();
     assert_eq!(out, Value::Int(123));
 }
@@ -823,13 +828,9 @@ fn icall_invokes_function_reference() {
 #[test]
 fn vcall_invokes_resolved_method() {
     let mut module = Module::default();
-    module.methods.insert(
-        ("Point".to_string(), "get_x".to_string()),
-        "Point_get_x".to_string(),
-    );
 
-    module.functions.insert(
-        "Point_get_x".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "Point_get_x".to_string(),
             params: vec![Param {
@@ -854,8 +855,13 @@ fn vcall_invokes_resolved_method() {
         },
     );
 
-    module.functions.insert(
-        "main".to_string(),
+    let method_id = module.function_id("Point_get_x").unwrap();
+    module
+        .methods
+        .insert(("Point".to_string(), "get_x".to_string()), method_id);
+
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -894,8 +900,8 @@ fn vcall_invokes_resolved_method() {
 #[test]
 fn get_field_missing_field_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -937,8 +943,8 @@ fn get_field_missing_field_is_error() {
 #[test]
 fn index_get_out_of_bounds_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -973,8 +979,8 @@ fn index_get_out_of_bounds_is_error() {
 #[test]
 fn len_on_non_array_is_type_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1015,8 +1021,8 @@ fn len_on_non_array_is_type_error() {
 #[test]
 fn switch_target_param_arity_mismatch_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1074,8 +1080,8 @@ fn switch_target_param_arity_mismatch_is_error() {
 #[test]
 fn push_handler_validates_target_param_arity() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1126,8 +1132,8 @@ fn push_handler_validates_target_param_arity() {
 fn effect_handler_clause_order_and_arg_patterns_work() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "do_both".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "do_both".to_string(),
             params: vec![],
@@ -1163,8 +1169,8 @@ fn effect_handler_clause_order_and_arg_patterns_work() {
         },
     );
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1275,8 +1281,8 @@ fn effect_handler_clause_order_and_arg_patterns_work() {
 fn nested_handlers_prefer_innermost() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "do_one".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "do_one".to_string(),
             params: vec![],
@@ -1301,8 +1307,8 @@ fn nested_handlers_prefer_innermost() {
         },
     );
 
-    module.functions.insert(
-        "with_inner".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "with_inner".to_string(),
             params: vec![],
@@ -1359,8 +1365,8 @@ fn nested_handlers_prefer_innermost() {
         },
     );
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1439,8 +1445,8 @@ fn nested_handlers_prefer_innermost() {
 fn handler_can_skip_continuation_by_not_resuming() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "do_work".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "do_work".to_string(),
             params: vec![],
@@ -1472,8 +1478,8 @@ fn handler_can_skip_continuation_by_not_resuming() {
         },
     );
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1536,8 +1542,8 @@ fn handler_can_skip_continuation_by_not_resuming() {
 fn can_resume_continuation_from_host_and_it_is_one_shot() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1607,8 +1613,8 @@ fn can_resume_continuation_from_host_and_it_is_one_shot() {
 #[test]
 fn invalid_local_index_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1642,8 +1648,8 @@ fn invalid_local_index_is_error() {
 #[test]
 fn invalid_block_id_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1675,8 +1681,8 @@ fn invalid_block_id_is_error() {
 #[test]
 fn cond_br_requires_bool_condition() {
     let mut module = Module::default();
-    module.functions.insert(
-        "choose".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "choose".to_string(),
             params: vec![Param {
@@ -1736,8 +1742,8 @@ fn cond_br_requires_bool_condition() {
 #[test]
 fn copy_from_uninitialized_local_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1765,8 +1771,8 @@ fn copy_from_uninitialized_local_is_error() {
 #[test]
 fn set_field_missing_field_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1808,8 +1814,8 @@ fn set_field_missing_field_is_error() {
 #[test]
 fn index_set_readonly_write_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1848,8 +1854,8 @@ fn index_set_readonly_write_is_error() {
 #[test]
 fn index_set_out_of_bounds_is_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1884,8 +1890,8 @@ fn index_set_out_of_bounds_is_error() {
 #[test]
 fn vcall_unresolved_method_is_trap() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -1928,8 +1934,8 @@ fn vcall_unresolved_method_is_trap() {
 fn pop_handler_in_non_owner_frame_is_error() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "callee".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "callee".to_string(),
             params: vec![],
@@ -1946,8 +1952,8 @@ fn pop_handler_in_non_owner_frame_is_error() {
         },
     );
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -2000,8 +2006,8 @@ fn pop_handler_in_non_owner_frame_is_error() {
 #[test]
 fn icall_with_non_function_value_is_type_error() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![Param {
@@ -2043,8 +2049,8 @@ fn icall_with_non_function_value_is_type_error() {
 #[test]
 fn unhandled_effect_traps() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],
@@ -2084,8 +2090,8 @@ fn unhandled_effect_traps() {
 fn continuation_is_one_shot() {
     let mut module = Module::default();
 
-    module.functions.insert(
-        "main".to_string(),
+    add_fn(
+        &mut module,
         Function {
             name: "main".to_string(),
             params: vec![],

@@ -47,6 +47,13 @@ MIR uses the following identifier forms in its canonical textual format
 
 An implementation may intern these names.
 
+The in-tree compiler + interpreter implementation performs interning at the MIR level for hot-path
+execution:
+
+- functions are assigned dense `FunctionId` indices
+- declared host imports are assigned dense `HostImportId` indices
+- direct calls are resolved to a `CallTarget` (`mir(FunctionId)` / `host(HostImportId)`)
+
 ---
 
 ## 3. Program Structure
@@ -61,7 +68,7 @@ A module contains:
 
 In this implementation, method-resolution metadata is represented as a lookup table:
 
-- `(dynamic_type_name, method_id) -> function_name`
+- `(dynamic_type_name, method_id) -> function_id`
 
 Additionally, checked casts / runtime type tests against `interface` targets may use optional
 interface-implementation metadata:
@@ -76,6 +83,9 @@ index-based struct storage and fast field operations:
 Finally, a module may include a set of **declared host function imports** (e.g. `std::println`),
 including their (monomorphic) signatures. An interpreter may validate that all declared imports
 are installed before executing any MIR.
+
+Note: the in-tree implementation stores functions and host imports in indexed tables, with
+additional name → id maps for diagnostics and host registration.
 
 ### 3.2 Function
 
@@ -376,6 +386,14 @@ Some instructions are statement-like and produce no value.
   - Semantics: call a MIR function or a host function by name.
   - Convention: `%dst` may be written as `_` to indicate the return value is
     ignored.
+
+- `call_id` (direct, resolved):
+  - Syntax: `%dst = call_id <target> (<op_args...>)`
+  - Semantics: same as `call`, but the callee has already been resolved to a
+    `CallTarget`:
+    - `mir(FunctionId)` for MIR calls
+    - `host(HostImportId)` for declared host imports
+  - This avoids repeated string-key lookups on hot paths (e.g. arithmetic lowered to host calls).
 
 - `icall` (indirect):
   - Syntax: `%dst = icall <op_fnptr> (<op_args...>)`

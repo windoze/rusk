@@ -56,12 +56,13 @@ pub struct MarkSweepHeap {
     slots: Vec<Slot>,
     free: Vec<u32>,
     live: usize,
+    epoch: u32,
 }
 
 #[derive(Debug)]
 struct Slot {
     generation: u32,
-    marked: Cell<bool>,
+    marked_epoch: Cell<u32>,
     value: Option<HeapValue>,
 }
 
@@ -91,7 +92,7 @@ impl GcHeap for MarkSweepHeap {
             let slot = &mut self.slots[index as usize];
             debug_assert!(slot.value.is_none(), "free list points at live slot");
             slot.value = Some(value);
-            slot.marked.set(false);
+            slot.marked_epoch.set(0);
             self.live += 1;
             return GcRef::new(index, slot.generation);
         }
@@ -99,7 +100,7 @@ impl GcHeap for MarkSweepHeap {
         let index: u32 = self.slots.len().try_into().expect("gc heap index overflow");
         self.slots.push(Slot {
             generation: 0,
-            marked: Cell::new(false),
+            marked_epoch: Cell::new(0),
             value: Some(value),
         });
         self.live += 1;
@@ -115,9 +116,14 @@ impl GcHeap for MarkSweepHeap {
     }
 
     fn collect_garbage(&mut self, roots: &dyn Trace) {
-        // Clear marks first.
-        for slot in &self.slots {
-            slot.marked.set(false);
+        // Bump the mark epoch. Slots are considered marked iff `marked_epoch == self.epoch`.
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            // Extremely unlikely wraparound (2^32 GCs): fall back to a full clear.
+            for slot in &self.slots {
+                slot.marked_epoch.set(0);
+            }
+            self.epoch = 1;
         }
 
         // Mark phase (iterative).
@@ -139,7 +145,7 @@ impl GcHeap for MarkSweepHeap {
             if slot.value.is_none() {
                 continue;
             }
-            if slot.marked.get() {
+            if slot.marked_epoch.get() == self.epoch {
                 continue;
             }
 
@@ -178,10 +184,10 @@ impl Tracer for MarkTracer<'_> {
         let Some(slot) = self.heap.slot(handle) else {
             return;
         };
-        if slot.marked.get() {
+        if slot.marked_epoch.get() == self.heap.epoch {
             return;
         }
-        slot.marked.set(true);
+        slot.marked_epoch.set(self.heap.epoch);
         self.worklist.push(handle);
     }
 }

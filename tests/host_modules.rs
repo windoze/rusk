@@ -67,7 +67,8 @@ fn main() {
     )
     .unwrap();
 
-    let sig = module.host_imports.get("std::println").unwrap();
+    let import_id = module.host_import_id("std::println").unwrap();
+    let sig = &module.host_import(import_id).unwrap().sig;
     assert_eq!(
         sig,
         &HostFnSig {

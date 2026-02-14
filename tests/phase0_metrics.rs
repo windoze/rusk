@@ -26,9 +26,8 @@ fn main() {
 #[test]
 fn interpreter_metrics_count_executed_instructions_and_terminators() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
-        Function {
+    module
+        .add_function(Function {
             name: "main".to_string(),
             params: Vec::new(),
             ret_type: None,
@@ -44,8 +43,8 @@ fn interpreter_metrics_count_executed_instructions_and_terminators() {
                     value: Operand::Local(Local(0)),
                 },
             }],
-        },
-    );
+        })
+        .unwrap();
 
     let mut interp = Interpreter::new(module);
     interp.reset_metrics();

@@ -12,9 +12,8 @@ fn b(i: usize) -> BlockId {
 #[test]
 fn gc_collects_unreachable_objects() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
-        Function {
+    module
+        .add_function(Function {
             name: "main".to_string(),
             params: vec![],
             ret_type: Some(Type::Unit),
@@ -36,8 +35,8 @@ fn gc_collects_unreachable_objects() {
                     value: Operand::Literal(ConstValue::Unit),
                 },
             }],
-        },
-    );
+        })
+        .unwrap();
 
     let mut interp = Interpreter::new(module);
     let out = interp.run_function("main", vec![]).unwrap();
@@ -51,9 +50,8 @@ fn gc_collects_unreachable_objects() {
 #[test]
 fn gc_preserves_objects_reachable_via_rooted_values() {
     let mut module = Module::default();
-    module.functions.insert(
-        "make".to_string(),
-        Function {
+    module
+        .add_function(Function {
             name: "make".to_string(),
             params: vec![],
             ret_type: Some(Type::Array),
@@ -73,11 +71,10 @@ fn gc_preserves_objects_reachable_via_rooted_values() {
                     value: Operand::Local(l(0)),
                 },
             }],
-        },
-    );
-    module.functions.insert(
-        "len_of".to_string(),
-        Function {
+        })
+        .unwrap();
+    module
+        .add_function(Function {
             name: "len_of".to_string(),
             params: vec![Param {
                 local: l(0),
@@ -97,8 +94,8 @@ fn gc_preserves_objects_reachable_via_rooted_values() {
                     value: Operand::Local(l(1)),
                 },
             }],
-        },
-    );
+        })
+        .unwrap();
 
     let mut interp = Interpreter::new(module);
     let arr = interp.run_function("make", vec![]).unwrap();
@@ -121,9 +118,8 @@ fn gc_preserves_objects_reachable_via_rooted_values() {
 #[test]
 fn gc_traces_through_nested_heap_graphs() {
     let mut module = Module::default();
-    module.functions.insert(
-        "make_nested".to_string(),
-        Function {
+    module
+        .add_function(Function {
             name: "make_nested".to_string(),
             params: vec![],
             ret_type: Some(Type::Struct("Box".to_string())),
@@ -147,11 +143,10 @@ fn gc_traces_through_nested_heap_graphs() {
                     value: Operand::Local(l(1)),
                 },
             }],
-        },
-    );
-    module.functions.insert(
-        "len_inner".to_string(),
-        Function {
+        })
+        .unwrap();
+    module
+        .add_function(Function {
             name: "len_inner".to_string(),
             params: vec![Param {
                 local: l(0),
@@ -178,8 +173,8 @@ fn gc_traces_through_nested_heap_graphs() {
                     value: Operand::Local(l(2)),
                 },
             }],
-        },
-    );
+        })
+        .unwrap();
 
     let mut interp = Interpreter::new(module);
     let boxed = interp.run_function("make_nested", vec![]).unwrap();
@@ -205,9 +200,8 @@ fn gc_traces_through_nested_heap_graphs() {
 #[test]
 fn gc_roots_values_captured_in_continuations() {
     let mut module = Module::default();
-    module.functions.insert(
-        "main".to_string(),
-        Function {
+    module
+        .add_function(Function {
             name: "main".to_string(),
             params: vec![],
             ret_type: None,
@@ -261,8 +255,8 @@ fn gc_roots_values_captured_in_continuations() {
                     },
                 },
             ],
-        },
-    );
+        })
+        .unwrap();
 
     let mut interp = Interpreter::new(module);
 
@@ -312,16 +306,11 @@ fn gc_prevents_stale_handle_use_after_reuse() {
         }],
     };
 
-    module
-        .functions
-        .insert("make1".to_string(), make_box("make1", 1));
-    module
-        .functions
-        .insert("make2".to_string(), make_box("make2", 2));
+    module.add_function(make_box("make1", 1)).unwrap();
+    module.add_function(make_box("make2", 2)).unwrap();
 
-    module.functions.insert(
-        "read_x".to_string(),
-        Function {
+    module
+        .add_function(Function {
             name: "read_x".to_string(),
             params: vec![Param {
                 local: l(0),
@@ -342,8 +331,8 @@ fn gc_prevents_stale_handle_use_after_reuse() {
                     value: Operand::Local(l(1)),
                 },
             }],
-        },
-    );
+        })
+        .unwrap();
 
     let mut interp = Interpreter::new(module);
     let old = interp.run_function("make1", vec![]).unwrap();

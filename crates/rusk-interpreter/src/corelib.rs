@@ -53,7 +53,10 @@ fn register_to_string(interp: &mut Interpreter) {
         [Value::TypeRep(_), Value::Ref(r)] => {
             Ok(Value::String(format!("{:?}", Value::Ref(r.clone()))))
         }
-        [Value::TypeRep(_), Value::Function(name)] => Ok(Value::String(format!("fn({name})"))),
+        [Value::TypeRep(_), Value::Function(id)] => {
+            let name = _interp.function_name(*id).unwrap_or("<unknown function>");
+            Ok(Value::String(format!("fn({name})")))
+        }
         [Value::TypeRep(_), Value::Continuation(_)] => {
             Ok(Value::String("continuation(..)".to_string()))
         }

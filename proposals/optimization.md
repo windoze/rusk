@@ -321,78 +321,84 @@ Risk level:
 
 ### Phase 3 — Compiler: Capture Analysis for Lambdas and Helpers
 
-Replace “capture everything visible” with “capture only free variables”.
+Status: **DONE** (implemented in-tree)
 
-Approach:
+Implemented artifacts:
 
-1. Implement a **free-variable analysis** pass on the AST (or on a lowered IR) for:
-   - lambda bodies
-   - match-with-effects helpers
+- Compiler performs a free-variable analysis over the AST for:
+  - lambda bodies
+  - match-with-effects helper bodies
+- Lambdas/helpers now capture **only the bindings that are actually referenced** (plus the
+  internal `$typerep::` capture slots).
+- Tests:
+  - `tests/phase3_capture_analysis.rs`
 
-2. Capture only:
-   - referenced bindings from outer scopes
-   - any required generic `TypeRep` captures (already handled via `$typerep::` slots)
+Benchmark (local, `rusk-measure`, release build):
 
-3. Preserve determinism:
-   - keep capture order stable by sorting by (module, name) or by first-use order (deterministic).
-
-Expected impact:
-
-- Smaller closure environments → less allocation + copying + GC pressure.
-- Smaller helper signatures → faster calls and less local initialization.
-
-Risk level:
-
-- Medium: correctness-sensitive (must match lexical scoping rules and shadowing).
+- Input: `benchmarks/phase3_closure_capture.rusk`
+- Command:
+  - `cargo run --release --bin rusk-measure -- --json --warmup 2 --iters 10 benchmarks/phase3_closure_capture.rusk`
+- Baseline (before Phase 3):
+  - `run.avg_ns = 246066495` (≈ 246ms)
+- After Phase 3:
+  - `run.avg_ns = 114329229` (≈ 114ms)
+  - ≈ **53.5% faster** on this benchmark on this machine
 
 ### Phase 4 — Symbol Interning / ID-Based Names (Cross-cutting)
 
-Introduce a “symbol” layer so the pipeline doesn’t repeatedly allocate/compare strings.
+Status: **DONE** (implemented in-tree)
 
-Options (in increasing scope):
+Implemented artifacts:
 
-1. **Interpreter-only interning**
-   - Build a runtime string→id table at module load time to speed up lookups (`functions`, `methods`,
-     `field names`).
+- MIR ids and tables:
+  - `FunctionId` and `HostImportId` identifiers
+  - `Module::functions` and `Module::host_imports` stored as indexed tables
+  - name → id maps (`Module::{function_ids, host_import_ids}`)
+  - virtual dispatch table now stores `FunctionId` values
+- New MIR ops / literals:
+  - `Instruction::CallId { func: CallTarget, ... }` for resolved call dispatch
+  - `ConstValue::FunctionId(FunctionId)` for interned function references
+- Compiler post-pass:
+  - Resolves `call` targets into `CallId` using the module tables.
+  - Resolves `ConstValue::Function(name)` into `ConstValue::FunctionId(id)`.
+- Interpreter execution:
+  - Stores the current function as a `FunctionId` in `Frame` (no per-step string lookup).
+  - Dispatches `CallId` without string-key lookups.
+  - Represents `Value::Function` as a `FunctionId` (so `icall` avoids string dispatch).
 
-2. **Compiler + interpreter interning (shared)**
-   - Intern identifiers during lexing/parsing/typeck and carry `SymbolId` through.
+Benchmark (local, `rusk-measure`, release build):
 
-3. **MIR-level symbol tables**
-   - Add a string table to `rusk_mir::Module` and reference names by indices.
-   - This requires MIR format changes (which is acceptable at this stage).
-
-Expected impact:
-
-- Reduced allocations and faster comparisons across compile + runtime.
-
-Risk level:
-
-- Medium/High: touches serialization formats and public data structures.
+- Input: `benchmarks/phase4_call_dispatch.rusk`
+- Command:
+  - `cargo run --release --bin rusk-measure -- --json --warmup 2 --iters 10 benchmarks/phase4_call_dispatch.rusk`
+- Baseline (before Phase 4, after Phase 3):
+  - `run.avg_ns = 454285645` (≈ 454ms)
+- After Phase 4:
+  - `run.avg_ns = 287352766` (≈ 287ms)
+  - ≈ **36.7% faster** on this benchmark on this machine
 
 ### Phase 5 — GC Improvements (Mark Epoch + Policy)
 
-Two incremental improvements:
+Status: **DONE** (mark epoch implemented in-tree; adaptive threshold deferred)
 
-1. **Mark epoch (avoid full mark clearing)**
-   - Replace `marked: Cell<bool>` with `marked_epoch: Cell<u32>`
-   - Maintain a heap-level `current_epoch: u32`
-   - A slot is marked if `marked_epoch == current_epoch`
-   - Increment epoch per GC cycle (handle wraparound by doing a full clear occasionally)
+Implemented artifacts:
 
-2. **Adaptive GC threshold**
-   - Replace a fixed `gc_threshold` with a policy based on:
-     - live objects
-     - allocation rate
-     - previous GC cost
+- Mark epoch in the mark-sweep heap:
+  - Slots store `marked_epoch: Cell<u32>` rather than a boolean.
+  - Heap stores a `current epoch` and increments per GC cycle (with a wraparound fallback).
+- Existing GC tests still pass:
+  - `tests/gc.rs`
 
-Expected impact:
+Benchmark (local, `rusk-measure`, release build):
 
-- Better performance for allocation-heavy workloads; avoids O(total_slots) clear work each cycle.
-
-Risk level:
-
-- Medium: GC correctness is high-stakes; requires careful tests.
+- Input: `benchmarks/phase5_gc_epoch.rusk`
+- Command:
+  - `cargo run --release --bin rusk-measure -- --json --warmup 2 --iters 10 benchmarks/phase5_gc_epoch.rusk`
+- Baseline (before Phase 5, after Phase 4):
+  - `run.avg_ns = 2113890362` (≈ 2.114s)
+- After Phase 5:
+  - `run.avg_ns = 1990100037` (≈ 1.990s)
+  - ≈ **5.8% faster** on this benchmark on this machine
 
 ---
 

@@ -28,8 +28,8 @@ use std::time::Instant;
 
 use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
 use rusk_mir::{
-    BasicBlock, BlockId, ConstValue, EffectSpec, Function, Instruction, Local, Module, Mutability,
-    Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
+    BasicBlock, BlockId, CallTarget, ConstValue, EffectSpec, Function, FunctionId, Instruction,
+    Local, Module, Mutability, Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
 };
 
 /// An internal runtime type representation identifier.
@@ -73,7 +73,7 @@ pub enum Value {
     Bytes(Vec<u8>),
     TypeRep(TypeRepId),
     Ref(RefValue),
-    Function(String),
+    Function(FunctionId),
     Continuation(ContinuationToken),
 }
 
@@ -119,7 +119,7 @@ impl fmt::Debug for Value {
                     r.handle.index, r.handle.generation, ro
                 )
             }
-            Value::Function(name) => write!(f, "fn({name})"),
+            Value::Function(id) => write!(f, "fn#{}", id.0),
             Value::Continuation(_) => write!(f, "continuation(..)"),
         }
     }
@@ -411,6 +411,7 @@ pub struct InterpreterImpl<GC: GcHeap> {
     type_rep_intern: HashMap<TypeRepNode, TypeRepId>,
     struct_layouts: HashMap<String, StructLayout>,
     host_functions: BTreeMap<String, HostFunction<GC>>,
+    host_import_functions: Vec<Option<HostFunction<GC>>>,
     stack: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
     heap: GC,
@@ -480,12 +481,15 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             struct_layouts.insert(type_name.clone(), StructLayout::new(fields.clone()));
         }
 
+        let host_import_functions = vec![None; module.host_imports.len()];
+
         Self {
             module,
             type_reps: Vec::new(),
             type_rep_intern: HashMap::new(),
             struct_layouts,
             host_functions: BTreeMap::new(),
+            host_import_functions,
             stack: Vec::new(),
             handlers: Vec::new(),
             heap,
@@ -584,7 +588,17 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     where
         F: Fn(&mut Self, &[Value]) -> Result<Value, RuntimeError> + 'static,
     {
-        self.host_functions.insert(name.into(), Rc::new(f));
+        let name: String = name.into();
+        let f: HostFunction<GC> = Rc::new(f);
+        self.host_functions.insert(name.clone(), Rc::clone(&f));
+
+        if let Some(id) = self.module.host_import_id(name.as_str()) {
+            let slot = self
+                .host_import_functions
+                .get_mut(id.0 as usize)
+                .expect("host import id in bounds");
+            *slot = Some(f);
+        }
     }
 
     /// Returns the names of all currently registered host functions.
@@ -592,11 +606,20 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         self.host_functions.keys().map(|name| name.as_str())
     }
 
+    pub(crate) fn function_name(&self, id: FunctionId) -> Option<&str> {
+        self.module.function(id).map(|f| f.name.as_str())
+    }
+
     fn validate_declared_host_functions(&self) -> Result<(), RuntimeError> {
         let mut missing = Vec::new();
-        for name in self.module.host_imports.keys() {
-            if !self.host_functions.contains_key(name) {
-                missing.push(name.clone());
+        for (idx, import) in self.module.host_imports.iter().enumerate() {
+            if self
+                .host_import_functions
+                .get(idx)
+                .and_then(|slot| slot.as_ref())
+                .is_none()
+            {
+                missing.push(import.name.clone());
             }
         }
         if missing.is_empty() {
@@ -771,15 +794,16 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         self.validate_declared_host_functions()?;
 
         let module = Rc::clone(&self.module);
-        let function =
-            module
-                .functions
-                .get(fn_name)
-                .ok_or_else(|| RuntimeError::UnknownFunction {
-                    name: fn_name.to_string(),
-                })?;
+        let func_id = module
+            .function_id(fn_name)
+            .ok_or_else(|| RuntimeError::UnknownFunction {
+                name: fn_name.to_string(),
+            })?;
+        let function = module.function(func_id).ok_or_else(|| RuntimeError::Trap {
+            message: format!("invalid function id: {}", func_id.0),
+        })?;
 
-        let mut frame = Frame::new(Rc::from(fn_name), function.locals, None);
+        let mut frame = Frame::new(func_id, function.locals, None);
         self.init_params(&mut frame, function, &args)?;
         self.stack.push(frame);
         self.run_loop_with_module(module.as_ref())
@@ -868,12 +892,12 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 });
             };
 
-            let (func_name, block_id, ip) = {
+            let (func_id, block_id, ip) = {
                 let frame = &self.stack[frame_index];
-                (Rc::clone(&frame.func), frame.block, frame.ip)
+                (frame.func, frame.block, frame.ip)
             };
 
-            let function = Self::function(module, func_name.as_ref())?;
+            let function = Self::function(module, func_id)?;
             let block = Self::block(function, block_id)?;
 
             if ip < block.instructions.len() {
@@ -895,13 +919,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
-    fn function<'m>(module: &'m Module, name: &str) -> Result<&'m Function, RuntimeError> {
-        module
-            .functions
-            .get(name)
-            .ok_or_else(|| RuntimeError::UnknownFunction {
-                name: name.to_string(),
-            })
+    fn function(module: &Module, id: FunctionId) -> Result<&Function, RuntimeError> {
+        module.function(id).ok_or_else(|| RuntimeError::Trap {
+            message: format!("invalid function id: {}", id.0),
+        })
     }
 
     fn block(function: &Function, block: BlockId) -> Result<&BasicBlock, RuntimeError> {
@@ -942,7 +963,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     fn eval_operand(&mut self, frame_index: usize, op: &Operand) -> Result<Value, RuntimeError> {
         match op {
             Operand::Local(local) => self.stack[frame_index].read_local(*local),
-            Operand::Literal(lit) => Ok(self.eval_const(lit)),
+            Operand::Literal(lit) => self.eval_const(lit),
         }
     }
 
@@ -1090,28 +1111,41 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             })
     }
 
-    fn eval_const(&mut self, lit: &ConstValue) -> Value {
+    fn eval_const(&mut self, lit: &ConstValue) -> Result<Value, RuntimeError> {
         match lit {
-            ConstValue::Unit => Value::Unit,
-            ConstValue::Bool(v) => Value::Bool(*v),
-            ConstValue::Int(v) => Value::Int(*v),
-            ConstValue::Float(v) => Value::Float(*v),
-            ConstValue::String(v) => Value::String(v.clone()),
-            ConstValue::Bytes(v) => Value::Bytes(v.clone()),
-            ConstValue::TypeRep(lit) => Value::TypeRep(self.eval_type_rep_lit(lit)),
-            ConstValue::Function(name) => Value::Function(name.clone()),
+            ConstValue::Unit => Ok(Value::Unit),
+            ConstValue::Bool(v) => Ok(Value::Bool(*v)),
+            ConstValue::Int(v) => Ok(Value::Int(*v)),
+            ConstValue::Float(v) => Ok(Value::Float(*v)),
+            ConstValue::String(v) => Ok(Value::String(v.clone())),
+            ConstValue::Bytes(v) => Ok(Value::Bytes(v.clone())),
+            ConstValue::TypeRep(lit) => Ok(Value::TypeRep(self.eval_type_rep_lit(lit))),
+            ConstValue::FunctionId(id) => Ok(Value::Function(*id)),
+            ConstValue::Function(name) => {
+                let module = Rc::clone(&self.module);
+                let Some(id) = module.function_id(name.as_str()) else {
+                    return Err(RuntimeError::UnknownFunction { name: name.clone() });
+                };
+                Ok(Value::Function(id))
+            }
             ConstValue::Array(items) => {
-                let values = items.iter().map(|x| self.eval_const(x)).collect();
+                let values = items
+                    .iter()
+                    .map(|x| self.eval_const(x))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let handle = self.alloc_heap(HeapValue::Array(values));
-                Value::Ref(RefValue::new(handle))
+                Ok(Value::Ref(RefValue::new(handle)))
             }
             ConstValue::Tuple(items) => {
                 if items.is_empty() {
-                    return Value::Unit;
+                    return Ok(Value::Unit);
                 }
-                let values = items.iter().map(|x| self.eval_const(x)).collect();
+                let values = items
+                    .iter()
+                    .map(|x| self.eval_const(x))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let handle = self.alloc_heap(HeapValue::Tuple(values));
-                Value::Ref(RefValue::new(handle))
+                Ok(Value::Ref(RefValue::new(handle)))
             }
             ConstValue::Struct { type_name, fields } => {
                 let observed_fields: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
@@ -1121,11 +1155,14 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     .expect("ConstValue::Struct produced inconsistent layout");
 
                 let values = if in_layout_order {
-                    fields.iter().map(|(_, v)| self.eval_const(v)).collect()
+                    fields
+                        .iter()
+                        .map(|(_, v)| self.eval_const(v))
+                        .collect::<Result<Vec<_>, _>>()?
                 } else {
                     let mut out: Vec<Option<Value>> = vec![None; field_count];
                     for ((_, v), idx) in fields.iter().zip(field_indices.iter().copied()) {
-                        out[idx] = Some(self.eval_const(v));
+                        out[idx] = Some(self.eval_const(v)?);
                     }
                     let layout = self
                         .struct_layouts
@@ -1146,21 +1183,24 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     type_args: Vec::new(),
                     fields: values,
                 });
-                Value::Ref(RefValue::new(handle))
+                Ok(Value::Ref(RefValue::new(handle)))
             }
             ConstValue::Enum {
                 enum_name,
                 variant,
                 fields,
             } => {
-                let vals = fields.iter().map(|x| self.eval_const(x)).collect();
+                let vals = fields
+                    .iter()
+                    .map(|x| self.eval_const(x))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let handle = self.alloc_heap(HeapValue::Enum {
                     enum_name: enum_name.clone(),
                     type_args: Vec::new(),
                     variant: variant.clone(),
                     fields: vals,
                 });
-                Value::Ref(RefValue::new(handle))
+                Ok(Value::Ref(RefValue::new(handle)))
             }
         }
     }
@@ -1260,7 +1300,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
     ) -> Result<(), RuntimeError> {
         match instr {
             Instruction::Const { dst, value } => {
-                let v = self.eval_const(value);
+                let v = self.eval_const(value)?;
                 self.stack[frame_index].write_local(*dst, v)?;
             }
             Instruction::Copy { dst, src } => {
@@ -1758,12 +1798,17 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             Instruction::Call { dst, func, args } => {
                 self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
                 let arg_values = self.eval_args(frame_index, args)?;
-                self.call_function(module, frame_index, *dst, func.as_str(), arg_values)?;
+                self.call_function_by_name(module, frame_index, *dst, func.as_str(), arg_values)?;
+            }
+            Instruction::CallId { dst, func, args } => {
+                self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
+                let arg_values = self.eval_args(frame_index, args)?;
+                self.call_target(module, frame_index, *dst, *func, arg_values)?;
             }
             Instruction::ICall { dst, fnptr, args } => {
                 self.metrics.icall_instructions = self.metrics.icall_instructions.saturating_add(1);
                 let fn_value = self.eval_operand(frame_index, fnptr)?;
-                let Value::Function(name) = fn_value else {
+                let Value::Function(id) = fn_value else {
                     return Err(RuntimeError::TypeError {
                         op: "icall",
                         expected: "fn reference",
@@ -1771,7 +1816,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     });
                 };
                 let arg_values = self.eval_args(frame_index, args)?;
-                self.call_function(module, frame_index, *dst, name.as_str(), arg_values)?;
+                self.call_mir_function(module, frame_index, *dst, id, arg_values)?;
             }
             Instruction::VCall {
                 dst,
@@ -1809,7 +1854,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                     }
                 };
                 let lookup_key = (type_name.clone(), method.clone());
-                let Some(fn_name) = module.methods.get(&lookup_key) else {
+                let Some(fn_id) = module.methods.get(&lookup_key).copied() else {
                     return Err(RuntimeError::Trap {
                         message: format!("unresolved vcall method: {method} on {type_name}"),
                     });
@@ -1825,7 +1870,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 }
                 arg_values.push(recv);
                 arg_values.extend(self.eval_args(frame_index, args)?);
-                self.call_function(module, frame_index, *dst, fn_name.as_str(), arg_values)?;
+                self.call_mir_function(module, frame_index, *dst, fn_id, arg_values)?;
             }
 
             Instruction::PushHandler {
@@ -1834,8 +1879,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             } => {
                 let owner_depth = frame_index;
                 // Validate handler blocks have `binds + 1` params and materialize runtime effect ids.
-                let func_name = Rc::clone(&self.stack[frame_index].func);
-                let function = Self::function(module, func_name.as_ref())?;
+                let func_id = self.stack[frame_index].func;
+                let function = Self::function(module, func_id)?;
                 let mut runtime_clauses = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     let bind_count = count_binds_in_patterns(&clause.arg_patterns);
@@ -1952,7 +1997,58 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         Ok(out)
     }
 
-    fn call_function(
+    fn call_target(
+        &mut self,
+        module: &Module,
+        frame_index: usize,
+        dst: Option<Local>,
+        func: CallTarget,
+        args: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        match func {
+            CallTarget::Host(id) => {
+                let host = self
+                    .host_import_functions
+                    .get(id.0 as usize)
+                    .and_then(|slot| slot.as_ref())
+                    .cloned();
+                let Some(host) = host else {
+                    let name = module
+                        .host_import(id)
+                        .map(|import| import.name.clone())
+                        .unwrap_or_else(|| format!("#{idx}", idx = id.0));
+                    return Err(RuntimeError::MissingHostFunctions { names: vec![name] });
+                };
+
+                self.metrics.host_calls = self.metrics.host_calls.saturating_add(1);
+                let value = host(self, &args)?;
+                if let Some(dst_local) = dst {
+                    self.stack[frame_index].write_local(dst_local, value)?;
+                }
+                Ok(())
+            }
+            CallTarget::Mir(id) => self.call_mir_function(module, frame_index, dst, id, args),
+        }
+    }
+
+    fn call_mir_function(
+        &mut self,
+        module: &Module,
+        frame_index: usize,
+        dst: Option<Local>,
+        func: FunctionId,
+        args: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        self.metrics.mir_calls = self.metrics.mir_calls.saturating_add(1);
+        let callee = Self::function(module, func)?;
+        let mut new_frame = Frame::new(func, callee.locals, dst);
+        self.init_params(&mut new_frame, callee, &args)?;
+        self.stack.push(new_frame);
+        let _ = frame_index;
+        Ok(())
+    }
+
+    fn call_function_by_name(
         &mut self,
         module: &Module,
         frame_index: usize,
@@ -1960,8 +2056,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         func: &str,
         args: Vec<Value>,
     ) -> Result<(), RuntimeError> {
-        let host = self.host_functions.get(func).cloned();
-        if let Some(host) = host {
+        if let Some(host) = self.host_functions.get(func).cloned() {
             self.metrics.host_calls = self.metrics.host_calls.saturating_add(1);
             let value = host(self, &args)?;
             if let Some(dst_local) = dst {
@@ -1970,12 +2065,17 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             return Ok(());
         }
 
-        self.metrics.mir_calls = self.metrics.mir_calls.saturating_add(1);
-        let callee = Self::function(module, func)?;
-        let mut new_frame = Frame::new(Rc::from(func), callee.locals, dst);
-        self.init_params(&mut new_frame, callee, &args)?;
-        self.stack.push(new_frame);
-        Ok(())
+        if let Some(id) = module.function_id(func) {
+            return self.call_mir_function(module, frame_index, dst, id, args);
+        }
+
+        if let Some(id) = module.host_import_id(func) {
+            return self.call_target(module, frame_index, dst, CallTarget::Host(id), args);
+        }
+
+        Err(RuntimeError::UnknownFunction {
+            name: func.to_string(),
+        })
     }
 
     fn perform_effect(
@@ -2051,8 +2151,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
         // Transfer control to handler block in the now-top frame.
         let handler_frame_index = self.stack.len() - 1;
-        let handler_func_name = Rc::clone(&self.stack[handler_frame_index].func);
-        let function = Self::function(module, handler_func_name.as_ref())?;
+        let handler_func_id = self.stack[handler_frame_index].func;
+        let function = Self::function(module, handler_func_id)?;
         let clause = &self.handlers[handler_index].clauses[clause_index];
         let handler_block = Self::block(function, clause.target)?;
         let expected_params = binds.len() + 1;
@@ -2115,8 +2215,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         args: Vec<Value>,
     ) -> Result<(), RuntimeError> {
         self.metrics.block_entries = self.metrics.block_entries.saturating_add(1);
-        let func_name = Rc::clone(&self.stack[frame_index].func);
-        let function = Self::function(module, func_name.as_ref())?;
+        let func_id = self.stack[frame_index].func;
+        let function = Self::function(module, func_id)?;
         let block = Self::block(function, target)?;
 
         if args.len() != block.params.len() {
@@ -2238,7 +2338,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
 #[derive(Clone)]
 struct Frame {
-    func: Rc<str>,
+    func: FunctionId,
     block: BlockId,
     ip: usize,
     locals: Vec<Option<Value>>,
@@ -2246,7 +2346,7 @@ struct Frame {
 }
 
 impl Frame {
-    fn new(func: Rc<str>, locals_count: usize, return_dst: Option<Local>) -> Self {
+    fn new(func: FunctionId, locals_count: usize, return_dst: Option<Local>) -> Self {
         let locals = vec![None; locals_count];
         Self {
             func,
@@ -2461,7 +2561,7 @@ fn match_pattern<GC: GcHeap>(
             (ConstValue::Float(a), Value::Float(b)) => a == b,
             (ConstValue::String(a), Value::String(b)) => a == b,
             (ConstValue::Bytes(a), Value::Bytes(b)) => a == b,
-            (ConstValue::Function(a), Value::Function(b)) => a == b,
+            (ConstValue::FunctionId(a), Value::Function(b)) => a == b,
             _ => false,
         }),
         Pattern::Enum {

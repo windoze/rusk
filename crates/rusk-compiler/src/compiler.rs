@@ -9,8 +9,9 @@ use crate::source::Span;
 use crate::source_map::{SourceMap, SourceName};
 use crate::typeck::{self, ProgramEnv, Ty, TypeError as TypeckError, TypeInfo};
 use rusk_mir::{
-    BasicBlock, BlockId, ConstValue, EffectSpec, Function, HandlerClause, Instruction, Local,
-    Module, Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type, TypeRepLit,
+    BasicBlock, BlockId, CallTarget, ConstValue, EffectSpec, Function, HandlerClause, HostImport,
+    Instruction, Local, Module, Mutability, Operand, Param, Pattern, SwitchCase, Terminator, Type,
+    TypeRepLit,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -40,6 +41,219 @@ fn parse_type_rep_capture_name(name: &str) -> Option<usize> {
     name.strip_prefix(CAPTURE_TYPE_REP_PREFIX)?
         .parse::<usize>()
         .ok()
+}
+
+fn free_value_vars_in_pattern(pat: &AstPattern, bound: &mut BTreeSet<String>) {
+    match pat {
+        AstPattern::Wildcard { .. } | AstPattern::Literal { .. } => {}
+        AstPattern::Bind { name, .. } => {
+            bound.insert(name.name.clone());
+        }
+        AstPattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+            ..
+        } => {
+            for p in prefix {
+                free_value_vars_in_pattern(p, bound);
+            }
+            if let Some(rest) = rest
+                && let Some(binding) = &rest.binding
+            {
+                bound.insert(binding.name.clone());
+            }
+            for p in suffix {
+                free_value_vars_in_pattern(p, bound);
+            }
+        }
+        AstPattern::Enum { fields, .. } | AstPattern::Ctor { args: fields, .. } => {
+            for p in fields {
+                free_value_vars_in_pattern(p, bound);
+            }
+        }
+        AstPattern::Struct { fields, .. } => {
+            for (_name, p) in fields {
+                free_value_vars_in_pattern(p, bound);
+            }
+        }
+        AstPattern::Array {
+            prefix,
+            rest,
+            suffix,
+            ..
+        } => {
+            for p in prefix {
+                free_value_vars_in_pattern(p, bound);
+            }
+            if let Some(rest) = rest
+                && let Some(binding) = &rest.binding
+            {
+                bound.insert(binding.name.clone());
+            }
+            for p in suffix {
+                free_value_vars_in_pattern(p, bound);
+            }
+        }
+    }
+}
+
+fn free_value_vars_in_match_pat(pat: &MatchPat, bound: &mut BTreeSet<String>) {
+    match pat {
+        MatchPat::Value(p) => free_value_vars_in_pattern(p, bound),
+        MatchPat::Effect(effect) => {
+            for p in &effect.args {
+                free_value_vars_in_pattern(p, bound);
+            }
+            let cont_name = effect
+                .cont
+                .as_ref()
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "resume".to_string());
+            bound.insert(cont_name);
+        }
+    }
+}
+
+fn free_value_vars_in_block(block: &Block, bound: &mut BTreeSet<String>) -> BTreeSet<String> {
+    let mut free = BTreeSet::new();
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Let { name, init, .. } => {
+                if let Some(init) = init {
+                    free_value_vars_in_expr(init, bound, &mut free);
+                }
+                bound.insert(name.name.clone());
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(value) = value {
+                    free_value_vars_in_expr(value, bound, &mut free);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Expr { expr, .. } => {
+                free_value_vars_in_expr(expr, bound, &mut free);
+            }
+        }
+    }
+    if let Some(tail) = block.tail.as_deref() {
+        free_value_vars_in_expr(tail, bound, &mut free);
+    }
+    free
+}
+
+fn free_value_vars_in_expr(expr: &Expr, bound: &BTreeSet<String>, out: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Unit { .. }
+        | Expr::Bool { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::String { .. }
+        | Expr::Bytes { .. } => {}
+
+        Expr::Path { path, .. } => {
+            if path.segments.len() == 1 {
+                let name = path.segments[0].name.as_str();
+                if !bound.contains(name) {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
+            for item in items {
+                free_value_vars_in_expr(item, bound, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_name, value) in fields {
+                free_value_vars_in_expr(value, bound, out);
+            }
+        }
+        Expr::EffectCall { args, .. } => {
+            for arg in args {
+                free_value_vars_in_expr(arg, bound, out);
+            }
+        }
+
+        Expr::Lambda { params, body, .. } => {
+            let mut lambda_bound = BTreeSet::new();
+            for p in params {
+                lambda_bound.insert(p.name.name.clone());
+            }
+            out.extend(free_value_vars_in_block(body, &mut lambda_bound));
+        }
+        Expr::If {
+            cond,
+            then_block,
+            else_branch,
+            ..
+        } => {
+            free_value_vars_in_expr(cond, bound, out);
+            out.extend(free_value_vars_in_block(then_block, &mut bound.clone()));
+            if let Some(e) = else_branch.as_deref() {
+                free_value_vars_in_expr(e, &bound.clone(), out);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            free_value_vars_in_expr(scrutinee, bound, out);
+            for arm in arms {
+                let mut arm_bound = bound.clone();
+                free_value_vars_in_match_pat(&arm.pat, &mut arm_bound);
+                free_value_vars_in_expr(&arm.body, &arm_bound, out);
+            }
+        }
+        Expr::Loop { body, .. } => {
+            out.extend(free_value_vars_in_block(body, &mut bound.clone()));
+        }
+        Expr::While { cond, body, .. } => {
+            free_value_vars_in_expr(cond, bound, out);
+            out.extend(free_value_vars_in_block(body, &mut bound.clone()));
+        }
+        Expr::For {
+            binding,
+            iter,
+            body,
+            ..
+        } => {
+            free_value_vars_in_expr(iter, bound, out);
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(binding.name.clone());
+            out.extend(free_value_vars_in_block(body, &mut inner_bound));
+        }
+        Expr::Block { block, .. } => {
+            out.extend(free_value_vars_in_block(block, &mut bound.clone()));
+        }
+
+        Expr::Call { callee, args, .. } => {
+            free_value_vars_in_expr(callee, bound, out);
+            for arg in args {
+                free_value_vars_in_expr(arg, bound, out);
+            }
+        }
+        Expr::Field { base, .. } => {
+            free_value_vars_in_expr(base, bound, out);
+        }
+        Expr::Index { base, index, .. } => {
+            free_value_vars_in_expr(base, bound, out);
+            free_value_vars_in_expr(index, bound, out);
+        }
+        Expr::Unary { expr, .. } => {
+            free_value_vars_in_expr(expr, bound, out);
+        }
+        Expr::Binary { left, right, .. } => {
+            free_value_vars_in_expr(left, bound, out);
+            free_value_vars_in_expr(right, bound, out);
+        }
+        Expr::Assign { target, value, .. } => {
+            free_value_vars_in_expr(target, bound, out);
+            free_value_vars_in_expr(value, bound, out);
+        }
+        Expr::As { expr, .. } | Expr::AsQuestion { expr, .. } | Expr::Is { expr, .. } => {
+            free_value_vars_in_expr(expr, bound, out);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -503,6 +717,8 @@ impl Compiler {
         self.populate_interface_impl_table();
         self.populate_struct_layouts();
         self.populate_host_imports()?;
+        self.resolve_call_targets()?;
+        self.resolve_function_constants()?;
 
         Ok(self.module)
     }
@@ -537,13 +753,13 @@ impl Compiler {
     fn populate_host_imports(&mut self) -> Result<(), CompileError> {
         let mut used = BTreeSet::<String>::new();
 
-        for func in self.module.functions.values() {
+        for func in &self.module.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
                     let Instruction::Call { func, .. } = instr else {
                         continue;
                     };
-                    if !self.module.functions.contains_key(func) {
+                    if !self.module.function_ids.contains_key(func) {
                         used.insert(func.clone());
                     }
                 }
@@ -567,7 +783,11 @@ impl Compiler {
                     )
                 })?
             };
-            self.module.host_imports.insert(name, sig);
+            self.module
+                .add_host_import(HostImport { name, sig })
+                .map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), Span::new(0, 0))
+                })?;
         }
 
         Ok(())
@@ -577,14 +797,365 @@ impl Compiler {
         for ((type_name, origin_iface, method_name), impl_fn) in &self.env.interface_methods {
             let method_id = format!("{origin_iface}::{method_name}");
             let key = (type_name.clone(), method_id);
-            if let Some(prev) = self.module.methods.insert(key.clone(), impl_fn.clone()) {
+            let Some(impl_id) = self.module.function_id(impl_fn.as_str()) else {
+                return Err(CompileError::new(
+                    format!("internal error: missing interface impl function `{impl_fn}`"),
+                    Span::new(0, 0),
+                ));
+            };
+            if let Some(prev) = self.module.methods.insert(key.clone(), impl_id) {
                 return Err(CompileError::new(
                     format!(
-                        "internal error: duplicate dispatch entry for ({}, {}) ({prev})",
-                        key.0, key.1
+                        "internal error: duplicate dispatch entry for ({}, {}) (prev={:?})",
+                        key.0, key.1, prev
                     ),
                     Span::new(0, 0),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_call_targets(&mut self) -> Result<(), CompileError> {
+        let function_ids = self.module.function_ids.clone();
+        let host_import_ids = self.module.host_import_ids.clone();
+        for func in &mut self.module.functions {
+            for block in &mut func.blocks {
+                for instr in &mut block.instructions {
+                    let Instruction::Call { dst, func, args } = instr else {
+                        continue;
+                    };
+
+                    let name = std::mem::take(func);
+                    let args = std::mem::take(args);
+                    let dst = *dst;
+
+                    let target = if let Some(id) = function_ids.get(name.as_str()).copied() {
+                        CallTarget::Mir(id)
+                    } else if let Some(id) = host_import_ids.get(name.as_str()).copied() {
+                        CallTarget::Host(id)
+                    } else {
+                        return Err(CompileError::new(
+                            format!("internal error: unresolved call target `{name}`"),
+                            Span::new(0, 0),
+                        ));
+                    };
+
+                    *instr = Instruction::CallId {
+                        dst,
+                        func: target,
+                        args,
+                    };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_function_constants(&mut self) -> Result<(), CompileError> {
+        fn resolve_const(
+            function_ids: &BTreeMap<String, rusk_mir::FunctionId>,
+            value: &mut ConstValue,
+        ) -> Result<(), String> {
+            match value {
+                ConstValue::Function(name) => {
+                    let Some(id) = function_ids.get(name.as_str()).copied() else {
+                        return Err(format!("unknown function `{name}`"));
+                    };
+                    *value = ConstValue::FunctionId(id);
+                    Ok(())
+                }
+                ConstValue::FunctionId(_) => Ok(()),
+                ConstValue::Array(items) | ConstValue::Tuple(items) => {
+                    for item in items {
+                        resolve_const(function_ids, item)?;
+                    }
+                    Ok(())
+                }
+                ConstValue::Struct { fields, .. } => {
+                    for (_name, value) in fields {
+                        resolve_const(function_ids, value)?;
+                    }
+                    Ok(())
+                }
+                ConstValue::Enum { fields, .. } => {
+                    for value in fields {
+                        resolve_const(function_ids, value)?;
+                    }
+                    Ok(())
+                }
+                ConstValue::Unit
+                | ConstValue::Bool(_)
+                | ConstValue::Int(_)
+                | ConstValue::Float(_)
+                | ConstValue::String(_)
+                | ConstValue::Bytes(_)
+                | ConstValue::TypeRep(_) => Ok(()),
+            }
+        }
+
+        fn resolve_operand(
+            function_ids: &BTreeMap<String, rusk_mir::FunctionId>,
+            op: &mut Operand,
+        ) -> Result<(), String> {
+            if let Operand::Literal(lit) = op {
+                resolve_const(function_ids, lit)?;
+            }
+            Ok(())
+        }
+
+        fn resolve_pattern(
+            function_ids: &BTreeMap<String, rusk_mir::FunctionId>,
+            pat: &mut Pattern,
+        ) -> Result<(), String> {
+            match pat {
+                Pattern::Wildcard | Pattern::Bind => Ok(()),
+                Pattern::Literal(lit) => resolve_const(function_ids, lit),
+                Pattern::Tuple {
+                    prefix,
+                    rest,
+                    suffix,
+                } => {
+                    for p in prefix {
+                        resolve_pattern(function_ids, p)?;
+                    }
+                    if let Some(rest) = rest.as_deref_mut() {
+                        resolve_pattern(function_ids, rest)?;
+                    }
+                    for p in suffix {
+                        resolve_pattern(function_ids, p)?;
+                    }
+                    Ok(())
+                }
+                Pattern::Enum { fields, .. } => {
+                    for p in fields {
+                        resolve_pattern(function_ids, p)?;
+                    }
+                    Ok(())
+                }
+                Pattern::Struct { fields, .. } => {
+                    for (_name, p) in fields {
+                        resolve_pattern(function_ids, p)?;
+                    }
+                    Ok(())
+                }
+                Pattern::Array {
+                    prefix,
+                    rest,
+                    suffix,
+                } => {
+                    for p in prefix {
+                        resolve_pattern(function_ids, p)?;
+                    }
+                    if let Some(rest) = rest.as_deref_mut() {
+                        resolve_pattern(function_ids, rest)?;
+                    }
+                    for p in suffix {
+                        resolve_pattern(function_ids, p)?;
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        fn resolve_handler_clause(
+            function_ids: &BTreeMap<String, rusk_mir::FunctionId>,
+            clause: &mut HandlerClause,
+        ) -> Result<(), String> {
+            for op in &mut clause.effect.interface_args {
+                resolve_operand(function_ids, op)?;
+            }
+            for pat in &mut clause.arg_patterns {
+                resolve_pattern(function_ids, pat)?;
+            }
+            Ok(())
+        }
+
+        fn resolve_instr(
+            function_ids: &BTreeMap<String, rusk_mir::FunctionId>,
+            instr: &mut Instruction,
+        ) -> Result<(), String> {
+            match instr {
+                Instruction::Const { value, .. } => resolve_const(function_ids, value),
+                Instruction::Copy { .. }
+                | Instruction::Move { .. }
+                | Instruction::AsReadonly { .. } => Ok(()),
+                Instruction::IsType { value, ty, .. }
+                | Instruction::CheckedCast { value, ty, .. } => {
+                    resolve_operand(function_ids, value)?;
+                    resolve_operand(function_ids, ty)
+                }
+                Instruction::MakeTypeRep { args, .. } => {
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::MakeStruct {
+                    type_args, fields, ..
+                } => {
+                    for op in type_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for (_name, op) in fields {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::MakeArray { items, .. } | Instruction::MakeTuple { items, .. } => {
+                    for op in items {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::MakeEnum {
+                    type_args, fields, ..
+                } => {
+                    for op in type_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for op in fields {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::GetField { obj, .. } => resolve_operand(function_ids, obj),
+                Instruction::SetField { obj, value, .. } => {
+                    resolve_operand(function_ids, obj)?;
+                    resolve_operand(function_ids, value)
+                }
+                Instruction::StructGet { obj, .. } => resolve_operand(function_ids, obj),
+                Instruction::StructSet { obj, value, .. } => {
+                    resolve_operand(function_ids, obj)?;
+                    resolve_operand(function_ids, value)
+                }
+                Instruction::TupleGet { tup, .. } => resolve_operand(function_ids, tup),
+                Instruction::TupleSet { tup, value, .. } => {
+                    resolve_operand(function_ids, tup)?;
+                    resolve_operand(function_ids, value)
+                }
+                Instruction::IndexGet { arr, idx, .. } => {
+                    resolve_operand(function_ids, arr)?;
+                    resolve_operand(function_ids, idx)
+                }
+                Instruction::IndexSet { arr, idx, value } => {
+                    resolve_operand(function_ids, arr)?;
+                    resolve_operand(function_ids, idx)?;
+                    resolve_operand(function_ids, value)
+                }
+                Instruction::Len { arr, .. } => resolve_operand(function_ids, arr),
+                Instruction::Call { args, .. } => {
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::CallId { args, .. } => {
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::VCall {
+                    obj,
+                    method_type_args,
+                    args,
+                    ..
+                } => {
+                    resolve_operand(function_ids, obj)?;
+                    for op in method_type_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::ICall { fnptr, args, .. } => {
+                    resolve_operand(function_ids, fnptr)?;
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::PushHandler { clauses, .. } => {
+                    for clause in clauses {
+                        resolve_handler_clause(function_ids, clause)?;
+                    }
+                    Ok(())
+                }
+                Instruction::PopHandler => Ok(()),
+                Instruction::Perform { effect, args, .. } => {
+                    for op in &mut effect.interface_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Instruction::Resume { k, value, .. } => {
+                    resolve_operand(function_ids, k)?;
+                    resolve_operand(function_ids, value)
+                }
+            }
+        }
+
+        fn resolve_term(
+            function_ids: &BTreeMap<String, rusk_mir::FunctionId>,
+            term: &mut Terminator,
+        ) -> Result<(), String> {
+            match term {
+                Terminator::Br { args, .. } => {
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Terminator::CondBr {
+                    cond,
+                    then_args,
+                    else_args,
+                    ..
+                } => {
+                    resolve_operand(function_ids, cond)?;
+                    for op in then_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for op in else_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
+                Terminator::Switch { value, cases, .. } => {
+                    resolve_operand(function_ids, value)?;
+                    for case in cases {
+                        resolve_pattern(function_ids, &mut case.pattern)?;
+                    }
+                    Ok(())
+                }
+                Terminator::Return { value } => resolve_operand(function_ids, value),
+                Terminator::Trap { .. } => Ok(()),
+            }
+        }
+
+        let function_ids = self.module.function_ids.clone();
+        for func in &mut self.module.functions {
+            for block in &mut func.blocks {
+                for instr in &mut block.instructions {
+                    resolve_instr(&function_ids, instr).map_err(|message| {
+                        CompileError::new(
+                            format!("internal error: resolve constant: {message}"),
+                            Span::new(0, 0),
+                        )
+                    })?;
+                }
+                resolve_term(&function_ids, &mut block.terminator).map_err(|message| {
+                    CompileError::new(
+                        format!("internal error: resolve constant: {message}"),
+                        Span::new(0, 0),
+                    )
+                })?;
             }
         }
         Ok(())
@@ -720,7 +1291,7 @@ impl Compiler {
                         continue;
                     }
                     let wrapper_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                    if self.module.functions.contains_key(&wrapper_name) {
+                    if self.module.function_ids.contains_key(&wrapper_name) {
                         continue;
                     }
                     let default_name = format!("$default::{}::{mname}", info.origin);
@@ -862,9 +1433,9 @@ impl Compiler {
 
         let mut mir_fn = lowerer.finish()?;
         mir_fn.ret_type = mir_type_from_ty(&self.env, &sig.ret);
-        self.module
-            .functions
-            .insert(wrapper_name.to_string(), mir_fn);
+        self.module.add_function(mir_fn).map_err(|message| {
+            CompileError::new(format!("internal error: {message}"), Span::new(0, 0))
+        })?;
         Ok(())
     }
 
@@ -875,7 +1446,7 @@ impl Compiler {
         name_override: Option<String>,
     ) -> Result<(), CompileError> {
         let name = name_override.unwrap_or_else(|| module.qualify(&func.name.name));
-        if self.module.functions.contains_key(&name) {
+        if self.module.function_ids.contains_key(&name) {
             return Err(CompileError::new(
                 format!("duplicate function `{name}`"),
                 func.name.span,
@@ -927,7 +1498,9 @@ impl Compiler {
 
         let mut mir_fn = lowerer.finish()?;
         mir_fn.ret_type = ret_type;
-        self.module.functions.insert(name, mir_fn);
+        self.module.add_function(mir_fn).map_err(|message| {
+            CompileError::new(format!("internal error: {message}"), func.name.span)
+        })?;
         Ok(())
     }
 
@@ -949,7 +1522,7 @@ impl Compiler {
             .clone();
 
         let wrapper_name = format!("$wrap::{target}");
-        if self.module.functions.contains_key(&wrapper_name) {
+        if self.module.function_ids.contains_key(&wrapper_name) {
             return Ok(wrapper_name);
         }
 
@@ -995,7 +1568,9 @@ impl Compiler {
         })?;
 
         let mir_fn = lowerer.finish()?;
-        self.module.functions.insert(wrapper_name.clone(), mir_fn);
+        self.module.add_function(mir_fn).map_err(|message| {
+            CompileError::new(format!("internal error: {message}"), Span::new(0, 0))
+        })?;
         self.fn_value_wrappers
             .insert(target.to_string(), wrapper_name.clone());
         Ok(wrapper_name)
@@ -1109,7 +1684,9 @@ impl Compiler {
         }
 
         let mir_fn = lowerer.finish()?;
-        self.module.functions.insert(entry_name, mir_fn);
+        self.module.add_function(mir_fn).map_err(|message| {
+            CompileError::new(format!("internal error: {message}"), lambda_expr_span)
+        })?;
         Ok(())
     }
 
@@ -1169,7 +1746,9 @@ impl Compiler {
 
         let mut mir_fn = lowerer.finish()?;
         mir_fn.ret_type = Some(Type::Enum(INTERNAL_CONTROL_ENUM.to_string()));
-        self.module.functions.insert(helper_name, mir_fn);
+        self.module.add_function(mir_fn).map_err(|message| {
+            CompileError::new(format!("internal error: {message}"), match_span)
+        })?;
         Ok(())
     }
 }
@@ -2837,7 +3416,22 @@ impl<'a> FunctionLowerer<'a> {
         body: &Block,
         span: Span,
     ) -> Result<Local, CompileError> {
-        let captures = self.visible_bindings();
+        let visible = self.visible_bindings();
+        let mut lambda_bound = BTreeSet::new();
+        for p in params {
+            lambda_bound.insert(p.name.name.clone());
+        }
+        let free_vars = free_value_vars_in_block(body, &mut lambda_bound);
+        let captures = visible
+            .iter()
+            .filter_map(|(name, info)| {
+                if parse_type_rep_capture_name(name).is_some() || free_vars.contains(name) {
+                    Some((name.clone(), info.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
         let entry_name = self.compiler.fresh_internal_name("lambda");
 
         {
@@ -4233,7 +4827,25 @@ impl<'a> FunctionLowerer<'a> {
         arms: &[MatchArm],
         span: Span,
     ) -> Result<Local, CompileError> {
-        let captured = self.visible_bindings();
+        let visible = self.visible_bindings();
+        let mut free_vars = BTreeSet::new();
+        let bound = BTreeSet::new();
+        free_value_vars_in_expr(scrutinee, &bound, &mut free_vars);
+        for arm in arms {
+            let mut arm_bound = bound.clone();
+            free_value_vars_in_match_pat(&arm.pat, &mut arm_bound);
+            free_value_vars_in_expr(&arm.body, &arm_bound, &mut free_vars);
+        }
+        let captured = visible
+            .iter()
+            .filter_map(|(name, info)| {
+                if parse_type_rep_capture_name(name).is_some() || free_vars.contains(name) {
+                    Some((name.clone(), info.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
         let helper_name = self.compiler.fresh_internal_name("match");
         {
             let compiler = &mut *self.compiler;

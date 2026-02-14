@@ -17,20 +17,45 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Local(pub usize);
 
+/// A stable identifier for a MIR function within a [`Module`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct FunctionId(pub u32);
+
 /// A basic block index within a MIR function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct BlockId(pub usize);
 
+/// A stable identifier for a declared host import within a [`Module`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct HostImportId(pub u32);
+
+/// A fully-resolved call target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum CallTarget {
+    Mir(FunctionId),
+    Host(HostImportId),
+}
+
 /// A MIR module: a set of functions plus optional method-resolution metadata.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Module {
-    /// MIR functions by name.
-    pub functions: BTreeMap<String, Function>,
+    /// MIR functions in declaration order.
+    ///
+    /// Runtime execution uses `FunctionId` indexing into this table rather than string-keyed map
+    /// lookups on hot paths.
+    pub functions: Vec<Function>,
 
-    /// Optional virtual-call resolution: `(type_name, method_name) -> function_name`.
-    pub methods: BTreeMap<(String, String), String>,
+    /// Name → [`FunctionId`] map for `run_function("name", ...)` and diagnostics.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub function_ids: BTreeMap<String, FunctionId>,
+
+    /// Optional virtual-call resolution: `(type_name, method_name) -> FunctionId`.
+    pub methods: BTreeMap<(String, String), FunctionId>,
 
     /// Optional interface implementation metadata: `(type_name -> {interface_name...})`.
     ///
@@ -46,10 +71,71 @@ pub struct Module {
 
     /// Declared host function imports required by this module.
     ///
-    /// The interpreter can validate that all declared host functions are installed before
-    /// executing any MIR.
+    /// Execution uses `HostImportId` indexing into this table (see [`CallTarget::Host`]).
     #[cfg_attr(feature = "serde", serde(default))]
-    pub host_imports: BTreeMap<String, HostFnSig>,
+    pub host_imports: Vec<HostImport>,
+
+    /// Name → [`HostImportId`] map for validation and diagnostics.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub host_import_ids: BTreeMap<String, HostImportId>,
+}
+
+impl Module {
+    /// Inserts a function into the module, returning its assigned [`FunctionId`].
+    ///
+    /// This rejects duplicate names.
+    pub fn add_function(&mut self, func: Function) -> Result<FunctionId, String> {
+        if self.function_ids.contains_key(func.name.as_str()) {
+            return Err(format!("duplicate function `{}`", func.name));
+        }
+        let id_u32: u32 = self
+            .functions
+            .len()
+            .try_into()
+            .map_err(|_| "function table overflow".to_string())?;
+        let id = FunctionId(id_u32);
+        self.function_ids.insert(func.name.clone(), id);
+        self.functions.push(func);
+        Ok(id)
+    }
+
+    /// Returns the [`FunctionId`] for `name` if the module defines it.
+    pub fn function_id(&self, name: &str) -> Option<FunctionId> {
+        self.function_ids.get(name).copied()
+    }
+
+    /// Returns the function for `id` if it is valid.
+    pub fn function(&self, id: FunctionId) -> Option<&Function> {
+        self.functions.get(id.0 as usize)
+    }
+
+    /// Inserts a host import into the module, returning its assigned [`HostImportId`].
+    ///
+    /// This rejects duplicate names.
+    pub fn add_host_import(&mut self, import: HostImport) -> Result<HostImportId, String> {
+        if self.host_import_ids.contains_key(import.name.as_str()) {
+            return Err(format!("duplicate host import `{}`", import.name));
+        }
+        let id_u32: u32 = self
+            .host_imports
+            .len()
+            .try_into()
+            .map_err(|_| "host import table overflow".to_string())?;
+        let id = HostImportId(id_u32);
+        self.host_import_ids.insert(import.name.clone(), id);
+        self.host_imports.push(import);
+        Ok(id)
+    }
+
+    /// Returns the [`HostImportId`] for `name` if the module declares it.
+    pub fn host_import_id(&self, name: &str) -> Option<HostImportId> {
+        self.host_import_ids.get(name).copied()
+    }
+
+    /// Returns the host import for `id` if it is valid.
+    pub fn host_import(&self, id: HostImportId) -> Option<&HostImport> {
+        self.host_imports.get(id.0 as usize)
+    }
 }
 
 /// A MIR function body.
@@ -118,6 +204,14 @@ pub enum Type {
 pub struct HostFnSig {
     pub params: Vec<HostType>,
     pub ret: HostType,
+}
+
+/// A declared host import entry in a [`Module`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct HostImport {
+    pub name: String,
+    pub sig: HostFnSig,
 }
 
 /// A host ABI type used in [`HostFnSig`].
@@ -193,6 +287,8 @@ pub enum ConstValue {
     TypeRep(TypeRepLit),
     /// A first-class reference to a named MIR function.
     Function(String),
+    /// A first-class reference to a MIR function id.
+    FunctionId(FunctionId),
     Array(Vec<ConstValue>),
     Tuple(Vec<ConstValue>),
     Struct {
@@ -388,6 +484,11 @@ pub enum Instruction {
     Call {
         dst: Option<Local>,
         func: String,
+        args: Vec<Operand>,
+    },
+    CallId {
+        dst: Option<Local>,
+        func: CallTarget,
         args: Vec<Operand>,
     },
     VCall {
