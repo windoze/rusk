@@ -6,6 +6,8 @@ members = [
     "crates/rusk-compiler",
     "crates/rusk-interpreter",
     "crates/rusk-host",
+    "crates/rusk-bytecode",
+    "crates/rusk-vm",
 ]
 
 [package]

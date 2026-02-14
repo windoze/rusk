@@ -77,6 +77,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusk-bytecode"
+version = "0.1.0"
+dependencies = [
+ "rusk-mir",
+]
+
+[[package]]
 name = "rusk-compiler"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +116,13 @@ name = "rusk-mir"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "rusk-vm"
+version = "0.1.0"
+dependencies = [
+ "rusk-bytecode",
 ]
 
 [[package]]

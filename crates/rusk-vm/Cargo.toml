@@ -1,0 +1,8 @@
+[package]
+name = "rusk-vm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusk-bytecode = { path = "../rusk-bytecode" }
+
