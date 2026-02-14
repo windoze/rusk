@@ -138,14 +138,8 @@ struct FixtureCase {
 }
 
 fn is_bytecode_fixture(path: &Path) -> bool {
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let Ok(n) = digits.parse::<u32>() else {
-        return false;
-    };
-    (200..300).contains(&n) || matches!(n, 1 | 10 | 11 | 12)
+    let _ = path;
+    true
 }
 
 fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
@@ -185,6 +179,19 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
                     kind: FixtureKind::DirMain(main),
                 });
                 continue;
+            }
+
+            let has_rusk = fs::read_dir(&path).ok().is_some_and(|iter| {
+                iter.filter_map(Result::ok).any(|e| {
+                    e.path().is_file()
+                        && e.path().extension().and_then(|s| s.to_str()) == Some("rusk")
+                })
+            });
+            if has_rusk {
+                panic!(
+                    "fixture directory `{}` contains `.rusk` files but no `main.rusk` entry",
+                    path.display()
+                );
             }
         }
     }

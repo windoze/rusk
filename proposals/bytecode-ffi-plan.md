@@ -710,7 +710,7 @@ Work items (likely iterative):
   - [x] E3 — `Switch` terminator + pattern matching (enum/struct/tuple/array, incl. variadic `..rest`)
   - [x] E4 — `VCall` dynamic dispatch (module methods table + type-arg passing)
   - [x] E5 — In-VM effects/continuations: `PushHandler`/`PopHandler` + `Perform`/`Resume` semantics (incl. nested handlers); integrate with externalized effects
-  - [ ] E6 — Run *all* existing fixtures via bytecode backend (`tests/bytecode_fixtures.rs`) and match expectations
+  - [x] E6 — Run *all* existing fixtures via bytecode backend (`tests/bytecode_fixtures.rs`) and match expectations
 
 - Implement bytecode lowering + VM ops for:
   - arrays: `MakeArray`, `IndexGet/Set`, `Len`
