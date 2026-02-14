@@ -1044,6 +1044,23 @@ impl Compiler {
                     resolve_operand(function_ids, value)
                 }
                 Instruction::Len { arr, .. } => resolve_operand(function_ids, arr),
+                Instruction::IntAdd { a, b, .. }
+                | Instruction::IntSub { a, b, .. }
+                | Instruction::IntMul { a, b, .. }
+                | Instruction::IntDiv { a, b, .. }
+                | Instruction::IntMod { a, b, .. }
+                | Instruction::IntLt { a, b, .. }
+                | Instruction::IntLe { a, b, .. }
+                | Instruction::IntGt { a, b, .. }
+                | Instruction::IntGe { a, b, .. }
+                | Instruction::IntEq { a, b, .. }
+                | Instruction::IntNe { a, b, .. }
+                | Instruction::BoolEq { a, b, .. }
+                | Instruction::BoolNe { a, b, .. } => {
+                    resolve_operand(function_ids, a)?;
+                    resolve_operand(function_ids, b)
+                }
+                Instruction::BoolNot { v, .. } => resolve_operand(function_ids, v),
                 Instruction::Call { args, .. } => {
                     for op in args {
                         resolve_operand(function_ids, op)?;
@@ -3957,10 +3974,9 @@ impl<'a> FunctionLowerer<'a> {
             UnaryOp::Not => {
                 let v = self.lower_expr(expr)?;
                 let dst = self.alloc_local();
-                self.emit(Instruction::Call {
-                    dst: Some(dst),
-                    func: "core::intrinsics::bool_not".to_string(),
-                    args: vec![Operand::Local(v)],
+                self.emit(Instruction::BoolNot {
+                    dst,
+                    v: Operand::Local(v),
                 });
                 Ok(dst)
             }
@@ -3975,10 +3991,13 @@ impl<'a> FunctionLowerer<'a> {
                 match ty {
                     Ty::Int => {
                         let zero = self.alloc_int(0);
-                        self.lower_named_call(
-                            "core::intrinsics::int_sub",
-                            vec![Operand::Local(zero), Operand::Local(v)],
-                        )
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntSub {
+                            dst,
+                            a: Operand::Local(zero),
+                            b: Operand::Local(v),
+                        });
+                        Ok(dst)
                     }
                     Ty::Float => {
                         let zero = self.alloc_local();
@@ -4093,13 +4112,137 @@ impl<'a> FunctionLowerer<'a> {
                     .clone();
                 let l = self.lower_expr(left)?;
                 let r = self.lower_expr(right)?;
-                let func = select_binop_fn(op, &ty).ok_or_else(|| {
-                    CompileError::new(
-                        format!("internal error: unsupported binary op `{op:?}` for `{ty}`"),
-                        span,
-                    )
-                })?;
-                self.lower_named_call(func, vec![Operand::Local(l), Operand::Local(r)])
+                let operand_ty = self.strip_readonly_ty(&ty);
+                match (op, operand_ty) {
+                    (BinaryOp::Add, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntAdd {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Sub, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntSub {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Mul, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntMul {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Div, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntDiv {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Mod, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntMod {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Eq, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntEq {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Ne, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntNe {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Lt, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntLt {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Le, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntLe {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Gt, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntGt {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Ge, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntGe {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Eq, Ty::Bool) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::BoolEq {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Ne, Ty::Bool) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::BoolNe {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    _ => {
+                        let func = select_binop_fn(op, operand_ty).ok_or_else(|| {
+                            CompileError::new(
+                                format!(
+                                    "internal error: unsupported binary op `{op:?}` for `{ty}`"
+                                ),
+                                span,
+                            )
+                        })?;
+                        self.lower_named_call(func, vec![Operand::Local(l), Operand::Local(r)])
+                    }
+                }
             }
         }
     }

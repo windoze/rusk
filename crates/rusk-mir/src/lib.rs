@@ -481,6 +481,78 @@ pub enum Instruction {
         arr: Operand,
     },
 
+    IntAdd {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntSub {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntMul {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntDiv {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntMod {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+
+    IntLt {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntLe {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntGt {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntGe {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntEq {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntNe {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+
+    BoolNot {
+        dst: Local,
+        v: Operand,
+    },
+    BoolEq {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    BoolNe {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+
     Call {
         dst: Option<Local>,
         func: String,

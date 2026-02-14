@@ -28,8 +28,8 @@ use std::time::Instant;
 
 use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
 use rusk_mir::{
-    BasicBlock, BlockId, CallTarget, ConstValue, EffectSpec, Function, FunctionId, Instruction,
-    Local, Module, Mutability, Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
+    BasicBlock, BlockId, CallTarget, ConstValue, EffectSpec, Function, FunctionId, HostImportId,
+    Instruction, Local, Module, Mutability, Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
 };
 
 /// An internal runtime type representation identifier.
@@ -412,6 +412,8 @@ pub struct InterpreterImpl<GC: GcHeap> {
     struct_layouts: HashMap<String, StructLayout>,
     host_functions: BTreeMap<String, HostFunction<GC>>,
     host_import_functions: Vec<Option<HostFunction<GC>>>,
+    value_buffers: Vec<Vec<Value>>,
+    core_intrinsic_ids: CoreIntrinsicIds,
     stack: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
     heap: GC,
@@ -450,6 +452,26 @@ pub struct InterpreterMetrics {
     pub trap_terminators: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CoreIntrinsicIds {
+    bool_not: Option<HostImportId>,
+    bool_eq: Option<HostImportId>,
+    bool_ne: Option<HostImportId>,
+
+    int_add: Option<HostImportId>,
+    int_sub: Option<HostImportId>,
+    int_mul: Option<HostImportId>,
+    int_div: Option<HostImportId>,
+    int_mod: Option<HostImportId>,
+
+    int_eq: Option<HostImportId>,
+    int_ne: Option<HostImportId>,
+    int_lt: Option<HostImportId>,
+    int_le: Option<HostImportId>,
+    int_gt: Option<HostImportId>,
+    int_ge: Option<HostImportId>,
+}
+
 impl<GC: GcHeap + Default> InterpreterImpl<GC> {
     /// Creates a new interpreter instance for the given MIR module.
     pub fn new(module: Module) -> Self {
@@ -481,6 +503,25 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             struct_layouts.insert(type_name.clone(), StructLayout::new(fields.clone()));
         }
 
+        let core_intrinsic_ids = CoreIntrinsicIds {
+            bool_not: module.host_import_id("core::intrinsics::bool_not"),
+            bool_eq: module.host_import_id("core::intrinsics::bool_eq"),
+            bool_ne: module.host_import_id("core::intrinsics::bool_ne"),
+
+            int_add: module.host_import_id("core::intrinsics::int_add"),
+            int_sub: module.host_import_id("core::intrinsics::int_sub"),
+            int_mul: module.host_import_id("core::intrinsics::int_mul"),
+            int_div: module.host_import_id("core::intrinsics::int_div"),
+            int_mod: module.host_import_id("core::intrinsics::int_mod"),
+
+            int_eq: module.host_import_id("core::intrinsics::int_eq"),
+            int_ne: module.host_import_id("core::intrinsics::int_ne"),
+            int_lt: module.host_import_id("core::intrinsics::int_lt"),
+            int_le: module.host_import_id("core::intrinsics::int_le"),
+            int_gt: module.host_import_id("core::intrinsics::int_gt"),
+            int_ge: module.host_import_id("core::intrinsics::int_ge"),
+        };
+
         let host_import_functions = vec![None; module.host_imports.len()];
 
         Self {
@@ -490,6 +531,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             struct_layouts,
             host_functions: BTreeMap::new(),
             host_import_functions,
+            value_buffers: Vec::new(),
+            core_intrinsic_ids,
             stack: Vec::new(),
             handlers: Vec::new(),
             heap,
@@ -1795,15 +1838,296 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 self.stack[frame_index].write_local(*dst, Value::Int(len as i64))?;
             }
 
+            Instruction::IntAdd { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_add",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_add",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Int(a_i + b_i))?;
+            }
+            Instruction::IntSub { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_sub",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_sub",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Int(a_i - b_i))?;
+            }
+            Instruction::IntMul { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_mul",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_mul",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Int(a_i * b_i))?;
+            }
+            Instruction::IntDiv { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_div",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_div",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                if b_i == 0 {
+                    return Err(RuntimeError::Trap {
+                        message: "core::intrinsics::int_div: division by zero".to_string(),
+                    });
+                }
+                self.stack[frame_index].write_local(*dst, Value::Int(a_i / b_i))?;
+            }
+            Instruction::IntMod { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_mod",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_mod",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                if b_i == 0 {
+                    return Err(RuntimeError::Trap {
+                        message: "core::intrinsics::int_mod: modulo by zero".to_string(),
+                    });
+                }
+                self.stack[frame_index].write_local(*dst, Value::Int(a_i % b_i))?;
+            }
+
+            Instruction::IntLt { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_lt",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_lt",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_i < b_i))?;
+            }
+            Instruction::IntLe { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_le",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_le",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_i <= b_i))?;
+            }
+            Instruction::IntGt { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_gt",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_gt",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_i > b_i))?;
+            }
+            Instruction::IntGe { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_ge",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_ge",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_i >= b_i))?;
+            }
+            Instruction::IntEq { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_eq",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_eq",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_i == b_i))?;
+            }
+            Instruction::IntNe { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Int(a_i) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_ne",
+                        expected: "int",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Int(b_i) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "int_ne",
+                        expected: "int",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_i != b_i))?;
+            }
+
+            Instruction::BoolNot { dst, v } => {
+                let v = self.eval_operand(frame_index, v)?;
+                let Value::Bool(flag) = v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "bool_not",
+                        expected: "bool",
+                        got: v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(!flag))?;
+            }
+            Instruction::BoolEq { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Bool(a_b) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "bool_eq",
+                        expected: "bool",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Bool(b_b) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "bool_eq",
+                        expected: "bool",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_b == b_b))?;
+            }
+            Instruction::BoolNe { dst, a, b } => {
+                let a_v = self.eval_operand(frame_index, a)?;
+                let Value::Bool(a_b) = a_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "bool_ne",
+                        expected: "bool",
+                        got: a_v.kind(),
+                    });
+                };
+                let b_v = self.eval_operand(frame_index, b)?;
+                let Value::Bool(b_b) = b_v else {
+                    return Err(RuntimeError::TypeError {
+                        op: "bool_ne",
+                        expected: "bool",
+                        got: b_v.kind(),
+                    });
+                };
+                self.stack[frame_index].write_local(*dst, Value::Bool(a_b != b_b))?;
+            }
+
             Instruction::Call { dst, func, args } => {
                 self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
-                let arg_values = self.eval_args(frame_index, args)?;
-                self.call_function_by_name(module, frame_index, *dst, func.as_str(), arg_values)?;
+                self.with_value_buffer(|interp, arg_values| {
+                    interp.eval_args_into(frame_index, args, arg_values)?;
+                    interp.call_function_by_name(
+                        module,
+                        frame_index,
+                        *dst,
+                        func.as_str(),
+                        arg_values.as_slice(),
+                    )
+                })?;
             }
             Instruction::CallId { dst, func, args } => {
                 self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
-                let arg_values = self.eval_args(frame_index, args)?;
-                self.call_target(module, frame_index, *dst, *func, arg_values)?;
+                self.with_value_buffer(|interp, arg_values| {
+                    interp.eval_args_into(frame_index, args, arg_values)?;
+                    interp.call_target(module, frame_index, *dst, *func, arg_values.as_slice())
+                })?;
             }
             Instruction::ICall { dst, fnptr, args } => {
                 self.metrics.icall_instructions = self.metrics.icall_instructions.saturating_add(1);
@@ -1815,8 +2139,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: fn_value.kind(),
                     });
                 };
-                let arg_values = self.eval_args(frame_index, args)?;
-                self.call_mir_function(module, frame_index, *dst, id, arg_values)?;
+                self.with_value_buffer(|interp, arg_values| {
+                    interp.eval_args_into(frame_index, args, arg_values)?;
+                    interp.call_mir_function(module, frame_index, *dst, id, arg_values.as_slice())
+                })?;
             }
             Instruction::VCall {
                 dst,
@@ -1859,18 +2185,28 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         message: format!("unresolved vcall method: {method} on {type_name}"),
                     });
                 };
-                let mut arg_values =
-                    Vec::with_capacity(type_args.len() + method_type_args.len() + args.len() + 1);
-                for id in type_args {
-                    arg_values.push(Value::TypeRep(id));
-                }
-                for op in method_type_args {
-                    let id = self.eval_type_rep_operand(frame_index, op)?;
-                    arg_values.push(Value::TypeRep(id));
-                }
-                arg_values.push(recv);
-                arg_values.extend(self.eval_args(frame_index, args)?);
-                self.call_mir_function(module, frame_index, *dst, fn_id, arg_values)?;
+                self.with_value_buffer(|interp, arg_values| {
+                    arg_values.clear();
+                    arg_values.reserve(type_args.len() + method_type_args.len() + args.len() + 1);
+
+                    for id in type_args {
+                        arg_values.push(Value::TypeRep(id));
+                    }
+                    for op in method_type_args {
+                        let id = interp.eval_type_rep_operand(frame_index, op)?;
+                        arg_values.push(Value::TypeRep(id));
+                    }
+                    arg_values.push(recv);
+                    interp.eval_args_extend(frame_index, args, arg_values)?;
+
+                    interp.call_mir_function(
+                        module,
+                        frame_index,
+                        *dst,
+                        fn_id,
+                        arg_values.as_slice(),
+                    )
+                })?;
             }
 
             Instruction::PushHandler {
@@ -1928,8 +2264,10 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             }
 
             Instruction::Perform { dst, effect, args } => {
-                let arg_values = self.eval_args(frame_index, args)?;
-                self.perform_effect(module, frame_index, *dst, effect, arg_values)?;
+                self.with_value_buffer(|interp, arg_values| {
+                    interp.eval_args_into(frame_index, args, arg_values)?;
+                    interp.perform_effect(module, frame_index, *dst, effect, arg_values.as_slice())
+                })?;
             }
             Instruction::Resume { dst, k, value } => {
                 let k_value = self.eval_operand(frame_index, k)?;
@@ -1985,15 +2323,48 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         Ok(())
     }
 
+    fn with_value_buffer<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut Vec<Value>) -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        let mut buf = self.value_buffers.pop().unwrap_or_default();
+        buf.clear();
+        let result = f(self, &mut buf);
+        buf.clear();
+        self.value_buffers.push(buf);
+        result
+    }
+
+    fn eval_args_extend(
+        &mut self,
+        frame_index: usize,
+        args: &[Operand],
+        out: &mut Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        out.reserve(args.len());
+        for op in args {
+            out.push(self.eval_operand(frame_index, op)?);
+        }
+        Ok(())
+    }
+
+    fn eval_args_into(
+        &mut self,
+        frame_index: usize,
+        args: &[Operand],
+        out: &mut Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        out.clear();
+        self.eval_args_extend(frame_index, args, out)
+    }
+
     fn eval_args(
         &mut self,
         frame_index: usize,
         args: &[Operand],
     ) -> Result<Vec<Value>, RuntimeError> {
         let mut out = Vec::with_capacity(args.len());
-        for op in args {
-            out.push(self.eval_operand(frame_index, op)?);
-        }
+        self.eval_args_extend(frame_index, args, &mut out)?;
         Ok(out)
     }
 
@@ -2003,10 +2374,18 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         frame_index: usize,
         dst: Option<Local>,
         func: CallTarget,
-        args: Vec<Value>,
+        args: &[Value],
     ) -> Result<(), RuntimeError> {
         match func {
             CallTarget::Host(id) => {
+                if let Some(result) = self.call_core_intrinsic(id, args) {
+                    let value = result?;
+                    if let Some(dst_local) = dst {
+                        self.stack[frame_index].write_local(dst_local, value)?;
+                    }
+                    return Ok(());
+                }
+
                 let host = self
                     .host_import_functions
                     .get(id.0 as usize)
@@ -2021,7 +2400,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                 };
 
                 self.metrics.host_calls = self.metrics.host_calls.saturating_add(1);
-                let value = host(self, &args)?;
+                let value = host(self, args)?;
                 if let Some(dst_local) = dst {
                     self.stack[frame_index].write_local(dst_local, value)?;
                 }
@@ -2031,18 +2410,160 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         }
     }
 
+    fn call_core_intrinsic(
+        &self,
+        id: HostImportId,
+        args: &[Value],
+    ) -> Option<Result<Value, RuntimeError>> {
+        let intrinsics = &self.core_intrinsic_ids;
+
+        if intrinsics.bool_not == Some(id) {
+            return Some(match args {
+                [Value::Bool(v)] => Ok(Value::Bool(!v)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::bool_not: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.bool_eq == Some(id) {
+            return Some(match args {
+                [Value::Bool(a), Value::Bool(b)] => Ok(Value::Bool(a == b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::bool_eq: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.bool_ne == Some(id) {
+            return Some(match args {
+                [Value::Bool(a), Value::Bool(b)] => Ok(Value::Bool(a != b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::bool_ne: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_add == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a + b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_add: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_sub == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a - b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_sub: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_mul == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a * b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_mul: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_div == Some(id) {
+            return Some(match args {
+                [Value::Int(_), Value::Int(0)] => Err(RuntimeError::Trap {
+                    message: "core::intrinsics::int_div: division by zero".to_string(),
+                }),
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a / b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_div: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_mod == Some(id) {
+            return Some(match args {
+                [Value::Int(_), Value::Int(0)] => Err(RuntimeError::Trap {
+                    message: "core::intrinsics::int_mod: modulo by zero".to_string(),
+                }),
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a % b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_mod: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_eq == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a == b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_eq: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_ne == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a != b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_ne: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_lt == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a < b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_lt: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_le == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a <= b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_le: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_gt == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a > b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_gt: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        if intrinsics.int_ge == Some(id) {
+            return Some(match args {
+                [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a >= b)),
+                other => Err(RuntimeError::Trap {
+                    message: format!("core::intrinsics::int_ge: bad args: {other:?}"),
+                }),
+            });
+        }
+
+        None
+    }
+
     fn call_mir_function(
         &mut self,
         module: &Module,
         frame_index: usize,
         dst: Option<Local>,
         func: FunctionId,
-        args: Vec<Value>,
+        args: &[Value],
     ) -> Result<(), RuntimeError> {
         self.metrics.mir_calls = self.metrics.mir_calls.saturating_add(1);
         let callee = Self::function(module, func)?;
         let mut new_frame = Frame::new(func, callee.locals, dst);
-        self.init_params(&mut new_frame, callee, &args)?;
+        self.init_params(&mut new_frame, callee, args)?;
         self.stack.push(new_frame);
         let _ = frame_index;
         Ok(())
@@ -2054,11 +2575,11 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         frame_index: usize,
         dst: Option<Local>,
         func: &str,
-        args: Vec<Value>,
+        args: &[Value],
     ) -> Result<(), RuntimeError> {
         if let Some(host) = self.host_functions.get(func).cloned() {
             self.metrics.host_calls = self.metrics.host_calls.saturating_add(1);
-            let value = host(self, &args)?;
+            let value = host(self, args)?;
             if let Some(dst_local) = dst {
                 self.stack[frame_index].write_local(dst_local, value)?;
             }
@@ -2084,7 +2605,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         frame_index: usize,
         dst: Option<Local>,
         effect: &EffectSpec,
-        args: Vec<Value>,
+        args: &[Value],
     ) -> Result<(), RuntimeError> {
         let interface_args = effect
             .interface_args
@@ -2098,7 +2619,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         };
 
         let Some((handler_index, clause_index, binds)) =
-            self.find_handler_for_effect(&effect_id, &args)?
+            self.find_handler_for_effect(&effect_id, args)?
         else {
             return Err(RuntimeError::UnhandledEffect {
                 interface: effect_id.interface.clone(),
