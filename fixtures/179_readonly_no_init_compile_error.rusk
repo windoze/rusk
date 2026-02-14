@@ -1,0 +1,6 @@
+// expect: compile_error `readonly` bindings require an initializer
+
+fn main() -> unit {
+    readonly x: int;
+    ()
+}

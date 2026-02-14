@@ -304,7 +304,7 @@ Stmt           := LetStmt
                | ContinueStmt
                | ExprStmt ;
 
-LetStmt        := "let" Pattern (":" Type)? ("=" Expr)? ";" ;
+LetStmt        := "let" Pattern (":" Type)? "=" Expr ";" ;
 ConstStmt      := "const" Pattern (":" Type)? "=" Expr ";" ;
 ReadonlyStmt   := "readonly" Pattern (":" Type)? "=" Expr ";" ;
 
@@ -324,9 +324,8 @@ BlockLikeExpr  := Block
 ```
 
 Notes:
-- `let x: T;` declares an uninitialized local (reading it before assignment is a runtime error). In this implementation, an uninitialized `let` binding must have an explicit type annotation.
+- `let` bindings always require an initializer (`let x = e;`). If you need deferred initialization, use `Option<T>`.
 - `let pat = e;` pattern-matches `e` against `pat`, binding any names in `pat`. If the match fails at runtime, execution traps.
-  - Destructuring `let` forms (anything other than a simple binding name) require an initializer.
 - `const x = e;` prevents rebinding of `x` (but does not deep-freeze referenced objects).
 - `readonly x = e;` is equivalent to `const x = e;` plus a readonly view: it prevents rebinding and forbids mutation through `x`.
 - Like Rust, *block-like* expression statements (`if` / `match` / `loop` / `while` / `for` / `{ ... }`) may omit the trailing `;` when used as a statement inside a block.
@@ -649,10 +648,14 @@ mutation **through that particular binding/reference**.
 
 This matches MIR’s `as_readonly` behavior.
 
-### 4.4 Uninitialized Locals
+### 4.4 Initialized `let` bindings
 
-`let x;` introduces an uninitialized local. Reading `x` before it is initialized is
-a runtime error (trap).
+`let` bindings must have an initializer:
+
+- `let x = expr;`
+
+If you need “declare now, set later” semantics, use `Option<T>` instead
+(e.g. `let x = None;` then later `x = Some(value);`).
 
 ### 4.5 Evaluation Order
 

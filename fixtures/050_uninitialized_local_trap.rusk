@@ -1,4 +1,4 @@
-// expect: runtime_error uninitialized local
+// expect: compile_error `let` bindings require an initializer
 
 fn main() -> int {
     let x: int;

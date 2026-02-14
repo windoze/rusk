@@ -2111,22 +2111,20 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
 
             Instruction::Call { dst, func, args } => {
                 self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
-                self.with_value_buffer(|interp, arg_values| {
-                    interp.eval_args_into(frame_index, args, arg_values)?;
+                self.with_evaluated_args(frame_index, args, |interp, arg_values| {
                     interp.call_function_by_name(
                         module,
                         frame_index,
                         *dst,
                         func.as_str(),
-                        arg_values.as_slice(),
+                        arg_values,
                     )
                 })?;
             }
             Instruction::CallId { dst, func, args } => {
                 self.metrics.call_instructions = self.metrics.call_instructions.saturating_add(1);
-                self.with_value_buffer(|interp, arg_values| {
-                    interp.eval_args_into(frame_index, args, arg_values)?;
-                    interp.call_target(module, frame_index, *dst, *func, arg_values.as_slice())
+                self.with_evaluated_args(frame_index, args, |interp, arg_values| {
+                    interp.call_target(module, frame_index, *dst, *func, arg_values)
                 })?;
             }
             Instruction::ICall { dst, fnptr, args } => {
@@ -2139,9 +2137,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
                         got: fn_value.kind(),
                     });
                 };
-                self.with_value_buffer(|interp, arg_values| {
-                    interp.eval_args_into(frame_index, args, arg_values)?;
-                    interp.call_mir_function(module, frame_index, *dst, id, arg_values.as_slice())
+                self.with_evaluated_args(frame_index, args, |interp, arg_values| {
+                    interp.call_mir_function(module, frame_index, *dst, id, arg_values)
                 })?;
             }
             Instruction::VCall {
@@ -2264,9 +2261,8 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             }
 
             Instruction::Perform { dst, effect, args } => {
-                self.with_value_buffer(|interp, arg_values| {
-                    interp.eval_args_into(frame_index, args, arg_values)?;
-                    interp.perform_effect(module, frame_index, *dst, effect, arg_values.as_slice())
+                self.with_evaluated_args(frame_index, args, |interp, arg_values| {
+                    interp.perform_effect(module, frame_index, *dst, effect, arg_values)
                 })?;
             }
             Instruction::Resume { dst, k, value } => {
@@ -2333,6 +2329,32 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
         buf.clear();
         self.value_buffers.push(buf);
         result
+    }
+
+    fn with_evaluated_args<R>(
+        &mut self,
+        frame_index: usize,
+        args: &[Operand],
+        mut f: impl FnMut(&mut Self, &[Value]) -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        match args {
+            [] => f(self, &[]),
+            [a] => {
+                let a = self.eval_operand(frame_index, a)?;
+                let args = [a];
+                f(self, &args)
+            }
+            [a, b] => {
+                let a = self.eval_operand(frame_index, a)?;
+                let b = self.eval_operand(frame_index, b)?;
+                let args = [a, b];
+                f(self, &args)
+            }
+            _ => self.with_value_buffer(|interp, arg_values| {
+                interp.eval_args_into(frame_index, args, arg_values)?;
+                f(interp, arg_values.as_slice())
+            }),
+        }
     }
 
     fn eval_args_extend(

@@ -852,22 +852,15 @@ impl<'a> Parser<'a> {
         };
 
         if init.is_none() {
-            match kind {
-                BindingKind::Const | BindingKind::Readonly => {
-                    return Err(ParseError {
-                        message: "const/readonly bindings require an initializer".to_string(),
-                        span: pat.span(),
-                    });
-                }
-                BindingKind::Let => {
-                    if !matches!(pat, Pattern::Bind { .. }) {
-                        return Err(ParseError {
-                            message: "destructuring `let` requires an initializer".to_string(),
-                            span: pat.span(),
-                        });
-                    }
-                }
-            }
+            let message = match kind {
+                BindingKind::Let => "`let` bindings require an initializer".to_string(),
+                BindingKind::Const => "`const` bindings require an initializer".to_string(),
+                BindingKind::Readonly => "`readonly` bindings require an initializer".to_string(),
+            };
+            return Err(ParseError {
+                message,
+                span: pat.span(),
+            });
         }
 
         let end = self.expect(TokenKind::Semi)?.span.end;

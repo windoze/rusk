@@ -3146,6 +3146,18 @@ impl<'a> FnTypechecker<'a> {
                 init,
                 span,
             } => {
+                if init.is_none() {
+                    let message = match kind {
+                        BindingKind::Let => "`let` bindings require an initializer",
+                        BindingKind::Const => "`const` bindings require an initializer",
+                        BindingKind::Readonly => "`readonly` bindings require an initializer",
+                    };
+                    return Err(TypeError {
+                        message: message.to_string(),
+                        span: *span,
+                    });
+                }
+
                 let declared = if let Some(ty_expr) = ty {
                     let scope = GenericScope::new(&self.sig.generics)?;
                     Some(lower_type_expr(self.env, &self.module, &scope, ty_expr)?)
@@ -3153,59 +3165,29 @@ impl<'a> FnTypechecker<'a> {
                     None
                 };
 
-                let init_ty = if let Some(init_expr) = init {
-                    Some(self.typecheck_expr(init_expr, ExprUse::Value)?)
+                let init_expr = init.as_ref().expect("init checked above");
+                let init_ty = self.typecheck_expr(init_expr, ExprUse::Value)?;
+                let scrutinee_ty = if let Some(decl) = declared {
+                    self.infer.unify(decl, init_ty, *span)?
                 } else {
-                    None
+                    init_ty
                 };
 
-                let scrutinee_ty =
-                    match (declared, init_ty) {
-                        (Some(decl), Some(init_ty)) => self.infer.unify(decl, init_ty, *span)?,
-                        (Some(decl), None) => decl,
-                        (None, Some(init_ty)) => init_ty,
-                        (None, None) => return Err(TypeError {
-                            message:
-                                "cannot infer type for uninitialized `let` binding; add `: Type`"
-                                    .to_string(),
-                            span: *span,
-                        }),
-                    };
-
-                if init.is_none() {
-                    // Uninitialized locals are only allowed for simple `let x: T;` declarations
-                    // (not for destructuring patterns).
-                    let Pattern::Bind { name, .. } = pat else {
-                        return Err(TypeError {
-                            message: "destructuring `let` requires an initializer".to_string(),
-                            span: pat.span(),
-                        });
+                let binds = self.typecheck_pattern(pat, scrutinee_ty)?;
+                for (name, ty) in binds {
+                    let ty = if matches!(kind, BindingKind::Readonly) {
+                        ty.as_readonly_view()
+                    } else {
+                        ty
                     };
                     self.bind_local(
-                        name,
+                        &name,
                         LocalInfo {
-                            ty: scrutinee_ty,
+                            ty,
                             kind: *kind,
-                            span: *span,
+                            span: name.span,
                         },
                     )?;
-                } else {
-                    let binds = self.typecheck_pattern(pat, scrutinee_ty)?;
-                    for (name, ty) in binds {
-                        let ty = if matches!(kind, BindingKind::Readonly) {
-                            ty.as_readonly_view()
-                        } else {
-                            ty
-                        };
-                        self.bind_local(
-                            &name,
-                            LocalInfo {
-                                ty,
-                                kind: *kind,
-                                span: name.span,
-                            },
-                        )?;
-                    }
                 }
             }
             crate::ast::Stmt::Return { value, span } => {

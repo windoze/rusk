@@ -379,7 +379,51 @@ Some instructions are statement-like and produce no value.
   - Syntax: `%dst = len <op_arr>`
   - Trap: non-array.
 
-### 7.3 Calls
+### 7.3 Primitive Ops
+
+The following opcodes exist to make primitive arithmetic and comparisons cheap on hot paths.
+They are operationally equivalent to calling the corresponding `core::intrinsics::*` host functions,
+but avoid call/dispatch overhead.
+
+- `int_add`:
+  - Syntax: `%dst = int_add <op_a> <op_b>`
+  - Semantics: evaluate operands, require `int`, write `a + b` to `%dst`.
+
+- `int_sub`:
+  - Syntax: `%dst = int_sub <op_a> <op_b>`
+  - Semantics: evaluate operands, require `int`, write `a - b` to `%dst`.
+
+- `int_mul`:
+  - Syntax: `%dst = int_mul <op_a> <op_b>`
+  - Semantics: evaluate operands, require `int`, write `a * b` to `%dst`.
+
+- `int_div`:
+  - Syntax: `%dst = int_div <op_a> <op_b>`
+  - Semantics: evaluate operands, require `int`, write `a / b` (truncating division) to `%dst`.
+  - Trap: division by zero.
+
+- `int_mod`:
+  - Syntax: `%dst = int_mod <op_a> <op_b>`
+  - Semantics: evaluate operands, require `int`, write `a % b` to `%dst`.
+  - Trap: modulo by zero.
+
+- `int_lt` / `int_le` / `int_gt` / `int_ge`:
+  - Syntax: `%dst = int_lt <op_a> <op_b>` (and similarly)
+  - Semantics: evaluate operands, require `int`, write the comparison result (`bool`) to `%dst`.
+
+- `int_eq` / `int_ne`:
+  - Syntax: `%dst = int_eq <op_a> <op_b>` (and similarly)
+  - Semantics: evaluate operands, require `int`, write the comparison result (`bool`) to `%dst`.
+
+- `bool_not`:
+  - Syntax: `%dst = bool_not <op_v>`
+  - Semantics: evaluate operand, require `bool`, write `!v` to `%dst`.
+
+- `bool_eq` / `bool_ne`:
+  - Syntax: `%dst = bool_eq <op_a> <op_b>` (and similarly)
+  - Semantics: evaluate operands, require `bool`, write the comparison result (`bool`) to `%dst`.
+
+### 7.4 Calls
 
 - `call` (direct):
   - Syntax: `%dst = call <fn_name> (<op_args...>)`

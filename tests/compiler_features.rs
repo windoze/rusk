@@ -284,7 +284,7 @@ fn generic_calls_support_explicit_type_arguments_with_turbofish() {
 }
 
 #[test]
-fn traps_on_uninitialized_local_read() {
+fn rejects_uninitialized_let_bindings() {
     let src = r#"
         fn bad() -> int {
             let x;
@@ -292,9 +292,10 @@ fn traps_on_uninitialized_local_read() {
         }
     "#;
 
-    let err = run0(src, "bad").expect_err("should trap");
+    let err = compile_to_mir(src).expect_err("should fail");
     assert!(
-        matches!(err, RuntimeError::Trap { .. }),
+        err.message
+            .contains("`let` bindings require an initializer"),
         "unexpected error: {err:?}"
     );
 }
@@ -339,6 +340,26 @@ fn effects_resume_and_handler_result() {
 
     assert_eq!(run0(src, "test_resume").expect("run"), Value::Int(30));
     assert_eq!(run0(src, "test_no_resume").expect("run"), Value::Int(99));
+}
+
+#[test]
+fn match_helpers_can_mutate_captured_let_bindings() {
+    let src = r#"
+        interface Tick { fn tick(n: int) -> int; }
+
+        fn test() -> int {
+            let x = 0;
+
+            match @Tick.tick(7) {
+                @Tick.tick(n) => { x = n; resume(0) }
+                v => v
+            };
+
+            x
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), Value::Int(7));
 }
 
 #[test]

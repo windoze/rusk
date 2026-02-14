@@ -1,0 +1,6 @@
+// expect: compile_error `const` bindings require an initializer
+
+fn main() -> unit {
+    const x: int;
+    ()
+}

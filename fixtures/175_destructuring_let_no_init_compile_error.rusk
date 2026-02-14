@@ -1,7 +1,6 @@
-// expect: compile_error destructuring `let` requires an initializer
+// expect: compile_error `let` bindings require an initializer
 
 fn main() -> unit {
     let (a, b);
     ()
 }
-

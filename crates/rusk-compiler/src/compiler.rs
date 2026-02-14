@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const INTERNAL_CELL_STRUCT: &str = "$Cell";
-const CELL_FIELD_SET: &str = "set";
 const CELL_FIELD_VALUE: &str = "v";
 
 const INTERNAL_CLOSURE_STRUCT: &str = "$Closure";
@@ -252,6 +251,184 @@ fn free_value_vars_in_expr(expr: &Expr, bound: &BTreeSet<String>, out: &mut BTre
         }
         Expr::As { expr, .. } | Expr::AsQuestion { expr, .. } | Expr::Is { expr, .. } => {
             free_value_vars_in_expr(expr, bound, out);
+        }
+    }
+}
+
+fn collect_captured_vars_in_match_expr(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    bound: &BTreeSet<String>,
+    captured: &mut BTreeSet<String>,
+) {
+    let has_effect_arms = arms.iter().any(|a| matches!(a.pat, MatchPat::Effect(_)));
+    if has_effect_arms {
+        let mut free = BTreeSet::new();
+        let scratch_bound = BTreeSet::new();
+        free_value_vars_in_expr(scrutinee, &scratch_bound, &mut free);
+        for arm in arms {
+            let mut arm_bound = scratch_bound.clone();
+            free_value_vars_in_match_pat(&arm.pat, &mut arm_bound);
+            free_value_vars_in_expr(&arm.body, &arm_bound, &mut free);
+        }
+        for name in free {
+            if bound.contains(&name) {
+                captured.insert(name);
+            }
+        }
+    }
+
+    collect_captured_vars_in_expr(scrutinee, bound, captured);
+    for arm in arms {
+        let mut arm_bound = bound.clone();
+        free_value_vars_in_match_pat(&arm.pat, &mut arm_bound);
+        collect_captured_vars_in_expr(&arm.body, &arm_bound, captured);
+    }
+}
+
+fn collect_captured_vars_in_block(
+    block: &Block,
+    bound: &mut BTreeSet<String>,
+    captured: &mut BTreeSet<String>,
+) {
+    for stmt in &block.stmts {
+        collect_captured_vars_in_stmt(stmt, bound, captured);
+    }
+    if let Some(tail) = block.tail.as_deref() {
+        collect_captured_vars_in_expr(tail, bound, captured);
+    }
+}
+
+fn collect_captured_vars_in_stmt(
+    stmt: &Stmt,
+    bound: &mut BTreeSet<String>,
+    captured: &mut BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::Let { pat, init, .. } => {
+            if let Some(init) = init {
+                collect_captured_vars_in_expr(init, bound, captured);
+            }
+            free_value_vars_in_pattern(pat, bound);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(value) = value {
+                collect_captured_vars_in_expr(value, bound, captured);
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Expr { expr, .. } => collect_captured_vars_in_expr(expr, bound, captured),
+    }
+}
+
+fn collect_captured_vars_in_expr(
+    expr: &Expr,
+    bound: &BTreeSet<String>,
+    captured: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::Unit { .. }
+        | Expr::Bool { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::String { .. }
+        | Expr::Bytes { .. } => {}
+
+        Expr::Path { .. } => {}
+
+        Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_captured_vars_in_expr(item, bound, captured);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_name, value) in fields {
+                collect_captured_vars_in_expr(value, bound, captured);
+            }
+        }
+        Expr::EffectCall { args, .. } => {
+            for arg in args {
+                collect_captured_vars_in_expr(arg, bound, captured);
+            }
+        }
+
+        Expr::Lambda { params, body, .. } => {
+            let mut lambda_bound = BTreeSet::new();
+            for p in params {
+                lambda_bound.insert(p.name.name.clone());
+            }
+            let free = free_value_vars_in_block(body, &mut lambda_bound);
+            for name in free {
+                if bound.contains(&name) {
+                    captured.insert(name);
+                }
+            }
+
+            let mut inner_bound = bound.clone();
+            for p in params {
+                inner_bound.insert(p.name.name.clone());
+            }
+            collect_captured_vars_in_block(body, &mut inner_bound, captured);
+        }
+        Expr::If {
+            cond,
+            then_block,
+            else_branch,
+            ..
+        } => {
+            collect_captured_vars_in_expr(cond, bound, captured);
+            collect_captured_vars_in_block(then_block, &mut bound.clone(), captured);
+            if let Some(e) = else_branch.as_deref() {
+                collect_captured_vars_in_expr(e, bound, captured);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => collect_captured_vars_in_match_expr(scrutinee, arms, bound, captured),
+        Expr::Loop { body, .. } => {
+            collect_captured_vars_in_block(body, &mut bound.clone(), captured)
+        }
+        Expr::While { cond, body, .. } => {
+            collect_captured_vars_in_expr(cond, bound, captured);
+            collect_captured_vars_in_block(body, &mut bound.clone(), captured);
+        }
+        Expr::For {
+            binding,
+            iter,
+            body,
+            ..
+        } => {
+            collect_captured_vars_in_expr(iter, bound, captured);
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(binding.name.clone());
+            collect_captured_vars_in_block(body, &mut inner_bound, captured);
+        }
+        Expr::Block { block, .. } => {
+            collect_captured_vars_in_block(block, &mut bound.clone(), captured)
+        }
+
+        Expr::Call { callee, args, .. } => {
+            collect_captured_vars_in_expr(callee, bound, captured);
+            for arg in args {
+                collect_captured_vars_in_expr(arg, bound, captured);
+            }
+        }
+        Expr::Field { base, .. } => collect_captured_vars_in_expr(base, bound, captured),
+        Expr::Index { base, index, .. } => {
+            collect_captured_vars_in_expr(base, bound, captured);
+            collect_captured_vars_in_expr(index, bound, captured);
+        }
+        Expr::Unary { expr, .. } => collect_captured_vars_in_expr(expr, bound, captured),
+        Expr::Binary { left, right, .. } => {
+            collect_captured_vars_in_expr(left, bound, captured);
+            collect_captured_vars_in_expr(right, bound, captured);
+        }
+        Expr::Assign { target, value, .. } => {
+            collect_captured_vars_in_expr(target, bound, captured);
+            collect_captured_vars_in_expr(value, bound, captured);
+        }
+        Expr::As { expr, .. } | Expr::AsQuestion { expr, .. } | Expr::Is { expr, .. } => {
+            collect_captured_vars_in_expr(expr, bound, captured);
         }
     }
 }
@@ -718,6 +895,7 @@ impl Compiler {
         self.populate_struct_layouts();
         self.populate_host_imports()?;
         self.resolve_call_targets()?;
+        self.inline_tiny_functions()?;
         self.resolve_function_constants()?;
 
         Ok(self.module)
@@ -738,7 +916,7 @@ impl Compiler {
         self.module
             .struct_layouts
             .entry(INTERNAL_CELL_STRUCT.to_string())
-            .or_insert_with(|| vec![CELL_FIELD_SET.to_string(), CELL_FIELD_VALUE.to_string()]);
+            .or_insert_with(|| vec![CELL_FIELD_VALUE.to_string()]);
         self.module
             .struct_layouts
             .entry(INTERNAL_CLOSURE_STRUCT.to_string())
@@ -849,6 +1027,402 @@ impl Compiler {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn inline_tiny_functions(&mut self) -> Result<(), CompileError> {
+        #[derive(Clone)]
+        struct InlineBody {
+            params: Vec<Param>,
+            locals: usize,
+            instructions: Vec<Instruction>,
+            return_value: Operand,
+        }
+
+        const INLINE_MAX_INSTRUCTIONS: usize = 16;
+
+        fn inline_body_for_function(func: &Function) -> Option<InlineBody> {
+            if func.blocks.len() != 1 {
+                return None;
+            }
+            let block = func.blocks.first()?;
+            if !block.params.is_empty() {
+                return None;
+            }
+            if block.instructions.len() > INLINE_MAX_INSTRUCTIONS {
+                return None;
+            }
+            let Terminator::Return { value } = &block.terminator else {
+                return None;
+            };
+
+            // Very conservative: avoid inlining any function that can perform effects or calls.
+            for instr in &block.instructions {
+                match instr {
+                    Instruction::Call { .. }
+                    | Instruction::CallId { .. }
+                    | Instruction::ICall { .. }
+                    | Instruction::VCall { .. }
+                    | Instruction::PushHandler { .. }
+                    | Instruction::PopHandler
+                    | Instruction::Perform { .. }
+                    | Instruction::Resume { .. } => return None,
+                    _ => {}
+                }
+            }
+
+            Some(InlineBody {
+                params: func.params.clone(),
+                locals: func.locals,
+                instructions: block.instructions.clone(),
+                return_value: value.clone(),
+            })
+        }
+
+        fn fresh_local(next_local: &mut usize) -> Local {
+            let local = Local(*next_local);
+            *next_local = next_local.saturating_add(1);
+            local
+        }
+
+        fn remap_local(map: &[Local], local: Local) -> Local {
+            map.get(local.0)
+                .copied()
+                .unwrap_or_else(|| panic!("inline remap: invalid local {local:?}"))
+        }
+
+        fn remap_operand(map: &[Local], op: &Operand) -> Operand {
+            match op {
+                Operand::Local(local) => Operand::Local(remap_local(map, *local)),
+                Operand::Literal(lit) => Operand::Literal(lit.clone()),
+            }
+        }
+
+        fn remap_instr(map: &[Local], instr: Instruction) -> Instruction {
+            match instr {
+                Instruction::Const { dst, value } => Instruction::Const {
+                    dst: remap_local(map, dst),
+                    value,
+                },
+                Instruction::Copy { dst, src } => Instruction::Copy {
+                    dst: remap_local(map, dst),
+                    src: remap_local(map, src),
+                },
+                Instruction::Move { dst, src } => Instruction::Move {
+                    dst: remap_local(map, dst),
+                    src: remap_local(map, src),
+                },
+                Instruction::AsReadonly { dst, src } => Instruction::AsReadonly {
+                    dst: remap_local(map, dst),
+                    src: remap_local(map, src),
+                },
+                Instruction::IsType { dst, value, ty } => Instruction::IsType {
+                    dst: remap_local(map, dst),
+                    value: remap_operand(map, &value),
+                    ty: remap_operand(map, &ty),
+                },
+                Instruction::CheckedCast { dst, value, ty } => Instruction::CheckedCast {
+                    dst: remap_local(map, dst),
+                    value: remap_operand(map, &value),
+                    ty: remap_operand(map, &ty),
+                },
+                Instruction::MakeTypeRep { dst, base, args } => Instruction::MakeTypeRep {
+                    dst: remap_local(map, dst),
+                    base,
+                    args: args.into_iter().map(|op| remap_operand(map, &op)).collect(),
+                },
+                Instruction::MakeStruct {
+                    dst,
+                    type_name,
+                    type_args,
+                    fields,
+                } => Instruction::MakeStruct {
+                    dst: remap_local(map, dst),
+                    type_name,
+                    type_args: type_args
+                        .into_iter()
+                        .map(|op| remap_operand(map, &op))
+                        .collect(),
+                    fields: fields
+                        .into_iter()
+                        .map(|(name, op)| (name, remap_operand(map, &op)))
+                        .collect(),
+                },
+                Instruction::MakeArray { dst, items } => Instruction::MakeArray {
+                    dst: remap_local(map, dst),
+                    items: items
+                        .into_iter()
+                        .map(|op| remap_operand(map, &op))
+                        .collect(),
+                },
+                Instruction::MakeTuple { dst, items } => Instruction::MakeTuple {
+                    dst: remap_local(map, dst),
+                    items: items
+                        .into_iter()
+                        .map(|op| remap_operand(map, &op))
+                        .collect(),
+                },
+                Instruction::MakeEnum {
+                    dst,
+                    enum_name,
+                    type_args,
+                    variant,
+                    fields,
+                } => Instruction::MakeEnum {
+                    dst: remap_local(map, dst),
+                    enum_name,
+                    type_args: type_args
+                        .into_iter()
+                        .map(|op| remap_operand(map, &op))
+                        .collect(),
+                    variant,
+                    fields: fields
+                        .into_iter()
+                        .map(|op| remap_operand(map, &op))
+                        .collect(),
+                },
+                Instruction::GetField { dst, obj, field } => Instruction::GetField {
+                    dst: remap_local(map, dst),
+                    obj: remap_operand(map, &obj),
+                    field,
+                },
+                Instruction::SetField { obj, field, value } => Instruction::SetField {
+                    obj: remap_operand(map, &obj),
+                    field,
+                    value: remap_operand(map, &value),
+                },
+                Instruction::StructGet { dst, obj, idx } => Instruction::StructGet {
+                    dst: remap_local(map, dst),
+                    obj: remap_operand(map, &obj),
+                    idx,
+                },
+                Instruction::StructSet { obj, idx, value } => Instruction::StructSet {
+                    obj: remap_operand(map, &obj),
+                    idx,
+                    value: remap_operand(map, &value),
+                },
+                Instruction::TupleGet { dst, tup, idx } => Instruction::TupleGet {
+                    dst: remap_local(map, dst),
+                    tup: remap_operand(map, &tup),
+                    idx,
+                },
+                Instruction::TupleSet { tup, idx, value } => Instruction::TupleSet {
+                    tup: remap_operand(map, &tup),
+                    idx,
+                    value: remap_operand(map, &value),
+                },
+                Instruction::IndexGet { dst, arr, idx } => Instruction::IndexGet {
+                    dst: remap_local(map, dst),
+                    arr: remap_operand(map, &arr),
+                    idx: remap_operand(map, &idx),
+                },
+                Instruction::IndexSet { arr, idx, value } => Instruction::IndexSet {
+                    arr: remap_operand(map, &arr),
+                    idx: remap_operand(map, &idx),
+                    value: remap_operand(map, &value),
+                },
+                Instruction::Len { dst, arr } => Instruction::Len {
+                    dst: remap_local(map, dst),
+                    arr: remap_operand(map, &arr),
+                },
+                Instruction::IntAdd { dst, a, b } => Instruction::IntAdd {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntSub { dst, a, b } => Instruction::IntSub {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntMul { dst, a, b } => Instruction::IntMul {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntDiv { dst, a, b } => Instruction::IntDiv {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntMod { dst, a, b } => Instruction::IntMod {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntLt { dst, a, b } => Instruction::IntLt {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntLe { dst, a, b } => Instruction::IntLe {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntGt { dst, a, b } => Instruction::IntGt {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntGe { dst, a, b } => Instruction::IntGe {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntEq { dst, a, b } => Instruction::IntEq {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntNe { dst, a, b } => Instruction::IntNe {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::BoolNot { dst, v } => Instruction::BoolNot {
+                    dst: remap_local(map, dst),
+                    v: remap_operand(map, &v),
+                },
+                Instruction::BoolEq { dst, a, b } => Instruction::BoolEq {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::BoolNe { dst, a, b } => Instruction::BoolNe {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::Call { .. }
+                | Instruction::CallId { .. }
+                | Instruction::VCall { .. }
+                | Instruction::ICall { .. }
+                | Instruction::PushHandler { .. }
+                | Instruction::PopHandler
+                | Instruction::Perform { .. }
+                | Instruction::Resume { .. } => {
+                    panic!("inline remap: unsupported instruction {instr:?}")
+                }
+            }
+        }
+
+        let bodies = self
+            .module
+            .functions
+            .iter()
+            .map(inline_body_for_function)
+            .collect::<Vec<_>>();
+
+        for caller_idx in 0..self.module.functions.len() {
+            let Some(caller) = self.module.functions.get_mut(caller_idx) else {
+                continue;
+            };
+
+            let mut next_local = caller.locals;
+            for block in &mut caller.blocks {
+                let old_instructions = std::mem::take(&mut block.instructions);
+                let mut out = Vec::with_capacity(old_instructions.len());
+                for instr in old_instructions {
+                    let Instruction::CallId { dst, func, args } = instr else {
+                        out.push(instr);
+                        continue;
+                    };
+
+                    let CallTarget::Mir(callee_id) = func else {
+                        out.push(Instruction::CallId { dst, func, args });
+                        continue;
+                    };
+
+                    let callee_index = callee_id.0 as usize;
+                    let Some(body) = bodies.get(callee_index).and_then(|v| v.as_ref()) else {
+                        out.push(Instruction::CallId {
+                            dst,
+                            func: CallTarget::Mir(callee_id),
+                            args,
+                        });
+                        continue;
+                    };
+
+                    if args.len() != body.params.len() {
+                        out.push(Instruction::CallId {
+                            dst,
+                            func: CallTarget::Mir(callee_id),
+                            args,
+                        });
+                        continue;
+                    }
+
+                    // Allocate fresh locals for the inlined callee frame and map callee locals to
+                    // caller locals.
+                    let mut local_map = vec![None; body.locals];
+                    for (arg, param) in args.iter().zip(body.params.iter()) {
+                        let param_local = fresh_local(&mut next_local);
+                        local_map[param.local.0] = Some(param_local);
+
+                        match arg {
+                            Operand::Local(src) => out.push(Instruction::Copy {
+                                dst: param_local,
+                                src: *src,
+                            }),
+                            Operand::Literal(lit) => out.push(Instruction::Const {
+                                dst: param_local,
+                                value: lit.clone(),
+                            }),
+                        }
+
+                        if param.mutability == Mutability::Readonly {
+                            out.push(Instruction::AsReadonly {
+                                dst: param_local,
+                                src: param_local,
+                            });
+                        }
+                    }
+
+                    for slot in &mut local_map {
+                        if slot.is_none() {
+                            *slot = Some(fresh_local(&mut next_local));
+                        }
+                    }
+                    let local_map = local_map
+                        .into_iter()
+                        .map(|l| l.expect("all locals mapped"))
+                        .collect::<Vec<_>>();
+
+                    for callee_instr in body.instructions.iter().cloned() {
+                        out.push(remap_instr(&local_map, callee_instr));
+                    }
+
+                    let ret = remap_operand(&local_map, &body.return_value);
+                    if let Some(dst_local) = dst {
+                        match ret {
+                            Operand::Local(src) => {
+                                if dst_local != src {
+                                    out.push(Instruction::Copy {
+                                        dst: dst_local,
+                                        src,
+                                    });
+                                }
+                            }
+                            Operand::Literal(lit) => out.push(Instruction::Const {
+                                dst: dst_local,
+                                value: lit,
+                            }),
+                        }
+                    } else if let Operand::Local(src) = ret {
+                        // Preserve return-value evaluation for trap semantics (e.g. uninitialized
+                        // locals in invalid MIR), even when the value is ignored by the caller.
+                        let sink = fresh_local(&mut next_local);
+                        out.push(Instruction::Copy { dst: sink, src });
+                    }
+                }
+
+                block.instructions = out;
+            }
+
+            caller.locals = next_local;
+        }
+
         Ok(())
     }
 
@@ -1506,6 +2080,7 @@ impl Compiler {
         );
         lowerer.bind_type_rep_params_for_signature();
         lowerer.bind_params_from_fn_item(func, &param_mutabilities, &param_types)?;
+        lowerer.compute_captured_vars_for_block(&func.body);
         let value = lowerer.lower_block_expr(&func.body)?;
         if !lowerer.is_current_terminated() {
             lowerer.set_terminator(Terminator::Return {
@@ -1675,7 +2250,10 @@ impl Compiler {
             lowerer.bind_var(
                 name,
                 VarInfo {
-                    local: captured_val,
+                    storage: match info.storage {
+                        VarStorage::Local(_) => VarStorage::Local(captured_val),
+                        VarStorage::Cell(_) => VarStorage::Cell(captured_val),
+                    },
                     kind: info.kind,
                 },
             );
@@ -1687,12 +2265,13 @@ impl Compiler {
             lowerer.bind_var(
                 &p.name.name,
                 VarInfo {
-                    local: param_local,
+                    storage: VarStorage::Local(param_local),
                     kind: BindingKind::Const,
                 },
             );
         }
 
+        lowerer.compute_captured_vars_for_block(body);
         let result = lowerer.lower_block_expr(body)?;
         if !lowerer.is_current_terminated() {
             lowerer.set_terminator(Terminator::Return {
@@ -1747,12 +2326,16 @@ impl Compiler {
             lowerer.bind_var(
                 name,
                 VarInfo {
-                    local,
+                    storage: match info.storage {
+                        VarStorage::Local(_) => VarStorage::Local(local),
+                        VarStorage::Cell(_) => VarStorage::Cell(local),
+                    },
                     kind: info.kind,
                 },
             );
         }
 
+        lowerer.compute_captured_vars_for_match(scrutinee, arms);
         let value = lowerer.lower_match_inline_with_effects(scrutinee, arms, match_span)?;
         if !lowerer.is_current_terminated() {
             let control = lowerer.make_control(CONTROL_VARIANT_VALUE, vec![Operand::Local(value)]);
@@ -1776,9 +2359,23 @@ enum FnKind {
     ExprHelper,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VarStorage {
+    Local(Local),
+    Cell(Local),
+}
+
+impl VarStorage {
+    fn local(self) -> Local {
+        match self {
+            VarStorage::Local(local) | VarStorage::Cell(local) => local,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct VarInfo {
-    local: Local,
+    storage: VarStorage,
     kind: BindingKind,
 }
 
@@ -1815,6 +2412,7 @@ struct FunctionLowerer<'a> {
     blocks: Vec<BlockBuilder>,
     current: BlockId,
     next_local: usize,
+    captured_vars: BTreeSet<String>,
     scopes: Vec<BTreeMap<String, VarInfo>>,
     loop_stack: Vec<LoopTargets>,
 }
@@ -1844,9 +2442,32 @@ impl<'a> FunctionLowerer<'a> {
             }],
             current: BlockId(0),
             next_local: 0,
+            captured_vars: BTreeSet::new(),
             scopes: vec![BTreeMap::new()],
             loop_stack: Vec::new(),
         }
+    }
+
+    fn compute_captured_vars_for_block(&mut self, body: &Block) {
+        let mut bound = BTreeSet::new();
+        for scope in &self.scopes {
+            bound.extend(scope.keys().cloned());
+        }
+
+        let mut captured = BTreeSet::new();
+        collect_captured_vars_in_block(body, &mut bound, &mut captured);
+        self.captured_vars = captured;
+    }
+
+    fn compute_captured_vars_for_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) {
+        let mut bound = BTreeSet::new();
+        for scope in &self.scopes {
+            bound.extend(scope.keys().cloned());
+        }
+
+        let mut captured = BTreeSet::new();
+        collect_captured_vars_in_match_expr(scrutinee, arms, &bound, &mut captured);
+        self.captured_vars = captured;
     }
 
     fn finish(mut self) -> Result<Function, CompileError> {
@@ -1936,7 +2557,7 @@ impl<'a> FunctionLowerer<'a> {
             self.bind_var(
                 "self",
                 VarInfo {
-                    local,
+                    storage: VarStorage::Local(local),
                     kind: BindingKind::Const,
                 },
             );
@@ -1962,7 +2583,7 @@ impl<'a> FunctionLowerer<'a> {
                     self.bind_var(
                         &name.name,
                         VarInfo {
-                            local,
+                            storage: VarStorage::Local(local),
                             kind: BindingKind::Const,
                         },
                     );
@@ -2006,7 +2627,7 @@ impl<'a> FunctionLowerer<'a> {
                         self.bind_var(
                             &name,
                             VarInfo {
-                                local,
+                                storage: VarStorage::Local(local),
                                 kind: BindingKind::Const,
                             },
                         );
@@ -2367,7 +2988,7 @@ impl<'a> FunctionLowerer<'a> {
             };
             out.entry(format!("{CAPTURE_TYPE_REP_PREFIX}{idx}"))
                 .or_insert_with(|| VarInfo {
-                    local,
+                    storage: VarStorage::Local(local),
                     kind: BindingKind::Const,
                 });
         }
@@ -2672,64 +3293,47 @@ impl<'a> FunctionLowerer<'a> {
         // - `let x = expr;`
         // - `const x = expr;`
         // - `readonly x = expr;`
-        // - `let x;` / `let x: T;`
         // - `*_ _ = expr;` (no binding, just evaluate for effect / type assertion)
         match (kind, pat, init) {
-            // Uninitialized `let x;`
-            (BindingKind::Let, crate::ast::Pattern::Bind { name, .. }, None) => {
-                // Represent `let` bindings as boxed cells so they can be captured across helper
-                // function boundaries (required for delimited effects compilation).
-                let cell = self.alloc_local();
-                self.emit(Instruction::MakeStruct {
-                    dst: cell,
-                    type_name: INTERNAL_CELL_STRUCT.to_string(),
-                    type_args: Vec::new(),
-                    fields: vec![
-                        (
-                            CELL_FIELD_SET.to_string(),
-                            Operand::Literal(ConstValue::Bool(false)),
-                        ),
-                        (
-                            CELL_FIELD_VALUE.to_string(),
-                            Operand::Literal(ConstValue::Unit),
-                        ),
-                    ],
-                });
-                self.bind_var(
-                    &name.name,
-                    VarInfo {
-                        local: cell,
-                        kind: BindingKind::Let,
-                    },
-                );
-                return Ok(());
+            (BindingKind::Let, crate::ast::Pattern::Bind { .. }, None) => {
+                return Err(CompileError::new(
+                    "`let` bindings require an initializer",
+                    span,
+                ));
             }
 
             // `let x = expr;`
             (BindingKind::Let, crate::ast::Pattern::Bind { name, .. }, Some(init_expr)) => {
-                // Represent `let` bindings as boxed cells so they can be captured across helper
-                // function boundaries (required for delimited effects compilation).
-                let cell = self.alloc_local();
                 let v = self.lower_expr(init_expr)?;
-                self.emit(Instruction::MakeStruct {
-                    dst: cell,
-                    type_name: INTERNAL_CELL_STRUCT.to_string(),
-                    type_args: Vec::new(),
-                    fields: vec![
-                        (
-                            CELL_FIELD_SET.to_string(),
-                            Operand::Literal(ConstValue::Bool(true)),
-                        ),
-                        (CELL_FIELD_VALUE.to_string(), Operand::Local(v)),
-                    ],
-                });
-                self.bind_var(
-                    &name.name,
-                    VarInfo {
-                        local: cell,
-                        kind: BindingKind::Let,
-                    },
-                );
+                if self.captured_vars.contains(&name.name) {
+                    // Captured `let` bindings need a stable location shared across helper/closure
+                    // boundaries, so we lower them to an internal `$Cell`.
+                    let cell = self.alloc_local();
+                    self.emit(Instruction::MakeStruct {
+                        dst: cell,
+                        type_name: INTERNAL_CELL_STRUCT.to_string(),
+                        type_args: Vec::new(),
+                        fields: vec![(CELL_FIELD_VALUE.to_string(), Operand::Local(v))],
+                    });
+                    self.bind_var(
+                        &name.name,
+                        VarInfo {
+                            storage: VarStorage::Cell(cell),
+                            kind: BindingKind::Let,
+                        },
+                    );
+                } else {
+                    // Uncaptured `let` bindings can live directly in a frame local.
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::Copy { dst, src: v });
+                    self.bind_var(
+                        &name.name,
+                        VarInfo {
+                            storage: VarStorage::Local(dst),
+                            kind: BindingKind::Let,
+                        },
+                    );
+                }
                 return Ok(());
             }
 
@@ -2748,7 +3352,13 @@ impl<'a> FunctionLowerer<'a> {
                 if kind == BindingKind::Readonly {
                     self.emit(Instruction::AsReadonly { dst, src: dst });
                 }
-                self.bind_var(&name.name, VarInfo { local: dst, kind });
+                self.bind_var(
+                    &name.name,
+                    VarInfo {
+                        storage: VarStorage::Local(dst),
+                        kind,
+                    },
+                );
                 return Ok(());
             }
 
@@ -2767,7 +3377,7 @@ impl<'a> FunctionLowerer<'a> {
             BindingKind::Let => {
                 let Some(init_expr) = init else {
                     return Err(CompileError::new(
-                        "destructuring `let` requires an initializer",
+                        "`let` bindings require an initializer",
                         span,
                     ));
                 };
@@ -2801,26 +3411,38 @@ impl<'a> FunctionLowerer<'a> {
 
                 self.set_current(ok_block);
                 for (name, value_local) in bind_names.into_iter().zip(params.into_iter()) {
-                    let cell = self.alloc_local();
-                    self.emit(Instruction::MakeStruct {
-                        dst: cell,
-                        type_name: INTERNAL_CELL_STRUCT.to_string(),
-                        type_args: Vec::new(),
-                        fields: vec![
-                            (
-                                CELL_FIELD_SET.to_string(),
-                                Operand::Literal(ConstValue::Bool(true)),
-                            ),
-                            (CELL_FIELD_VALUE.to_string(), Operand::Local(value_local)),
-                        ],
-                    });
-                    self.bind_var(
-                        &name,
-                        VarInfo {
-                            local: cell,
-                            kind: BindingKind::Let,
-                        },
-                    );
+                    if self.captured_vars.contains(&name) {
+                        let cell = self.alloc_local();
+                        self.emit(Instruction::MakeStruct {
+                            dst: cell,
+                            type_name: INTERNAL_CELL_STRUCT.to_string(),
+                            type_args: Vec::new(),
+                            fields: vec![(
+                                CELL_FIELD_VALUE.to_string(),
+                                Operand::Local(value_local),
+                            )],
+                        });
+                        self.bind_var(
+                            &name,
+                            VarInfo {
+                                storage: VarStorage::Cell(cell),
+                                kind: BindingKind::Let,
+                            },
+                        );
+                    } else {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Copy {
+                            dst,
+                            src: value_local,
+                        });
+                        self.bind_var(
+                            &name,
+                            VarInfo {
+                                storage: VarStorage::Local(dst),
+                                kind: BindingKind::Let,
+                            },
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -2869,7 +3491,13 @@ impl<'a> FunctionLowerer<'a> {
                     if kind == BindingKind::Readonly {
                         self.emit(Instruction::AsReadonly { dst, src: dst });
                     }
-                    self.bind_var(&name, VarInfo { local: dst, kind });
+                    self.bind_var(
+                        &name,
+                        VarInfo {
+                            storage: VarStorage::Local(dst),
+                            kind,
+                        },
+                    );
                 }
                 Ok(())
             }
@@ -2881,59 +3509,21 @@ impl<'a> FunctionLowerer<'a> {
             return Ok(self.alloc_unit());
         }
 
-        let set_local = self.alloc_local();
-        self.emit(Instruction::StructGet {
-            dst: set_local,
-            obj: Operand::Local(cell),
-            idx: 0,
-        });
-
-        let then_block = self.new_block(format!("cell_read_{name}_ok"));
-        let else_block = self.new_block(format!("cell_read_{name}_uninit"));
-        let join_block = self.new_block(format!("cell_read_{name}_join"));
-        let value_param = self.alloc_local();
-        self.blocks[join_block.0].params = vec![value_param];
-
-        self.set_terminator(Terminator::CondBr {
-            cond: Operand::Local(set_local),
-            then_target: then_block,
-            then_args: Vec::new(),
-            else_target: else_block,
-            else_args: Vec::new(),
-        })?;
-
-        self.set_current(then_block);
         let value_local = self.alloc_local();
         self.emit(Instruction::StructGet {
             dst: value_local,
             obj: Operand::Local(cell),
-            idx: 1,
+            idx: 0,
         });
-        self.set_terminator(Terminator::Br {
-            target: join_block,
-            args: vec![Operand::Local(value_local)],
-        })?;
-
-        self.set_current(else_block);
-        self.set_terminator(Terminator::Trap {
-            message: format!("uninitialized local `{name}`"),
-        })?;
-
-        self.set_current(join_block);
-        let _ = span;
-        Ok(value_param)
+        let _ = (name, span);
+        Ok(value_local)
     }
 
     fn write_cell(&mut self, cell: Local, value: Local) {
         self.emit(Instruction::StructSet {
             obj: Operand::Local(cell),
-            idx: 1,
-            value: Operand::Local(value),
-        });
-        self.emit(Instruction::StructSet {
-            obj: Operand::Local(cell),
             idx: 0,
-            value: Operand::Literal(ConstValue::Bool(true)),
+            value: Operand::Local(value),
         });
     }
 
@@ -3468,10 +4058,17 @@ impl<'a> FunctionLowerer<'a> {
         if path.segments.len() == 1 {
             let name = &path.segments[0].name;
             if let Some(var) = self.lookup_var(name) {
-                let local = var.local;
                 match var.kind {
-                    BindingKind::Let => return self.read_cell(local, name, span),
+                    BindingKind::Let => match var.storage {
+                        VarStorage::Cell(cell) => return self.read_cell(cell, name, span),
+                        VarStorage::Local(local) => {
+                            let dst = self.alloc_local();
+                            self.emit(Instruction::Copy { dst, src: local });
+                            return Ok(dst);
+                        }
+                    },
                     BindingKind::Const | BindingKind::Readonly => {
+                        let local = var.storage.local();
                         let dst = self.alloc_local();
                         self.emit(Instruction::Copy { dst, src: local });
                         return Ok(dst);
@@ -3621,7 +4218,7 @@ impl<'a> FunctionLowerer<'a> {
         // Capture values into an env array (name order).
         let mut captured_ops = Vec::with_capacity(captures.len());
         for (_name, info) in captures.iter() {
-            captured_ops.push(Operand::Local(info.local));
+            captured_ops.push(Operand::Local(info.storage.local()));
         }
         let env = self.alloc_local();
         self.emit(Instruction::MakeArray {
@@ -3863,7 +4460,7 @@ impl<'a> FunctionLowerer<'a> {
         self.bind_var(
             &binding.name,
             VarInfo {
-                local: some_param,
+                storage: VarStorage::Local(some_param),
                 kind: BindingKind::Const,
             },
         );
@@ -4262,7 +4859,7 @@ impl<'a> FunctionLowerer<'a> {
                     ));
                 }
                 let name = &path.segments[0].name;
-                let Some(var) = self.lookup_var(name) else {
+                let Some(var) = self.lookup_var(name).cloned() else {
                     return Err(CompileError::new(
                         format!("unknown name `{name}`"),
                         path.segments[0].span,
@@ -4274,9 +4871,16 @@ impl<'a> FunctionLowerer<'a> {
                         path.segments[0].span,
                     ));
                 }
-                let local = var.local;
                 let rhs = self.lower_expr(value)?;
-                self.write_cell(local, rhs);
+                match var.storage {
+                    VarStorage::Cell(cell) => self.write_cell(cell, rhs),
+                    VarStorage::Local(local) => {
+                        self.emit(Instruction::Copy {
+                            dst: local,
+                            src: rhs,
+                        });
+                    }
+                }
                 Ok(self.alloc_unit())
             }
             Expr::Field { base, name, .. } => {
@@ -5159,7 +5763,7 @@ impl<'a> FunctionLowerer<'a> {
 
         let mut args = Vec::with_capacity(captured.len());
         for (_name, info) in captured.iter() {
-            args.push(Operand::Local(info.local));
+            args.push(Operand::Local(info.storage.local()));
         }
 
         let control_local = self.alloc_local();
@@ -5216,7 +5820,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.bind_var(
                     &name,
                     VarInfo {
-                        local,
+                        storage: VarStorage::Local(local),
                         kind: BindingKind::Const,
                     },
                 );
@@ -5362,7 +5966,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.bind_var(
                     &name,
                     VarInfo {
-                        local,
+                        storage: VarStorage::Local(local),
                         kind: BindingKind::Const,
                     },
                 );
@@ -5375,7 +5979,7 @@ impl<'a> FunctionLowerer<'a> {
             self.bind_var(
                 &cont_name,
                 VarInfo {
-                    local: k_local,
+                    storage: VarStorage::Local(k_local),
                     kind: BindingKind::Const,
                 },
             );
@@ -5438,7 +6042,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.bind_var(
                     &name,
                     VarInfo {
-                        local,
+                        storage: VarStorage::Local(local),
                         kind: BindingKind::Const,
                     },
                 );
