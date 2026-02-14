@@ -145,7 +145,7 @@ fn is_bytecode_fixture(path: &Path) -> bool {
     let Ok(n) = digits.parse::<u32>() else {
         return false;
     };
-    (200..300).contains(&n)
+    (200..300).contains(&n) || matches!(n, 1 | 10 | 11 | 12)
 }
 
 fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
@@ -238,6 +238,7 @@ fn bytecode_fixtures() {
                 let mut vm = Vm::new(module.clone())
                     .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
                 common::install_test_host_fns_vm(&module, &mut vm);
+                common::install_core_host_fns_vm(&module, &mut vm);
                 let got = run_to_completion(&module, &mut vm).unwrap_or_else(|e| {
                     panic!("fixture {}: runtime failed: {e}", entry_path.display())
                 });
@@ -250,6 +251,7 @@ fn bytecode_fixtures() {
                 let mut vm = Vm::new(module.clone())
                     .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
                 common::install_test_host_fns_vm(&module, &mut vm);
+                common::install_core_host_fns_vm(&module, &mut vm);
                 let err = run_to_completion(&module, &mut vm).expect_err("expected trap");
                 let message = err;
                 assert!(

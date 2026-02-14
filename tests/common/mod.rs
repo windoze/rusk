@@ -254,3 +254,94 @@ pub fn install_test_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &m
         .unwrap();
     }
 }
+
+pub fn install_core_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &mut Vm) {
+    // Strings
+    if let Some(id) = module.host_import_id("core::intrinsics::string_concat") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::String(a), AbiValue::String(b)] => Ok(AbiValue::String(format!("{a}{b}"))),
+            other => Err(HostError {
+                message: format!("core::intrinsics::string_concat: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+    if let Some(id) = module.host_import_id("core::intrinsics::string_eq") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::String(a), AbiValue::String(b)] => Ok(AbiValue::Bool(a == b)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::string_eq: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+    if let Some(id) = module.host_import_id("core::intrinsics::string_ne") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::String(a), AbiValue::String(b)] => Ok(AbiValue::Bool(a != b)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::string_ne: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+
+    // Bytes
+    if let Some(id) = module.host_import_id("core::intrinsics::bytes_eq") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::Bytes(a), AbiValue::Bytes(b)] => Ok(AbiValue::Bool(a == b)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::bytes_eq: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+    if let Some(id) = module.host_import_id("core::intrinsics::bytes_ne") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::Bytes(a), AbiValue::Bytes(b)] => Ok(AbiValue::Bool(a != b)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::bytes_ne: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+
+    // Unit
+    if let Some(id) = module.host_import_id("core::intrinsics::unit_eq") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::Unit, AbiValue::Unit] => Ok(AbiValue::Bool(true)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::unit_eq: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+    if let Some(id) = module.host_import_id("core::intrinsics::unit_ne") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::Unit, AbiValue::Unit] => Ok(AbiValue::Bool(false)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::unit_ne: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+
+    // Floats
+    if let Some(id) = module.host_import_id("core::intrinsics::float_lt") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::Float(a), AbiValue::Float(b)] => Ok(AbiValue::Bool(a < b)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::float_lt: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+    if let Some(id) = module.host_import_id("core::intrinsics::float_ge") {
+        vm.register_host_import(id, |args: &[AbiValue]| match args {
+            [AbiValue::Float(a), AbiValue::Float(b)] => Ok(AbiValue::Bool(a >= b)),
+            other => Err(HostError {
+                message: format!("core::intrinsics::float_ge: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+}
