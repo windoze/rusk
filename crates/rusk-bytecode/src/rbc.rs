@@ -77,6 +77,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<ExecutableModule, DecodeError> {
 
     let module = dec.read_module()?;
     crate::verify::verify_module(&module).map_err(|e| dec.err(e.message))?;
+    if dec.remaining() != 0 {
+        return Err(dec.err("trailing bytes".to_string()));
+    }
     Ok(module)
 }
 
