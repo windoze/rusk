@@ -15,7 +15,7 @@ Scope: **plan only** (no code changes besides this plan file).
 - [x] Milestone D — Externalized effects (`Request`/`resume`/`drop`)
 - [x] Milestone E — Expand bytecode to pass fixture suite
 - [x] Milestone F — Generic specialization
-- [ ] Milestone G — Stable serialization + verification
+- [x] Milestone G — Stable serialization + verification
 
 Last updated: 2026-02-14
 
