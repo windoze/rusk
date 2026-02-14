@@ -1,0 +1,25 @@
+{
+  "name": "rusk",
+  "displayName": "Rusk Support",
+  "description": "Rusk Language Support",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [{
+      "id": "rusk",
+      "aliases": ["Rusk", "rusk"],
+      "extensions": [".rusk"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "rusk",
+      "scopeName": "source.rusk",
+      "path": "./syntaxes/rusk.tmLanguage"
+    }]
+  }
+}
