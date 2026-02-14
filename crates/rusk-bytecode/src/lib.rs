@@ -7,6 +7,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub mod lower;
+
+pub use lower::{LowerError, lower_mir_module};
+
 /// A stable identifier for a bytecode function within an [`ExecutableModule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FunctionId(pub u32);

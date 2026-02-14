@@ -15,6 +15,8 @@ pub use compiler::{
     CompileError, CompileMetrics, compile_file_to_mir, compile_file_to_mir_with_options,
     compile_file_to_mir_with_options_and_metrics, compile_to_mir, compile_to_mir_with_options,
     compile_to_mir_with_options_and_metrics,
+    compile_file_to_bytecode, compile_file_to_bytecode_with_options, compile_to_bytecode,
+    compile_to_bytecode_with_options,
 };
 pub use host::{CompileOptions, HostFunctionDecl, HostModuleDecl, HostVisibility};
 pub use rusk_mir::{HostFnSig, HostType};

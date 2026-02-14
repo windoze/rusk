@@ -74,6 +74,7 @@ dependencies = [
  "rusk-host",
  "rusk-interpreter",
  "rusk-mir",
+ "rusk-vm",
 ]
 
 [[package]]
@@ -88,6 +89,7 @@ name = "rusk-compiler"
 version = "0.1.0"
 dependencies = [
  "bitcode",
+ "rusk-bytecode",
  "rusk-mir",
  "serde",
  "unicode-ident",

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rusk-mir = { path = "../rusk-mir" }
+rusk-bytecode = { path = "../rusk-bytecode" }
 unicode-ident = { version = "1", optional = true }
 bitcode = { version = "0.6", default-features = false, optional = true, features = ["serde"] }
 serde = { version = "1", default-features = false, optional = true, features = [

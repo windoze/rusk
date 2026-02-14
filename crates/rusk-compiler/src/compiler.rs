@@ -532,6 +532,10 @@ pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
     compile_to_mir_with_options(source, &CompileOptions::default())
 }
 
+pub fn compile_to_bytecode(source: &str) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
+    compile_to_bytecode_with_options(source, &CompileOptions::default())
+}
+
 /// Compiles a single Rusk source file into MIR with host-module declarations.
 pub fn compile_to_mir_with_options(
     source: &str,
@@ -551,6 +555,14 @@ pub fn compile_to_mir_with_options(
     })();
 
     result.map_err(|e| e.with_source_map(&source_map))
+}
+
+pub fn compile_to_bytecode_with_options(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
+    let mir = compile_to_mir_with_options(source, options)?;
+    rusk_bytecode::lower_mir_module(&mir).map_err(|e| CompileError::new(e.message, Span::new(0, 0)))
 }
 
 /// Compiles a single Rusk source string into MIR, returning pipeline timing metrics.
@@ -597,6 +609,12 @@ pub fn compile_file_to_mir(entry_path: &Path) -> Result<Module, CompileError> {
     compile_file_to_mir_with_options(entry_path, &CompileOptions::default())
 }
 
+pub fn compile_file_to_bytecode(
+    entry_path: &Path,
+) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
+    compile_file_to_bytecode_with_options(entry_path, &CompileOptions::default())
+}
+
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR with host-module
 /// declarations.
 pub fn compile_file_to_mir_with_options(
@@ -622,6 +640,14 @@ pub fn compile_file_to_mir_with_options(
     };
 
     compile_program_to_mir(&program, options).map_err(|e| e.with_source_map(loader.source_map()))
+}
+
+pub fn compile_file_to_bytecode_with_options(
+    entry_path: &Path,
+    options: &CompileOptions,
+) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
+    let mir = compile_file_to_mir_with_options(entry_path, options)?;
+    rusk_bytecode::lower_mir_module(&mir).map_err(|e| CompileError::new(e.message, Span::new(0, 0)))
 }
 
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR with timing metrics.

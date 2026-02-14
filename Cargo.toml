@@ -22,3 +22,4 @@ rusk-host = { path = "crates/rusk-host" }
 
 [dev-dependencies]
 rusk-mir = { path = "crates/rusk-mir" }
+rusk-vm = { path = "crates/rusk-vm" }
