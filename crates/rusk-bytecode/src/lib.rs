@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -105,6 +105,8 @@ pub enum ConstValue {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
+    TypeRep(rusk_mir::TypeRepLit),
+    Function(FunctionId),
 }
 
 /// A bytecode register index.
@@ -125,6 +127,44 @@ pub enum Instruction {
     Const { dst: Reg, value: ConstValue },
     Copy { dst: Reg, src: Reg },
     Move { dst: Reg, src: Reg },
+    AsReadonly { dst: Reg, src: Reg },
+    IsType { dst: Reg, value: Reg, ty: Reg },
+    CheckedCast { dst: Reg, value: Reg, ty: Reg },
+
+    MakeTypeRep {
+        dst: Reg,
+        base: rusk_mir::TypeRepLit,
+        args: Vec<Reg>,
+    },
+
+    MakeStruct {
+        dst: Reg,
+        type_name: String,
+        type_args: Vec<Reg>,
+        fields: Vec<(String, Reg)>,
+    },
+    MakeArray { dst: Reg, items: Vec<Reg> },
+    MakeTuple { dst: Reg, items: Vec<Reg> },
+    MakeEnum {
+        dst: Reg,
+        enum_name: String,
+        type_args: Vec<Reg>,
+        variant: String,
+        fields: Vec<Reg>,
+    },
+
+    GetField { dst: Reg, obj: Reg, field: String },
+    SetField { obj: Reg, field: String, value: Reg },
+
+    StructGet { dst: Reg, obj: Reg, idx: usize },
+    StructSet { obj: Reg, idx: usize, value: Reg },
+
+    TupleGet { dst: Reg, tup: Reg, idx: usize },
+    TupleSet { tup: Reg, idx: usize, value: Reg },
+
+    IndexGet { dst: Reg, arr: Reg, idx: Reg },
+    IndexSet { arr: Reg, idx: Reg, value: Reg },
+    Len { dst: Reg, arr: Reg },
 
     IntAdd { dst: Reg, a: Reg, b: Reg },
     IntSub { dst: Reg, a: Reg, b: Reg },
@@ -146,6 +186,11 @@ pub enum Instruction {
     Call {
         dst: Option<Reg>,
         func: CallTarget,
+        args: Vec<Reg>,
+    },
+    ICall {
+        dst: Option<Reg>,
+        fnptr: Reg,
         args: Vec<Reg>,
     },
 
@@ -185,6 +230,10 @@ pub struct ExecutableModule {
 
     pub host_imports: Vec<HostImport>,
     pub host_import_ids: BTreeMap<String, HostImportId>,
+
+    pub methods: BTreeMap<(String, String), FunctionId>,
+    pub interface_impls: BTreeMap<String, BTreeSet<String>>,
+    pub struct_layouts: BTreeMap<String, Vec<String>>,
 
     pub external_effects: Vec<ExternalEffectDecl>,
     pub external_effect_ids: BTreeMap<(String, String), EffectId>,

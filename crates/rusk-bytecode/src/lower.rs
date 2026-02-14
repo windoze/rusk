@@ -90,6 +90,14 @@ pub fn lower_mir_module_with_options(
     };
     out.entry = FunctionId(main_id.0);
 
+    out.methods = mir
+        .methods
+        .iter()
+        .map(|((ty, method), id)| ((ty.clone(), method.clone()), FunctionId(id.0)))
+        .collect();
+    out.interface_impls = mir.interface_impls.clone();
+    out.struct_layouts = mir.struct_layouts.clone();
+
     Ok(out)
 }
 
@@ -211,12 +219,12 @@ fn lower_mir_instruction(
     let local = |l: rusk_mir::Local| -> Reg { l.0 as Reg };
 
     let op_reg = |op: &Operand, code: &mut Vec<Instruction>, temps: &mut TempAlloc| {
-        lower_operand_to_reg(op, code, temps)
+        lower_operand_to_reg(mir_module, op, code, temps)
     };
 
     match instr {
         I::Const { dst, value } => {
-            let value = lower_const_value(value)?;
+            let value = lower_const_value(mir_module, value)?;
             code.push(Instruction::Const {
                 dst: local(*dst),
                 value,
@@ -232,6 +240,188 @@ fn lower_mir_instruction(
             code.push(Instruction::Move {
                 dst: local(*dst),
                 src: local(*src),
+            });
+        }
+        I::AsReadonly { dst, src } => {
+            code.push(Instruction::AsReadonly {
+                dst: local(*dst),
+                src: local(*src),
+            });
+        }
+        I::IsType { dst, value, ty } => {
+            let value = op_reg(value, code, temps)?;
+            let ty = op_reg(ty, code, temps)?;
+            code.push(Instruction::IsType {
+                dst: local(*dst),
+                value,
+                ty,
+            });
+        }
+        I::CheckedCast { dst, value, ty } => {
+            let value = op_reg(value, code, temps)?;
+            let ty = op_reg(ty, code, temps)?;
+            code.push(Instruction::CheckedCast {
+                dst: local(*dst),
+                value,
+                ty,
+            });
+        }
+
+        I::MakeTypeRep { dst, base, args } => {
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(arg, code, temps)?);
+            }
+            code.push(Instruction::MakeTypeRep {
+                dst: local(*dst),
+                base: base.clone(),
+                args: bc_args,
+            });
+        }
+
+        I::MakeStruct {
+            dst,
+            type_name,
+            type_args,
+            fields,
+        } => {
+            let mut bc_type_args = Vec::with_capacity(type_args.len());
+            for arg in type_args {
+                bc_type_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let mut bc_fields = Vec::with_capacity(fields.len());
+            for (field, op) in fields {
+                bc_fields.push((field.clone(), op_reg(op, code, temps)?));
+            }
+
+            code.push(Instruction::MakeStruct {
+                dst: local(*dst),
+                type_name: type_name.clone(),
+                type_args: bc_type_args,
+                fields: bc_fields,
+            });
+        }
+        I::MakeArray { dst, items } => {
+            let mut bc_items = Vec::with_capacity(items.len());
+            for op in items {
+                bc_items.push(op_reg(op, code, temps)?);
+            }
+            code.push(Instruction::MakeArray {
+                dst: local(*dst),
+                items: bc_items,
+            });
+        }
+        I::MakeTuple { dst, items } => {
+            let mut bc_items = Vec::with_capacity(items.len());
+            for op in items {
+                bc_items.push(op_reg(op, code, temps)?);
+            }
+            code.push(Instruction::MakeTuple {
+                dst: local(*dst),
+                items: bc_items,
+            });
+        }
+        I::MakeEnum {
+            dst,
+            enum_name,
+            type_args,
+            variant,
+            fields,
+        } => {
+            let mut bc_type_args = Vec::with_capacity(type_args.len());
+            for arg in type_args {
+                bc_type_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let mut bc_fields = Vec::with_capacity(fields.len());
+            for op in fields {
+                bc_fields.push(op_reg(op, code, temps)?);
+            }
+
+            code.push(Instruction::MakeEnum {
+                dst: local(*dst),
+                enum_name: enum_name.clone(),
+                type_args: bc_type_args,
+                variant: variant.clone(),
+                fields: bc_fields,
+            });
+        }
+
+        I::GetField { dst, obj, field } => {
+            let obj = op_reg(obj, code, temps)?;
+            code.push(Instruction::GetField {
+                dst: local(*dst),
+                obj,
+                field: field.clone(),
+            });
+        }
+        I::SetField { obj, field, value } => {
+            let obj = op_reg(obj, code, temps)?;
+            let value = op_reg(value, code, temps)?;
+            code.push(Instruction::SetField {
+                obj,
+                field: field.clone(),
+                value,
+            });
+        }
+
+        I::StructGet { dst, obj, idx } => {
+            let obj = op_reg(obj, code, temps)?;
+            code.push(Instruction::StructGet {
+                dst: local(*dst),
+                obj,
+                idx: *idx,
+            });
+        }
+        I::StructSet { obj, idx, value } => {
+            let obj = op_reg(obj, code, temps)?;
+            let value = op_reg(value, code, temps)?;
+            code.push(Instruction::StructSet {
+                obj,
+                idx: *idx,
+                value,
+            });
+        }
+
+        I::TupleGet { dst, tup, idx } => {
+            let tup = op_reg(tup, code, temps)?;
+            code.push(Instruction::TupleGet {
+                dst: local(*dst),
+                tup,
+                idx: *idx,
+            });
+        }
+        I::TupleSet { tup, idx, value } => {
+            let tup = op_reg(tup, code, temps)?;
+            let value = op_reg(value, code, temps)?;
+            code.push(Instruction::TupleSet {
+                tup,
+                idx: *idx,
+                value,
+            });
+        }
+
+        I::IndexGet { dst, arr, idx } => {
+            let arr = op_reg(arr, code, temps)?;
+            let idx = op_reg(idx, code, temps)?;
+            code.push(Instruction::IndexGet {
+                dst: local(*dst),
+                arr,
+                idx,
+            });
+        }
+        I::IndexSet { arr, idx, value } => {
+            let arr = op_reg(arr, code, temps)?;
+            let idx = op_reg(idx, code, temps)?;
+            let value = op_reg(value, code, temps)?;
+            code.push(Instruction::IndexSet { arr, idx, value });
+        }
+        I::Len { dst, arr } => {
+            let arr = op_reg(arr, code, temps)?;
+            code.push(Instruction::Len {
+                dst: local(*dst),
+                arr,
             });
         }
 
@@ -421,6 +611,19 @@ fn lower_mir_instruction(
             });
         }
 
+        I::ICall { dst, fnptr, args } => {
+            let fnptr = op_reg(fnptr, code, temps)?;
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(arg, code, temps)?);
+            }
+            code.push(Instruction::ICall {
+                dst: dst.map(local),
+                fnptr,
+                args: bc_args,
+            });
+        }
+
         I::Perform { dst, effect, args } => {
             if !effect.interface_args.is_empty() {
                 return Err(LowerError::new(
@@ -476,7 +679,7 @@ fn lower_mir_terminator(
     use rusk_mir::Terminator as T;
 
     let op_reg = |op: &Operand, code: &mut Vec<Instruction>, temps: &mut TempAlloc| {
-        lower_operand_to_reg(op, code, temps)
+        lower_operand_to_reg(mir_module, op, code, temps)
     };
 
     match term {
@@ -595,7 +798,7 @@ fn emit_branch_arg_copies(
     let mut moves: Vec<(Reg, Reg)> = Vec::with_capacity(params.len());
     for (dst_local, arg) in params.iter().copied().zip(args.iter()) {
         let dst = dst_local.0 as Reg;
-        let src = lower_operand_to_reg(arg, code, temps)?;
+        let src = lower_operand_to_reg(mir_module, arg, code, temps)?;
         moves.push((dst, src));
     }
 
@@ -653,6 +856,7 @@ fn emit_parallel_copies(mut moves: Vec<(Reg, Reg)>, temps: &mut TempAlloc, code:
 }
 
 fn lower_operand_to_reg(
+    mir_module: &rusk_mir::Module,
     op: &Operand,
     code: &mut Vec<Instruction>,
     temps: &mut TempAlloc,
@@ -661,14 +865,17 @@ fn lower_operand_to_reg(
         Operand::Local(l) => Ok(l.0 as Reg),
         Operand::Literal(v) => {
             let dst = temps.alloc();
-            let value = lower_const_value(v)?;
+            let value = lower_const_value(mir_module, v)?;
             code.push(Instruction::Const { dst, value });
             Ok(dst)
         }
     }
 }
 
-fn lower_const_value(v: &MirConstValue) -> Result<ConstValue, LowerError> {
+fn lower_const_value(
+    mir_module: &rusk_mir::Module,
+    v: &MirConstValue,
+) -> Result<ConstValue, LowerError> {
     Ok(match v {
         MirConstValue::Unit => ConstValue::Unit,
         MirConstValue::Bool(b) => ConstValue::Bool(*b),
@@ -676,11 +883,18 @@ fn lower_const_value(v: &MirConstValue) -> Result<ConstValue, LowerError> {
         MirConstValue::Float(x) => ConstValue::Float(*x),
         MirConstValue::String(s) => ConstValue::String(s.clone()),
         MirConstValue::Bytes(b) => ConstValue::Bytes(b.clone()),
+        MirConstValue::TypeRep(rep) => ConstValue::TypeRep(rep.clone()),
+        MirConstValue::Function(name) => {
+            let Some(id) = mir_module.function_id(name.as_str()) else {
+                return Err(LowerError::new(format!(
+                    "unresolved function constant `{name}`"
+                )));
+            };
+            ConstValue::Function(FunctionId(id.0))
+        }
+        MirConstValue::FunctionId(id) => ConstValue::Function(FunctionId(id.0)),
 
-        MirConstValue::TypeRep(_)
-        | MirConstValue::Function(_)
-        | MirConstValue::FunctionId(_)
-        | MirConstValue::Array(_)
+        MirConstValue::Array(_)
         | MirConstValue::Tuple(_)
         | MirConstValue::Struct { .. }
         | MirConstValue::Enum { .. } => {

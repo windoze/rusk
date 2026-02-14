@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 use rusk_bytecode::{AbiType, EffectId, ExecutableModule, FunctionId, HostImportId};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AbiValue {
@@ -86,7 +89,108 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct TypeRepId(pub u32);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TypeCtor {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Array,
+    Tuple(usize),
+    Struct(String),
+    Enum(String),
+    Interface(String),
+    Fn,
+    Cont,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TypeRepNode {
+    ctor: TypeCtor,
+    args: Vec<TypeRepId>,
+}
+
+#[derive(Debug, Default)]
+struct TypeReps {
+    nodes: Vec<TypeRepNode>,
+    intern: HashMap<TypeRepNode, TypeRepId>,
+}
+
+impl TypeReps {
+    fn intern(&mut self, node: TypeRepNode) -> TypeRepId {
+        if let Some(id) = self.intern.get(&node).copied() {
+            return id;
+        }
+        let id_u32: u32 = self
+            .nodes
+            .len()
+            .try_into()
+            .expect("type rep table overflow");
+        let id = TypeRepId(id_u32);
+        self.nodes.push(node.clone());
+        self.intern.insert(node, id);
+        id
+    }
+
+    fn node(&self, id: TypeRepId) -> Option<&TypeRepNode> {
+        self.nodes.get(id.0 as usize)
+    }
+
+    fn ctor_from_lit(lit: &rusk_mir::TypeRepLit) -> TypeCtor {
+        match lit {
+            rusk_mir::TypeRepLit::Unit => TypeCtor::Unit,
+            rusk_mir::TypeRepLit::Bool => TypeCtor::Bool,
+            rusk_mir::TypeRepLit::Int => TypeCtor::Int,
+            rusk_mir::TypeRepLit::Float => TypeCtor::Float,
+            rusk_mir::TypeRepLit::String => TypeCtor::String,
+            rusk_mir::TypeRepLit::Bytes => TypeCtor::Bytes,
+            rusk_mir::TypeRepLit::Array => TypeCtor::Array,
+            rusk_mir::TypeRepLit::Tuple(arity) => TypeCtor::Tuple(*arity),
+            rusk_mir::TypeRepLit::Struct(name) => TypeCtor::Struct(name.clone()),
+            rusk_mir::TypeRepLit::Enum(name) => TypeCtor::Enum(name.clone()),
+            rusk_mir::TypeRepLit::Interface(name) => TypeCtor::Interface(name.clone()),
+            rusk_mir::TypeRepLit::Fn => TypeCtor::Fn,
+            rusk_mir::TypeRepLit::Cont => TypeCtor::Cont,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RefValue {
+    readonly: bool,
+    obj: Rc<RefCell<HeapValue>>,
+}
+
+impl RefValue {
+    fn new(obj: Rc<RefCell<HeapValue>>) -> Self {
+        Self {
+            readonly: false,
+            obj,
+        }
+    }
+
+    fn as_readonly(&self) -> Self {
+        Self {
+            readonly: true,
+            obj: Rc::clone(&self.obj),
+        }
+    }
+
+    fn is_readonly(&self) -> bool {
+        self.readonly
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.obj, &other.obj)
+    }
+}
+
+#[derive(Clone, Debug)]
 enum Value {
     Unit,
     Bool(bool),
@@ -94,9 +198,33 @@ enum Value {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
+    TypeRep(TypeRepId),
+    Ref(RefValue),
+    Function(FunctionId),
 }
 
 impl Value {
+    fn kind(&self) -> &'static str {
+        match self {
+            Value::Unit => "unit",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::String(_) => "string",
+            Value::Bytes(_) => "bytes",
+            Value::TypeRep(_) => "typerep",
+            Value::Ref(_) => "ref",
+            Value::Function(_) => "function",
+        }
+    }
+
+    fn into_readonly_view(self) -> Self {
+        match self {
+            Value::Ref(r) => Value::Ref(r.as_readonly()),
+            other => other,
+        }
+    }
+
     fn from_abi(v: &AbiValue) -> Self {
         match v {
             AbiValue::Unit => Value::Unit,
@@ -108,16 +236,34 @@ impl Value {
         }
     }
 
-    fn to_abi(&self) -> AbiValue {
-        match self {
+    fn to_abi(&self) -> Option<AbiValue> {
+        Some(match self {
             Value::Unit => AbiValue::Unit,
             Value::Bool(b) => AbiValue::Bool(*b),
             Value::Int(n) => AbiValue::Int(*n),
             Value::Float(x) => AbiValue::Float(*x),
             Value::String(s) => AbiValue::String(s.clone()),
             Value::Bytes(b) => AbiValue::Bytes(b.clone()),
-        }
+            Value::TypeRep(_) | Value::Ref(_) | Value::Function(_) => return None,
+        })
     }
+}
+
+#[derive(Clone, Debug)]
+enum HeapValue {
+    Struct {
+        type_name: String,
+        type_args: Vec<TypeRepId>,
+        fields: Vec<Value>,
+    },
+    Array(Vec<Value>),
+    Tuple(Vec<Value>),
+    Enum {
+        enum_name: String,
+        type_args: Vec<TypeRepId>,
+        variant: String,
+        fields: Vec<Value>,
+    },
 }
 
 #[derive(Debug)]
@@ -146,6 +292,7 @@ pub struct Vm {
     host_fns: Vec<Option<Box<dyn HostFn>>>,
     in_host_call: bool,
     continuation_generation: u32,
+    type_reps: TypeReps,
 }
 
 impl Vm {
@@ -184,6 +331,7 @@ impl Vm {
             }],
             in_host_call: false,
             continuation_generation: 0,
+            type_reps: TypeReps::default(),
         })
     }
 
@@ -279,7 +427,9 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 continue;
             }
 
-            let ret = ret.to_abi();
+            let Some(ret) = ret.to_abi() else {
+                return trap(vm, "non-ABI-safe return value".to_string());
+            };
             vm.state = VmState::Done { value: ret.clone() };
             return StepResult::Done { value: ret };
         }
@@ -308,6 +458,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     rusk_bytecode::ConstValue::Float(x) => Value::Float(*x),
                     rusk_bytecode::ConstValue::String(s) => Value::String(s.clone()),
                     rusk_bytecode::ConstValue::Bytes(b) => Value::Bytes(b.clone()),
+                    rusk_bytecode::ConstValue::TypeRep(lit) => {
+                        let id = vm.type_reps.intern(TypeRepNode {
+                            ctor: TypeReps::ctor_from_lit(lit),
+                            args: Vec::new(),
+                        });
+                        Value::TypeRep(id)
+                    }
+                    rusk_bytecode::ConstValue::Function(id) => Value::Function(*id),
                 };
                 *slot = Some(v);
             }
@@ -360,6 +518,610 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     return StepResult::Trap { message };
                 };
                 *dst_slot = Some(v);
+            }
+
+            rusk_bytecode::Instruction::AsReadonly { dst, src } => {
+                let v = match read_value(frame, *src) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("as_readonly src: {msg}")),
+                };
+                let v = v.into_readonly_view();
+                if let Err(msg) = write_value(frame, *dst, v) {
+                    return trap(vm, format!("as_readonly dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IsType { dst, value, ty } => {
+                let v = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("is_type value: {msg}")),
+                };
+                let target = match read_type_rep(frame, *ty) {
+                    Ok(id) => id,
+                    Err(msg) => return trap(vm, format!("is_type ty: {msg}")),
+                };
+                let ok = match type_test(&vm.module, &vm.type_reps, &v, target) {
+                    Ok(ok) => ok,
+                    Err(msg) => return trap(vm, msg),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Bool(ok)) {
+                    return trap(vm, format!("is_type dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::CheckedCast { dst, value, ty } => {
+                let v = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("checked_cast value: {msg}")),
+                };
+                let target = match read_type_rep(frame, *ty) {
+                    Ok(id) => id,
+                    Err(msg) => return trap(vm, format!("checked_cast ty: {msg}")),
+                };
+                let ok = match type_test(&vm.module, &vm.type_reps, &v, target) {
+                    Ok(ok) => ok,
+                    Err(msg) => return trap(vm, msg),
+                };
+                let (variant, fields) = if ok {
+                    ("Some".to_string(), vec![v])
+                } else {
+                    ("None".to_string(), Vec::new())
+                };
+                let option = alloc_ref(HeapValue::Enum {
+                    enum_name: "Option".to_string(),
+                    type_args: vec![target],
+                    variant,
+                    fields,
+                });
+                if let Err(msg) = write_value(frame, *dst, option) {
+                    return trap(vm, format!("checked_cast dst: {msg}"));
+                }
+            }
+
+            rusk_bytecode::Instruction::MakeTypeRep { dst, base, args } => {
+                let mut arg_ids = Vec::with_capacity(args.len());
+                for reg in args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => return trap(vm, format!("make_typerep arg: {msg}")),
+                    };
+                    arg_ids.push(id);
+                }
+                let id = vm.type_reps.intern(TypeRepNode {
+                    ctor: TypeReps::ctor_from_lit(base),
+                    args: arg_ids,
+                });
+                if let Err(msg) = write_value(frame, *dst, Value::TypeRep(id)) {
+                    return trap(vm, format!("make_typerep dst: {msg}"));
+                }
+            }
+
+            rusk_bytecode::Instruction::MakeStruct {
+                dst,
+                type_name,
+                type_args,
+                fields,
+            } => {
+                let mut arg_ids = Vec::with_capacity(type_args.len());
+                for reg in type_args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => return trap(vm, format!("make_struct type_args: {msg}")),
+                    };
+                    arg_ids.push(id);
+                }
+
+                let layout = match vm.module.struct_layouts.get(type_name.as_str()) {
+                    Some(l) => l,
+                    None => {
+                        return trap(vm, format!("missing struct layout for `{type_name}`"));
+                    }
+                };
+
+                let mut out: Vec<Option<Value>> = vec![None; layout.len()];
+                for (field_name, reg) in fields {
+                    let value = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("make_struct field `{field_name}`: {msg}")),
+                    };
+                    let Some(idx) = layout.iter().position(|name| name == field_name) else {
+                        return trap(vm, format!("missing field: {field_name}"));
+                    };
+                    if out[idx].is_some() {
+                        return trap(
+                            vm,
+                            format!("duplicate field `{field_name}` in `{type_name}` literal"),
+                        );
+                    }
+                    out[idx] = Some(value);
+                }
+
+                let mut values = Vec::with_capacity(layout.len());
+                for (idx, slot) in out.into_iter().enumerate() {
+                    let Some(v) = slot else {
+                        return trap(vm, format!("missing field: {}", layout[idx]));
+                    };
+                    values.push(v);
+                }
+
+                let obj = HeapValue::Struct {
+                    type_name: type_name.clone(),
+                    type_args: arg_ids,
+                    fields: values,
+                };
+                if let Err(msg) = write_value(frame, *dst, alloc_ref(obj)) {
+                    return trap(vm, format!("make_struct dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::MakeArray { dst, items } => {
+                let mut values = Vec::with_capacity(items.len());
+                for reg in items {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("make_array item: {msg}")),
+                    };
+                    values.push(v);
+                }
+                if let Err(msg) = write_value(frame, *dst, alloc_ref(HeapValue::Array(values))) {
+                    return trap(vm, format!("make_array dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::MakeTuple { dst, items } => {
+                if items.is_empty() {
+                    if let Err(msg) = write_value(frame, *dst, Value::Unit) {
+                        return trap(vm, format!("make_tuple dst: {msg}"));
+                    }
+                    continue;
+                }
+                let mut values = Vec::with_capacity(items.len());
+                for reg in items {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("make_tuple item: {msg}")),
+                    };
+                    values.push(v);
+                }
+                if let Err(msg) = write_value(frame, *dst, alloc_ref(HeapValue::Tuple(values))) {
+                    return trap(vm, format!("make_tuple dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::MakeEnum {
+                dst,
+                enum_name,
+                type_args,
+                variant,
+                fields,
+            } => {
+                let mut arg_ids = Vec::with_capacity(type_args.len());
+                for reg in type_args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => return trap(vm, format!("make_enum type_args: {msg}")),
+                    };
+                    arg_ids.push(id);
+                }
+                let mut values = Vec::with_capacity(fields.len());
+                for reg in fields {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("make_enum field: {msg}")),
+                    };
+                    values.push(v);
+                }
+                let obj = HeapValue::Enum {
+                    enum_name: enum_name.clone(),
+                    type_args: arg_ids,
+                    variant: variant.clone(),
+                    fields: values,
+                };
+                if let Err(msg) = write_value(frame, *dst, alloc_ref(obj)) {
+                    return trap(vm, format!("make_enum dst: {msg}"));
+                }
+            }
+
+            rusk_bytecode::Instruction::GetField { dst, obj, field } => {
+                let obj_v = match read_value(frame, *obj) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("get_field obj: {msg}")),
+                };
+                let Value::Ref(r) = obj_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in get_field: expected ref(struct/tuple), got {}",
+                            obj_v.kind()
+                        ),
+                    );
+                };
+
+                let value = match &*r.obj.borrow() {
+                    HeapValue::Struct {
+                        type_name, fields, ..
+                    } => {
+                        let idx = match struct_field_index(&vm.module, type_name.as_str(), field.as_str()) {
+                            Ok(i) => i,
+                            Err(msg) => return trap(vm, msg),
+                        };
+                        let Some(v) = fields.get(idx) else {
+                            return trap(vm, format!("missing field: {field}"));
+                        };
+                        if r.readonly {
+                            v.clone().into_readonly_view()
+                        } else {
+                            v.clone()
+                        }
+                    }
+                    HeapValue::Tuple(items) => {
+                        let Some(idx) = tuple_field_index(field.as_str()) else {
+                            return trap(vm, format!("missing field: {field}"));
+                        };
+                        let Some(v) = items.get(idx) else {
+                            return trap(vm, format!("missing field: {field}"));
+                        };
+                        if r.readonly {
+                            v.clone().into_readonly_view()
+                        } else {
+                            v.clone()
+                        }
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in get_field: expected struct/tuple, got ref".to_string(),
+                        );
+                    }
+                };
+
+                if let Err(msg) = write_value(frame, *dst, value) {
+                    return trap(vm, format!("get_field dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::SetField { obj, field, value } => {
+                let obj_v = match read_value(frame, *obj) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("set_field obj: {msg}")),
+                };
+                let Value::Ref(r) = obj_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in set_field: expected ref(struct/tuple), got {}",
+                            obj_v.kind()
+                        ),
+                    );
+                };
+                if r.is_readonly() {
+                    return trap(vm, "illegal write through readonly reference".to_string());
+                }
+                let val = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("set_field value: {msg}")),
+                };
+
+                match &mut *r.obj.borrow_mut() {
+                    HeapValue::Struct {
+                        type_name,
+                        fields,
+                        ..
+                    } => {
+                        let idx =
+                            match struct_field_index(&vm.module, type_name.as_str(), field.as_str())
+                            {
+                                Ok(i) => i,
+                                Err(msg) => return trap(vm, msg),
+                            };
+                        let Some(slot) = fields.get_mut(idx) else {
+                            return trap(vm, format!("missing field: {field}"));
+                        };
+                        *slot = val;
+                    }
+                    HeapValue::Tuple(items) => {
+                        let Some(idx) = tuple_field_index(field.as_str()) else {
+                            return trap(vm, format!("missing field: {field}"));
+                        };
+                        let Some(slot) = items.get_mut(idx) else {
+                            return trap(vm, format!("missing field: {field}"));
+                        };
+                        *slot = val;
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in set_field: expected struct/tuple, got ref".to_string(),
+                        );
+                    }
+                }
+            }
+
+            rusk_bytecode::Instruction::StructGet { dst, obj, idx } => {
+                let obj_v = match read_value(frame, *obj) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("struct_get obj: {msg}")),
+                };
+                let Value::Ref(r) = obj_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in struct_get: expected ref(struct), got {}",
+                            obj_v.kind()
+                        ),
+                    );
+                };
+                let value = match &*r.obj.borrow() {
+                    HeapValue::Struct {
+                        type_name, fields, ..
+                    } => {
+                        let Some(v) = fields.get(*idx) else {
+                            let field_name = vm
+                                .module
+                                .struct_layouts
+                                .get(type_name.as_str())
+                                .and_then(|names| names.get(*idx))
+                                .cloned()
+                                .unwrap_or_else(|| format!("#{idx}"));
+                            return trap(vm, format!("missing field: {field_name}"));
+                        };
+                        if r.readonly {
+                            v.clone().into_readonly_view()
+                        } else {
+                            v.clone()
+                        }
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in struct_get: expected struct, got ref".to_string(),
+                        );
+                    }
+                };
+                if let Err(msg) = write_value(frame, *dst, value) {
+                    return trap(vm, format!("struct_get dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::StructSet { obj, idx, value } => {
+                let obj_v = match read_value(frame, *obj) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("struct_set obj: {msg}")),
+                };
+                let Value::Ref(r) = obj_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in struct_set: expected ref(struct), got {}",
+                            obj_v.kind()
+                        ),
+                    );
+                };
+                if r.is_readonly() {
+                    return trap(vm, "illegal write through readonly reference".to_string());
+                }
+                let val = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("struct_set value: {msg}")),
+                };
+                match &mut *r.obj.borrow_mut() {
+                    HeapValue::Struct { fields, .. } => {
+                        let Some(slot) = fields.get_mut(*idx) else {
+                            return trap(vm, format!("missing field: #{idx}"));
+                        };
+                        *slot = val;
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in struct_set: expected struct, got ref".to_string(),
+                        );
+                    }
+                }
+            }
+
+            rusk_bytecode::Instruction::TupleGet { dst, tup, idx } => {
+                let tup_v = match read_value(frame, *tup) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("tuple_get tup: {msg}")),
+                };
+                let Value::Ref(r) = tup_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in tuple_get: expected ref(tuple), got {}",
+                            tup_v.kind()
+                        ),
+                    );
+                };
+                let value = match &*r.obj.borrow() {
+                    HeapValue::Tuple(items) => {
+                        let Some(v) = items.get(*idx) else {
+                            return trap(vm, format!("missing field: .{idx}"));
+                        };
+                        if r.readonly {
+                            v.clone().into_readonly_view()
+                        } else {
+                            v.clone()
+                        }
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in tuple_get: expected tuple, got ref".to_string(),
+                        );
+                    }
+                };
+                if let Err(msg) = write_value(frame, *dst, value) {
+                    return trap(vm, format!("tuple_get dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::TupleSet { tup, idx, value } => {
+                let tup_v = match read_value(frame, *tup) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("tuple_set tup: {msg}")),
+                };
+                let Value::Ref(r) = tup_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in tuple_set: expected ref(tuple), got {}",
+                            tup_v.kind()
+                        ),
+                    );
+                };
+                if r.is_readonly() {
+                    return trap(vm, "illegal write through readonly reference".to_string());
+                }
+                let val = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("tuple_set value: {msg}")),
+                };
+                match &mut *r.obj.borrow_mut() {
+                    HeapValue::Tuple(items) => {
+                        let Some(slot) = items.get_mut(*idx) else {
+                            return trap(vm, format!("missing field: .{idx}"));
+                        };
+                        *slot = val;
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in tuple_set: expected tuple, got ref".to_string(),
+                        );
+                    }
+                }
+            }
+
+            rusk_bytecode::Instruction::IndexGet { dst, arr, idx } => {
+                let arr_v = match read_value(frame, *arr) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("index_get arr: {msg}")),
+                };
+                let Value::Ref(r) = arr_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in index_get: expected ref(array), got {}",
+                            arr_v.kind()
+                        ),
+                    );
+                };
+                let i = match read_int(frame, *idx) {
+                    Ok(i) => i,
+                    Err(msg) => {
+                        return trap(
+                            vm,
+                            format!("type error in index_get: expected int index, got {msg}"),
+                        );
+                    }
+                };
+
+                let element = match &*r.obj.borrow() {
+                    HeapValue::Array(items) => {
+                        let idx_usize: usize = match i.try_into() {
+                            Ok(u) => u,
+                            Err(_) => {
+                                return trap(
+                                    vm,
+                                    format!("index out of bounds: index={i}, len={}", items.len()),
+                                );
+                            }
+                        };
+                        let Some(v) = items.get(idx_usize) else {
+                            return trap(
+                                vm,
+                                format!("index out of bounds: index={i}, len={}", items.len()),
+                            );
+                        };
+                        if r.readonly {
+                            v.clone().into_readonly_view()
+                        } else {
+                            v.clone()
+                        }
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in index_get: expected array, got ref".to_string(),
+                        );
+                    }
+                };
+                if let Err(msg) = write_value(frame, *dst, element) {
+                    return trap(vm, format!("index_get dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IndexSet { arr, idx, value } => {
+                let arr_v = match read_value(frame, *arr) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("index_set arr: {msg}")),
+                };
+                let Value::Ref(r) = arr_v else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in index_set: expected ref(array), got {}",
+                            arr_v.kind()
+                        ),
+                    );
+                };
+                if r.is_readonly() {
+                    return trap(vm, "illegal write through readonly reference".to_string());
+                }
+                let i = match read_int(frame, *idx) {
+                    Ok(i) => i,
+                    Err(msg) => {
+                        return trap(
+                            vm,
+                            format!("type error in index_set: expected int index, got {msg}"),
+                        );
+                    }
+                };
+                let val = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("index_set value: {msg}")),
+                };
+
+                match &mut *r.obj.borrow_mut() {
+                    HeapValue::Array(items) => {
+                        let idx_usize: usize = match i.try_into() {
+                            Ok(u) => u,
+                            Err(_) => {
+                                return trap(
+                                    vm,
+                                    format!("index out of bounds: index={i}, len={}", items.len()),
+                                );
+                            }
+                        };
+                        if idx_usize >= items.len() {
+                            return trap(
+                                vm,
+                                format!("index out of bounds: index={i}, len={}", items.len()),
+                            );
+                        }
+                        items[idx_usize] = val;
+                    }
+                    _ => {
+                        return trap(
+                            vm,
+                            "type error in index_set: expected array, got ref".to_string(),
+                        );
+                    }
+                }
+            }
+            rusk_bytecode::Instruction::Len { dst, arr } => {
+                let arr_v = match read_value(frame, *arr) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("len arr: {msg}")),
+                };
+                let Value::Ref(r) = arr_v else {
+                    return trap(
+                        vm,
+                        format!("type error in len: expected ref(array), got {}", arr_v.kind()),
+                    );
+                };
+                let len = match &*r.obj.borrow() {
+                    HeapValue::Array(items) => items.len(),
+                    _ => {
+                        return trap(vm, "type error in len: expected array, got ref".to_string());
+                    }
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(len as i64)) {
+                    return trap(vm, format!("len dst: {msg}"));
+                }
             }
 
             rusk_bytecode::Instruction::IntAdd { dst, a, b } => {
@@ -637,7 +1399,17 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                                 ),
                             );
                         };
-                        let abi = v.to_abi();
+                        let Some(abi) = v.to_abi() else {
+                            return trap(
+                                vm,
+                                format!(
+                                    "host call `{}` arg type mismatch: expected {:?}, got {}",
+                                    import.name,
+                                    expected,
+                                    v.kind()
+                                ),
+                            );
+                        };
                         if abi.ty() != *expected {
                             return trap(
                                 vm,
@@ -686,6 +1458,58 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
             },
 
+            rusk_bytecode::Instruction::ICall { dst, fnptr, args } => {
+                let fn_value = match read_value(frame, *fnptr) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("icall fnptr: {msg}")),
+                };
+                let Value::Function(id) = fn_value else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in icall: expected fn reference, got {}",
+                            fn_value.kind()
+                        ),
+                    );
+                };
+
+                let Some(callee) = vm.module.function(id) else {
+                    return trap(vm, format!("invalid function id {}", id.0));
+                };
+                if args.len() != callee.param_count as usize {
+                    return trap(
+                        vm,
+                        format!(
+                            "icall arity mismatch: expected {} args but got {}",
+                            callee.param_count,
+                            args.len()
+                        ),
+                    );
+                }
+
+                let mut regs: Vec<Option<Value>> = Vec::with_capacity(callee.reg_count as usize);
+                regs.resize(callee.reg_count as usize, None);
+                for (idx, arg_reg) in args.iter().enumerate() {
+                    let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
+                    let Some(v) = frame
+                        .regs
+                        .get(src_idx)
+                        .and_then(|v| v.as_ref())
+                        .cloned()
+                    else {
+                        return trap(vm, format!("icall arg reg {arg_reg} is uninitialized"));
+                    };
+                    regs[idx] = Some(v);
+                }
+
+                vm.frames.push(Frame {
+                    func: id,
+                    pc: 0,
+                    regs,
+                    return_dst: *dst,
+                });
+            }
+
             rusk_bytecode::Instruction::Perform {
                 dst,
                 effect_id,
@@ -724,7 +1548,18 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                             ),
                         );
                     };
-                    let abi = v.to_abi();
+                    let Some(abi) = v.to_abi() else {
+                        return trap(
+                            vm,
+                            format!(
+                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
+                                effect.interface,
+                                effect.method,
+                                expected,
+                                v.kind()
+                            ),
+                        );
+                    };
                     if abi.ty() != *expected {
                         return trap(
                             vm,
@@ -810,7 +1645,9 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     continue;
                 }
 
-                let ret = v.to_abi();
+                let Some(ret) = v.to_abi() else {
+                    return trap(vm, "non-ABI-safe return value".to_string());
+                };
                 vm.state = VmState::Done { value: ret.clone() };
                 return StepResult::Done { value: ret };
             }
@@ -838,6 +1675,135 @@ fn trap(vm: &mut Vm, message: String) -> StepResult {
         message: message.clone(),
     };
     StepResult::Trap { message }
+}
+
+fn alloc_ref(obj: HeapValue) -> Value {
+    Value::Ref(RefValue::new(Rc::new(RefCell::new(obj))))
+}
+
+fn read_value(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<Value, String> {
+    let idx: usize = reg.try_into().unwrap_or(usize::MAX);
+    let Some(v) = frame.regs.get(idx).and_then(|v| v.as_ref()).cloned() else {
+        return Err(format!("read from uninitialized reg {reg}"));
+    };
+    Ok(v)
+}
+
+fn read_type_rep(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<TypeRepId, String> {
+    let v = read_value(frame, reg)?;
+    match v {
+        Value::TypeRep(id) => Ok(id),
+        other => Err(format!("type error in typerep: expected typerep, got {}", other.kind())),
+    }
+}
+
+fn tuple_field_index(field: &str) -> Option<usize> {
+    field.strip_prefix('.').and_then(|s| s.parse::<usize>().ok())
+}
+
+fn struct_field_index(
+    module: &ExecutableModule,
+    type_name: &str,
+    field: &str,
+) -> Result<usize, String> {
+    let Some(layout) = module.struct_layouts.get(type_name) else {
+        return Err(format!("missing struct layout for `{type_name}`"));
+    };
+    layout
+        .iter()
+        .position(|name| name == field)
+        .ok_or_else(|| format!("missing field: {field}"))
+}
+
+fn type_test(
+    module: &ExecutableModule,
+    type_reps: &TypeReps,
+    value: &Value,
+    target: TypeRepId,
+) -> Result<bool, String> {
+    let Some(target) = type_reps.node(target) else {
+        return Err(format!("invalid typerep({})", target.0));
+    };
+
+    Ok(match &target.ctor {
+        TypeCtor::Unit => matches!(value, Value::Unit),
+        TypeCtor::Bool => matches!(value, Value::Bool(_)),
+        TypeCtor::Int => matches!(value, Value::Int(_)),
+        TypeCtor::Float => matches!(value, Value::Float(_)),
+        TypeCtor::String => matches!(value, Value::String(_)),
+        TypeCtor::Bytes => matches!(value, Value::Bytes(_)),
+        TypeCtor::Array => match value {
+            Value::Ref(r) => matches!(&*r.obj.borrow(), HeapValue::Array(_)),
+            _ => false,
+        },
+        TypeCtor::Tuple(arity) => match value {
+            Value::Unit => *arity == 0,
+            Value::Ref(r) => match &*r.obj.borrow() {
+                HeapValue::Tuple(items) => items.len() == *arity,
+                _ => false,
+            },
+            _ => false,
+        },
+        TypeCtor::Struct(name) => match value {
+            Value::Ref(r) => match &*r.obj.borrow() {
+                HeapValue::Struct {
+                    type_name,
+                    type_args,
+                    ..
+                } => type_name == name && type_args.as_slice() == target.args.as_slice(),
+                _ => false,
+            },
+            _ => false,
+        },
+        TypeCtor::Enum(name) => match value {
+            Value::Ref(r) => match &*r.obj.borrow() {
+                HeapValue::Enum {
+                    enum_name,
+                    type_args,
+                    ..
+                } => enum_name == name && type_args.as_slice() == target.args.as_slice(),
+                _ => false,
+            },
+            _ => false,
+        },
+        TypeCtor::Interface(iface) => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+
+            let borrowed = r.obj.borrow();
+            let (dyn_type, dyn_type_args) = match &*borrowed {
+                HeapValue::Struct {
+                    type_name,
+                    type_args,
+                    ..
+                } => (type_name.as_str(), type_args.as_slice()),
+                HeapValue::Enum {
+                    enum_name,
+                    type_args,
+                    ..
+                } => (enum_name.as_str(), type_args.as_slice()),
+                _ => return Ok(false),
+            };
+
+            let implements_iface = module
+                .interface_impls
+                .get(dyn_type)
+                .is_some_and(|ifaces| ifaces.contains(iface.as_str()));
+            if !implements_iface {
+                return Ok(false);
+            }
+
+            if target.args.is_empty() {
+                return Ok(true);
+            }
+            if dyn_type_args.len() < target.args.len() {
+                return Ok(false);
+            }
+            dyn_type_args[..target.args.len()] == target.args
+        }
+        TypeCtor::Fn | TypeCtor::Cont => false,
+    })
 }
 
 fn read_int(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<i64, String> {
