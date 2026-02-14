@@ -704,6 +704,14 @@ Goal:
 
 Work items (likely iterative):
 
+- Tracked checklist (mark ✅ as we finish each chunk):
+  - [ ] E1 — Heap values + basic ops: `Make{Array,Tuple,Struct,Enum}`, `{Index,Tuple,Struct}{Get,Set}`, `Len`, `AsReadonly`, `IsType`, `CheckedCast`, `MakeTypeRep`, `ICall`
+  - [ ] E2 — Core intrinsics in bytecode VM: `to_string`, `panic`, array intrinsics, iterator intrinsics (`into_iter`/`next`)
+  - [ ] E3 — `Switch` terminator + pattern matching (enum/struct/tuple/array, incl. variadic `..rest`)
+  - [ ] E4 — `VCall` dynamic dispatch (module methods table + type-arg passing)
+  - [ ] E5 — In-VM effects/continuations: `PushHandler`/`PopHandler` + `Perform`/`Resume` semantics (incl. nested handlers); integrate with externalized effects
+  - [ ] E6 — Run *all* existing fixtures via bytecode backend (`tests/bytecode_fixtures.rs`) and match expectations
+
 - Implement bytecode lowering + VM ops for:
   - arrays: `MakeArray`, `IndexGet/Set`, `Len`
   - tuples: `MakeTuple`, `TupleGet/Set`
