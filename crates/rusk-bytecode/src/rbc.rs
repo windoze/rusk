@@ -137,7 +137,7 @@ impl Encoder {
     }
 
     fn write_string(&mut self, s: &str) -> Result<(), EncodeError> {
-        self.write_len(s.as_bytes().len())?;
+        self.write_len(s.len())?;
         self.write_bytes(s.as_bytes());
         Ok(())
     }
@@ -928,7 +928,10 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_exact(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
-        let end = self.pos.checked_add(n).ok_or_else(|| self.err("offset overflow".to_string()))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| self.err("offset overflow".to_string()))?;
         if end > self.bytes.len() {
             return Err(self.err("unexpected EOF".to_string()));
         }
@@ -1005,7 +1008,9 @@ impl<'a> Decoder<'a> {
     fn read_vec_reg(&mut self) -> Result<Vec<Reg>, DecodeError> {
         let n = self.read_len()?;
         // Fixed-size: each reg is u32.
-        let min_bytes = n.checked_mul(4).ok_or_else(|| self.err("length overflow".to_string()))?;
+        let min_bytes = n
+            .checked_mul(4)
+            .ok_or_else(|| self.err("length overflow".to_string()))?;
         if min_bytes > self.remaining() {
             return Err(self.err("unexpected EOF".to_string()));
         }
@@ -1103,10 +1108,7 @@ impl<'a> Decoder<'a> {
         for (idx, import) in host_imports.iter().enumerate() {
             let id = HostImportId(idx as u32);
             if host_import_ids.insert(import.name.clone(), id).is_some() {
-                return Err(self.err(format!(
-                    "duplicate host import name `{}`",
-                    import.name
-                )));
+                return Err(self.err(format!("duplicate host import name `{}`", import.name)));
             }
         }
 
@@ -1218,8 +1220,8 @@ impl<'a> Decoder<'a> {
             6 => Ok(rusk_mir::TypeRepLit::Array),
             7 => {
                 let arity = self.read_u32()?;
-                let arity_usize: usize =
-                    usize::try_from(arity).map_err(|_| self.err("tuple arity overflow".to_string()))?;
+                let arity_usize: usize = usize::try_from(arity)
+                    .map_err(|_| self.err("tuple arity overflow".to_string()))?;
                 Ok(rusk_mir::TypeRepLit::Tuple(arity_usize))
             }
             8 => Ok(rusk_mir::TypeRepLit::Struct(self.read_string()?)),

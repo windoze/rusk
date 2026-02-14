@@ -1,7 +1,7 @@
+use rusk_bytecode::ExecutableModule;
 use rusk_compiler::{
     CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
 };
-use rusk_bytecode::ExecutableModule;
 use rusk_interpreter::{Interpreter, RuntimeError, Value};
 use rusk_vm::{AbiValue, HostError, Vm};
 use std::io::{self, Write};

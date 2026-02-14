@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import statistics
 import subprocess
 import sys
@@ -196,14 +197,18 @@ def _validate_rusk_output(repo_root: Path, rusk_bin: Path, case: BenchCase) -> N
     proc = _run([str(rusk_bin), str(case.rusk_path)], cwd=repo_root)
     if proc.returncode != 0:
         raise RuntimeError(f"rusk failed for {case.rusk_path}:\n{proc.stderr}")
-    out = proc.stdout.strip()
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip() != ""]
+    out = "" if not lines else lines[-1]
     if out == "":
         got: int | None = 0
     else:
         try:
             got = int(out)
-        except ValueError as e:
-            raise RuntimeError(f"unexpected rusk output for {case.rusk_path}: {out!r}") from e
+        except ValueError:
+            m = re.fullmatch(r"(?:Value::)?Int\(([-+]?[0-9_]+)\)", out)
+            if m is None:
+                raise RuntimeError(f"unexpected rusk output for {case.rusk_path}: {out!r}")
+            got = int(m.group(1).replace("_", ""))
     if got != case.expected:
         raise RuntimeError(f"{case.name}: rusk returned {got}, expected {case.expected}")
 

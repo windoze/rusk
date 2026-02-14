@@ -54,10 +54,7 @@ fn rbc_version_mismatch_is_error() {
     bytes[9] = 0x00;
 
     let err = from_bytes(&bytes).expect_err("expected version mismatch error");
-    assert!(
-        err.message.contains("unsupported rbc version"),
-        "{err}"
-    );
+    assert!(err.message.contains("unsupported rbc version"), "{err}");
 }
 
 #[test]
@@ -68,4 +65,3 @@ fn rbc_rejects_trailing_bytes() {
     let err = from_bytes(&bytes).expect_err("expected trailing bytes error");
     assert!(err.message.contains("trailing bytes"), "{err}");
 }
-

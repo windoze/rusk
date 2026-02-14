@@ -238,8 +238,7 @@ fn lower_mir_function(
 
     let mut temps = TempAlloc::new(base_reg_count);
 
-    let mut block_pcs: Vec<u32> = Vec::with_capacity(mir_func.blocks.len());
-    block_pcs.resize(mir_func.blocks.len(), 0);
+    let mut block_pcs: Vec<u32> = vec![0; mir_func.blocks.len()];
 
     let mut code: Vec<Instruction> = Vec::new();
     let mut patches: Vec<PcPatch> = Vec::new();
@@ -367,6 +366,7 @@ fn lower_mir_function(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_mir_instruction(
     mir_module: &rusk_mir::Module,
     mir_func: &rusk_mir::Function,
@@ -903,12 +903,6 @@ fn lower_mir_instruction(
                 value,
             });
         }
-
-        other => {
-            return Err(LowerError::new(format!(
-                "unsupported MIR instruction in v0 bytecode lowering: {other:?}"
-            )));
-        }
     }
 
     let _ = mir_func;
@@ -1073,12 +1067,6 @@ fn lower_mir_terminator(
                 instr_index,
                 target: *default,
             });
-        }
-
-        other => {
-            return Err(LowerError::new(format!(
-                "unsupported MIR terminator in v0 bytecode lowering: {other:?}"
-            )));
         }
     }
 

@@ -78,7 +78,9 @@ fn main() {
             eprintln!("runtime error: {message}");
             process::exit(1);
         }
-        StepResult::Request { effect_id, args, .. } => {
+        StepResult::Request {
+            effect_id, args, ..
+        } => {
             let name = module
                 .external_effect(effect_id)
                 .map(|d| format!("{}.{}", d.interface, d.method))

@@ -199,6 +199,7 @@ impl RefValue {
         self.readonly
     }
 
+    #[allow(unused)]
     fn ptr_eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.obj, &other.obj)
     }
@@ -1563,10 +1564,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         Ok(v) => v,
                         Err(msg) => return trap(vm, msg),
                     };
-                    if let Some(dst) = dst {
-                        if let Err(msg) = write_value(frame, *dst, out) {
-                            return trap(vm, format!("intrinsic call dst: {msg}"));
-                        }
+                    if let Some(dst) = dst
+                        && let Err(msg) = write_value(frame, *dst, out)
+                    {
+                        return trap(vm, format!("intrinsic call dst: {msg}"));
                     }
                 }
             },
@@ -2109,13 +2110,6 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 return StepResult::Trap {
                     message: message.clone(),
                 };
-            }
-            _ => {
-                let message = format!("unimplemented opcode: {instr:?}");
-                vm.state = VmState::Trapped {
-                    message: message.clone(),
-                };
-                return StepResult::Trap { message };
             }
         }
     }

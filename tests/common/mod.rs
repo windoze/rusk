@@ -80,6 +80,7 @@ pub fn register_test_host_module(options: &mut CompileOptions) {
         .expect("test host module declaration must be valid");
 }
 
+#[allow(unused)]
 pub fn register_test_external_effects(options: &mut CompileOptions) {
     options
         .register_external_effect(
@@ -115,6 +116,7 @@ pub fn register_test_external_effects(options: &mut CompileOptions) {
         .expect("register TestFfi.echo_bytes");
 }
 
+#[allow(unused)]
 pub fn install_test_host_fns(interp: &mut Interpreter) {
     interp.register_host_fn("test::add_int", |_interp, args| match args {
         [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a + b)),
@@ -173,6 +175,7 @@ pub fn install_test_host_fns(interp: &mut Interpreter) {
     });
 }
 
+#[allow(unused)]
 pub fn install_test_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &mut Vm) {
     if let Some(id) = module.host_import_id("test::add_int") {
         vm.register_host_import(id, |args: &[AbiValue]| match args {
@@ -255,6 +258,7 @@ pub fn install_test_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &m
     }
 }
 
+#[allow(unused)]
 pub fn install_core_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &mut Vm) {
     // Strings
     if let Some(id) = module.host_import_id("core::intrinsics::string_concat") {

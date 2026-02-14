@@ -172,7 +172,15 @@ fn verify_function(
 
     let reg_count = func.reg_count;
     for (pc, inst) in func.code.iter().enumerate() {
-        verify_instruction(module, func, fn_id, pc as u32, code_len_u32, reg_count, inst)?;
+        verify_instruction(
+            module,
+            func,
+            fn_id,
+            pc as u32,
+            code_len_u32,
+            reg_count,
+            inst,
+        )?;
     }
     Ok(())
 }
@@ -200,17 +208,24 @@ fn count_pattern_binds(p: &rusk_mir::Pattern) -> usize {
         rusk_mir::Pattern::Wildcard => 0,
         rusk_mir::Pattern::Bind => 1,
         rusk_mir::Pattern::Literal(_) => 0,
-        rusk_mir::Pattern::Tuple { prefix, rest, suffix } => {
+        rusk_mir::Pattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+        } => {
             prefix.iter().map(count_pattern_binds).sum::<usize>()
                 + rest.as_deref().map(count_pattern_binds).unwrap_or(0)
                 + suffix.iter().map(count_pattern_binds).sum::<usize>()
         }
         rusk_mir::Pattern::Enum { fields, .. } => fields.iter().map(count_pattern_binds).sum(),
-        rusk_mir::Pattern::Struct { fields, .. } => fields
-            .iter()
-            .map(|(_, pat)| count_pattern_binds(pat))
-            .sum(),
-        rusk_mir::Pattern::Array { prefix, rest, suffix } => {
+        rusk_mir::Pattern::Struct { fields, .. } => {
+            fields.iter().map(|(_, pat)| count_pattern_binds(pat)).sum()
+        }
+        rusk_mir::Pattern::Array {
+            prefix,
+            rest,
+            suffix,
+        } => {
             prefix.iter().map(count_pattern_binds).sum::<usize>()
                 + rest.as_deref().map(count_pattern_binds).unwrap_or(0)
                 + suffix.iter().map(count_pattern_binds).sum::<usize>()
@@ -391,7 +406,11 @@ fn verify_instruction(
                     &clause.effect,
                     &format!("{}: handler effect", here()),
                 )?;
-                verify_pc(code_len, clause.target_pc, &format!("{}: handler target", here()))?;
+                verify_pc(
+                    code_len,
+                    clause.target_pc,
+                    &format!("{}: handler target", here()),
+                )?;
                 for r in &clause.param_regs {
                     verify_reg(reg_count, *r, &format!("{}: handler param reg", here()))?;
                 }
@@ -450,7 +469,11 @@ fn verify_instruction(
             verify_reg(reg_count, *value, &format!("{}: value", here()))?;
             verify_pc(code_len, *default_pc, &format!("{}: default", here()))?;
             for case in cases {
-                verify_pc(code_len, case.target_pc, &format!("{}: case target", here()))?;
+                verify_pc(
+                    code_len,
+                    case.target_pc,
+                    &format!("{}: case target", here()),
+                )?;
                 for r in &case.param_regs {
                     verify_reg(reg_count, *r, &format!("{}: case param", here()))?;
                 }
@@ -529,4 +552,3 @@ fn verify_effect_spec(reg_count: u32, spec: &EffectSpec, context: &str) -> Resul
     }
     Ok(())
 }
-

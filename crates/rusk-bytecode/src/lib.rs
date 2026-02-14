@@ -16,28 +16,16 @@ pub use rbc::{DecodeError, EncodeError, from_bytes, to_bytes};
 pub use verify::{VerifyError, verify_module};
 
 /// A stable identifier for a bytecode function within an [`ExecutableModule`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FunctionId(pub u32);
 
-impl Default for FunctionId {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-
 /// A stable identifier for a declared host import within an [`ExecutableModule`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct HostImportId(pub u32);
 
 /// A stable identifier for an externalized effect operation within an [`ExecutableModule`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct EffectId(pub u32);
-
-impl Default for EffectId {
-    fn default() -> Self {
-        Self(0)
-    }
-}
 
 /// A VM/host boundary ABI type (v0): builtin primitives only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
