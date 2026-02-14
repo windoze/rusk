@@ -131,7 +131,10 @@ struct Frame {
 #[derive(Debug)]
 enum VmState {
     Running,
-    Suspended { k: ContinuationHandle },
+    Suspended {
+        k: ContinuationHandle,
+        perform_dst: Option<rusk_bytecode::Reg>,
+    },
     Done { value: AbiValue },
     Trapped { message: String },
 }
@@ -142,6 +145,7 @@ pub struct Vm {
     frames: Vec<Frame>,
     host_fns: Vec<Option<Box<dyn HostFn>>>,
     in_host_call: bool,
+    continuation_generation: u32,
 }
 
 impl Vm {
@@ -179,6 +183,7 @@ impl Vm {
                 return_dst: None,
             }],
             in_host_call: false,
+            continuation_generation: 0,
         })
     }
 
@@ -681,6 +686,75 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
             },
 
+            rusk_bytecode::Instruction::Perform {
+                dst,
+                effect_id,
+                args,
+            } => {
+                let Some(effect) = vm.module.external_effect(*effect_id) else {
+                    return trap(vm, format!("invalid effect id {}", effect_id.0));
+                };
+                if args.len() != effect.sig.params.len() {
+                    return trap(
+                        vm,
+                        format!(
+                            "external effect `{}.{}` arity mismatch: expected {} args but got {}",
+                            effect.interface,
+                            effect.method,
+                            effect.sig.params.len(),
+                            args.len()
+                        ),
+                    );
+                }
+
+                let mut abi_args = Vec::with_capacity(args.len());
+                for (arg_reg, expected) in args.iter().zip(effect.sig.params.iter()) {
+                    let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
+                    let Some(v) = frame
+                        .regs
+                        .get(src_idx)
+                        .and_then(|v| v.as_ref())
+                        .cloned()
+                    else {
+                        return trap(
+                            vm,
+                            format!(
+                                "external effect `{}.{}` read from uninitialized reg {arg_reg}",
+                                effect.interface, effect.method
+                            ),
+                        );
+                    };
+                    let abi = v.to_abi();
+                    if abi.ty() != *expected {
+                        return trap(
+                            vm,
+                            format!(
+                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {:?}",
+                                effect.interface,
+                                effect.method,
+                                expected,
+                                abi.ty()
+                            ),
+                        );
+                    }
+                    abi_args.push(abi);
+                }
+
+                let k = ContinuationHandle {
+                    index: 0,
+                    generation: vm.continuation_generation,
+                };
+                vm.state = VmState::Suspended {
+                    k: k.clone(),
+                    perform_dst: *dst,
+                };
+                return StepResult::Request {
+                    effect_id: *effect_id,
+                    args: abi_args,
+                    k,
+                };
+            }
+
             rusk_bytecode::Instruction::Jump { target_pc } => {
                 frame.pc = (*target_pc) as usize;
             }
@@ -803,18 +877,35 @@ pub fn vm_resume(vm: &mut Vm, k: ContinuationHandle, value: AbiValue) -> Result<
             message: "vm re-entered during host call".to_string(),
         });
     }
-
-    let _ = value;
     match &vm.state {
-        VmState::Suspended { k: want } => {
+        VmState::Suspended {
+            k: want,
+            perform_dst,
+        } => {
             if want != &k {
                 return Err(VmError::InvalidContinuation {
                     message: "continuation handle mismatch".to_string(),
                 });
             }
-            Err(VmError::InvalidState {
-                message: "resume is not implemented yet".to_string(),
-            })
+
+            let dst = *perform_dst;
+            vm.state = VmState::Running;
+            vm.continuation_generation = vm.continuation_generation.wrapping_add(1);
+
+            if let Some(dst) = dst {
+                let Some(frame) = vm.frames.last_mut() else {
+                    return Err(VmError::InvalidState {
+                        message: "resume with empty stack".to_string(),
+                    });
+                };
+                write_value(frame, dst, Value::from_abi(&value)).map_err(|message| {
+                    VmError::InvalidState {
+                        message: format!("resume dst write failed: {message}"),
+                    }
+                })?;
+            }
+
+            Ok(())
         }
         VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => Err(VmError::InvalidState {
             message: "vm is not suspended".to_string(),
@@ -830,15 +921,18 @@ pub fn vm_drop_continuation(vm: &mut Vm, k: ContinuationHandle) -> Result<(), Vm
     }
 
     match &vm.state {
-        VmState::Suspended { k: want } => {
+        VmState::Suspended { k: want, .. } => {
             if want != &k {
                 return Err(VmError::InvalidContinuation {
                     message: "continuation handle mismatch".to_string(),
                 });
             }
-            Err(VmError::InvalidState {
-                message: "drop is not implemented yet".to_string(),
-            })
+            vm.continuation_generation = vm.continuation_generation.wrapping_add(1);
+            vm.frames.clear();
+            vm.state = VmState::Trapped {
+                message: "cancelled".to_string(),
+            };
+            Ok(())
         }
         VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => Err(VmError::InvalidState {
             message: "vm is not suspended".to_string(),

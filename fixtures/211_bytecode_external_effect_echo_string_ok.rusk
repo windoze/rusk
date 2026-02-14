@@ -1,0 +1,8 @@
+// expect: ok string "hi"
+
+interface TestFfi { fn echo(s: string) -> string; }
+
+fn main() -> string {
+    @TestFfi.echo("hi")
+}
+

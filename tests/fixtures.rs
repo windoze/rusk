@@ -147,6 +147,17 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
         )
     });
 
+    fn is_interpreter_fixture(path: &Path) -> bool {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            return true;
+        };
+        let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(n) = digits.parse::<u32>() else {
+            return true;
+        };
+        n < 200
+    }
+
     for entry in entries {
         let entry = entry.unwrap_or_else(|e| {
             panic!(
@@ -157,6 +168,9 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
         let path = entry.path();
         if path.is_file() {
             if path.extension().and_then(|s| s.to_str()) == Some("rusk") {
+                if !is_interpreter_fixture(&path) {
+                    continue;
+                }
                 out.push(FixtureCase {
                     path: path.clone(),
                     kind: FixtureKind::SingleFile(path),
@@ -168,6 +182,9 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
         if path.is_dir() {
             let main = path.join("main.rusk");
             if main.is_file() {
+                if !is_interpreter_fixture(&main) {
+                    continue;
+                }
                 out.push(FixtureCase {
                     path: path.clone(),
                     kind: FixtureKind::DirMain(main),

@@ -3,7 +3,7 @@ mod common;
 use rusk_compiler::{
     CompileOptions, compile_file_to_bytecode_with_options, compile_to_bytecode_with_options,
 };
-use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
+use rusk_vm::{AbiValue, StepResult, Vm, vm_drop_continuation, vm_resume, vm_step};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -201,6 +201,7 @@ fn bytecode_fixtures() {
 
     let mut options = CompileOptions::default();
     common::register_test_host_module(&mut options);
+    common::register_test_external_effects(&mut options);
 
     for case in cases {
         let (entry_path, source, module) = match &case.kind {
@@ -237,13 +238,10 @@ fn bytecode_fixtures() {
                 let mut vm = Vm::new(module.clone())
                     .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
                 common::install_test_host_fns_vm(&module, &mut vm);
-                let got = vm_step(&mut vm, None);
-                assert_eq!(
-                    got,
-                    StepResult::Done { value: want },
-                    "fixture {}: result mismatch",
-                    entry_path.display()
-                );
+                let got = run_to_completion(&module, &mut vm).unwrap_or_else(|e| {
+                    panic!("fixture {}: runtime failed: {e}", entry_path.display())
+                });
+                assert_eq!(got, want, "fixture {}: result mismatch", entry_path.display());
             }
             Expectation::RuntimeError { contains } => {
                 let module = module.unwrap_or_else(|e| {
@@ -252,10 +250,8 @@ fn bytecode_fixtures() {
                 let mut vm = Vm::new(module.clone())
                     .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
                 common::install_test_host_fns_vm(&module, &mut vm);
-                let got = vm_step(&mut vm, None);
-                let StepResult::Trap { message } = got else {
-                    panic!("fixture {}: expected trap, got {got:?}", entry_path.display());
-                };
+                let err = run_to_completion(&module, &mut vm).expect_err("expected trap");
+                let message = err;
                 assert!(
                     message.contains(&contains),
                     "fixture {}: runtime error mismatch\n  want message containing: {contains:?}\n  got: {message}",
@@ -266,3 +262,55 @@ fn bytecode_fixtures() {
     }
 }
 
+fn run_to_completion(
+    module: &rusk_bytecode::ExecutableModule,
+    vm: &mut Vm,
+) -> Result<AbiValue, String> {
+    loop {
+        match vm_step(vm, None) {
+            StepResult::Done { value } => return Ok(value),
+            StepResult::Trap { message } => return Err(message),
+            StepResult::Yield { .. } => return Err("unexpected yield".to_string()),
+            StepResult::Request {
+                effect_id,
+                args,
+                k,
+            } => {
+                let Some(decl) = module.external_effect(effect_id) else {
+                    let _ = vm_drop_continuation(vm, k);
+                    return Err(format!("unknown external effect id {}", effect_id.0));
+                };
+
+                let resume_value = match (decl.interface.as_str(), decl.method.as_str()) {
+                    ("TestFfi", "add") => match args.as_slice() {
+                        [AbiValue::Int(a), AbiValue::Int(b)] => AbiValue::Int(a + b),
+                        other => {
+                            let _ = vm_drop_continuation(vm, k);
+                            return Err(format!("TestFfi.add: bad args: {other:?}"));
+                        }
+                    },
+                    ("TestFfi", "echo") => match args.as_slice() {
+                        [AbiValue::String(s)] => AbiValue::String(s.clone()),
+                        other => {
+                            let _ = vm_drop_continuation(vm, k);
+                            return Err(format!("TestFfi.echo: bad args: {other:?}"));
+                        }
+                    },
+                    ("TestFfi", "echo_bytes") => match args.as_slice() {
+                        [AbiValue::Bytes(b)] => AbiValue::Bytes(b.clone()),
+                        other => {
+                            let _ = vm_drop_continuation(vm, k);
+                            return Err(format!("TestFfi.echo_bytes: bad args: {other:?}"));
+                        }
+                    },
+                    other => {
+                        let _ = vm_drop_continuation(vm, k);
+                        return Err(format!("unhandled external effect: {other:?}"));
+                    }
+                };
+
+                vm_resume(vm, k, resume_value).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+}

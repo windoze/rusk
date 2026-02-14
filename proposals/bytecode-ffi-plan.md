@@ -12,7 +12,7 @@ Scope: **plan only** (no code changes besides this plan file).
 - [x] Milestone A — Bytecode module skeleton + VM API surface
 - [x] Milestone B — MIR → bytecode lowering (minimal subset)
 - [x] Milestone C — `CALL_HOST` + non-reentrancy enforcement
-- [ ] Milestone D — Externalized effects (`Request`/`resume`/`drop`)
+- [x] Milestone D — Externalized effects (`Request`/`resume`/`drop`)
 - [ ] Milestone E — Expand bytecode to pass fixture suite
 - [ ] Milestone F — Generic specialization
 - [ ] Milestone G — Stable serialization + verification

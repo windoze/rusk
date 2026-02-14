@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 pub mod lower;
 
-pub use lower::{LowerError, lower_mir_module};
+pub use lower::{LowerError, LowerOptions, lower_mir_module, lower_mir_module_with_options};
 
 /// A stable identifier for a bytecode function within an [`ExecutableModule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -28,6 +28,12 @@ pub struct HostImportId(pub u32);
 /// A stable identifier for an externalized effect operation within an [`ExecutableModule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EffectId(pub u32);
+
+impl Default for EffectId {
+    fn default() -> Self {
+        Self(0)
+    }
+}
 
 /// A VM/host boundary ABI type (v0): builtin primitives only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +85,14 @@ impl HostFnSig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostImport {
     pub name: String,
+    pub sig: HostFnSig,
+}
+
+/// An externalized effect operation declaration (v0: non-generic interface + method).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalEffectDecl {
+    pub interface: String,
+    pub method: String,
     pub sig: HostFnSig,
 }
 
@@ -135,6 +149,12 @@ pub enum Instruction {
         args: Vec<Reg>,
     },
 
+    Perform {
+        dst: Option<Reg>,
+        effect_id: EffectId,
+        args: Vec<Reg>,
+    },
+
     Jump { target_pc: u32 },
     JumpIf {
         cond: Reg,
@@ -165,6 +185,9 @@ pub struct ExecutableModule {
 
     pub host_imports: Vec<HostImport>,
     pub host_import_ids: BTreeMap<String, HostImportId>,
+
+    pub external_effects: Vec<ExternalEffectDecl>,
+    pub external_effect_ids: BTreeMap<(String, String), EffectId>,
 
     /// Entry function for starting execution (typically `main`).
     pub entry: FunctionId,
@@ -215,5 +238,34 @@ impl ExecutableModule {
 
     pub fn host_import_id(&self, name: &str) -> Option<HostImportId> {
         self.host_import_ids.get(name).copied()
+    }
+
+    pub fn add_external_effect(&mut self, decl: ExternalEffectDecl) -> Result<EffectId, String> {
+        let key = (decl.interface.clone(), decl.method.clone());
+        if self.external_effect_ids.contains_key(&key) {
+            return Err(format!(
+                "duplicate external effect `{}.{}`",
+                decl.interface, decl.method
+            ));
+        }
+        let id_u32: u32 = self
+            .external_effects
+            .len()
+            .try_into()
+            .map_err(|_| "external effect table overflow".to_string())?;
+        let id = EffectId(id_u32);
+        self.external_effect_ids.insert(key, id);
+        self.external_effects.push(decl);
+        Ok(id)
+    }
+
+    pub fn external_effect(&self, id: EffectId) -> Option<&ExternalEffectDecl> {
+        self.external_effects.get(id.0 as usize)
+    }
+
+    pub fn external_effect_id(&self, interface: &str, method: &str) -> Option<EffectId> {
+        self.external_effect_ids
+            .get(&(interface.to_string(), method.to_string()))
+            .copied()
     }
 }

@@ -80,6 +80,41 @@ pub fn register_test_host_module(options: &mut CompileOptions) {
         .expect("test host module declaration must be valid");
 }
 
+pub fn register_test_external_effects(options: &mut CompileOptions) {
+    options
+        .register_external_effect(
+            "TestFfi",
+            "add",
+            HostFnSig {
+                params: vec![HostType::Int, HostType::Int],
+                ret: HostType::Int,
+            },
+        )
+        .expect("register TestFfi.add");
+
+    options
+        .register_external_effect(
+            "TestFfi",
+            "echo",
+            HostFnSig {
+                params: vec![HostType::String],
+                ret: HostType::String,
+            },
+        )
+        .expect("register TestFfi.echo");
+
+    options
+        .register_external_effect(
+            "TestFfi",
+            "echo_bytes",
+            HostFnSig {
+                params: vec![HostType::Bytes],
+                ret: HostType::Bytes,
+            },
+        )
+        .expect("register TestFfi.echo_bytes");
+}
+
 pub fn install_test_host_fns(interp: &mut Interpreter) {
     interp.register_host_fn("test::add_int", |_interp, args| match args {
         [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a + b)),
@@ -219,4 +254,3 @@ pub fn install_test_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &m
         .unwrap();
     }
 }
-

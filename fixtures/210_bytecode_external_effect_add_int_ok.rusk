@@ -1,0 +1,8 @@
+// expect: ok int 3
+
+interface TestFfi { fn add(a: int, b: int) -> int; }
+
+fn main() -> int {
+    @TestFfi.add(1, 2)
+}
+

@@ -7,10 +7,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::{
-    CallTarget, ConstValue, ExecutableModule, Function, FunctionId, HostFnSig, HostImport,
-    HostImportId, Instruction, Reg,
+    CallTarget, ConstValue, ExecutableModule, ExternalEffectDecl, Function, FunctionId, HostFnSig,
+    HostImport, HostImportId, Instruction, Reg,
 };
-use rusk_mir::{BlockId, CallTarget as MirCallTarget, ConstValue as MirConstValue, Operand};
+use rusk_mir::{
+    BlockId, CallTarget as MirCallTarget, ConstValue as MirConstValue, Operand,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerError {
@@ -35,7 +37,25 @@ impl core::fmt::Display for LowerError {
 impl std::error::Error for LowerError {}
 
 pub fn lower_mir_module(mir: &rusk_mir::Module) -> Result<ExecutableModule, LowerError> {
+    lower_mir_module_with_options(mir, &LowerOptions::default())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LowerOptions {
+    pub external_effects: Vec<ExternalEffectDecl>,
+}
+
+pub fn lower_mir_module_with_options(
+    mir: &rusk_mir::Module,
+    options: &LowerOptions,
+) -> Result<ExecutableModule, LowerError> {
     let mut out = ExecutableModule::default();
+
+    for decl in &options.external_effects {
+        out.add_external_effect(decl.clone())
+            .map_err(LowerError::new)?;
+    }
+    let external_effect_ids = out.external_effect_ids.clone();
 
     let mut host_id_map: Vec<Option<HostImportId>> = Vec::with_capacity(mir.host_imports.len());
     host_id_map.resize(mir.host_imports.len(), None);
@@ -54,7 +74,7 @@ pub fn lower_mir_module(mir: &rusk_mir::Module) -> Result<ExecutableModule, Lowe
     }
 
     for (idx, func) in mir.functions.iter().enumerate() {
-        let bc_func = lower_mir_function(mir, func, &host_id_map)?;
+        let bc_func = lower_mir_function(mir, func, &host_id_map, &external_effect_ids)?;
         let id = out.add_function(bc_func).map_err(LowerError::new)?;
         let expect = FunctionId(idx as u32);
         if id != expect {
@@ -99,6 +119,7 @@ fn lower_mir_function(
     mir_module: &rusk_mir::Module,
     mir_func: &rusk_mir::Function,
     host_id_map: &[Option<HostImportId>],
+    external_effect_ids: &BTreeMap<(String, String), crate::EffectId>,
 ) -> Result<Function, LowerError> {
     for (idx, param) in mir_func.params.iter().enumerate() {
         if param.local.0 != idx {
@@ -129,7 +150,15 @@ fn lower_mir_function(
             .map_err(|_| LowerError::new("function too large (pc overflow)"))?;
 
         for instr in &block.instructions {
-            lower_mir_instruction(mir_module, mir_func, instr, host_id_map, &mut temps, &mut code)?;
+            lower_mir_instruction(
+                mir_module,
+                mir_func,
+                instr,
+                host_id_map,
+                external_effect_ids,
+                &mut temps,
+                &mut code,
+            )?;
         }
 
         lower_mir_terminator(
@@ -173,6 +202,7 @@ fn lower_mir_instruction(
     mir_func: &rusk_mir::Function,
     instr: &rusk_mir::Instruction,
     host_id_map: &[Option<HostImportId>],
+    external_effect_ids: &BTreeMap<(String, String), crate::EffectId>,
     temps: &mut TempAlloc,
     code: &mut Vec<Instruction>,
 ) -> Result<(), LowerError> {
@@ -391,6 +421,37 @@ fn lower_mir_instruction(
             });
         }
 
+        I::Perform { dst, effect, args } => {
+            if !effect.interface_args.is_empty() {
+                return Err(LowerError::new(
+                    "bytecode v0 does not yet support generic interface args for external effects",
+                ));
+            }
+
+            let key = (effect.interface.clone(), effect.method.clone());
+            let Some(effect_id) = external_effect_ids.get(&key).copied() else {
+                // Not externalized (yet): lower as an immediate trap at runtime.
+                code.push(Instruction::Trap {
+                    message: format!(
+                        "unhandled effect (not externalized): {}.{}",
+                        effect.interface, effect.method
+                    ),
+                });
+                return Ok(());
+            };
+
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(arg, code, temps)?);
+            }
+
+            code.push(Instruction::Perform {
+                dst: dst.map(local),
+                effect_id,
+                args: bc_args,
+            });
+        }
+
         other => {
             return Err(LowerError::new(format!(
                 "unsupported MIR instruction in v0 bytecode lowering: {other:?}"
@@ -399,6 +460,7 @@ fn lower_mir_instruction(
     }
 
     let _ = mir_func;
+    let _ = external_effect_ids;
     Ok(())
 }
 

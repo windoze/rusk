@@ -1,0 +1,8 @@
+// expect: runtime_error unhandled effect
+
+interface NoExternal { fn boom() -> unit; }
+
+fn main() -> unit {
+    @NoExternal.boom()
+}
+

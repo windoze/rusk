@@ -1,0 +1,8 @@
+// expect: ok bool true
+
+interface TestFfi { fn echo_bytes(b: bytes) -> bytes; }
+
+fn main() -> bool {
+    test::bytes_eq(@TestFfi.echo_bytes(b"hi"), b"hi")
+}
+
