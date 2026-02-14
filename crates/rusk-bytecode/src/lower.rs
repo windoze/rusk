@@ -183,9 +183,14 @@ impl TempAlloc {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct JumpPatch {
-    instr_index: usize,
-    target: BlockId,
+enum PcPatch {
+    Jump { instr_index: usize, target: BlockId },
+    SwitchCase {
+        instr_index: usize,
+        case_index: usize,
+        target: BlockId,
+    },
+    SwitchDefault { instr_index: usize, target: BlockId },
 }
 
 fn lower_mir_function(
@@ -214,7 +219,7 @@ fn lower_mir_function(
     block_pcs.resize(mir_func.blocks.len(), 0);
 
     let mut code: Vec<Instruction> = Vec::new();
-    let mut patches: Vec<JumpPatch> = Vec::new();
+    let mut patches: Vec<PcPatch> = Vec::new();
 
     for (block_idx, block) in mir_func.blocks.iter().enumerate() {
         block_pcs[block_idx] = code
@@ -246,16 +251,57 @@ fn lower_mir_function(
     }
 
     for patch in patches {
-        let target_pc = *block_pcs
-            .get(patch.target.0)
-            .ok_or_else(|| LowerError::new("invalid jump target block id"))?;
-        let Some(slot) = code.get_mut(patch.instr_index) else {
-            return Err(LowerError::new("invalid jump patch pc"));
-        };
-        let Instruction::Jump { target_pc: pc } = slot else {
-            return Err(LowerError::new("internal error: jump patch points at non-jump opcode"));
-        };
-        *pc = target_pc;
+        match patch {
+            PcPatch::Jump { instr_index, target } => {
+                let target_pc = *block_pcs
+                    .get(target.0)
+                    .ok_or_else(|| LowerError::new("invalid jump target block id"))?;
+                let Some(slot) = code.get_mut(instr_index) else {
+                    return Err(LowerError::new("invalid jump patch pc"));
+                };
+                let Instruction::Jump { target_pc: pc } = slot else {
+                    return Err(LowerError::new(
+                        "internal error: jump patch points at non-jump opcode",
+                    ));
+                };
+                *pc = target_pc;
+            }
+            PcPatch::SwitchCase {
+                instr_index,
+                case_index,
+                target,
+            } => {
+                let target_pc = *block_pcs
+                    .get(target.0)
+                    .ok_or_else(|| LowerError::new("invalid switch target block id"))?;
+                let Some(slot) = code.get_mut(instr_index) else {
+                    return Err(LowerError::new("invalid switch patch pc"));
+                };
+                let Instruction::Switch { cases, .. } = slot else {
+                    return Err(LowerError::new(
+                        "internal error: switch patch points at non-switch opcode",
+                    ));
+                };
+                let Some(case) = cases.get_mut(case_index) else {
+                    return Err(LowerError::new("invalid switch case index"));
+                };
+                case.target_pc = target_pc;
+            }
+            PcPatch::SwitchDefault { instr_index, target } => {
+                let target_pc = *block_pcs
+                    .get(target.0)
+                    .ok_or_else(|| LowerError::new("invalid switch default block id"))?;
+                let Some(slot) = code.get_mut(instr_index) else {
+                    return Err(LowerError::new("invalid switch patch pc"));
+                };
+                let Instruction::Switch { default_pc, .. } = slot else {
+                    return Err(LowerError::new(
+                        "internal error: switch patch points at non-switch opcode",
+                    ));
+                };
+                *default_pc = target_pc;
+            }
+        }
     }
 
     Ok(Function {
@@ -745,7 +791,7 @@ fn lower_mir_terminator(
     host_id_map: &[Option<HostImportId>],
     temps: &mut TempAlloc,
     code: &mut Vec<Instruction>,
-    patches: &mut Vec<JumpPatch>,
+    patches: &mut Vec<PcPatch>,
 ) -> Result<(), LowerError> {
     use rusk_mir::Terminator as T;
 
@@ -772,7 +818,7 @@ fn lower_mir_terminator(
             emit_branch_arg_copies(mir_module, params, args, host_id_map, temps, code)?;
             let instr_index = code.len();
             code.push(Instruction::Jump { target_pc: 0 });
-            patches.push(JumpPatch {
+            patches.push(PcPatch::Jump {
                 instr_index,
                 target: *target,
             });
@@ -806,7 +852,7 @@ fn lower_mir_terminator(
                 emit_branch_arg_copies(mir_module, params, then_args, host_id_map, temps, code)?;
                 let instr_index = code.len();
                 code.push(Instruction::Jump { target_pc: 0 });
-                patches.push(JumpPatch {
+                patches.push(PcPatch::Jump {
                     instr_index,
                     target: *then_target,
                 });
@@ -825,7 +871,7 @@ fn lower_mir_terminator(
                 emit_branch_arg_copies(mir_module, params, else_args, host_id_map, temps, code)?;
                 let instr_index = code.len();
                 code.push(Instruction::Jump { target_pc: 0 });
-                patches.push(JumpPatch {
+                patches.push(PcPatch::Jump {
                     instr_index,
                     target: *else_target,
                 });
@@ -838,6 +884,64 @@ fn lower_mir_terminator(
             };
         }
 
+        T::Switch {
+            value,
+            cases,
+            default,
+        } => {
+            let scrut = op_reg(value, code, temps)?;
+
+            let instr_index = code.len();
+            let mut bc_cases = Vec::with_capacity(cases.len());
+            for (case_index, case) in cases.iter().enumerate() {
+                let bind_count = count_binds_in_pattern(&case.pattern);
+                let params = &mir_func
+                    .blocks
+                    .get(case.target.0)
+                    .ok_or_else(|| LowerError::new("invalid switch target block id"))?
+                    .params;
+                if params.len() != bind_count {
+                    return Err(LowerError::new(format!(
+                        "invalid switch target params for {:?}: expected {bind_count}, got {}",
+                        case.target.0,
+                        params.len()
+                    )));
+                }
+                let param_regs = params.iter().map(|l| l.0 as Reg).collect::<Vec<_>>();
+                bc_cases.push(crate::SwitchCase {
+                    pattern: case.pattern.clone(),
+                    target_pc: 0,
+                    param_regs,
+                });
+                patches.push(PcPatch::SwitchCase {
+                    instr_index,
+                    case_index,
+                    target: case.target,
+                });
+            }
+
+            let default_params = &mir_func
+                .blocks
+                .get(default.0)
+                .ok_or_else(|| LowerError::new("invalid switch default block id"))?
+                .params;
+            if !default_params.is_empty() {
+                return Err(LowerError::new(
+                    "switch default block must not take params (no binds)".to_string(),
+                ));
+            }
+
+            code.push(Instruction::Switch {
+                value: scrut,
+                cases: bc_cases,
+                default_pc: 0,
+            });
+            patches.push(PcPatch::SwitchDefault {
+                instr_index,
+                target: *default,
+            });
+        }
+
         other => {
             return Err(LowerError::new(format!(
                 "unsupported MIR terminator in v0 bytecode lowering: {other:?}"
@@ -847,6 +951,33 @@ fn lower_mir_terminator(
 
     let _ = host_id_map;
     Ok(())
+}
+
+fn count_binds_in_pattern(pat: &rusk_mir::Pattern) -> usize {
+    use rusk_mir::Pattern as P;
+    match pat {
+        P::Wildcard | P::Literal(_) => 0,
+        P::Bind => 1,
+        P::Enum { fields, .. } => fields.iter().map(count_binds_in_pattern).sum(),
+        P::Struct { fields, .. } => fields
+            .iter()
+            .map(|(_name, pat)| count_binds_in_pattern(pat))
+            .sum(),
+        P::Tuple {
+            prefix,
+            rest,
+            suffix,
+        }
+        | P::Array {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            prefix.iter().map(count_binds_in_pattern).sum::<usize>()
+                + rest.as_deref().map(count_binds_in_pattern).unwrap_or(0)
+                + suffix.iter().map(count_binds_in_pattern).sum::<usize>()
+        }
+    }
 }
 
 fn emit_branch_arg_copies(

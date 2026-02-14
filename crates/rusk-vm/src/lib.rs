@@ -1615,6 +1615,50 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 };
                 frame.pc = if cond { *then_pc } else { *else_pc } as usize;
             }
+            rusk_bytecode::Instruction::Switch {
+                value,
+                cases,
+                default_pc,
+            } => {
+                let scrutinee = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("switch value: {msg}")),
+                };
+
+                let mut matched = false;
+                for case in cases {
+                    let mut binds = Vec::new();
+                    let ok = match match_pattern(&vm.module, &case.pattern, &scrutinee, &mut binds) {
+                        Ok(ok) => ok,
+                        Err(msg) => return trap(vm, msg),
+                    };
+                    if !ok {
+                        continue;
+                    }
+                    if binds.len() != case.param_regs.len() {
+                        return trap(
+                            vm,
+                            format!(
+                                "invalid switch binds: expected {}, got {}",
+                                case.param_regs.len(),
+                                binds.len()
+                            ),
+                        );
+                    }
+                    for (dst, value) in case.param_regs.iter().copied().zip(binds.into_iter()) {
+                        if let Err(msg) = write_value(frame, dst, value) {
+                            return trap(vm, format!("switch bind dst: {msg}"));
+                        }
+                    }
+                    frame.pc = case.target_pc as usize;
+                    matched = true;
+                    break;
+                }
+
+                if !matched {
+                    frame.pc = (*default_pc) as usize;
+                }
+            }
             rusk_bytecode::Instruction::Return { value } => {
                 let idx: usize = (*value).try_into().unwrap_or(usize::MAX);
                 let Some(v) = frame
@@ -2391,6 +2435,236 @@ fn eval_core_intrinsic(
             }
             _ => Err(bad_args("core::intrinsics::next")),
         },
+    }
+}
+
+fn match_pattern(
+    module: &ExecutableModule,
+    pat: &rusk_mir::Pattern,
+    value: &Value,
+    binds: &mut Vec<Value>,
+) -> Result<bool, String> {
+    use rusk_mir::{ConstValue, Pattern};
+
+    match pat {
+        Pattern::Wildcard => Ok(true),
+        Pattern::Bind => {
+            binds.push(value.clone());
+            Ok(true)
+        }
+        Pattern::Literal(lit) => Ok(match (lit, value) {
+            (ConstValue::Unit, Value::Unit) => true,
+            (ConstValue::Bool(a), Value::Bool(b)) => a == b,
+            (ConstValue::Int(a), Value::Int(b)) => a == b,
+            (ConstValue::Float(a), Value::Float(b)) => a == b,
+            (ConstValue::String(a), Value::String(b)) => a == b,
+            (ConstValue::Bytes(a), Value::Bytes(b)) => a == b,
+            (ConstValue::FunctionId(a), Value::Function(b)) => a.0 == b.0,
+            _ => false,
+        }),
+        Pattern::Enum {
+            enum_name,
+            variant,
+            fields,
+        } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let (e, v, actual_fields) = match &*r.obj.borrow() {
+                HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    fields,
+                    ..
+                } => (enum_name.clone(), variant.clone(), fields.clone()),
+                _ => return Ok(false),
+            };
+            if e != *enum_name || v != *variant || actual_fields.len() != fields.len() {
+                return Ok(false);
+            }
+            for (p, actual) in fields.iter().zip(actual_fields.iter()) {
+                let actual = if r.readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(module, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Tuple {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let actual_items = match &*r.obj.borrow() {
+                HeapValue::Tuple(items) => items.clone(),
+                _ => return Ok(false),
+            };
+            let min_len = prefix.len() + suffix.len();
+            if rest.is_some() {
+                if actual_items.len() < min_len {
+                    return Ok(false);
+                }
+            } else if actual_items.len() != min_len {
+                return Ok(false);
+            }
+
+            let readonly = r.readonly;
+
+            for (p, actual) in prefix.iter().zip(actual_items.iter()) {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(module, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+
+            if let Some(rest_pat) = rest {
+                let start = prefix.len();
+                let end = actual_items.len().saturating_sub(suffix.len());
+                let slice: Vec<Value> = actual_items[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|v| if readonly { v.into_readonly_view() } else { v })
+                    .collect();
+                match rest_pat.as_ref() {
+                    Pattern::Wildcard => {}
+                    Pattern::Bind => {
+                        let rest_value = if slice.is_empty() {
+                            Value::Unit
+                        } else {
+                            alloc_ref(HeapValue::Tuple(slice))
+                        };
+                        binds.push(rest_value);
+                    }
+                    _ => return Ok(false),
+                }
+            }
+
+            for (p, actual) in suffix
+                .iter()
+                .zip(actual_items.iter().rev().take(suffix.len()).rev())
+            {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(module, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Struct { type_name, fields } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let (actual_ty, actual_fields) = match &*r.obj.borrow() {
+                HeapValue::Struct {
+                    type_name, fields, ..
+                } => (type_name.clone(), fields.clone()),
+                _ => return Ok(false),
+            };
+            if actual_ty != *type_name {
+                return Ok(false);
+            }
+            let Some(layout) = module.struct_layouts.get(actual_ty.as_str()) else {
+                return Err(format!("missing struct layout for `{actual_ty}`"));
+            };
+            for (field_name, field_pat) in fields.iter() {
+                let Some(idx) = layout.iter().position(|f| f == field_name) else {
+                    return Err(format!("missing field: {field_name}"));
+                };
+                let Some(field_value) = actual_fields.get(idx) else {
+                    return Err(format!("missing field: {field_name}"));
+                };
+                let field_value = if r.readonly {
+                    field_value.clone().into_readonly_view()
+                } else {
+                    field_value.clone()
+                };
+                if !match_pattern(module, field_pat, &field_value, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Pattern::Array {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            let Value::Ref(r) = value else {
+                return Ok(false);
+            };
+            let actual_items = match &*r.obj.borrow() {
+                HeapValue::Array(items) => items.clone(),
+                _ => return Ok(false),
+            };
+            let min_len = prefix.len() + suffix.len();
+            if rest.is_some() {
+                if actual_items.len() < min_len {
+                    return Ok(false);
+                }
+            } else if actual_items.len() != min_len {
+                return Ok(false);
+            }
+
+            let readonly = r.readonly;
+
+            for (p, actual) in prefix.iter().zip(actual_items.iter()) {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(module, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+
+            if let Some(rest_pat) = rest {
+                let start = prefix.len();
+                let end = actual_items.len().saturating_sub(suffix.len());
+                let slice: Vec<Value> = actual_items[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|v| if readonly { v.into_readonly_view() } else { v })
+                    .collect();
+                match rest_pat.as_ref() {
+                    Pattern::Wildcard => {}
+                    Pattern::Bind => {
+                        binds.push(alloc_ref(HeapValue::Array(slice)));
+                    }
+                    _ => return Ok(false),
+                }
+            }
+
+            for (p, actual) in suffix
+                .iter()
+                .zip(actual_items.iter().rev().take(suffix.len()).rev())
+            {
+                let actual = if readonly {
+                    actual.clone().into_readonly_view()
+                } else {
+                    actual.clone()
+                };
+                if !match_pattern(module, p, &actual, binds)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
     }
 }
 

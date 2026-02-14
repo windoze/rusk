@@ -187,6 +187,15 @@ pub enum CallTarget {
     Intrinsic(Intrinsic),
 }
 
+/// A lowered `switch` case (pattern + jump target).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchCase {
+    pub pattern: rusk_mir::Pattern,
+    pub target_pc: u32,
+    /// The destination registers for pattern binds (must match `count_binds(pattern)`).
+    pub param_regs: Vec<Reg>,
+}
+
 /// An in-memory bytecode instruction stream.
 ///
 /// This is not yet a stable serialized format.
@@ -273,6 +282,11 @@ pub enum Instruction {
         cond: Reg,
         then_pc: u32,
         else_pc: u32,
+    },
+    Switch {
+        value: Reg,
+        cases: Vec<SwitchCase>,
+        default_pc: u32,
     },
 
     Return { value: Reg },
