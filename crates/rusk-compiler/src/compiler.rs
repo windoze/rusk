@@ -119,11 +119,11 @@ fn free_value_vars_in_block(block: &Block, bound: &mut BTreeSet<String>) -> BTre
     let mut free = BTreeSet::new();
     for stmt in &block.stmts {
         match stmt {
-            Stmt::Let { name, init, .. } => {
+            Stmt::Let { pat, init, .. } => {
                 if let Some(init) = init {
                     free_value_vars_in_expr(init, bound, &mut free);
                 }
-                bound.insert(name.name.clone());
+                free_value_vars_in_pattern(pat, bound);
             }
             Stmt::Return { value, .. } => {
                 if let Some(value) = value {
@@ -2568,11 +2568,11 @@ impl<'a> FunctionLowerer<'a> {
         match stmt {
             Stmt::Let {
                 kind,
-                name,
+                pat,
                 ty: _,
                 init,
                 span,
-            } => self.lower_let_stmt(*kind, name, init.as_ref(), *span)?,
+            } => self.lower_let_stmt(*kind, pat, init.as_ref(), *span)?,
             Stmt::Return { value, span } => self.lower_return_stmt(value.as_ref(), *span)?,
             Stmt::Break { span } => self.lower_break_continue(true, *span)?,
             Stmt::Continue { span } => self.lower_break_continue(false, *span)?,
@@ -2647,21 +2647,22 @@ impl<'a> FunctionLowerer<'a> {
     fn lower_let_stmt(
         &mut self,
         kind: BindingKind,
-        name: &crate::ast::Ident,
+        pat: &crate::ast::Pattern,
         init: Option<&Expr>,
         span: Span,
     ) -> Result<(), CompileError> {
-        match kind {
-            BindingKind::Let => {
+        // Fast paths for the common cases:
+        // - `let x = expr;`
+        // - `const x = expr;`
+        // - `readonly x = expr;`
+        // - `let x;` / `let x: T;`
+        // - `*_ _ = expr;` (no binding, just evaluate for effect / type assertion)
+        match (kind, pat, init) {
+            // Uninitialized `let x;`
+            (BindingKind::Let, crate::ast::Pattern::Bind { name, .. }, None) => {
                 // Represent `let` bindings as boxed cells so they can be captured across helper
                 // function boundaries (required for delimited effects compilation).
                 let cell = self.alloc_local();
-                let (set_value, initial_value) = if let Some(init_expr) = init {
-                    let v = self.lower_expr(init_expr)?;
-                    (true, Operand::Local(v))
-                } else {
-                    (false, Operand::Literal(ConstValue::Unit))
-                };
                 self.emit(Instruction::MakeStruct {
                     dst: cell,
                     type_name: INTERNAL_CELL_STRUCT.to_string(),
@@ -2669,9 +2670,12 @@ impl<'a> FunctionLowerer<'a> {
                     fields: vec![
                         (
                             CELL_FIELD_SET.to_string(),
-                            Operand::Literal(ConstValue::Bool(set_value)),
+                            Operand::Literal(ConstValue::Bool(false)),
                         ),
-                        (CELL_FIELD_VALUE.to_string(), initial_value),
+                        (
+                            CELL_FIELD_VALUE.to_string(),
+                            Operand::Literal(ConstValue::Unit),
+                        ),
                     ],
                 });
                 self.bind_var(
@@ -2681,15 +2685,43 @@ impl<'a> FunctionLowerer<'a> {
                         kind: BindingKind::Let,
                     },
                 );
-                Ok(())
+                return Ok(());
             }
-            BindingKind::Const | BindingKind::Readonly => {
-                let Some(init_expr) = init else {
-                    return Err(CompileError::new(
-                        "const/readonly bindings require an initializer",
-                        span,
-                    ));
-                };
+
+            // `let x = expr;`
+            (BindingKind::Let, crate::ast::Pattern::Bind { name, .. }, Some(init_expr)) => {
+                // Represent `let` bindings as boxed cells so they can be captured across helper
+                // function boundaries (required for delimited effects compilation).
+                let cell = self.alloc_local();
+                let v = self.lower_expr(init_expr)?;
+                self.emit(Instruction::MakeStruct {
+                    dst: cell,
+                    type_name: INTERNAL_CELL_STRUCT.to_string(),
+                    type_args: Vec::new(),
+                    fields: vec![
+                        (
+                            CELL_FIELD_SET.to_string(),
+                            Operand::Literal(ConstValue::Bool(true)),
+                        ),
+                        (CELL_FIELD_VALUE.to_string(), Operand::Local(v)),
+                    ],
+                });
+                self.bind_var(
+                    &name.name,
+                    VarInfo {
+                        local: cell,
+                        kind: BindingKind::Let,
+                    },
+                );
+                return Ok(());
+            }
+
+            // `const x = expr;` / `readonly x = expr;`
+            (
+                BindingKind::Const | BindingKind::Readonly,
+                crate::ast::Pattern::Bind { name, .. },
+                Some(init_expr),
+            ) => {
                 let value_local = self.lower_expr(init_expr)?;
                 let dst = self.alloc_local();
                 self.emit(Instruction::Copy {
@@ -2700,6 +2732,128 @@ impl<'a> FunctionLowerer<'a> {
                     self.emit(Instruction::AsReadonly { dst, src: dst });
                 }
                 self.bind_var(&name.name, VarInfo { local: dst, kind });
+                return Ok(());
+            }
+
+            // `_` patterns: evaluate and discard. This is useful for type ascription, e.g.
+            // `let _: T = expr;` / `const _: T = expr;`.
+            (_, crate::ast::Pattern::Wildcard { .. }, Some(init_expr)) => {
+                let _ = self.lower_expr(init_expr)?;
+                return Ok(());
+            }
+
+            // Anything else falls through to the general destructuring lowering below.
+            _ => {}
+        }
+
+        match kind {
+            BindingKind::Let => {
+                let Some(init_expr) = init else {
+                    return Err(CompileError::new(
+                        "destructuring `let` requires an initializer",
+                        span,
+                    ));
+                };
+
+                let tmp = self.lower_expr(init_expr)?;
+                let (mir_pat, bind_names) = self.lower_ast_pattern(pat)?;
+
+                let ok_block = self.new_block("let_pat_ok");
+                let mut params = Vec::with_capacity(bind_names.len());
+                for _ in 0..bind_names.len() {
+                    params.push(self.alloc_local());
+                }
+                self.blocks[ok_block.0].params = params.clone();
+
+                let trap_block = self.new_block("let_pat_fail");
+                let prev = self.current;
+                self.set_current(trap_block);
+                self.set_terminator(Terminator::Trap {
+                    message: "binding pattern match failed".to_string(),
+                })?;
+                self.set_current(prev);
+
+                self.set_terminator(Terminator::Switch {
+                    value: Operand::Local(tmp),
+                    cases: vec![SwitchCase {
+                        pattern: mir_pat,
+                        target: ok_block,
+                    }],
+                    default: trap_block,
+                })?;
+
+                self.set_current(ok_block);
+                for (name, value_local) in bind_names.into_iter().zip(params.into_iter()) {
+                    let cell = self.alloc_local();
+                    self.emit(Instruction::MakeStruct {
+                        dst: cell,
+                        type_name: INTERNAL_CELL_STRUCT.to_string(),
+                        type_args: Vec::new(),
+                        fields: vec![
+                            (
+                                CELL_FIELD_SET.to_string(),
+                                Operand::Literal(ConstValue::Bool(true)),
+                            ),
+                            (CELL_FIELD_VALUE.to_string(), Operand::Local(value_local)),
+                        ],
+                    });
+                    self.bind_var(
+                        &name,
+                        VarInfo {
+                            local: cell,
+                            kind: BindingKind::Let,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            BindingKind::Const | BindingKind::Readonly => {
+                let Some(init_expr) = init else {
+                    return Err(CompileError::new(
+                        "const/readonly bindings require an initializer",
+                        span,
+                    ));
+                };
+
+                let tmp = self.lower_expr(init_expr)?;
+                let (mir_pat, bind_names) = self.lower_ast_pattern(pat)?;
+
+                let ok_block = self.new_block("binding_pat_ok");
+                let mut params = Vec::with_capacity(bind_names.len());
+                for _ in 0..bind_names.len() {
+                    params.push(self.alloc_local());
+                }
+                self.blocks[ok_block.0].params = params.clone();
+
+                let trap_block = self.new_block("binding_pat_fail");
+                let prev = self.current;
+                self.set_current(trap_block);
+                self.set_terminator(Terminator::Trap {
+                    message: "binding pattern match failed".to_string(),
+                })?;
+                self.set_current(prev);
+
+                self.set_terminator(Terminator::Switch {
+                    value: Operand::Local(tmp),
+                    cases: vec![SwitchCase {
+                        pattern: mir_pat,
+                        target: ok_block,
+                    }],
+                    default: trap_block,
+                })?;
+
+                self.set_current(ok_block);
+                for (name, value_local) in bind_names.into_iter().zip(params.into_iter()) {
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::Copy {
+                        dst,
+                        src: value_local,
+                    });
+                    if kind == BindingKind::Readonly {
+                        self.emit(Instruction::AsReadonly { dst, src: dst });
+                    }
+                    self.bind_var(&name, VarInfo { local: dst, kind });
+                }
                 Ok(())
             }
         }

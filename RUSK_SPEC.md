@@ -304,9 +304,9 @@ Stmt           := LetStmt
                | ContinueStmt
                | ExprStmt ;
 
-LetStmt        := "let" Ident (":" Type)? ("=" Expr)? ";" ;
-ConstStmt      := "const" Ident (":" Type)? "=" Expr ";" ;
-ReadonlyStmt   := "readonly" Ident (":" Type)? "=" Expr ";" ;
+LetStmt        := "let" Pattern (":" Type)? ("=" Expr)? ";" ;
+ConstStmt      := "const" Pattern (":" Type)? "=" Expr ";" ;
+ReadonlyStmt   := "readonly" Pattern (":" Type)? "=" Expr ";" ;
 
 ReturnStmt     := "return" Expr? ";" ;
 BreakStmt      := "break" ";" ;
@@ -325,7 +325,8 @@ BlockLikeExpr  := Block
 
 Notes:
 - `let x: T;` declares an uninitialized local (reading it before assignment is a runtime error). In this implementation, an uninitialized `let` binding must have an explicit type annotation.
-- `let x = e;` initializes `x`.
+- `let pat = e;` pattern-matches `e` against `pat`, binding any names in `pat`. If the match fails at runtime, execution traps.
+  - Destructuring `let` forms (anything other than a simple binding name) require an initializer.
 - `const x = e;` prevents rebinding of `x` (but does not deep-freeze referenced objects).
 - `readonly x = e;` is equivalent to `const x = e;` plus a readonly view: it prevents rebinding and forbids mutation through `x`.
 - Like Rust, *block-like* expression statements (`if` / `match` / `loop` / `while` / `for` / `{ ... }`) may omit the trailing `;` when used as a statement inside a block.
@@ -573,6 +574,7 @@ Patterns are used in:
 - `match` value arms
 - effect arms’ parameter patterns
 - function parameters (§3.2.1)
+- binding statements: `let` / `const` / `readonly` (§3.5)
 
 ```
 Pattern        := "_"                       // wildcard

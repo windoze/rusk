@@ -1,0 +1,9 @@
+// expect: ok int 123
+
+struct UserId(int);
+
+fn main() -> int {
+    let UserId(id) = UserId(123);
+    id
+}
+

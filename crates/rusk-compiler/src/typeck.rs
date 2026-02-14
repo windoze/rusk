@@ -3141,7 +3141,7 @@ impl<'a> FnTypechecker<'a> {
         match stmt {
             crate::ast::Stmt::Let {
                 kind,
-                name,
+                pat,
                 ty,
                 init,
                 span,
@@ -3159,7 +3159,7 @@ impl<'a> FnTypechecker<'a> {
                     None
                 };
 
-                let local_ty =
+                let scrutinee_ty =
                     match (declared, init_ty) {
                         (Some(decl), Some(init_ty)) => self.infer.unify(decl, init_ty, *span)?,
                         (Some(decl), None) => decl,
@@ -3172,24 +3172,40 @@ impl<'a> FnTypechecker<'a> {
                         }),
                     };
 
-                if matches!(kind, BindingKind::Readonly) {
+                if init.is_none() {
+                    // Uninitialized locals are only allowed for simple `let x: T;` declarations
+                    // (not for destructuring patterns).
+                    let Pattern::Bind { name, .. } = pat else {
+                        return Err(TypeError {
+                            message: "destructuring `let` requires an initializer".to_string(),
+                            span: pat.span(),
+                        });
+                    };
                     self.bind_local(
                         name,
                         LocalInfo {
-                            ty: local_ty.as_readonly_view(),
+                            ty: scrutinee_ty,
                             kind: *kind,
                             span: *span,
                         },
                     )?;
                 } else {
-                    self.bind_local(
-                        name,
-                        LocalInfo {
-                            ty: local_ty,
-                            kind: *kind,
-                            span: *span,
-                        },
-                    )?;
+                    let binds = self.typecheck_pattern(pat, scrutinee_ty)?;
+                    for (name, ty) in binds {
+                        let ty = if matches!(kind, BindingKind::Readonly) {
+                            ty.as_readonly_view()
+                        } else {
+                            ty
+                        };
+                        self.bind_local(
+                            &name,
+                            LocalInfo {
+                                ty,
+                                kind: *kind,
+                                span: name.span,
+                            },
+                        )?;
+                    }
                 }
             }
             crate::ast::Stmt::Return { value, span } => {

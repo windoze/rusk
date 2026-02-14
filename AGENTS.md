@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Non-goals
+
+- Backwards compatibility: we are free to make breaking changes as needed in the current stage of development.
+
 ## Project Structure & Module Organization
 
 - `Cargo.toml`: Workspace definition plus root `rusk` package.

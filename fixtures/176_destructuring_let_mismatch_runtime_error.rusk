@@ -1,0 +1,7 @@
+// expect: runtime_error binding pattern match failed
+
+fn main() -> unit {
+    let 1 = 2;
+    ()
+}
+

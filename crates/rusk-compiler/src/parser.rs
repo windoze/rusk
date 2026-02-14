@@ -837,7 +837,7 @@ impl<'a> Parser<'a> {
             _ => return Err(self.error_here("expected binding statement")),
         };
         self.bump()?;
-        let name = self.expect_ident()?;
+        let pat = self.parse_pattern()?;
         let ty = if matches!(self.lookahead.kind, TokenKind::Colon) {
             self.bump()?;
             Some(self.parse_type()?)
@@ -851,20 +851,29 @@ impl<'a> Parser<'a> {
             None
         };
 
-        match kind {
-            BindingKind::Const | BindingKind::Readonly if init.is_none() => {
-                return Err(ParseError {
-                    message: "const/readonly bindings require an initializer".to_string(),
-                    span: name.span,
-                });
+        if init.is_none() {
+            match kind {
+                BindingKind::Const | BindingKind::Readonly => {
+                    return Err(ParseError {
+                        message: "const/readonly bindings require an initializer".to_string(),
+                        span: pat.span(),
+                    });
+                }
+                BindingKind::Let => {
+                    if !matches!(pat, Pattern::Bind { .. }) {
+                        return Err(ParseError {
+                            message: "destructuring `let` requires an initializer".to_string(),
+                            span: pat.span(),
+                        });
+                    }
+                }
             }
-            _ => {}
         }
 
         let end = self.expect(TokenKind::Semi)?.span.end;
         Ok(Stmt::Let {
             kind,
-            name,
+            pat,
             ty,
             init,
             span: Span::new(start, end),
@@ -1016,7 +1025,10 @@ impl<'a> Parser<'a> {
                                     let stmt_span = Span::new(name.span.start, init.span().end);
                                     stmts.push(Stmt::Let {
                                         kind: BindingKind::Let,
-                                        name: name.clone(),
+                                        pat: Pattern::Bind {
+                                            name: name.clone(),
+                                            span: name.span,
+                                        },
                                         ty: None,
                                         init: Some(init),
                                         span: stmt_span,

@@ -1,0 +1,9 @@
+// expect: ok int 1
+
+struct S { x: int, y: int }
+
+fn main() -> int {
+    let S { x, .. } = S { x: 1, y: 2 };
+    x
+}
+

@@ -290,7 +290,7 @@ pub struct Block {
 pub enum Stmt {
     Let {
         kind: BindingKind,
-        name: Ident,
+        pat: Pattern,
         ty: Option<TypeExpr>,
         init: Option<Expr>,
         span: Span,

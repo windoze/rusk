@@ -1,0 +1,8 @@
+// expect: compile_error cannot assign through a readonly view
+
+fn main() -> unit {
+    readonly [..rest] = [1, 2, 3];
+    rest[0] = 9;
+    ()
+}
+

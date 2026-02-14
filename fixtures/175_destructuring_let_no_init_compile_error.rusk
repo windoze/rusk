@@ -1,0 +1,7 @@
+// expect: compile_error destructuring `let` requires an initializer
+
+fn main() -> unit {
+    let (a, b);
+    ()
+}
+
