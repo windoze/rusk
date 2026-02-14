@@ -1,0 +1,1725 @@
+{
+  "benchmarks": [
+    {
+      "expected": 20000300000,
+      "name": "phase1_var_loop",
+      "notes": "Local var load/store + while loop + int arithmetic.",
+      "params": {
+        "iters": 3,
+        "warmup": 1
+      },
+      "python": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.py",
+        "runs": [
+          {
+            "import_ns": 335708,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.py",
+            "iters": 3,
+            "last_result_repr": "20000300000",
+            "run": {
+              "avg_ns": 8306889,
+              "total_ns": 24920667
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 309333,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.py",
+            "iters": 3,
+            "last_result_repr": "20000300000",
+            "run": {
+              "avg_ns": 8337764,
+              "total_ns": 25013292
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 1204834,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.py",
+            "iters": 3,
+            "last_result_repr": "20000300000",
+            "run": {
+              "avg_ns": 8415222,
+              "total_ns": 25245667
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 155917,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.py",
+            "iters": 3,
+            "last_result_repr": "20000300000",
+            "run": {
+              "avg_ns": 8423902,
+              "total_ns": 25271708
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 182791,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.py",
+            "iters": 3,
+            "last_result_repr": "20000300000",
+            "run": {
+              "avg_ns": 8294555,
+              "total_ns": 24883666
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "run_avg_ns": {
+            "max": 8423902,
+            "mean": 8355666,
+            "median": 8337764,
+            "min": 8294555,
+            "stdev": 60492
+          }
+        }
+      },
+      "rusk": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.rusk",
+        "runs": [
+          {
+            "compile": {
+              "bytes_read": 394,
+              "files_read": 1,
+              "load_ns": 504042,
+              "lower_ns": 287625,
+              "parse_ns": 230584,
+              "read_ns": 87166,
+              "total_ns": 1368583,
+              "typecheck_ns": 576625
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 164821763,
+              "metrics": {
+                "allocations": 12,
+                "block_entries": 8400030,
+                "br_terminators": 4200015,
+                "call_instructions": 2400006,
+                "cond_br_terminators": 4200015,
+                "executed_instructions": 16200057,
+                "executed_terminators": 8400033,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 2400006,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 3,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 494465291
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 394,
+              "files_read": 1,
+              "load_ns": 63833,
+              "lower_ns": 50125,
+              "parse_ns": 18625,
+              "read_ns": 14833,
+              "total_ns": 197708,
+              "typecheck_ns": 83750
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 164385347,
+              "metrics": {
+                "allocations": 12,
+                "block_entries": 8400030,
+                "br_terminators": 4200015,
+                "call_instructions": 2400006,
+                "cond_br_terminators": 4200015,
+                "executed_instructions": 16200057,
+                "executed_terminators": 8400033,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 2400006,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 3,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 493156043
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 394,
+              "files_read": 1,
+              "load_ns": 72083,
+              "lower_ns": 51000,
+              "parse_ns": 20708,
+              "read_ns": 15375,
+              "total_ns": 210542,
+              "typecheck_ns": 87459
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 164564486,
+              "metrics": {
+                "allocations": 12,
+                "block_entries": 8400030,
+                "br_terminators": 4200015,
+                "call_instructions": 2400006,
+                "cond_br_terminators": 4200015,
+                "executed_instructions": 16200057,
+                "executed_terminators": 8400033,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 2400006,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 3,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 493693459
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 394,
+              "files_read": 1,
+              "load_ns": 64875,
+              "lower_ns": 49458,
+              "parse_ns": 19958,
+              "read_ns": 15500,
+              "total_ns": 201167,
+              "typecheck_ns": 86708
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 166810902,
+              "metrics": {
+                "allocations": 12,
+                "block_entries": 8400030,
+                "br_terminators": 4200015,
+                "call_instructions": 2400006,
+                "cond_br_terminators": 4200015,
+                "executed_instructions": 16200057,
+                "executed_terminators": 8400033,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 2400006,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 3,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 500432708
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 394,
+              "files_read": 1,
+              "load_ns": 60458,
+              "lower_ns": 47500,
+              "parse_ns": 19667,
+              "read_ns": 13583,
+              "total_ns": 186459,
+              "typecheck_ns": 78375
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase1_var_loop.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 165398972,
+              "metrics": {
+                "allocations": 12,
+                "block_entries": 8400030,
+                "br_terminators": 4200015,
+                "call_instructions": 2400006,
+                "cond_br_terminators": 4200015,
+                "executed_instructions": 16200057,
+                "executed_terminators": 8400033,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 2400006,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 3,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 496196916
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "compile_total_ns": {
+            "max": 1368583,
+            "mean": 432891,
+            "median": 201167,
+            "min": 186459,
+            "stdev": 523138
+          },
+          "run_avg_ns": {
+            "max": 166810902,
+            "mean": 165196294,
+            "median": 164821763,
+            "min": 164385347,
+            "stdev": 980449
+          }
+        }
+      }
+    },
+    {
+      "expected": 45001350000,
+      "name": "phase2_object_access",
+      "notes": "Tuple/struct field get/set hot paths.",
+      "params": {
+        "iters": 3,
+        "warmup": 1
+      },
+      "python": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.py",
+        "runs": [
+          {
+            "import_ns": 181000,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.py",
+            "iters": 3,
+            "last_result_repr": "45001350000",
+            "run": {
+              "avg_ns": 20846972,
+              "total_ns": 62540917
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 201375,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.py",
+            "iters": 3,
+            "last_result_repr": "45001350000",
+            "run": {
+              "avg_ns": 20841611,
+              "total_ns": 62524834
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 249667,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.py",
+            "iters": 3,
+            "last_result_repr": "45001350000",
+            "run": {
+              "avg_ns": 21106111,
+              "total_ns": 63318334
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 290375,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.py",
+            "iters": 3,
+            "last_result_repr": "45001350000",
+            "run": {
+              "avg_ns": 21130111,
+              "total_ns": 63390334
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 207750,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.py",
+            "iters": 3,
+            "last_result_repr": "45001350000",
+            "run": {
+              "avg_ns": 21189875,
+              "total_ns": 63569625
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "run_avg_ns": {
+            "max": 21189875,
+            "mean": 21022936,
+            "median": 21106111,
+            "min": 20841611,
+            "stdev": 165918
+          }
+        }
+      },
+      "rusk": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.rusk",
+        "runs": [
+          {
+            "compile": {
+              "bytes_read": 844,
+              "files_read": 1,
+              "load_ns": 105000,
+              "lower_ns": 79250,
+              "parse_ns": 46417,
+              "read_ns": 23500,
+              "total_ns": 342917,
+              "typecheck_ns": 158583
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 292841319,
+              "metrics": {
+                "allocations": 24,
+                "block_entries": 13800036,
+                "br_terminators": 6900018,
+                "call_instructions": 4200015,
+                "cond_br_terminators": 6900018,
+                "executed_instructions": 29100108,
+                "executed_terminators": 13800045,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4200009,
+                "icall_instructions": 0,
+                "mir_calls": 6,
+                "return_terminators": 9,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 878523959
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 844,
+              "files_read": 1,
+              "load_ns": 70083,
+              "lower_ns": 65625,
+              "parse_ns": 32042,
+              "read_ns": 12584,
+              "total_ns": 234000,
+              "typecheck_ns": 98250
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 292263430,
+              "metrics": {
+                "allocations": 24,
+                "block_entries": 13800036,
+                "br_terminators": 6900018,
+                "call_instructions": 4200015,
+                "cond_br_terminators": 6900018,
+                "executed_instructions": 29100108,
+                "executed_terminators": 13800045,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4200009,
+                "icall_instructions": 0,
+                "mir_calls": 6,
+                "return_terminators": 9,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 876790292
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 844,
+              "files_read": 1,
+              "load_ns": 89333,
+              "lower_ns": 70584,
+              "parse_ns": 37167,
+              "read_ns": 19916,
+              "total_ns": 277459,
+              "typecheck_ns": 117500
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 293865125,
+              "metrics": {
+                "allocations": 24,
+                "block_entries": 13800036,
+                "br_terminators": 6900018,
+                "call_instructions": 4200015,
+                "cond_br_terminators": 6900018,
+                "executed_instructions": 29100108,
+                "executed_terminators": 13800045,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4200009,
+                "icall_instructions": 0,
+                "mir_calls": 6,
+                "return_terminators": 9,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 881595376
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 844,
+              "files_read": 1,
+              "load_ns": 89833,
+              "lower_ns": 71459,
+              "parse_ns": 38583,
+              "read_ns": 16208,
+              "total_ns": 299500,
+              "typecheck_ns": 138166
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 291873749,
+              "metrics": {
+                "allocations": 24,
+                "block_entries": 13800036,
+                "br_terminators": 6900018,
+                "call_instructions": 4200015,
+                "cond_br_terminators": 6900018,
+                "executed_instructions": 29100108,
+                "executed_terminators": 13800045,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4200009,
+                "icall_instructions": 0,
+                "mir_calls": 6,
+                "return_terminators": 9,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 875621249
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 844,
+              "files_read": 1,
+              "load_ns": 120666,
+              "lower_ns": 82708,
+              "parse_ns": 42084,
+              "read_ns": 24750,
+              "total_ns": 332208,
+              "typecheck_ns": 128750
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase2_object_access.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 294546013,
+              "metrics": {
+                "allocations": 24,
+                "block_entries": 13800036,
+                "br_terminators": 6900018,
+                "call_instructions": 4200015,
+                "cond_br_terminators": 6900018,
+                "executed_instructions": 29100108,
+                "executed_terminators": 13800045,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4200009,
+                "icall_instructions": 0,
+                "mir_calls": 6,
+                "return_terminators": 9,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 883638041
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "compile_total_ns": {
+            "max": 342917,
+            "mean": 297216,
+            "median": 299500,
+            "min": 234000,
+            "stdev": 43888
+          },
+          "run_avg_ns": {
+            "max": 294546013,
+            "mean": 293077927,
+            "median": 292841319,
+            "min": 291873749,
+            "stdev": 1111799
+          }
+        }
+      }
+    },
+    {
+      "expected": 4999950063,
+      "name": "phase3_closure_capture",
+      "notes": "Closure/lambda in a tight loop (Rusk: capture analysis).",
+      "params": {
+        "iters": 3,
+        "warmup": 1
+      },
+      "python": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.py",
+        "runs": [
+          {
+            "import_ns": 195125,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.py",
+            "iters": 3,
+            "last_result_repr": "4999950063",
+            "run": {
+              "avg_ns": 4943389,
+              "total_ns": 14830167
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 191500,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.py",
+            "iters": 3,
+            "last_result_repr": "4999950063",
+            "run": {
+              "avg_ns": 5001458,
+              "total_ns": 15004375
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 259625,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.py",
+            "iters": 3,
+            "last_result_repr": "4999950063",
+            "run": {
+              "avg_ns": 5021652,
+              "total_ns": 15064958
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 394583,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.py",
+            "iters": 3,
+            "last_result_repr": "4999950063",
+            "run": {
+              "avg_ns": 5152388,
+              "total_ns": 15457166
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 164250,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.py",
+            "iters": 3,
+            "last_result_repr": "4999950063",
+            "run": {
+              "avg_ns": 5039916,
+              "total_ns": 15119750
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "run_avg_ns": {
+            "max": 5152388,
+            "mean": 5031760,
+            "median": 5021652,
+            "min": 4943389,
+            "stdev": 76562
+          }
+        }
+      },
+      "rusk": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.rusk",
+        "runs": [
+          {
+            "compile": {
+              "bytes_read": 2112,
+              "files_read": 1,
+              "load_ns": 108958,
+              "lower_ns": 86208,
+              "parse_ns": 40917,
+              "read_ns": 29625,
+              "total_ns": 308542,
+              "typecheck_ns": 113292
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 79849152,
+              "metrics": {
+                "allocations": 15,
+                "block_entries": 3600018,
+                "br_terminators": 1800009,
+                "call_instructions": 900009,
+                "cond_br_terminators": 1800009,
+                "executed_instructions": 7500438,
+                "executed_terminators": 3900021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 900009,
+                "icall_instructions": 300000,
+                "mir_calls": 300000,
+                "return_terminators": 300003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 239547458
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 2112,
+              "files_read": 1,
+              "load_ns": 83500,
+              "lower_ns": 76708,
+              "parse_ns": 38750,
+              "read_ns": 15166,
+              "total_ns": 265292,
+              "typecheck_ns": 104958
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 79381291,
+              "metrics": {
+                "allocations": 15,
+                "block_entries": 3600018,
+                "br_terminators": 1800009,
+                "call_instructions": 900009,
+                "cond_br_terminators": 1800009,
+                "executed_instructions": 7500438,
+                "executed_terminators": 3900021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 900009,
+                "icall_instructions": 300000,
+                "mir_calls": 300000,
+                "return_terminators": 300003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 238143875
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 2112,
+              "files_read": 1,
+              "load_ns": 86458,
+              "lower_ns": 76708,
+              "parse_ns": 41000,
+              "read_ns": 14000,
+              "total_ns": 265625,
+              "typecheck_ns": 102291
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 79575764,
+              "metrics": {
+                "allocations": 15,
+                "block_entries": 3600018,
+                "br_terminators": 1800009,
+                "call_instructions": 900009,
+                "cond_br_terminators": 1800009,
+                "executed_instructions": 7500438,
+                "executed_terminators": 3900021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 900009,
+                "icall_instructions": 300000,
+                "mir_calls": 300000,
+                "return_terminators": 300003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 238727292
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 2112,
+              "files_read": 1,
+              "load_ns": 92291,
+              "lower_ns": 80208,
+              "parse_ns": 42083,
+              "read_ns": 14625,
+              "total_ns": 284125,
+              "typecheck_ns": 111542
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 79512847,
+              "metrics": {
+                "allocations": 15,
+                "block_entries": 3600018,
+                "br_terminators": 1800009,
+                "call_instructions": 900009,
+                "cond_br_terminators": 1800009,
+                "executed_instructions": 7500438,
+                "executed_terminators": 3900021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 900009,
+                "icall_instructions": 300000,
+                "mir_calls": 300000,
+                "return_terminators": 300003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 238538541
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 2112,
+              "files_read": 1,
+              "load_ns": 83541,
+              "lower_ns": 76500,
+              "parse_ns": 38208,
+              "read_ns": 15375,
+              "total_ns": 275792,
+              "typecheck_ns": 115709
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase3_closure_capture.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 78851625,
+              "metrics": {
+                "allocations": 15,
+                "block_entries": 3600018,
+                "br_terminators": 1800009,
+                "call_instructions": 900009,
+                "cond_br_terminators": 1800009,
+                "executed_instructions": 7500438,
+                "executed_terminators": 3900021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 900009,
+                "icall_instructions": 300000,
+                "mir_calls": 300000,
+                "return_terminators": 300003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 236554875
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "compile_total_ns": {
+            "max": 308542,
+            "mean": 279875,
+            "median": 275792,
+            "min": 265292,
+            "stdev": 17834
+          },
+          "run_avg_ns": {
+            "max": 79849152,
+            "mean": 79434135,
+            "median": 79512847,
+            "min": 78851625,
+            "stdev": 367628
+          }
+        }
+      }
+    },
+    {
+      "expected": 500000,
+      "name": "phase4_call_dispatch",
+      "notes": "Call-heavy loop (inc/dispatch).",
+      "params": {
+        "iters": 3,
+        "warmup": 1
+      },
+      "python": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.py",
+        "runs": [
+          {
+            "import_ns": 252125,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.py",
+            "iters": 3,
+            "last_result_repr": "500000",
+            "run": {
+              "avg_ns": 21980069,
+              "total_ns": 65940209
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 320583,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.py",
+            "iters": 3,
+            "last_result_repr": "500000",
+            "run": {
+              "avg_ns": 21344666,
+              "total_ns": 64034000
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 289875,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.py",
+            "iters": 3,
+            "last_result_repr": "500000",
+            "run": {
+              "avg_ns": 21347930,
+              "total_ns": 64043792
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 213625,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.py",
+            "iters": 3,
+            "last_result_repr": "500000",
+            "run": {
+              "avg_ns": 22339639,
+              "total_ns": 67018917
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 303292,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.py",
+            "iters": 3,
+            "last_result_repr": "500000",
+            "run": {
+              "avg_ns": 21517680,
+              "total_ns": 64553042
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "run_avg_ns": {
+            "max": 22339639,
+            "mean": 21705996,
+            "median": 21517680,
+            "min": 21344666,
+            "stdev": 438991
+          }
+        }
+      },
+      "rusk": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.rusk",
+        "runs": [
+          {
+            "compile": {
+              "bytes_read": 409,
+              "files_read": 1,
+              "load_ns": 81042,
+              "lower_ns": 48500,
+              "parse_ns": 23209,
+              "read_ns": 30875,
+              "total_ns": 221625,
+              "typecheck_ns": 92083
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 280173458,
+              "metrics": {
+                "allocations": 6,
+                "block_entries": 12000018,
+                "br_terminators": 6000009,
+                "call_instructions": 6000003,
+                "cond_br_terminators": 6000009,
+                "executed_instructions": 30000033,
+                "executed_terminators": 13500021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4500003,
+                "icall_instructions": 0,
+                "mir_calls": 1500000,
+                "return_terminators": 1500003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 840520376
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 409,
+              "files_read": 1,
+              "load_ns": 71500,
+              "lower_ns": 49250,
+              "parse_ns": 21208,
+              "read_ns": 15458,
+              "total_ns": 215167,
+              "typecheck_ns": 94250
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 277389444,
+              "metrics": {
+                "allocations": 6,
+                "block_entries": 12000018,
+                "br_terminators": 6000009,
+                "call_instructions": 6000003,
+                "cond_br_terminators": 6000009,
+                "executed_instructions": 30000033,
+                "executed_terminators": 13500021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4500003,
+                "icall_instructions": 0,
+                "mir_calls": 1500000,
+                "return_terminators": 1500003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 832168334
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 409,
+              "files_read": 1,
+              "load_ns": 67667,
+              "lower_ns": 50583,
+              "parse_ns": 22583,
+              "read_ns": 15416,
+              "total_ns": 210667,
+              "typecheck_ns": 92292
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 280797111,
+              "metrics": {
+                "allocations": 6,
+                "block_entries": 12000018,
+                "br_terminators": 6000009,
+                "call_instructions": 6000003,
+                "cond_br_terminators": 6000009,
+                "executed_instructions": 30000033,
+                "executed_terminators": 13500021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4500003,
+                "icall_instructions": 0,
+                "mir_calls": 1500000,
+                "return_terminators": 1500003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 842391334
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 409,
+              "files_read": 1,
+              "load_ns": 79708,
+              "lower_ns": 51375,
+              "parse_ns": 22125,
+              "read_ns": 26541,
+              "total_ns": 230250,
+              "typecheck_ns": 99125
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 278250902,
+              "metrics": {
+                "allocations": 6,
+                "block_entries": 12000018,
+                "br_terminators": 6000009,
+                "call_instructions": 6000003,
+                "cond_br_terminators": 6000009,
+                "executed_instructions": 30000033,
+                "executed_terminators": 13500021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4500003,
+                "icall_instructions": 0,
+                "mir_calls": 1500000,
+                "return_terminators": 1500003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 834752708
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 409,
+              "files_read": 1,
+              "load_ns": 90167,
+              "lower_ns": 56000,
+              "parse_ns": 24334,
+              "read_ns": 23209,
+              "total_ns": 264625,
+              "typecheck_ns": 118333
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase4_call_dispatch.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 283383791,
+              "metrics": {
+                "allocations": 6,
+                "block_entries": 12000018,
+                "br_terminators": 6000009,
+                "call_instructions": 6000003,
+                "cond_br_terminators": 6000009,
+                "executed_instructions": 30000033,
+                "executed_terminators": 13500021,
+                "gc_cycles": 0,
+                "gc_ns": 0,
+                "host_calls": 4500003,
+                "icall_instructions": 0,
+                "mir_calls": 1500000,
+                "return_terminators": 1500003,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 850151375
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "compile_total_ns": {
+            "max": 264625,
+            "mean": 228466,
+            "median": 221625,
+            "min": 210667,
+            "stdev": 21512
+          },
+          "run_avg_ns": {
+            "max": 283383791,
+            "mean": 279998941,
+            "median": 280173458,
+            "min": 277389444,
+            "stdev": 2344667
+          }
+        }
+      }
+    },
+    {
+      "expected": 200001,
+      "name": "phase5_gc_epoch",
+      "notes": "Allocation churn / GC stress (not semantically identical across runtimes).",
+      "params": {
+        "iters": 1,
+        "warmup": 0
+      },
+      "python": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.py",
+        "runs": [
+          {
+            "import_ns": 227792,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.py",
+            "iters": 1,
+            "last_result_repr": "200001",
+            "run": {
+              "avg_ns": 92591166,
+              "total_ns": 92591166
+            },
+            "warmup": 0
+          },
+          {
+            "import_ns": 210375,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.py",
+            "iters": 1,
+            "last_result_repr": "200001",
+            "run": {
+              "avg_ns": 93238250,
+              "total_ns": 93238250
+            },
+            "warmup": 0
+          },
+          {
+            "import_ns": 183833,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.py",
+            "iters": 1,
+            "last_result_repr": "200001",
+            "run": {
+              "avg_ns": 89718583,
+              "total_ns": 89718583
+            },
+            "warmup": 0
+          },
+          {
+            "import_ns": 219625,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.py",
+            "iters": 1,
+            "last_result_repr": "200001",
+            "run": {
+              "avg_ns": 89951708,
+              "total_ns": 89951708
+            },
+            "warmup": 0
+          },
+          {
+            "import_ns": 198250,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.py",
+            "iters": 1,
+            "last_result_repr": "200001",
+            "run": {
+              "avg_ns": 89833083,
+              "total_ns": 89833083
+            },
+            "warmup": 0
+          }
+        ],
+        "stats": {
+          "run_avg_ns": {
+            "max": 93238250,
+            "mean": 91066558,
+            "median": 89951708,
+            "min": 89718583,
+            "stdev": 1704557
+          }
+        }
+      },
+      "rusk": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.rusk",
+        "runs": [
+          {
+            "compile": {
+              "bytes_read": 960,
+              "files_read": 1,
+              "load_ns": 81833,
+              "lower_ns": 65458,
+              "parse_ns": 27875,
+              "read_ns": 22583,
+              "total_ns": 258959,
+              "typecheck_ns": 111542
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 2001557292,
+              "metrics": {
+                "allocations": 4200106,
+                "block_entries": 22401012,
+                "br_terminators": 11200506,
+                "call_instructions": 6800303,
+                "cond_br_terminators": 11200506,
+                "executed_instructions": 42401826,
+                "executed_terminators": 22401013,
+                "gc_cycles": 420,
+                "gc_ns": 522836219,
+                "host_calls": 6800303,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 1,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 2001557292
+            },
+            "warmup": 0
+          },
+          {
+            "compile": {
+              "bytes_read": 960,
+              "files_read": 1,
+              "load_ns": 84667,
+              "lower_ns": 60334,
+              "parse_ns": 27167,
+              "read_ns": 25083,
+              "total_ns": 250000,
+              "typecheck_ns": 104875
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 2013964667,
+              "metrics": {
+                "allocations": 4200106,
+                "block_entries": 22401012,
+                "br_terminators": 11200506,
+                "call_instructions": 6800303,
+                "cond_br_terminators": 11200506,
+                "executed_instructions": 42401826,
+                "executed_terminators": 22401013,
+                "gc_cycles": 420,
+                "gc_ns": 520064801,
+                "host_calls": 6800303,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 1,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 2013964667
+            },
+            "warmup": 0
+          },
+          {
+            "compile": {
+              "bytes_read": 960,
+              "files_read": 1,
+              "load_ns": 90333,
+              "lower_ns": 63500,
+              "parse_ns": 27042,
+              "read_ns": 23542,
+              "total_ns": 260167,
+              "typecheck_ns": 106208
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 1976323250,
+              "metrics": {
+                "allocations": 4200106,
+                "block_entries": 22401012,
+                "br_terminators": 11200506,
+                "call_instructions": 6800303,
+                "cond_br_terminators": 11200506,
+                "executed_instructions": 42401826,
+                "executed_terminators": 22401013,
+                "gc_cycles": 420,
+                "gc_ns": 514253133,
+                "host_calls": 6800303,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 1,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 1976323250
+            },
+            "warmup": 0
+          },
+          {
+            "compile": {
+              "bytes_read": 960,
+              "files_read": 1,
+              "load_ns": 77125,
+              "lower_ns": 60917,
+              "parse_ns": 27084,
+              "read_ns": 15875,
+              "total_ns": 245916,
+              "typecheck_ns": 107750
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 1977378875,
+              "metrics": {
+                "allocations": 4200106,
+                "block_entries": 22401012,
+                "br_terminators": 11200506,
+                "call_instructions": 6800303,
+                "cond_br_terminators": 11200506,
+                "executed_instructions": 42401826,
+                "executed_terminators": 22401013,
+                "gc_cycles": 420,
+                "gc_ns": 513593793,
+                "host_calls": 6800303,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 1,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 1977378875
+            },
+            "warmup": 0
+          },
+          {
+            "compile": {
+              "bytes_read": 960,
+              "files_read": 1,
+              "load_ns": 81750,
+              "lower_ns": 62000,
+              "parse_ns": 27458,
+              "read_ns": 22250,
+              "total_ns": 250541,
+              "typecheck_ns": 106750
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase5_gc_epoch.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 1987420791,
+              "metrics": {
+                "allocations": 4200106,
+                "block_entries": 22401012,
+                "br_terminators": 11200506,
+                "call_instructions": 6800303,
+                "cond_br_terminators": 11200506,
+                "executed_instructions": 42401826,
+                "executed_terminators": 22401013,
+                "gc_cycles": 420,
+                "gc_ns": 511673715,
+                "host_calls": 6800303,
+                "icall_instructions": 0,
+                "mir_calls": 0,
+                "return_terminators": 1,
+                "switch_terminators": 0,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 1987420791
+            },
+            "warmup": 0
+          }
+        ],
+        "stats": {
+          "compile_total_ns": {
+            "max": 260167,
+            "mean": 253116,
+            "median": 250541,
+            "min": 245916,
+            "stdev": 6165
+          },
+          "run_avg_ns": {
+            "max": 2013964667,
+            "mean": 1991328975,
+            "median": 1987420791,
+            "min": 1976323250,
+            "stdev": 16217613
+          }
+        }
+      }
+    },
+    {
+      "expected": 49995000,
+      "name": "phase6_effects_generator",
+      "notes": "Generator-like yield/resume (Rusk effects) vs Python generator.",
+      "params": {
+        "iters": 3,
+        "warmup": 1
+      },
+      "python": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.py",
+        "runs": [
+          {
+            "import_ns": 200875,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.py",
+            "iters": 3,
+            "last_result_repr": "49995000",
+            "run": {
+              "avg_ns": 414652,
+              "total_ns": 1243958
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 172125,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.py",
+            "iters": 3,
+            "last_result_repr": "49995000",
+            "run": {
+              "avg_ns": 420444,
+              "total_ns": 1261334
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 158542,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.py",
+            "iters": 3,
+            "last_result_repr": "49995000",
+            "run": {
+              "avg_ns": 423555,
+              "total_ns": 1270667
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 166583,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.py",
+            "iters": 3,
+            "last_result_repr": "49995000",
+            "run": {
+              "avg_ns": 415375,
+              "total_ns": 1246125
+            },
+            "warmup": 1
+          },
+          {
+            "import_ns": 155459,
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.py",
+            "iters": 3,
+            "last_result_repr": "49995000",
+            "run": {
+              "avg_ns": 427444,
+              "total_ns": 1282333
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "run_avg_ns": {
+            "max": 427444,
+            "mean": 420294,
+            "median": 420444,
+            "min": 414652,
+            "stdev": 5426
+          }
+        }
+      },
+      "rusk": {
+        "path": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.rusk",
+        "runs": [
+          {
+            "compile": {
+              "bytes_read": 661,
+              "files_read": 1,
+              "load_ns": 87208,
+              "lower_ns": 68000,
+              "parse_ns": 28625,
+              "read_ns": 27375,
+              "total_ns": 266125,
+              "typecheck_ns": 110792
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 30222416,
+              "metrics": {
+                "allocations": 30009,
+                "block_entries": 360027,
+                "br_terminators": 150012,
+                "call_instructions": 120009,
+                "cond_br_terminators": 150009,
+                "executed_instructions": 840054,
+                "executed_terminators": 390036,
+                "gc_cycles": 3,
+                "gc_ns": 854834,
+                "host_calls": 90003,
+                "icall_instructions": 0,
+                "mir_calls": 30006,
+                "return_terminators": 60009,
+                "switch_terminators": 30006,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 90667250
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 661,
+              "files_read": 1,
+              "load_ns": 70084,
+              "lower_ns": 63542,
+              "parse_ns": 27708,
+              "read_ns": 14459,
+              "total_ns": 240000,
+              "typecheck_ns": 106292
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 30367638,
+              "metrics": {
+                "allocations": 30009,
+                "block_entries": 360027,
+                "br_terminators": 150012,
+                "call_instructions": 120009,
+                "cond_br_terminators": 150009,
+                "executed_instructions": 840054,
+                "executed_terminators": 390036,
+                "gc_cycles": 3,
+                "gc_ns": 820834,
+                "host_calls": 90003,
+                "icall_instructions": 0,
+                "mir_calls": 30006,
+                "return_terminators": 60009,
+                "switch_terminators": 30006,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 91102916
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 661,
+              "files_read": 1,
+              "load_ns": 72250,
+              "lower_ns": 63459,
+              "parse_ns": 27667,
+              "read_ns": 14750,
+              "total_ns": 243666,
+              "typecheck_ns": 107875
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 30463166,
+              "metrics": {
+                "allocations": 30009,
+                "block_entries": 360027,
+                "br_terminators": 150012,
+                "call_instructions": 120009,
+                "cond_br_terminators": 150009,
+                "executed_instructions": 840054,
+                "executed_terminators": 390036,
+                "gc_cycles": 3,
+                "gc_ns": 881041,
+                "host_calls": 90003,
+                "icall_instructions": 0,
+                "mir_calls": 30006,
+                "return_terminators": 60009,
+                "switch_terminators": 30006,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 91389500
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 661,
+              "files_read": 1,
+              "load_ns": 68208,
+              "lower_ns": 62417,
+              "parse_ns": 27166,
+              "read_ns": 13750,
+              "total_ns": 236417,
+              "typecheck_ns": 105667
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 30245861,
+              "metrics": {
+                "allocations": 30009,
+                "block_entries": 360027,
+                "br_terminators": 150012,
+                "call_instructions": 120009,
+                "cond_br_terminators": 150009,
+                "executed_instructions": 840054,
+                "executed_terminators": 390036,
+                "gc_cycles": 3,
+                "gc_ns": 805791,
+                "host_calls": 90003,
+                "icall_instructions": 0,
+                "mir_calls": 30006,
+                "return_terminators": 60009,
+                "switch_terminators": 30006,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 90737583
+            },
+            "warmup": 1
+          },
+          {
+            "compile": {
+              "bytes_read": 661,
+              "files_read": 1,
+              "load_ns": 72375,
+              "lower_ns": 65833,
+              "parse_ns": 28291,
+              "read_ns": 14583,
+              "total_ns": 244459,
+              "typecheck_ns": 106125
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk.1/benchmarks/phase6_effects_generator.rusk",
+            "iters": 3,
+            "run": {
+              "avg_ns": 31380819,
+              "metrics": {
+                "allocations": 30009,
+                "block_entries": 360027,
+                "br_terminators": 150012,
+                "call_instructions": 120009,
+                "cond_br_terminators": 150009,
+                "executed_instructions": 840054,
+                "executed_terminators": 390036,
+                "gc_cycles": 3,
+                "gc_ns": 834000,
+                "host_calls": 90003,
+                "icall_instructions": 0,
+                "mir_calls": 30006,
+                "return_terminators": 60009,
+                "switch_terminators": 30006,
+                "trap_terminators": 0,
+                "vcall_instructions": 0
+              },
+              "total_ns": 94142458
+            },
+            "warmup": 1
+          }
+        ],
+        "stats": {
+          "compile_total_ns": {
+            "max": 266125,
+            "mean": 246133,
+            "median": 243666,
+            "min": 236417,
+            "stdev": 11625
+          },
+          "run_avg_ns": {
+            "max": 31380819,
+            "mean": 30535980,
+            "median": 30367638,
+            "min": 30222416,
+            "stdev": 482152
+          }
+        }
+      }
+    }
+  ],
+  "env": {
+    "cargo": "cargo 1.93.0 (083ac5135 2025-12-15)",
+    "git_commit": "38770dbdc9ad7fdf638752b70090b9e11924750c",
+    "machine": "arm64",
+    "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+    "python": {
+      "executable": "/Volumes/Data/home/chenxu/repos/rusk.1/.venv/bin/python",
+      "version": "3.14.2 (main, Dec  5 2025, 16:49:16) [Clang 17.0.0 (clang-1700.6.3.2)]"
+    },
+    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
+    "timestamp_utc": "2026-02-14T06:50:07Z"
+  },
+  "params": {
+    "iters": 3,
+    "repeats": 5,
+    "warmup": 1
+  }
+}

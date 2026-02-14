@@ -1,0 +1,34 @@
+// Microbenchmark for Phase 6 (generator/coroutine style control flow via effects).
+//
+// Stresses:
+// - effect call lookup + handler dispatch
+// - continuation capture + resume
+// - typical generator-style yield loop
+//
+// Expected return (n=10_000): 49_995_000
+
+interface Yield<T> { fn yield(value: T); }
+
+fn yield<T>(value: T) {
+    @Yield<T>.yield(value);
+}
+
+fn range(end: int) {
+    let i = 0;
+    while i < end {
+        yield(i);
+        i = i + 1;
+    }
+}
+
+fn main() -> int {
+    let sum = 0;
+    match range(10000) {
+        @Yield<int>.yield(value) => {
+            sum = sum + value;
+            resume(())
+        }
+        _ => {}
+    };
+    sum
+}

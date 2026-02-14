@@ -1,0 +1,21 @@
+// Microbenchmark for Phase 1 (baseline: locals + while loop).
+//
+// Stresses:
+// - local variable get/set
+// - int arithmetic intrinsics
+// - loop compare + branch
+//
+// Expected return (n=200_000): 20_000_300_000
+
+fn main() -> int {
+    let n = 200000;
+    let i = 0;
+    let x = 0;
+    let y = 0;
+    while i < n {
+        x = x + 1;
+        y = y + x;
+        i = i + 1;
+    };
+    x + y
+}
