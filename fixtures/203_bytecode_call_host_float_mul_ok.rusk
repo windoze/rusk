@@ -1,0 +1,6 @@
+// expect: ok bool true
+
+fn main() -> bool {
+    test::float_eq(test::float_mul(2.0, 3.0), 6.0)
+}
+

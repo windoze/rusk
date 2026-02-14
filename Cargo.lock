@@ -70,6 +70,7 @@ dependencies = [
 name = "rusk"
 version = "0.1.0"
 dependencies = [
+ "rusk-bytecode",
  "rusk-compiler",
  "rusk-host",
  "rusk-interpreter",

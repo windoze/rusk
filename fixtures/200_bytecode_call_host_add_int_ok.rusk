@@ -1,0 +1,6 @@
+// expect: ok int 3
+
+fn main() -> int {
+    test::add_int(1, 2)
+}
+

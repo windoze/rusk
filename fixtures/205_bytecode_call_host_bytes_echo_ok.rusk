@@ -1,0 +1,6 @@
+// expect: ok bool true
+
+fn main() -> bool {
+    test::bytes_eq(test::bytes_echo(b"hi"), b"hi")
+}
+

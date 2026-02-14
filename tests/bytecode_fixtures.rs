@@ -1,16 +1,15 @@
 mod common;
 
 use rusk_compiler::{
-    CompileOptions, compile_file_to_mir_with_options, compile_to_mir_with_options,
+    CompileOptions, compile_file_to_bytecode_with_options, compile_to_bytecode_with_options,
 };
-use rusk_interpreter::corelib::register_core_host_fns;
-use rusk_interpreter::{Interpreter, Value};
+use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 enum Expectation {
-    Ok(Value),
+    Ok(AbiValue),
     CompileError { contains: String },
     RuntimeError { contains: String },
 }
@@ -83,17 +82,17 @@ fn parse_expectation(source: &str, path: &Path) -> Expectation {
     );
 }
 
-fn parse_expected_value(spec: &str, path: &Path) -> Value {
+fn parse_expected_value(spec: &str, path: &Path) -> AbiValue {
     let spec = spec.trim();
     if spec == "unit" {
-        return Value::Unit;
+        return AbiValue::Unit;
     }
 
     if let Some(rest) = spec.strip_prefix("bool") {
         let v = rest.trim();
         return match v {
-            "true" => Value::Bool(true),
-            "false" => Value::Bool(false),
+            "true" => AbiValue::Bool(true),
+            "false" => AbiValue::Bool(false),
             _ => panic!(
                 "fixture {}: invalid bool expectation `{spec}`; use `bool true` or `bool false`",
                 path.display()
@@ -109,7 +108,7 @@ fn parse_expected_value(spec: &str, path: &Path) -> Value {
                 path.display()
             )
         });
-        return Value::Int(n);
+        return AbiValue::Int(n);
     }
 
     if let Some(rest) = spec.strip_prefix("string") {
@@ -117,7 +116,7 @@ fn parse_expected_value(spec: &str, path: &Path) -> Value {
         if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
             s = &s[1..s.len() - 1];
         }
-        return Value::String(s.to_string());
+        return AbiValue::String(s.to_string());
     }
 
     panic!(
@@ -138,6 +137,17 @@ struct FixtureCase {
     kind: FixtureKind,
 }
 
+fn is_bytecode_fixture(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let Ok(n) = digits.parse::<u32>() else {
+        return false;
+    };
+    (200..300).contains(&n)
+}
+
 fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
     let mut out = Vec::new();
     let entries = fs::read_dir(fixture_dir).unwrap_or_else(|e| {
@@ -156,7 +166,7 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
         });
         let path = entry.path();
         if path.is_file() {
-            if path.extension().and_then(|s| s.to_str()) == Some("rusk") {
+            if path.extension().and_then(|s| s.to_str()) == Some("rusk") && is_bytecode_fixture(&path) {
                 out.push(FixtureCase {
                     path: path.clone(),
                     kind: FixtureKind::SingleFile(path),
@@ -167,25 +177,12 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
 
         if path.is_dir() {
             let main = path.join("main.rusk");
-            if main.is_file() {
+            if main.is_file() && is_bytecode_fixture(&path) {
                 out.push(FixtureCase {
                     path: path.clone(),
                     kind: FixtureKind::DirMain(main),
                 });
                 continue;
-            }
-
-            let has_rusk = fs::read_dir(&path).ok().is_some_and(|iter| {
-                iter.filter_map(Result::ok).any(|e| {
-                    e.path().is_file()
-                        && e.path().extension().and_then(|s| s.to_str()) == Some("rusk")
-                })
-            });
-            if has_rusk {
-                panic!(
-                    "fixture directory `{}` contains `.rusk` files but no `main.rusk` entry",
-                    path.display()
-                );
             }
         }
     }
@@ -195,11 +192,11 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
 }
 
 #[test]
-fn fixtures() {
+fn bytecode_fixtures() {
     let fixture_dir = Path::new("fixtures");
     let cases = discover_fixtures(fixture_dir);
     if cases.is_empty() {
-        panic!("no fixtures found under `{}`", fixture_dir.display());
+        panic!("no bytecode fixtures found under `{}`", fixture_dir.display());
     }
 
     let mut options = CompileOptions::default();
@@ -210,20 +207,19 @@ fn fixtures() {
             FixtureKind::SingleFile(path) => {
                 let source = fs::read_to_string(path)
                     .unwrap_or_else(|e| panic!("fixture {}: read failed: {e}", path.display()));
-                let module = compile_to_mir_with_options(&source, &options);
+                let module = compile_to_bytecode_with_options(&source, &options);
                 (path.as_path(), source, module)
             }
             FixtureKind::DirMain(main_path) => {
                 let source = fs::read_to_string(main_path).unwrap_or_else(|e| {
                     panic!("fixture {}: read failed: {e}", main_path.display())
                 });
-                let module = compile_file_to_mir_with_options(main_path, &options);
+                let module = compile_file_to_bytecode_with_options(main_path, &options);
                 (main_path.as_path(), source, module)
             }
         };
 
         let expect = parse_expectation(&source, entry_path);
-
         match expect {
             Expectation::CompileError { contains } => {
                 let err = module.expect_err("expected compile error");
@@ -238,15 +234,13 @@ fn fixtures() {
                 let module = module.unwrap_or_else(|e| {
                     panic!("fixture {}: compile failed: {e}", entry_path.display())
                 });
-                let mut interp = Interpreter::new(module);
-                register_core_host_fns(&mut interp);
-                common::install_test_host_fns(&mut interp);
-                let got = interp.run_function("main", vec![]).unwrap_or_else(|e| {
-                    panic!("fixture {}: runtime failed: {e}", entry_path.display())
-                });
+                let mut vm = Vm::new(module.clone())
+                    .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
+                common::install_test_host_fns_vm(&module, &mut vm);
+                let got = vm_step(&mut vm, None);
                 assert_eq!(
                     got,
-                    want,
+                    StepResult::Done { value: want },
                     "fixture {}: result mismatch",
                     entry_path.display()
                 );
@@ -255,19 +249,20 @@ fn fixtures() {
                 let module = module.unwrap_or_else(|e| {
                     panic!("fixture {}: compile failed: {e}", entry_path.display())
                 });
-                let mut interp = Interpreter::new(module);
-                register_core_host_fns(&mut interp);
-                common::install_test_host_fns(&mut interp);
-                let err = interp
-                    .run_function("main", vec![])
-                    .expect_err("expected runtime error");
-                let msg = err.to_string();
+                let mut vm = Vm::new(module.clone())
+                    .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
+                common::install_test_host_fns_vm(&module, &mut vm);
+                let got = vm_step(&mut vm, None);
+                let StepResult::Trap { message } = got else {
+                    panic!("fixture {}: expected trap, got {got:?}", entry_path.display());
+                };
                 assert!(
-                    msg.contains(&contains),
-                    "fixture {}: runtime error mismatch\n  want message containing: {contains:?}\n  got: {msg}",
+                    message.contains(&contains),
+                    "fixture {}: runtime error mismatch\n  want message containing: {contains:?}\n  got: {message}",
                     entry_path.display()
                 );
             }
         }
     }
 }
+

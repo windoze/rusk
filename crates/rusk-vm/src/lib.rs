@@ -79,7 +79,7 @@ pub trait HostFn: 'static {
 
 impl<F> HostFn for F
 where
-    F: FnMut(&[AbiValue]) -> Result<AbiValue, HostError> + 'static,
+    F: for<'a> FnMut(&'a [AbiValue]) -> Result<AbiValue, HostError> + 'static,
 {
     fn call(&mut self, args: &[AbiValue]) -> Result<AbiValue, HostError> {
         self(args)
@@ -590,12 +590,94 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         return_dst: *dst,
                     });
                 }
-                rusk_bytecode::CallTarget::Host(_hid) => {
-                    let message = "host calls are not implemented yet".to_string();
-                    vm.state = VmState::Trapped {
-                        message: message.clone(),
+                rusk_bytecode::CallTarget::Host(hid) => {
+                    let Some(import) = vm.module.host_import(*hid) else {
+                        return trap(vm, format!("invalid host import id {}", hid.0));
                     };
-                    return StepResult::Trap { message };
+
+                    if args.len() != import.sig.params.len() {
+                        return trap(
+                            vm,
+                            format!(
+                                "host call `{}` arity mismatch: expected {} args but got {}",
+                                import.name,
+                                import.sig.params.len(),
+                                args.len()
+                            ),
+                        );
+                    }
+
+                    let idx: usize = hid.0 as usize;
+                    let Some(host_fn) = vm.host_fns.get_mut(idx).and_then(|v| v.as_mut()) else {
+                        return trap(
+                            vm,
+                            format!("missing host import implementation: `{}`", import.name),
+                        );
+                    };
+
+                    let mut abi_args = Vec::with_capacity(args.len());
+                    for (arg_reg, expected) in args.iter().zip(import.sig.params.iter()) {
+                        let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
+                        let Some(v) = frame
+                            .regs
+                            .get(src_idx)
+                            .and_then(|v| v.as_ref())
+                            .cloned()
+                        else {
+                            return trap(
+                                vm,
+                                format!(
+                                    "host call `{}` read from uninitialized reg {arg_reg}",
+                                    import.name
+                                ),
+                            );
+                        };
+                        let abi = v.to_abi();
+                        if abi.ty() != *expected {
+                            return trap(
+                                vm,
+                                format!(
+                                    "host call `{}` arg type mismatch: expected {:?}, got {:?}",
+                                    import.name,
+                                    expected,
+                                    abi.ty()
+                                ),
+                            );
+                        }
+                        abi_args.push(abi);
+                    }
+
+                    vm.in_host_call = true;
+                    let call_result = host_fn.call(&abi_args);
+                    vm.in_host_call = false;
+
+                    let abi_ret = match call_result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return trap(
+                                vm,
+                                format!("host call `{}` failed: {e}", import.name),
+                            );
+                        }
+                    };
+
+                    if abi_ret.ty() != import.sig.ret {
+                        return trap(
+                            vm,
+                            format!(
+                                "host call `{}` return type mismatch: expected {:?}, got {:?}",
+                                import.name,
+                                import.sig.ret,
+                                abi_ret.ty()
+                            ),
+                        );
+                    }
+
+                    if let Some(dst) = dst {
+                        if let Err(msg) = write_value(frame, *dst, Value::from_abi(&abi_ret)) {
+                            return trap(vm, format!("host call `{}` dst: {msg}", import.name));
+                        }
+                    }
                 }
             },
 
@@ -767,7 +849,7 @@ pub fn vm_drop_continuation(vm: &mut Vm, k: ContinuationHandle) -> Result<(), Vm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusk_bytecode::{ExecutableModule, Function};
+    use rusk_bytecode::{AbiType, CallTarget, ExecutableModule, Function, HostFnSig, HostImport, Instruction};
 
     #[test]
     fn step_done_for_trivial_program() {
@@ -860,5 +942,169 @@ mod tests {
         )
         .expect_err("expected error");
         assert!(err.to_string().contains("not suspended"));
+    }
+
+    #[test]
+    fn call_host_int_add_ok() {
+        let mut module = ExecutableModule::default();
+        let add_id = module
+            .add_host_import(HostImport {
+                name: "test::add_int".to_string(),
+                sig: HostFnSig {
+                    params: vec![AbiType::Int, AbiType::Int],
+                    ret: AbiType::Int,
+                },
+            })
+            .unwrap();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 3,
+                param_count: 0,
+                code: vec![
+                    Instruction::Const {
+                        dst: 0,
+                        value: rusk_bytecode::ConstValue::Int(1),
+                    },
+                    Instruction::Const {
+                        dst: 1,
+                        value: rusk_bytecode::ConstValue::Int(2),
+                    },
+                    Instruction::Call {
+                        dst: Some(2),
+                        func: CallTarget::Host(add_id),
+                        args: vec![0, 1],
+                    },
+                    Instruction::Return { value: 2 },
+                ],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+        vm.register_host_import(add_id, |args: &[AbiValue]| match args {
+            [AbiValue::Int(a), AbiValue::Int(b)] => Ok(AbiValue::Int(a + b)),
+            other => Err(HostError {
+                message: format!("bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            vm_step(&mut vm, None),
+            StepResult::Done {
+                value: AbiValue::Int(3)
+            }
+        );
+    }
+
+    #[test]
+    fn call_host_type_mismatch_traps() {
+        let mut module = ExecutableModule::default();
+        let add_id = module
+            .add_host_import(HostImport {
+                name: "test::add_int".to_string(),
+                sig: HostFnSig {
+                    params: vec![AbiType::Int],
+                    ret: AbiType::Int,
+                },
+            })
+            .unwrap();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 2,
+                param_count: 0,
+                code: vec![
+                    Instruction::Const {
+                        dst: 0,
+                        value: rusk_bytecode::ConstValue::Bool(true),
+                    },
+                    Instruction::Call {
+                        dst: Some(1),
+                        func: CallTarget::Host(add_id),
+                        args: vec![0],
+                    },
+                    Instruction::Return { value: 1 },
+                ],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+        vm.register_host_import(add_id, |_args: &[AbiValue]| Ok(AbiValue::Int(0)))
+            .unwrap();
+
+        let got = vm_step(&mut vm, None);
+        let StepResult::Trap { message } = got else {
+            panic!("expected trap, got {got:?}");
+        };
+        assert!(message.contains("arg type mismatch"), "{message}");
+    }
+
+    #[test]
+    fn call_host_arity_mismatch_traps() {
+        let mut module = ExecutableModule::default();
+        let add_id = module
+            .add_host_import(HostImport {
+                name: "test::add_int".to_string(),
+                sig: HostFnSig {
+                    params: vec![AbiType::Int, AbiType::Int],
+                    ret: AbiType::Int,
+                },
+            })
+            .unwrap();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 2,
+                param_count: 0,
+                code: vec![
+                    Instruction::Const {
+                        dst: 0,
+                        value: rusk_bytecode::ConstValue::Int(1),
+                    },
+                    Instruction::Call {
+                        dst: Some(1),
+                        func: CallTarget::Host(add_id),
+                        args: vec![0],
+                    },
+                    Instruction::Return { value: 1 },
+                ],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+        vm.register_host_import(add_id, |_args: &[AbiValue]| Ok(AbiValue::Int(0)))
+            .unwrap();
+
+        let got = vm_step(&mut vm, None);
+        let StepResult::Trap { message } = got else {
+            panic!("expected trap, got {got:?}");
+        };
+        assert!(message.contains("arity mismatch"), "{message}");
+    }
+
+    #[test]
+    fn call_host_non_reentrant_guard_traps() {
+        let mut module = ExecutableModule::default();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 0,
+                param_count: 0,
+                code: vec![],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+        vm.in_host_call = true;
+        let got = vm_step(&mut vm, None);
+        let StepResult::Trap { message } = got else {
+            panic!("expected trap, got {got:?}");
+        };
+        assert!(message.contains("re-entered"), "{message}");
     }
 }

@@ -1,0 +1,6 @@
+// expect: ok bool false
+
+fn main() -> bool {
+    test::bool_not(true)
+}
+

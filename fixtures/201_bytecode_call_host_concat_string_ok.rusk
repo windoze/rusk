@@ -1,0 +1,6 @@
+// expect: ok string "ab"
+
+fn main() -> string {
+    test::concat_string("a", "b")
+}
+
