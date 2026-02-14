@@ -1456,6 +1456,17 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         }
                     }
                 }
+                rusk_bytecode::CallTarget::Intrinsic(intr) => {
+                    let out = match eval_core_intrinsic(&vm.module, frame, *intr, args.as_slice()) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, msg),
+                    };
+                    if let Some(dst) = dst {
+                        if let Err(msg) = write_value(frame, *dst, out) {
+                            return trap(vm, format!("intrinsic call dst: {msg}"));
+                        }
+                    }
+                }
             },
 
             rusk_bytecode::Instruction::ICall { dst, fnptr, args } => {
@@ -1804,6 +1815,583 @@ fn type_test(
         }
         TypeCtor::Fn | TypeCtor::Cont => false,
     })
+}
+
+const ARRAY_ITER_TYPE: &str = "core::intrinsics::ArrayIter";
+const ARRAY_ITER_FIELD_ARRAY: &str = "arr";
+const ARRAY_ITER_FIELD_INDEX: &str = "idx";
+
+fn eval_core_intrinsic(
+    module: &ExecutableModule,
+    frame: &Frame,
+    intr: rusk_bytecode::Intrinsic,
+    arg_regs: &[rusk_bytecode::Reg],
+) -> Result<Value, String> {
+    use rusk_bytecode::Intrinsic as I;
+
+    let mut args = Vec::with_capacity(arg_regs.len());
+    for reg in arg_regs {
+        args.push(read_value(frame, *reg)?);
+    }
+
+    let bad_args = |name: &str| -> String { format!("{name}: bad args: {args:?}") };
+
+    match intr {
+        I::StringConcat => match args.as_slice() {
+            [Value::String(a), Value::String(b)] => Ok(Value::String(format!("{a}{b}"))),
+            _ => Err(bad_args("core::intrinsics::string_concat")),
+        },
+        I::ToString => match args.as_slice() {
+            [Value::TypeRep(_), Value::Unit] => Ok(Value::String("()".to_string())),
+            [Value::TypeRep(_), Value::Bool(v)] => Ok(Value::String(v.to_string())),
+            [Value::TypeRep(_), Value::Int(v)] => Ok(Value::String(v.to_string())),
+            [Value::TypeRep(_), Value::Float(v)] => Ok(Value::String(v.to_string())),
+            [Value::TypeRep(_), Value::String(v)] => Ok(Value::String(v.clone())),
+            [Value::TypeRep(_), Value::Bytes(v)] => Ok(Value::String(format!("bytes(len={})", v.len()))),
+            [Value::TypeRep(_), Value::Ref(r)] => Ok(Value::String(format!("{:?}", Value::Ref(r.clone())))),
+            [Value::TypeRep(_), Value::Function(id)] => Ok(Value::String(format!("fn#{}", id.0))),
+            [Value::TypeRep(_), Value::TypeRep(id)] => Ok(Value::String(format!("typerep({})", id.0))),
+            _ => Err(bad_args("core::intrinsics::to_string")),
+        },
+        I::Panic => match args.as_slice() {
+            [Value::TypeRep(_), Value::String(msg)] => Err(format!("panic: {msg}")),
+            _ => Err(bad_args("core::intrinsics::panic")),
+        },
+
+        I::BoolNot => match args.as_slice() {
+            [Value::Bool(v)] => Ok(Value::Bool(!v)),
+            _ => Err(bad_args("core::intrinsics::bool_not")),
+        },
+        I::BoolEq => match args.as_slice() {
+            [Value::Bool(a), Value::Bool(b)] => Ok(Value::Bool(a == b)),
+            _ => Err(bad_args("core::intrinsics::bool_eq")),
+        },
+        I::BoolNe => match args.as_slice() {
+            [Value::Bool(a), Value::Bool(b)] => Ok(Value::Bool(a != b)),
+            _ => Err(bad_args("core::intrinsics::bool_ne")),
+        },
+
+        I::IntAdd => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a + b)),
+            _ => Err(bad_args("core::intrinsics::int_add")),
+        },
+        I::IntSub => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a - b)),
+            _ => Err(bad_args("core::intrinsics::int_sub")),
+        },
+        I::IntMul => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a * b)),
+            _ => Err(bad_args("core::intrinsics::int_mul")),
+        },
+        I::IntDiv => match args.as_slice() {
+            [Value::Int(_), Value::Int(0)] => Err("core::intrinsics::int_div: division by zero".to_string()),
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a / b)),
+            _ => Err(bad_args("core::intrinsics::int_div")),
+        },
+        I::IntMod => match args.as_slice() {
+            [Value::Int(_), Value::Int(0)] => Err("core::intrinsics::int_mod: modulo by zero".to_string()),
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a % b)),
+            _ => Err(bad_args("core::intrinsics::int_mod")),
+        },
+        I::IntEq => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a == b)),
+            _ => Err(bad_args("core::intrinsics::int_eq")),
+        },
+        I::IntNe => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a != b)),
+            _ => Err(bad_args("core::intrinsics::int_ne")),
+        },
+        I::IntLt => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a < b)),
+            _ => Err(bad_args("core::intrinsics::int_lt")),
+        },
+        I::IntLe => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a <= b)),
+            _ => Err(bad_args("core::intrinsics::int_le")),
+        },
+        I::IntGt => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a > b)),
+            _ => Err(bad_args("core::intrinsics::int_gt")),
+        },
+        I::IntGe => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a >= b)),
+            _ => Err(bad_args("core::intrinsics::int_ge")),
+        },
+
+        I::FloatAdd => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a + b)),
+            _ => Err(bad_args("core::intrinsics::float_add")),
+        },
+        I::FloatSub => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a - b)),
+            _ => Err(bad_args("core::intrinsics::float_sub")),
+        },
+        I::FloatMul => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a * b)),
+            _ => Err(bad_args("core::intrinsics::float_mul")),
+        },
+        I::FloatDiv => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a / b)),
+            _ => Err(bad_args("core::intrinsics::float_div")),
+        },
+        I::FloatMod => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a % b)),
+            _ => Err(bad_args("core::intrinsics::float_mod")),
+        },
+        I::FloatEq => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Bool(a == b)),
+            _ => Err(bad_args("core::intrinsics::float_eq")),
+        },
+        I::FloatNe => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Bool(a != b)),
+            _ => Err(bad_args("core::intrinsics::float_ne")),
+        },
+        I::FloatLt => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Bool(a < b)),
+            _ => Err(bad_args("core::intrinsics::float_lt")),
+        },
+        I::FloatLe => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Bool(a <= b)),
+            _ => Err(bad_args("core::intrinsics::float_le")),
+        },
+        I::FloatGt => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Bool(a > b)),
+            _ => Err(bad_args("core::intrinsics::float_gt")),
+        },
+        I::FloatGe => match args.as_slice() {
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Bool(a >= b)),
+            _ => Err(bad_args("core::intrinsics::float_ge")),
+        },
+
+        I::StringEq => match args.as_slice() {
+            [Value::String(a), Value::String(b)] => Ok(Value::Bool(a == b)),
+            _ => Err(bad_args("core::intrinsics::string_eq")),
+        },
+        I::StringNe => match args.as_slice() {
+            [Value::String(a), Value::String(b)] => Ok(Value::Bool(a != b)),
+            _ => Err(bad_args("core::intrinsics::string_ne")),
+        },
+        I::BytesEq => match args.as_slice() {
+            [Value::Bytes(a), Value::Bytes(b)] => Ok(Value::Bool(a == b)),
+            _ => Err(bad_args("core::intrinsics::bytes_eq")),
+        },
+        I::BytesNe => match args.as_slice() {
+            [Value::Bytes(a), Value::Bytes(b)] => Ok(Value::Bool(a != b)),
+            _ => Err(bad_args("core::intrinsics::bytes_ne")),
+        },
+        I::UnitEq => match args.as_slice() {
+            [Value::Unit, Value::Unit] => Ok(Value::Bool(true)),
+            _ => Err(bad_args("core::intrinsics::unit_eq")),
+        },
+        I::UnitNe => match args.as_slice() {
+            [Value::Unit, Value::Unit] => Ok(Value::Bool(false)),
+            _ => Err(bad_args("core::intrinsics::unit_ne")),
+        },
+
+        I::ArrayLen => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr)] => match &*arr.obj.borrow() {
+                HeapValue::Array(items) => Ok(Value::Int(items.len() as i64)),
+                _ => Err("core::intrinsics::array_len: expected an array".to_string()),
+            },
+            _ => Err(bad_args("core::intrinsics::array_len")),
+        },
+        I::ArrayLenRo => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr)] => match &*arr.obj.borrow() {
+                HeapValue::Array(items) => Ok(Value::Int(items.len() as i64)),
+                _ => Err("core::intrinsics::array_len_ro: expected an array".to_string()),
+            },
+            _ => Err(bad_args("core::intrinsics::array_len_ro")),
+        },
+        I::ArrayPush => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), value] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err("core::intrinsics::array_push: expected an array".to_string());
+                };
+                items.push(value.clone());
+                Ok(Value::Unit)
+            }
+            _ => Err(bad_args("core::intrinsics::array_push")),
+        },
+        I::ArrayPop => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err("core::intrinsics::array_pop: expected an array".to_string());
+                };
+                match items.pop() {
+                    Some(v) => Ok(alloc_ref(HeapValue::Enum {
+                        enum_name: "Option".to_string(),
+                        type_args: vec![*elem_rep],
+                        variant: "Some".to_string(),
+                        fields: vec![v],
+                    })),
+                    None => Ok(alloc_ref(HeapValue::Enum {
+                        enum_name: "Option".to_string(),
+                        type_args: vec![*elem_rep],
+                        variant: "None".to_string(),
+                        fields: Vec::new(),
+                    })),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::array_pop")),
+        },
+        I::ArrayClear => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr)] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err("core::intrinsics::array_clear: expected an array".to_string());
+                };
+                items.clear();
+                Ok(Value::Unit)
+            }
+            _ => Err(bad_args("core::intrinsics::array_clear")),
+        },
+        I::ArrayResize => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), Value::Int(new_len), fill] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                if *new_len < 0 {
+                    return Err(
+                        "core::intrinsics::array_resize: new_len must be >= 0".to_string(),
+                    );
+                }
+                let new_len_usize: usize = *new_len as usize;
+
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err("core::intrinsics::array_resize: expected an array".to_string());
+                };
+
+                if new_len_usize <= items.len() {
+                    items.truncate(new_len_usize);
+                    return Ok(Value::Unit);
+                }
+
+                let extra = new_len_usize - items.len();
+                items.reserve(extra);
+                for _ in 0..extra {
+                    items.push(fill.clone());
+                }
+                Ok(Value::Unit)
+            }
+            _ => Err(bad_args("core::intrinsics::array_resize")),
+        },
+        I::ArrayInsert => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), Value::Int(idx), value] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err("core::intrinsics::array_insert: expected an array".to_string());
+                };
+                let idx_usize: usize = (*idx)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={idx}, len={}", items.len()))?;
+                if idx_usize > items.len() {
+                    return Err(format!(
+                        "index out of bounds: index={idx}, len={}",
+                        items.len()
+                    ));
+                }
+                items.insert(idx_usize, value.clone());
+                Ok(Value::Unit)
+            }
+            _ => Err(bad_args("core::intrinsics::array_insert")),
+        },
+        I::ArrayRemove => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), Value::Int(idx)] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err("core::intrinsics::array_remove: expected an array".to_string());
+                };
+                let idx_usize: usize = (*idx)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={idx}, len={}", items.len()))?;
+                if idx_usize >= items.len() {
+                    return Err(format!(
+                        "index out of bounds: index={idx}, len={}",
+                        items.len()
+                    ));
+                }
+                Ok(items.remove(idx_usize))
+            }
+            _ => Err(bad_args("core::intrinsics::array_remove")),
+        },
+        I::ArrayExtend => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), Value::Ref(other)] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let other_items = match &*other.obj.borrow() {
+                    HeapValue::Array(items) => items.clone(),
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_extend: expected an array for `other`".to_string(),
+                        );
+                    }
+                };
+                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                    return Err(
+                        "core::intrinsics::array_extend: expected an array for `arr`".to_string(),
+                    );
+                };
+                items.extend(other_items);
+                Ok(Value::Unit)
+            }
+            _ => Err(bad_args("core::intrinsics::array_extend")),
+        },
+        I::ArrayConcat => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(a), Value::Ref(b)] => {
+                let a_items = match &*a.obj.borrow() {
+                    HeapValue::Array(items) => items.clone(),
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_concat: expected an array for `a`".to_string(),
+                        );
+                    }
+                };
+                let b_items = match &*b.obj.borrow() {
+                    HeapValue::Array(items) => items.clone(),
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_concat: expected an array for `b`".to_string(),
+                        );
+                    }
+                };
+                let mut items = Vec::with_capacity(a_items.len() + b_items.len());
+                items.extend(a_items);
+                items.extend(b_items);
+                Ok(alloc_ref(HeapValue::Array(items)))
+            }
+            _ => Err(bad_args("core::intrinsics::array_concat")),
+        },
+        I::ArrayConcatRo => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(a), Value::Ref(b)] => {
+                let a_items = match &*a.obj.borrow() {
+                    HeapValue::Array(items) => items.clone(),
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_concat_ro: expected an array for `a`".to_string(),
+                        );
+                    }
+                };
+                let b_items = match &*b.obj.borrow() {
+                    HeapValue::Array(items) => items.clone(),
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_concat_ro: expected an array for `b`".to_string(),
+                        );
+                    }
+                };
+                let mut items = Vec::with_capacity(a_items.len() + b_items.len());
+                items.extend(a_items.into_iter().map(Value::into_readonly_view));
+                items.extend(b_items.into_iter().map(Value::into_readonly_view));
+                Ok(alloc_ref(HeapValue::Array(items)))
+            }
+            _ => Err(bad_args("core::intrinsics::array_concat_ro")),
+        },
+        I::ArraySlice => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), Value::Int(start), Value::Int(end)] => {
+                let borrowed = arr.obj.borrow();
+                let items = match &*borrowed {
+                    HeapValue::Array(items) => items,
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_slice: expected an array".to_string(),
+                        );
+                    }
+                };
+                let len = items.len();
+
+                let start_usize: usize = (*start)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
+                let end_usize: usize = (*end)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
+                if start_usize > end_usize {
+                    return Err(
+                        "core::intrinsics::array_slice: start must be <= end".to_string(),
+                    );
+                }
+                if end_usize > len {
+                    return Err(format!("index out of bounds: index={end}, len={len}"));
+                }
+                Ok(alloc_ref(HeapValue::Array(
+                    items[start_usize..end_usize].to_vec(),
+                )))
+            }
+            _ => Err(bad_args("core::intrinsics::array_slice")),
+        },
+        I::ArraySliceRo => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(arr), Value::Int(start), Value::Int(end)] => {
+                let borrowed = arr.obj.borrow();
+                let items = match &*borrowed {
+                    HeapValue::Array(items) => items,
+                    _ => {
+                        return Err(
+                            "core::intrinsics::array_slice_ro: expected an array".to_string(),
+                        );
+                    }
+                };
+                let len = items.len();
+
+                let start_usize: usize = (*start)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
+                let end_usize: usize = (*end)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
+                if start_usize > end_usize {
+                    return Err(
+                        "core::intrinsics::array_slice_ro: start must be <= end".to_string(),
+                    );
+                }
+                if end_usize > len {
+                    return Err(format!("index out of bounds: index={end}, len={len}"));
+                }
+                Ok(alloc_ref(HeapValue::Array(
+                    items[start_usize..end_usize]
+                        .iter()
+                        .cloned()
+                        .map(Value::into_readonly_view)
+                        .collect(),
+                )))
+            }
+            _ => Err(bad_args("core::intrinsics::array_slice_ro")),
+        },
+
+        I::IntoIter => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
+                match &*arr.obj.borrow() {
+                    HeapValue::Array(_) => {}
+                    _ => {
+                        return Err(
+                            "core::intrinsics::into_iter: expected an array".to_string(),
+                        );
+                    }
+                }
+
+                let layout = module
+                    .struct_layouts
+                    .get(ARRAY_ITER_TYPE)
+                    .ok_or_else(|| format!("missing struct layout for `{ARRAY_ITER_TYPE}`"))?;
+                let mut fields = vec![Value::Unit; layout.len()];
+
+                let arr_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_ARRAY)?;
+                let idx_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_INDEX)?;
+
+                fields[arr_idx] = Value::Ref(arr.clone());
+                fields[idx_idx] = Value::Int(0);
+
+                Ok(alloc_ref(HeapValue::Struct {
+                    type_name: ARRAY_ITER_TYPE.to_string(),
+                    type_args: vec![*elem_rep],
+                    fields,
+                }))
+            }
+            _ => Err(bad_args("core::intrinsics::into_iter")),
+        },
+        I::Next => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
+                if iter.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+
+                let arr_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_ARRAY)?;
+                let idx_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_INDEX)?;
+
+                let (arr_ref, idx) = {
+                    let borrowed = iter.obj.borrow();
+                    let HeapValue::Struct { type_name, fields, .. } = &*borrowed else {
+                        return Err(
+                            "core::intrinsics::next: expected iterator struct".to_string(),
+                        );
+                    };
+                    if type_name != ARRAY_ITER_TYPE {
+                        return Err(format!(
+                            "core::intrinsics::next: expected `{ARRAY_ITER_TYPE}`, got `{type_name}`"
+                        ));
+                    }
+
+                    let Some(Value::Ref(arr_ref)) = fields.get(arr_idx).cloned() else {
+                        return Err(
+                            "core::intrinsics::next: iterator missing `arr` field".to_string(),
+                        );
+                    };
+                    let Some(Value::Int(idx)) = fields.get(idx_idx).cloned() else {
+                        return Err(
+                            "core::intrinsics::next: iterator missing `idx` field".to_string(),
+                        );
+                    };
+                    (arr_ref, idx)
+                };
+
+                if idx < 0 {
+                    return Err(
+                        "core::intrinsics::next: negative iterator index".to_string(),
+                    );
+                }
+                let idx_usize: usize = idx as usize;
+
+                let out = {
+                    let borrowed = arr_ref.obj.borrow();
+                    let HeapValue::Array(items) = &*borrowed else {
+                        return Err(
+                            "core::intrinsics::next: iterator `arr` is not an array".to_string(),
+                        );
+                    };
+
+                    if idx_usize < items.len() {
+                        let mut item = items[idx_usize].clone();
+                        if arr_ref.is_readonly() {
+                            item = item.into_readonly_view();
+                        }
+                        alloc_ref(HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![item],
+                        })
+                    } else {
+                        alloc_ref(HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        })
+                    }
+                };
+
+                {
+                    let mut borrowed = iter.obj.borrow_mut();
+                    let HeapValue::Struct { fields, .. } = &mut *borrowed else {
+                        return Err(
+                            "core::intrinsics::next: expected iterator struct".to_string(),
+                        );
+                    };
+                    let Some(slot) = fields.get_mut(idx_idx) else {
+                        return Err(
+                            "core::intrinsics::next: iterator missing `idx` field".to_string(),
+                        );
+                    };
+                    *slot = Value::Int(idx + 1);
+                }
+
+                Ok(out)
+            }
+            _ => Err(bad_args("core::intrinsics::next")),
+        },
+    }
 }
 
 fn read_int(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<i64, String> {

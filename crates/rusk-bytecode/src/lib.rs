@@ -112,11 +112,79 @@ pub enum ConstValue {
 /// A bytecode register index.
 pub type Reg = u32;
 
+/// A VM-internal core intrinsic (compiler desugaring target).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Intrinsic {
+    // f-string helpers.
+    StringConcat,
+    ToString,
+    Panic,
+
+    // Booleans.
+    BoolNot,
+    BoolEq,
+    BoolNe,
+
+    // Int arithmetic & comparisons.
+    IntAdd,
+    IntSub,
+    IntMul,
+    IntDiv,
+    IntMod,
+    IntEq,
+    IntNe,
+    IntLt,
+    IntLe,
+    IntGt,
+    IntGe,
+
+    // Float arithmetic & comparisons.
+    FloatAdd,
+    FloatSub,
+    FloatMul,
+    FloatDiv,
+    FloatMod,
+    FloatEq,
+    FloatNe,
+    FloatLt,
+    FloatLe,
+    FloatGt,
+    FloatGe,
+
+    // Primitive equality helpers.
+    StringEq,
+    StringNe,
+    BytesEq,
+    BytesNe,
+    UnitEq,
+    UnitNe,
+
+    // Iterator protocol.
+    IntoIter,
+    Next,
+
+    // Array operations.
+    ArrayLen,
+    ArrayLenRo,
+    ArrayPush,
+    ArrayPop,
+    ArrayClear,
+    ArrayResize,
+    ArrayInsert,
+    ArrayRemove,
+    ArrayExtend,
+    ArrayConcat,
+    ArrayConcatRo,
+    ArraySlice,
+    ArraySliceRo,
+}
+
 /// A bytecode call target (internal function vs host import).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallTarget {
     Bc(FunctionId),
     Host(HostImportId),
+    Intrinsic(Intrinsic),
 }
 
 /// An in-memory bytecode instruction stream.

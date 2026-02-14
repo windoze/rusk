@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use crate::{
     CallTarget, ConstValue, ExecutableModule, ExternalEffectDecl, Function, FunctionId, HostFnSig,
-    HostImport, HostImportId, Instruction, Reg,
+    HostImport, HostImportId, Instruction, Intrinsic, Reg,
 };
 use rusk_mir::{
     BlockId, CallTarget as MirCallTarget, ConstValue as MirConstValue, Operand,
@@ -36,6 +36,68 @@ impl core::fmt::Display for LowerError {
 #[cfg(feature = "std")]
 impl std::error::Error for LowerError {}
 
+fn core_intrinsic(name: &str) -> Option<Intrinsic> {
+    Some(match name {
+        "core::intrinsics::string_concat" => Intrinsic::StringConcat,
+        "core::intrinsics::to_string" => Intrinsic::ToString,
+        "core::intrinsics::panic" => Intrinsic::Panic,
+
+        "core::intrinsics::bool_not" => Intrinsic::BoolNot,
+        "core::intrinsics::bool_eq" => Intrinsic::BoolEq,
+        "core::intrinsics::bool_ne" => Intrinsic::BoolNe,
+
+        "core::intrinsics::int_add" => Intrinsic::IntAdd,
+        "core::intrinsics::int_sub" => Intrinsic::IntSub,
+        "core::intrinsics::int_mul" => Intrinsic::IntMul,
+        "core::intrinsics::int_div" => Intrinsic::IntDiv,
+        "core::intrinsics::int_mod" => Intrinsic::IntMod,
+        "core::intrinsics::int_eq" => Intrinsic::IntEq,
+        "core::intrinsics::int_ne" => Intrinsic::IntNe,
+        "core::intrinsics::int_lt" => Intrinsic::IntLt,
+        "core::intrinsics::int_le" => Intrinsic::IntLe,
+        "core::intrinsics::int_gt" => Intrinsic::IntGt,
+        "core::intrinsics::int_ge" => Intrinsic::IntGe,
+
+        "core::intrinsics::float_add" => Intrinsic::FloatAdd,
+        "core::intrinsics::float_sub" => Intrinsic::FloatSub,
+        "core::intrinsics::float_mul" => Intrinsic::FloatMul,
+        "core::intrinsics::float_div" => Intrinsic::FloatDiv,
+        "core::intrinsics::float_mod" => Intrinsic::FloatMod,
+        "core::intrinsics::float_eq" => Intrinsic::FloatEq,
+        "core::intrinsics::float_ne" => Intrinsic::FloatNe,
+        "core::intrinsics::float_lt" => Intrinsic::FloatLt,
+        "core::intrinsics::float_le" => Intrinsic::FloatLe,
+        "core::intrinsics::float_gt" => Intrinsic::FloatGt,
+        "core::intrinsics::float_ge" => Intrinsic::FloatGe,
+
+        "core::intrinsics::string_eq" => Intrinsic::StringEq,
+        "core::intrinsics::string_ne" => Intrinsic::StringNe,
+        "core::intrinsics::bytes_eq" => Intrinsic::BytesEq,
+        "core::intrinsics::bytes_ne" => Intrinsic::BytesNe,
+        "core::intrinsics::unit_eq" => Intrinsic::UnitEq,
+        "core::intrinsics::unit_ne" => Intrinsic::UnitNe,
+
+        "core::intrinsics::into_iter" => Intrinsic::IntoIter,
+        "core::intrinsics::next" => Intrinsic::Next,
+
+        "core::intrinsics::array_len" => Intrinsic::ArrayLen,
+        "core::intrinsics::array_len_ro" => Intrinsic::ArrayLenRo,
+        "core::intrinsics::array_push" => Intrinsic::ArrayPush,
+        "core::intrinsics::array_pop" => Intrinsic::ArrayPop,
+        "core::intrinsics::array_clear" => Intrinsic::ArrayClear,
+        "core::intrinsics::array_resize" => Intrinsic::ArrayResize,
+        "core::intrinsics::array_insert" => Intrinsic::ArrayInsert,
+        "core::intrinsics::array_remove" => Intrinsic::ArrayRemove,
+        "core::intrinsics::array_extend" => Intrinsic::ArrayExtend,
+        "core::intrinsics::array_concat" => Intrinsic::ArrayConcat,
+        "core::intrinsics::array_concat_ro" => Intrinsic::ArrayConcatRo,
+        "core::intrinsics::array_slice" => Intrinsic::ArraySlice,
+        "core::intrinsics::array_slice_ro" => Intrinsic::ArraySliceRo,
+
+        _ => return None,
+    })
+}
+
 pub fn lower_mir_module(mir: &rusk_mir::Module) -> Result<ExecutableModule, LowerError> {
     lower_mir_module_with_options(mir, &LowerOptions::default())
 }
@@ -61,6 +123,9 @@ pub fn lower_mir_module_with_options(
     host_id_map.resize(mir.host_imports.len(), None);
 
     for (idx, import) in mir.host_imports.iter().enumerate() {
+        if core_intrinsic(import.name.as_str()).is_some() {
+            continue;
+        }
         let Some(sig) = HostFnSig::from_host_sig(&import.sig) else {
             continue;
         };
@@ -561,17 +626,21 @@ fn lower_mir_instruction(
             let func = match func {
                 MirCallTarget::Mir(fid) => CallTarget::Bc(FunctionId(fid.0)),
                 MirCallTarget::Host(hid) => {
+                    let name = mir_module
+                        .host_import(*hid)
+                        .map(|h| h.name.as_str())
+                        .unwrap_or("<unknown>");
+                    if let Some(intr) = core_intrinsic(name) {
+                        CallTarget::Intrinsic(intr)
+                    } else {
                     let idx = hid.0 as usize;
                     let Some(bc_id) = host_id_map.get(idx).and_then(|v| *v) else {
-                        let name = mir_module
-                            .host_import(*hid)
-                            .map(|h| h.name.as_str())
-                            .unwrap_or("<unknown>");
                         return Err(LowerError::new(format!(
                             "host import `{name}` is not ABI-safe for bytecode v0"
                         )));
                     };
                     CallTarget::Host(bc_id)
+                    }
                 }
             };
 
@@ -588,7 +657,9 @@ fn lower_mir_instruction(
                 bc_args.push(op_reg(arg, code, temps)?);
             }
 
-            let func = if let Some(fid) = mir_module.function_id(func) {
+            let func = if let Some(intr) = core_intrinsic(func.as_str()) {
+                CallTarget::Intrinsic(intr)
+            } else if let Some(fid) = mir_module.function_id(func) {
                 CallTarget::Bc(FunctionId(fid.0))
             } else if let Some(hid) = mir_module.host_import_id(func) {
                 let idx = hid.0 as usize;
