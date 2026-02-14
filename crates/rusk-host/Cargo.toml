@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 rusk-compiler = { path = "../rusk-compiler" }
 rusk-interpreter = { path = "../rusk-interpreter" }
-
+rusk-bytecode = { path = "../rusk-bytecode" }
+rusk-vm = { path = "../rusk-vm" }

@@ -100,8 +100,10 @@ dependencies = [
 name = "rusk-host"
 version = "0.1.0"
 dependencies = [
+ "rusk-bytecode",
  "rusk-compiler",
  "rusk-interpreter",
+ "rusk-vm",
 ]
 
 [[package]]
