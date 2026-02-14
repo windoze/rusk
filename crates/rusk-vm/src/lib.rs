@@ -1521,6 +1521,104 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 });
             }
 
+            rusk_bytecode::Instruction::VCall {
+                dst,
+                obj,
+                method,
+                method_type_args,
+                args,
+            } => {
+                let recv = match read_value(frame, *obj) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("vcall obj: {msg}")),
+                };
+                let Value::Ref(r) = &recv else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in vcall: expected ref(struct|enum), got {}",
+                            recv.kind()
+                        ),
+                    );
+                };
+
+                let (type_name, type_args) = match &*r.obj.borrow() {
+                    HeapValue::Struct { type_name, type_args, .. } => {
+                        (type_name.clone(), type_args.clone())
+                    }
+                    HeapValue::Enum { enum_name, type_args, .. } => {
+                        (enum_name.clone(), type_args.clone())
+                    }
+                    HeapValue::Array(_) | HeapValue::Tuple(_) => {
+                        return trap(
+                            vm,
+                            format!(
+                                "type error in vcall: expected struct|enum, got {}",
+                                recv.kind()
+                            ),
+                        );
+                    }
+                };
+
+                let lookup_key = (type_name.clone(), method.clone());
+                let Some(fn_id) = vm.module.methods.get(&lookup_key).copied() else {
+                    return trap(
+                        vm,
+                        format!("unresolved vcall method: {method} on {type_name}"),
+                    );
+                };
+
+                let Some(callee) = vm.module.function(fn_id) else {
+                    return trap(vm, format!("invalid function id {}", fn_id.0));
+                };
+
+                let mut arg_values = Vec::with_capacity(
+                    type_args.len() + method_type_args.len() + args.len() + 1,
+                );
+                for id in type_args {
+                    arg_values.push(Value::TypeRep(id));
+                }
+                for reg in method_type_args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => return trap(vm, format!("vcall method_type_args: {msg}")),
+                    };
+                    arg_values.push(Value::TypeRep(id));
+                }
+                arg_values.push(recv);
+                for reg in args {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                    };
+                    arg_values.push(v);
+                }
+
+                if arg_values.len() != callee.param_count as usize {
+                    return trap(
+                        vm,
+                        format!(
+                            "vcall arity mismatch: expected {} args but got {}",
+                            callee.param_count,
+                            arg_values.len()
+                        ),
+                    );
+                }
+
+                let mut regs: Vec<Option<Value>> = Vec::with_capacity(callee.reg_count as usize);
+                regs.resize(callee.reg_count as usize, None);
+                for (idx, value) in arg_values.into_iter().enumerate() {
+                    regs[idx] = Some(value);
+                }
+
+                vm.frames.push(Frame {
+                    func: fn_id,
+                    pc: 0,
+                    regs,
+                    return_dst: *dst,
+                });
+            }
+
             rusk_bytecode::Instruction::Perform {
                 dst,
                 effect_id,
@@ -3006,6 +3104,83 @@ mod tests {
             panic!("expected trap, got {got:?}");
         };
         assert!(message.contains("arity mismatch"), "{message}");
+    }
+
+    #[test]
+    fn vcall_dispatch_reads_receiver_type_args_and_calls_method() {
+        let mut module = ExecutableModule::default();
+        module
+            .struct_layouts
+            .insert("S".to_string(), vec!["x".to_string()]);
+
+        let foo = module
+            .add_function(Function {
+                name: "S::foo".to_string(),
+                reg_count: 6,
+                param_count: 3,
+                code: vec![
+                    Instruction::MakeTypeRep {
+                        dst: 3,
+                        base: rusk_mir::TypeRepLit::Array,
+                        args: vec![0],
+                    },
+                    Instruction::MakeTypeRep {
+                        dst: 4,
+                        base: rusk_mir::TypeRepLit::Array,
+                        args: vec![1],
+                    },
+                    Instruction::StructGet { dst: 5, obj: 2, idx: 0 },
+                    Instruction::Return { value: 5 },
+                ],
+            })
+            .unwrap();
+
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 5,
+                param_count: 0,
+                code: vec![
+                    Instruction::Const {
+                        dst: 0,
+                        value: rusk_bytecode::ConstValue::TypeRep(rusk_mir::TypeRepLit::Int),
+                    },
+                    Instruction::Const {
+                        dst: 1,
+                        value: rusk_bytecode::ConstValue::TypeRep(rusk_mir::TypeRepLit::Bool),
+                    },
+                    Instruction::Const {
+                        dst: 2,
+                        value: rusk_bytecode::ConstValue::Int(42),
+                    },
+                    Instruction::MakeStruct {
+                        dst: 3,
+                        type_name: "S".to_string(),
+                        type_args: vec![0],
+                        fields: vec![("x".to_string(), 2)],
+                    },
+                    Instruction::VCall {
+                        dst: Some(4),
+                        obj: 3,
+                        method: "foo".to_string(),
+                        method_type_args: vec![1],
+                        args: vec![],
+                    },
+                    Instruction::Return { value: 4 },
+                ],
+            })
+            .unwrap();
+
+        module.entry = main;
+        module.methods.insert(("S".to_string(), "foo".to_string()), foo);
+
+        let mut vm = Vm::new(module).unwrap();
+        assert_eq!(
+            vm_step(&mut vm, None),
+            StepResult::Done {
+                value: AbiValue::Int(42)
+            }
+        );
     }
 
     #[test]

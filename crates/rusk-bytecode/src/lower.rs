@@ -741,6 +741,34 @@ fn lower_mir_instruction(
             });
         }
 
+        I::VCall {
+            dst,
+            obj,
+            method,
+            method_type_args,
+            args,
+        } => {
+            let obj = op_reg(obj, code, temps)?;
+
+            let mut bc_method_type_args = Vec::with_capacity(method_type_args.len());
+            for arg in method_type_args {
+                bc_method_type_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(arg, code, temps)?);
+            }
+
+            code.push(Instruction::VCall {
+                dst: dst.map(local),
+                obj,
+                method: method.clone(),
+                method_type_args: bc_method_type_args,
+                args: bc_args,
+            });
+        }
+
         I::Perform { dst, effect, args } => {
             if !effect.interface_args.is_empty() {
                 return Err(LowerError::new(

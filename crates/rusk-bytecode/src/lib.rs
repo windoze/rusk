@@ -270,6 +270,13 @@ pub enum Instruction {
         fnptr: Reg,
         args: Vec<Reg>,
     },
+    VCall {
+        dst: Option<Reg>,
+        obj: Reg,
+        method: String,
+        method_type_args: Vec<Reg>,
+        args: Vec<Reg>,
+    },
 
     Perform {
         dst: Option<Reg>,
