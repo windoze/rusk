@@ -98,7 +98,7 @@ where
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct TypeRepId(pub u32);
+pub struct TypeRepId(pub u32);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TypeCtor {
@@ -121,6 +121,12 @@ enum TypeCtor {
 struct TypeRepNode {
     ctor: TypeCtor,
     args: Vec<TypeRepId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GenericSpecializationKey {
+    func: FunctionId,
+    type_args: Vec<TypeRepId>,
 }
 
 #[derive(Debug, Default)]
@@ -351,6 +357,7 @@ pub struct Vm {
     state: VmState,
     frames: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
+    generic_specializations: HashMap<GenericSpecializationKey, HostImportId>,
     host_fns: Vec<Option<Box<dyn HostFn>>>,
     in_host_call: bool,
     continuation_generation: u32,
@@ -393,6 +400,7 @@ impl Vm {
                 return_dst: None,
             }],
             handlers: Vec::new(),
+            generic_specializations: HashMap::new(),
             in_host_call: false,
             continuation_generation: 0,
             type_reps: TypeReps::default(),
@@ -411,6 +419,73 @@ impl Vm {
             });
         }
         self.host_fns[idx] = Some(Box::new(host_fn));
+        Ok(())
+    }
+
+    pub fn intern_type_rep(
+        &mut self,
+        base: &rusk_mir::TypeRepLit,
+        args: &[TypeRepId],
+    ) -> TypeRepId {
+        self.type_reps.intern(TypeRepNode {
+            ctor: TypeReps::ctor_from_lit(base),
+            args: args.to_vec(),
+        })
+    }
+
+    pub fn register_generic_specialization(
+        &mut self,
+        fn_id: FunctionId,
+        type_args: Vec<TypeRepId>,
+        host_import_id: HostImportId,
+    ) -> Result<(), VmError> {
+        let Some(func) = self.module.function(fn_id) else {
+            return Err(VmError::InvalidState {
+                message: format!("invalid function id {}", fn_id.0),
+            });
+        };
+        let Some(import) = self.module.host_import(host_import_id) else {
+            return Err(VmError::InvalidState {
+                message: format!("invalid host import id {}", host_import_id.0),
+            });
+        };
+
+        let generic_params = self.module.function_generic_param_count(fn_id).unwrap_or(0);
+        if generic_params == 0 {
+            return Err(VmError::InvalidState {
+                message: "cannot register specialization for non-generic function".to_string(),
+            });
+        }
+
+        if type_args.len() != generic_params as usize {
+            return Err(VmError::InvalidState {
+                message: format!(
+                    "generic specialization arity mismatch: expected {} type args but got {}",
+                    generic_params,
+                    type_args.len()
+                ),
+            });
+        }
+
+        let value_params = func.param_count.saturating_sub(generic_params) as usize;
+        if import.sig.params.len() != value_params {
+            return Err(VmError::InvalidState {
+                message: format!(
+                    "specialized host import `{}` arity mismatch: expected {} params but got {}",
+                    import.name,
+                    value_params,
+                    import.sig.params.len()
+                ),
+            });
+        }
+
+        self.generic_specializations.insert(
+            GenericSpecializationKey {
+                func: fn_id,
+                type_args,
+            },
+            host_import_id,
+        );
         Ok(())
     }
 }
@@ -1407,6 +1482,46 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         };
                         return StepResult::Trap { message };
                     }
+
+                    let generic_params =
+                        vm.module.function_generic_param_count(*fid).unwrap_or(0) as usize;
+                    if generic_params > 0 && generic_params <= args.len() {
+                        let mut type_args = Vec::with_capacity(generic_params);
+                        let mut ok = true;
+                        for arg_reg in args.iter().take(generic_params) {
+                            let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
+                            let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()) else {
+                                ok = false;
+                                break;
+                            };
+                            let Value::TypeRep(id) = v else {
+                                ok = false;
+                                break;
+                            };
+                            type_args.push(*id);
+                        }
+
+                        if ok {
+                            let key = GenericSpecializationKey {
+                                func: *fid,
+                                type_args,
+                            };
+                            if let Some(hid) = vm.generic_specializations.get(&key).copied() {
+                                if let Err(msg) = call_host_import(
+                                    &vm.module,
+                                    &mut vm.host_fns,
+                                    &mut vm.in_host_call,
+                                    frame,
+                                    *dst,
+                                    hid,
+                                    &args[generic_params..],
+                                ) {
+                                    return trap(vm, msg);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     let mut regs: Vec<Option<Value>> =
                         Vec::with_capacity(callee.reg_count as usize);
                     regs.resize(callee.reg_count as usize, None);
@@ -1431,95 +1546,16 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     });
                 }
                 rusk_bytecode::CallTarget::Host(hid) => {
-                    let Some(import) = vm.module.host_import(*hid) else {
-                        return trap(vm, format!("invalid host import id {}", hid.0));
-                    };
-
-                    if args.len() != import.sig.params.len() {
-                        return trap(
-                            vm,
-                            format!(
-                                "host call `{}` arity mismatch: expected {} args but got {}",
-                                import.name,
-                                import.sig.params.len(),
-                                args.len()
-                            ),
-                        );
-                    }
-
-                    let idx: usize = hid.0 as usize;
-                    let Some(host_fn) = vm.host_fns.get_mut(idx).and_then(|v| v.as_mut()) else {
-                        return trap(
-                            vm,
-                            format!("missing host import implementation: `{}`", import.name),
-                        );
-                    };
-
-                    let mut abi_args = Vec::with_capacity(args.len());
-                    for (arg_reg, expected) in args.iter().zip(import.sig.params.iter()) {
-                        let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
-                        let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned()
-                        else {
-                            return trap(
-                                vm,
-                                format!(
-                                    "host call `{}` read from uninitialized reg {arg_reg}",
-                                    import.name
-                                ),
-                            );
-                        };
-                        let Some(abi) = v.to_abi() else {
-                            return trap(
-                                vm,
-                                format!(
-                                    "host call `{}` arg type mismatch: expected {:?}, got {}",
-                                    import.name,
-                                    expected,
-                                    v.kind()
-                                ),
-                            );
-                        };
-                        if abi.ty() != *expected {
-                            return trap(
-                                vm,
-                                format!(
-                                    "host call `{}` arg type mismatch: expected {:?}, got {:?}",
-                                    import.name,
-                                    expected,
-                                    abi.ty()
-                                ),
-                            );
-                        }
-                        abi_args.push(abi);
-                    }
-
-                    vm.in_host_call = true;
-                    let call_result = host_fn.call(&abi_args);
-                    vm.in_host_call = false;
-
-                    let abi_ret = match call_result {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return trap(vm, format!("host call `{}` failed: {e}", import.name));
-                        }
-                    };
-
-                    if abi_ret.ty() != import.sig.ret {
-                        return trap(
-                            vm,
-                            format!(
-                                "host call `{}` return type mismatch: expected {:?}, got {:?}",
-                                import.name,
-                                import.sig.ret,
-                                abi_ret.ty()
-                            ),
-                        );
-                    }
-
-                    if let Some(dst) = dst {
-                        if let Err(msg) = write_value(frame, *dst, Value::from_abi(&abi_ret)) {
-                            return trap(vm, format!("host call `{}` dst: {msg}", import.name));
-                        }
+                    if let Err(msg) = call_host_import(
+                        &vm.module,
+                        &mut vm.host_fns,
+                        &mut vm.in_host_call,
+                        frame,
+                        *dst,
+                        *hid,
+                        args.as_slice(),
+                    ) {
+                        return trap(vm, msg);
                     }
                 }
                 rusk_bytecode::CallTarget::Intrinsic(intr) => {
@@ -3120,6 +3156,92 @@ fn write_value(frame: &mut Frame, reg: rusk_bytecode::Reg, value: Value) -> Resu
         return Err(format!("write to out-of-range reg {reg}"));
     };
     *slot = Some(value);
+    Ok(())
+}
+
+fn call_host_import(
+    module: &ExecutableModule,
+    host_fns: &mut Vec<Option<Box<dyn HostFn>>>,
+    in_host_call: &mut bool,
+    frame: &mut Frame,
+    dst: Option<rusk_bytecode::Reg>,
+    hid: HostImportId,
+    args: &[rusk_bytecode::Reg],
+) -> Result<(), String> {
+    let Some(import) = module.host_import(hid) else {
+        return Err(format!("invalid host import id {}", hid.0));
+    };
+
+    if args.len() != import.sig.params.len() {
+        return Err(format!(
+            "host call `{}` arity mismatch: expected {} args but got {}",
+            import.name,
+            import.sig.params.len(),
+            args.len()
+        ));
+    }
+
+    let idx: usize = hid.0 as usize;
+    let Some(host_fn) = host_fns.get_mut(idx).and_then(|v| v.as_mut()) else {
+        return Err(format!(
+            "missing host import implementation: `{}`",
+            import.name
+        ));
+    };
+
+    let mut abi_args = Vec::with_capacity(args.len());
+    for (arg_reg, expected) in args.iter().zip(import.sig.params.iter()) {
+        let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
+        let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned() else {
+            return Err(format!(
+                "host call `{}` read from uninitialized reg {arg_reg}",
+                import.name
+            ));
+        };
+        let Some(abi) = v.to_abi() else {
+            return Err(format!(
+                "host call `{}` arg type mismatch: expected {:?}, got {}",
+                import.name,
+                expected,
+                v.kind()
+            ));
+        };
+        if abi.ty() != *expected {
+            return Err(format!(
+                "host call `{}` arg type mismatch: expected {:?}, got {:?}",
+                import.name,
+                expected,
+                abi.ty()
+            ));
+        }
+        abi_args.push(abi);
+    }
+
+    *in_host_call = true;
+    let call_result = host_fn.call(&abi_args);
+    *in_host_call = false;
+
+    let abi_ret = match call_result {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(format!("host call `{}` failed: {e}", import.name));
+        }
+    };
+
+    if abi_ret.ty() != import.sig.ret {
+        return Err(format!(
+            "host call `{}` return type mismatch: expected {:?}, got {:?}",
+            import.name,
+            import.sig.ret,
+            abi_ret.ty()
+        ));
+    }
+
+    if let Some(dst) = dst {
+        write_value(frame, dst, Value::from_abi(&abi_ret))
+            .map_err(|msg| format!("host call `{}` dst: {msg}", import.name))?;
+    }
+
     Ok(())
 }
 

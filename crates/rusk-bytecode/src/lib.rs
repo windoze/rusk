@@ -469,6 +469,10 @@ pub struct Function {
 pub struct ExecutableModule {
     pub functions: Vec<Function>,
     pub function_ids: BTreeMap<String, FunctionId>,
+    /// Number of implicit runtime `TypeRep` params per function (generic arity).
+    ///
+    /// `function_generic_params[id]` is the count of leading parameters that are runtime type args.
+    pub function_generic_params: Vec<u32>,
 
     pub host_imports: Vec<HostImport>,
     pub host_import_ids: BTreeMap<String, HostImportId>,
@@ -497,6 +501,7 @@ impl ExecutableModule {
         let id = FunctionId(id_u32);
         self.function_ids.insert(func.name.clone(), id);
         self.functions.push(func);
+        self.function_generic_params.push(0);
         Ok(id)
     }
 
@@ -506,6 +511,10 @@ impl ExecutableModule {
 
     pub fn function_id(&self, name: &str) -> Option<FunctionId> {
         self.function_ids.get(name).copied()
+    }
+
+    pub fn function_generic_param_count(&self, id: FunctionId) -> Option<u32> {
+        self.function_generic_params.get(id.0 as usize).copied()
     }
 
     pub fn add_host_import(&mut self, import: HostImport) -> Result<HostImportId, String> {

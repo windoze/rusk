@@ -137,6 +137,14 @@ pub fn lower_mir_module_with_options(
     }
 
     for (idx, func) in mir.functions.iter().enumerate() {
+        let generic_param_count: u32 = func
+            .params
+            .iter()
+            .take_while(|p| matches!(p.ty, Some(rusk_mir::Type::TypeRep)))
+            .count()
+            .try_into()
+            .map_err(|_| LowerError::new("generic param count overflow"))?;
+
         let bc_func = lower_mir_function(mir, func, &host_id_map, &external_effect_ids)?;
         let id = out.add_function(bc_func).map_err(LowerError::new)?;
         let expect = FunctionId(idx as u32);
@@ -146,6 +154,12 @@ pub fn lower_mir_module_with_options(
                 id.0, expect.0
             )));
         }
+        let Some(slot) = out.function_generic_params.get_mut(idx) else {
+            return Err(LowerError::new(
+                "internal error: function generic param table mismatch",
+            ));
+        };
+        *slot = generic_param_count;
     }
 
     let Some(main_id) = mir.function_id("main") else {

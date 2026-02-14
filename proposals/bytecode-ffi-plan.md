@@ -13,8 +13,8 @@ Scope: **plan only** (no code changes besides this plan file).
 - [x] Milestone B — MIR → bytecode lowering (minimal subset)
 - [x] Milestone C — `CALL_HOST` + non-reentrancy enforcement
 - [x] Milestone D — Externalized effects (`Request`/`resume`/`drop`)
-- [ ] Milestone E — Expand bytecode to pass fixture suite
-- [ ] Milestone F — Generic specialization
+- [x] Milestone E — Expand bytecode to pass fixture suite
+- [x] Milestone F — Generic specialization
 - [ ] Milestone G — Stable serialization + verification
 
 Last updated: 2026-02-14
