@@ -36,14 +36,20 @@ pub struct ContinuationHandle {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StepResult {
-    Done { value: AbiValue },
-    Trap { message: String },
+    Done {
+        value: AbiValue,
+    },
+    Trap {
+        message: String,
+    },
     Request {
         effect_id: EffectId,
         args: Vec<AbiValue>,
         k: ContinuationHandle,
     },
-    Yield { remaining_fuel: u64 },
+    Yield {
+        remaining_fuel: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +62,9 @@ impl std::fmt::Display for VmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VmError::InvalidState { message } => write!(f, "invalid vm state: {message}"),
-            VmError::InvalidContinuation { message } => write!(f, "invalid continuation: {message}"),
+            VmError::InvalidContinuation { message } => {
+                write!(f, "invalid continuation: {message}")
+            }
         }
     }
 }
@@ -191,6 +199,30 @@ impl RefValue {
 }
 
 #[derive(Clone, Debug)]
+struct ContinuationToken {
+    state: Rc<RefCell<Option<ContinuationState>>>,
+}
+
+impl ContinuationToken {
+    fn new(state: ContinuationState) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(Some(state))),
+        }
+    }
+
+    fn take_state(&self) -> Option<ContinuationState> {
+        self.state.borrow_mut().take()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ContinuationState {
+    frames: Vec<Frame>,
+    handlers: Vec<HandlerEntry>,
+    perform_dst: Option<rusk_bytecode::Reg>,
+}
+
+#[derive(Clone, Debug)]
 enum Value {
     Unit,
     Bool(bool),
@@ -201,6 +233,7 @@ enum Value {
     TypeRep(TypeRepId),
     Ref(RefValue),
     Function(FunctionId),
+    Continuation(ContinuationToken),
 }
 
 impl Value {
@@ -215,6 +248,7 @@ impl Value {
             Value::TypeRep(_) => "typerep",
             Value::Ref(_) => "ref",
             Value::Function(_) => "function",
+            Value::Continuation(_) => "continuation",
         }
     }
 
@@ -244,7 +278,9 @@ impl Value {
             Value::Float(x) => AbiValue::Float(*x),
             Value::String(s) => AbiValue::String(s.clone()),
             Value::Bytes(b) => AbiValue::Bytes(b.clone()),
-            Value::TypeRep(_) | Value::Ref(_) | Value::Function(_) => return None,
+            Value::TypeRep(_) | Value::Ref(_) | Value::Function(_) | Value::Continuation(_) => {
+                return None;
+            }
         })
     }
 }
@@ -266,7 +302,28 @@ enum HeapValue {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeEffectId {
+    interface: String,
+    interface_args: Vec<TypeRepId>,
+    method: String,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeHandlerClause {
+    effect: RuntimeEffectId,
+    arg_patterns: Vec<rusk_mir::Pattern>,
+    target_pc: u32,
+    param_regs: Vec<rusk_bytecode::Reg>,
+}
+
+#[derive(Clone, Debug)]
+struct HandlerEntry {
+    owner_depth: usize,
+    clauses: Vec<RuntimeHandlerClause>,
+}
+
+#[derive(Debug, Clone)]
 struct Frame {
     func: FunctionId,
     pc: usize,
@@ -281,14 +338,19 @@ enum VmState {
         k: ContinuationHandle,
         perform_dst: Option<rusk_bytecode::Reg>,
     },
-    Done { value: AbiValue },
-    Trapped { message: String },
+    Done {
+        value: AbiValue,
+    },
+    Trapped {
+        message: String,
+    },
 }
 
 pub struct Vm {
     module: ExecutableModule,
     state: VmState,
     frames: Vec<Frame>,
+    handlers: Vec<HandlerEntry>,
     host_fns: Vec<Option<Box<dyn HostFn>>>,
     in_host_call: bool,
     continuation_generation: u32,
@@ -304,12 +366,13 @@ impl Vm {
             });
         };
 
-        let reg_count: usize = entry_fn
-            .reg_count
-            .try_into()
-            .map_err(|_| VmError::InvalidState {
-                message: "entry reg_count overflow".to_string(),
-            })?;
+        let reg_count: usize =
+            entry_fn
+                .reg_count
+                .try_into()
+                .map_err(|_| VmError::InvalidState {
+                    message: "entry reg_count overflow".to_string(),
+                })?;
 
         let mut regs = Vec::with_capacity(reg_count);
         regs.resize(reg_count, None);
@@ -329,6 +392,7 @@ impl Vm {
                 regs,
                 return_dst: None,
             }],
+            handlers: Vec::new(),
             in_host_call: false,
             continuation_generation: 0,
             type_reps: TypeReps::default(),
@@ -366,7 +430,9 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             };
         }
         VmState::Done { value } => {
-            return StepResult::Done { value: value.clone() };
+            return StepResult::Done {
+                value: value.clone(),
+            };
         }
         VmState::Trapped { message } => {
             return StepResult::Trap {
@@ -382,14 +448,19 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             return StepResult::Yield { remaining_fuel: 0 };
         }
 
-        let Some(frame) = vm.frames.last_mut() else {
-            vm.state = VmState::Done {
-                value: AbiValue::Unit,
-            };
-            return StepResult::Done {
-                value: AbiValue::Unit,
-            };
+        let frame_index = match vm.frames.len() {
+            0 => {
+                vm.state = VmState::Done {
+                    value: AbiValue::Unit,
+                };
+                return StepResult::Done {
+                    value: AbiValue::Unit,
+                };
+            }
+            len => len - 1,
         };
+
+        let frame = &mut vm.frames[frame_index];
 
         let Some(func) = vm.module.function(frame.func) else {
             let message = format!("invalid function id {}", frame.func.0);
@@ -403,6 +474,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             let ret = Value::Unit;
             let return_dst = frame.return_dst;
             vm.frames.pop();
+            unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
             if let Some(caller) = vm.frames.last_mut() {
                 if let Some(dst) = return_dst {
                     let idx: usize = match dst.try_into() {
@@ -472,12 +544,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             rusk_bytecode::Instruction::Copy { dst, src } => {
                 let dst_idx: usize = (*dst).try_into().unwrap_or(usize::MAX);
                 let src_idx: usize = (*src).try_into().unwrap_or(usize::MAX);
-                let Some(v) = frame
-                    .regs
-                    .get(src_idx)
-                    .and_then(|v| v.as_ref())
-                    .cloned()
-                else {
+                let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned() else {
                     let message = format!("copy from uninitialized reg {src}");
                     vm.state = VmState::Trapped {
                         message: message.clone(),
@@ -620,7 +687,9 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 for (field_name, reg) in fields {
                     let value = match read_value(frame, *reg) {
                         Ok(v) => v,
-                        Err(msg) => return trap(vm, format!("make_struct field `{field_name}`: {msg}")),
+                        Err(msg) => {
+                            return trap(vm, format!("make_struct field `{field_name}`: {msg}"));
+                        }
                     };
                     let Some(idx) = layout.iter().position(|name| name == field_name) else {
                         return trap(vm, format!("missing field: {field_name}"));
@@ -736,7 +805,11 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     HeapValue::Struct {
                         type_name, fields, ..
                     } => {
-                        let idx = match struct_field_index(&vm.module, type_name.as_str(), field.as_str()) {
+                        let idx = match struct_field_index(
+                            &vm.module,
+                            type_name.as_str(),
+                            field.as_str(),
+                        ) {
                             Ok(i) => i,
                             Err(msg) => return trap(vm, msg),
                         };
@@ -798,16 +871,16 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 match &mut *r.obj.borrow_mut() {
                     HeapValue::Struct {
-                        type_name,
-                        fields,
-                        ..
+                        type_name, fields, ..
                     } => {
-                        let idx =
-                            match struct_field_index(&vm.module, type_name.as_str(), field.as_str())
-                            {
-                                Ok(i) => i,
-                                Err(msg) => return trap(vm, msg),
-                            };
+                        let idx = match struct_field_index(
+                            &vm.module,
+                            type_name.as_str(),
+                            field.as_str(),
+                        ) {
+                            Ok(i) => i,
+                            Err(msg) => return trap(vm, msg),
+                        };
                         let Some(slot) = fields.get_mut(idx) else {
                             return trap(vm, format!("missing field: {field}"));
                         };
@@ -1110,7 +1183,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 let Value::Ref(r) = arr_v else {
                     return trap(
                         vm,
-                        format!("type error in len: expected ref(array), got {}", arr_v.kind()),
+                        format!(
+                            "type error in len: expected ref(array), got {}",
+                            arr_v.kind()
+                        ),
                     );
                 };
                 let len = match &*r.obj.borrow() {
@@ -1331,15 +1407,12 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         };
                         return StepResult::Trap { message };
                     }
-                    let mut regs: Vec<Option<Value>> = Vec::with_capacity(callee.reg_count as usize);
+                    let mut regs: Vec<Option<Value>> =
+                        Vec::with_capacity(callee.reg_count as usize);
                     regs.resize(callee.reg_count as usize, None);
                     for (idx, arg_reg) in args.iter().enumerate() {
                         let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
-                        let Some(v) = frame
-                            .regs
-                            .get(src_idx)
-                            .and_then(|v| v.as_ref())
-                            .cloned()
+                        let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned()
                         else {
                             let message = format!("call arg reg {arg_reg} is uninitialized");
                             vm.state = VmState::Trapped {
@@ -1385,11 +1458,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     let mut abi_args = Vec::with_capacity(args.len());
                     for (arg_reg, expected) in args.iter().zip(import.sig.params.iter()) {
                         let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
-                        let Some(v) = frame
-                            .regs
-                            .get(src_idx)
-                            .and_then(|v| v.as_ref())
-                            .cloned()
+                        let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned()
                         else {
                             return trap(
                                 vm,
@@ -1431,10 +1500,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     let abi_ret = match call_result {
                         Ok(v) => v,
                         Err(e) => {
-                            return trap(
-                                vm,
-                                format!("host call `{}` failed: {e}", import.name),
-                            );
+                            return trap(vm, format!("host call `{}` failed: {e}", import.name));
                         }
                     };
 
@@ -1502,12 +1568,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 regs.resize(callee.reg_count as usize, None);
                 for (idx, arg_reg) in args.iter().enumerate() {
                     let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
-                    let Some(v) = frame
-                        .regs
-                        .get(src_idx)
-                        .and_then(|v| v.as_ref())
-                        .cloned()
-                    else {
+                    let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned() else {
                         return trap(vm, format!("icall arg reg {arg_reg} is uninitialized"));
                     };
                     regs[idx] = Some(v);
@@ -1543,12 +1604,16 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 };
 
                 let (type_name, type_args) = match &*r.obj.borrow() {
-                    HeapValue::Struct { type_name, type_args, .. } => {
-                        (type_name.clone(), type_args.clone())
-                    }
-                    HeapValue::Enum { enum_name, type_args, .. } => {
-                        (enum_name.clone(), type_args.clone())
-                    }
+                    HeapValue::Struct {
+                        type_name,
+                        type_args,
+                        ..
+                    } => (type_name.clone(), type_args.clone()),
+                    HeapValue::Enum {
+                        enum_name,
+                        type_args,
+                        ..
+                    } => (enum_name.clone(), type_args.clone()),
                     HeapValue::Array(_) | HeapValue::Tuple(_) => {
                         return trap(
                             vm,
@@ -1572,9 +1637,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     return trap(vm, format!("invalid function id {}", fn_id.0));
                 };
 
-                let mut arg_values = Vec::with_capacity(
-                    type_args.len() + method_type_args.len() + args.len() + 1,
-                );
+                let mut arg_values =
+                    Vec::with_capacity(type_args.len() + method_type_args.len() + args.len() + 1);
                 for id in type_args {
                     arg_values.push(Value::TypeRep(id));
                 }
@@ -1619,84 +1683,285 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 });
             }
 
-            rusk_bytecode::Instruction::Perform {
-                dst,
-                effect_id,
-                args,
-            } => {
-                let Some(effect) = vm.module.external_effect(*effect_id) else {
-                    return trap(vm, format!("invalid effect id {}", effect_id.0));
-                };
-                if args.len() != effect.sig.params.len() {
-                    return trap(
-                        vm,
-                        format!(
-                            "external effect `{}.{}` arity mismatch: expected {} args but got {}",
-                            effect.interface,
-                            effect.method,
-                            effect.sig.params.len(),
-                            args.len()
-                        ),
-                    );
-                }
-
-                let mut abi_args = Vec::with_capacity(args.len());
-                for (arg_reg, expected) in args.iter().zip(effect.sig.params.iter()) {
-                    let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
-                    let Some(v) = frame
-                        .regs
-                        .get(src_idx)
-                        .and_then(|v| v.as_ref())
-                        .cloned()
-                    else {
-                        return trap(
-                            vm,
-                            format!(
-                                "external effect `{}.{}` read from uninitialized reg {arg_reg}",
-                                effect.interface, effect.method
-                            ),
-                        );
-                    };
-                    let Some(abi) = v.to_abi() else {
-                        return trap(
-                            vm,
-                            format!(
-                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
-                                effect.interface,
-                                effect.method,
-                                expected,
-                                v.kind()
-                            ),
-                        );
-                    };
-                    if abi.ty() != *expected {
-                        return trap(
-                            vm,
-                            format!(
-                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {:?}",
-                                effect.interface,
-                                effect.method,
-                                expected,
-                                abi.ty()
-                            ),
-                        );
+            rusk_bytecode::Instruction::PushHandler { clauses } => {
+                let owner_depth = frame_index;
+                let mut runtime_clauses = Vec::with_capacity(clauses.len());
+                for clause in clauses {
+                    let mut interface_args = Vec::with_capacity(clause.effect.interface_args.len());
+                    for reg in &clause.effect.interface_args {
+                        let id = match read_type_rep(frame, *reg) {
+                            Ok(id) => id,
+                            Err(msg) => {
+                                return trap(vm, format!("push_handler interface args: {msg}"));
+                            }
+                        };
+                        interface_args.push(id);
                     }
-                    abi_args.push(abi);
+                    runtime_clauses.push(RuntimeHandlerClause {
+                        effect: RuntimeEffectId {
+                            interface: clause.effect.interface.clone(),
+                            interface_args,
+                            method: clause.effect.method.clone(),
+                        },
+                        arg_patterns: clause.arg_patterns.clone(),
+                        target_pc: clause.target_pc,
+                        param_regs: clause.param_regs.clone(),
+                    });
+                }
+                vm.handlers.push(HandlerEntry {
+                    owner_depth,
+                    clauses: runtime_clauses,
+                });
+            }
+            rusk_bytecode::Instruction::PopHandler => {
+                let Some(top) = vm.handlers.last() else {
+                    return trap(vm, "mismatched pop_handler".to_string());
+                };
+                if top.owner_depth != frame_index {
+                    return trap(vm, "mismatched pop_handler".to_string());
+                }
+                vm.handlers.pop();
+            }
+
+            rusk_bytecode::Instruction::Perform { dst, effect, args } => {
+                let mut interface_args = Vec::with_capacity(effect.interface_args.len());
+                for reg in &effect.interface_args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => return trap(vm, format!("perform interface args: {msg}")),
+                    };
+                    interface_args.push(id);
+                }
+                let effect_id = RuntimeEffectId {
+                    interface: effect.interface.clone(),
+                    interface_args,
+                    method: effect.method.clone(),
+                };
+
+                let mut arg_values = Vec::with_capacity(args.len());
+                for reg in args {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("perform arg: {msg}")),
+                    };
+                    arg_values.push(v);
                 }
 
-                let k = ContinuationHandle {
-                    index: 0,
-                    generation: vm.continuation_generation,
+                match find_handler_for_effect(
+                    &vm.module,
+                    vm.handlers.as_slice(),
+                    &effect_id,
+                    &arg_values,
+                ) {
+                    Ok(Some((handler_index, clause_index, binds))) => {
+                        let handler_owner_depth = vm.handlers[handler_index].owner_depth;
+
+                        let mut captured_frames = vm.frames[handler_owner_depth..].to_vec();
+                        let captured_handlers = vm
+                            .handlers
+                            .iter()
+                            .filter_map(|entry| {
+                                let owner_depth =
+                                    entry.owner_depth.checked_sub(handler_owner_depth)?;
+                                Some(HandlerEntry {
+                                    owner_depth,
+                                    clauses: entry.clauses.clone(),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+
+                        if let Some(dst_reg) = dst {
+                            let Some(top) = captured_frames.last_mut() else {
+                                return trap(
+                                    vm,
+                                    format!(
+                                        "unhandled effect: {}.{}",
+                                        effect_id.interface, effect_id.method
+                                    ),
+                                );
+                            };
+                            let idx: usize = (*dst_reg).try_into().unwrap_or(usize::MAX);
+                            let Some(slot) = top.regs.get_mut(idx) else {
+                                return trap(vm, format!("perform dst reg {dst_reg} out of range"));
+                            };
+                            *slot = None;
+                        }
+
+                        let token = ContinuationToken::new(ContinuationState {
+                            frames: captured_frames,
+                            handlers: captured_handlers,
+                            perform_dst: *dst,
+                        });
+
+                        let clause = vm.handlers[handler_index]
+                            .clauses
+                            .get(clause_index)
+                            .cloned()
+                            .expect("handler clause index is valid");
+
+                        vm.frames.truncate(handler_owner_depth + 1);
+                        vm.handlers.truncate(handler_index + 1);
+
+                        let Some(handler_frame) = vm.frames.get_mut(handler_owner_depth) else {
+                            return trap(vm, "invalid handler owner frame".to_string());
+                        };
+
+                        let expected_params = binds.len() + 1;
+                        if clause.param_regs.len() != expected_params {
+                            return trap(
+                                vm,
+                                format!(
+                                    "invalid handler params for {}.{}: expected {expected_params}, got {}",
+                                    effect_id.interface,
+                                    effect_id.method,
+                                    clause.param_regs.len()
+                                ),
+                            );
+                        }
+
+                        for (dst_reg, value) in clause
+                            .param_regs
+                            .iter()
+                            .copied()
+                            .take(binds.len())
+                            .zip(binds.into_iter())
+                        {
+                            if let Err(msg) = write_value(handler_frame, dst_reg, value) {
+                                return trap(vm, format!("handler bind dst: {msg}"));
+                            }
+                        }
+
+                        let k_reg = clause.param_regs[expected_params - 1];
+                        if let Err(msg) =
+                            write_value(handler_frame, k_reg, Value::Continuation(token))
+                        {
+                            return trap(vm, format!("handler k dst: {msg}"));
+                        }
+
+                        handler_frame.pc = clause.target_pc as usize;
+                    }
+                    Ok(None) => {
+                        let external_id = if effect_id.interface_args.is_empty() {
+                            vm.module.external_effect_id(
+                                effect_id.interface.as_str(),
+                                effect_id.method.as_str(),
+                            )
+                        } else {
+                            None
+                        };
+
+                        let Some(effect_id_u32) = external_id else {
+                            return trap(
+                                vm,
+                                format!(
+                                    "unhandled effect: {}.{}",
+                                    effect_id.interface, effect_id.method
+                                ),
+                            );
+                        };
+
+                        let Some(effect) = vm.module.external_effect(effect_id_u32) else {
+                            return trap(vm, format!("invalid effect id {}", effect_id_u32.0));
+                        };
+                        if arg_values.len() != effect.sig.params.len() {
+                            return trap(
+                                vm,
+                                format!(
+                                    "external effect `{}.{}` arity mismatch: expected {} args but got {}",
+                                    effect.interface,
+                                    effect.method,
+                                    effect.sig.params.len(),
+                                    arg_values.len()
+                                ),
+                            );
+                        }
+
+                        let mut abi_args = Vec::with_capacity(arg_values.len());
+                        for (v, expected) in arg_values.iter().zip(effect.sig.params.iter()) {
+                            let Some(abi) = v.to_abi() else {
+                                return trap(
+                                    vm,
+                                    format!(
+                                        "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
+                                        effect.interface,
+                                        effect.method,
+                                        expected,
+                                        v.kind()
+                                    ),
+                                );
+                            };
+                            if abi.ty() != *expected {
+                                return trap(
+                                    vm,
+                                    format!(
+                                        "external effect `{}.{}` arg type mismatch: expected {:?}, got {:?}",
+                                        effect.interface,
+                                        effect.method,
+                                        expected,
+                                        abi.ty()
+                                    ),
+                                );
+                            }
+                            abi_args.push(abi);
+                        }
+
+                        let k = ContinuationHandle {
+                            index: 0,
+                            generation: vm.continuation_generation,
+                        };
+                        vm.state = VmState::Suspended {
+                            k: k.clone(),
+                            perform_dst: *dst,
+                        };
+                        return StepResult::Request {
+                            effect_id: effect_id_u32,
+                            args: abi_args,
+                            k,
+                        };
+                    }
+                    Err(msg) => return trap(vm, msg),
+                }
+            }
+
+            rusk_bytecode::Instruction::Resume { dst, k, value } => {
+                let k_value = match read_value(frame, *k) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("resume k: {msg}")),
                 };
-                vm.state = VmState::Suspended {
-                    k: k.clone(),
-                    perform_dst: *dst,
+                let Value::Continuation(token) = k_value else {
+                    return trap(vm, "invalid resume".to_string());
                 };
-                return StepResult::Request {
-                    effect_id: *effect_id,
-                    args: abi_args,
-                    k,
+
+                let v = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("resume value: {msg}")),
                 };
+                let Some(mut cont) = token.take_state() else {
+                    return trap(vm, "invalid resume".to_string());
+                };
+
+                if let Some(perform_dst) = cont.perform_dst {
+                    let top_index = cont.frames.len().saturating_sub(1);
+                    let Some(top_frame) = cont.frames.get_mut(top_index) else {
+                        return trap(vm, "invalid resume".to_string());
+                    };
+                    if let Err(msg) = write_value(top_frame, perform_dst, v) {
+                        return trap(vm, format!("resume inject: {msg}"));
+                    }
+                }
+
+                let base_depth = vm.frames.len();
+                let Some(bottom) = cont.frames.first_mut() else {
+                    return trap(vm, "invalid resume".to_string());
+                };
+                bottom.return_dst = *dst;
+
+                for handler in &mut cont.handlers {
+                    handler.owner_depth = handler.owner_depth.saturating_add(base_depth);
+                }
+
+                vm.frames.extend(cont.frames);
+                vm.handlers.extend(cont.handlers);
             }
 
             rusk_bytecode::Instruction::Jump { target_pc } => {
@@ -1726,7 +1991,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 let mut matched = false;
                 for case in cases {
                     let mut binds = Vec::new();
-                    let ok = match match_pattern(&vm.module, &case.pattern, &scrutinee, &mut binds) {
+                    let ok = match match_pattern(&vm.module, &case.pattern, &scrutinee, &mut binds)
+                    {
                         Ok(ok) => ok,
                         Err(msg) => return trap(vm, msg),
                     };
@@ -1759,12 +2025,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             }
             rusk_bytecode::Instruction::Return { value } => {
                 let idx: usize = (*value).try_into().unwrap_or(usize::MAX);
-                let Some(v) = frame
-                    .regs
-                    .get(idx)
-                    .and_then(|v| v.as_ref())
-                    .cloned()
-                else {
+                let Some(v) = frame.regs.get(idx).and_then(|v| v.as_ref()).cloned() else {
                     let message = format!("return from uninitialized reg {value}");
                     vm.state = VmState::Trapped {
                         message: message.clone(),
@@ -1774,6 +2035,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 let return_dst = frame.return_dst;
                 vm.frames.pop();
+                unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
                 if let Some(caller) = vm.frames.last_mut() {
                     if let Some(dst) = return_dst {
                         let idx: usize = match dst.try_into() {
@@ -1830,6 +2092,48 @@ fn trap(vm: &mut Vm, message: String) -> StepResult {
     StepResult::Trap { message }
 }
 
+fn unwind_handlers_to_stack_len(handlers: &mut Vec<HandlerEntry>, stack_len: usize) {
+    while let Some(top) = handlers.last() {
+        if top.owner_depth < stack_len {
+            break;
+        }
+        handlers.pop();
+    }
+}
+
+fn find_handler_for_effect(
+    module: &ExecutableModule,
+    handlers: &[HandlerEntry],
+    effect: &RuntimeEffectId,
+    args: &[Value],
+) -> Result<Option<(usize, usize, Vec<Value>)>, String> {
+    for (handler_index, handler) in handlers.iter().enumerate().rev() {
+        for (clause_index, clause) in handler.clauses.iter().enumerate() {
+            if &clause.effect != effect {
+                continue;
+            }
+            if clause.arg_patterns.len() != args.len() {
+                continue;
+            }
+
+            let mut binds = Vec::new();
+            let mut ok = true;
+            for (pat, arg) in clause.arg_patterns.iter().zip(args.iter()) {
+                if !match_pattern(module, pat, arg, &mut binds)? {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if ok {
+                return Ok(Some((handler_index, clause_index, binds)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn alloc_ref(obj: HeapValue) -> Value {
     Value::Ref(RefValue::new(Rc::new(RefCell::new(obj))))
 }
@@ -1846,12 +2150,17 @@ fn read_type_rep(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<TypeRepId, St
     let v = read_value(frame, reg)?;
     match v {
         Value::TypeRep(id) => Ok(id),
-        other => Err(format!("type error in typerep: expected typerep, got {}", other.kind())),
+        other => Err(format!(
+            "type error in typerep: expected typerep, got {}",
+            other.kind()
+        )),
     }
 }
 
 fn tuple_field_index(field: &str) -> Option<usize> {
-    field.strip_prefix('.').and_then(|s| s.parse::<usize>().ok())
+    field
+        .strip_prefix('.')
+        .and_then(|s| s.parse::<usize>().ok())
 }
 
 fn struct_field_index(
@@ -1989,10 +2298,16 @@ fn eval_core_intrinsic(
             [Value::TypeRep(_), Value::Int(v)] => Ok(Value::String(v.to_string())),
             [Value::TypeRep(_), Value::Float(v)] => Ok(Value::String(v.to_string())),
             [Value::TypeRep(_), Value::String(v)] => Ok(Value::String(v.clone())),
-            [Value::TypeRep(_), Value::Bytes(v)] => Ok(Value::String(format!("bytes(len={})", v.len()))),
-            [Value::TypeRep(_), Value::Ref(r)] => Ok(Value::String(format!("{:?}", Value::Ref(r.clone())))),
+            [Value::TypeRep(_), Value::Bytes(v)] => {
+                Ok(Value::String(format!("bytes(len={})", v.len())))
+            }
+            [Value::TypeRep(_), Value::Ref(r)] => {
+                Ok(Value::String(format!("{:?}", Value::Ref(r.clone()))))
+            }
             [Value::TypeRep(_), Value::Function(id)] => Ok(Value::String(format!("fn#{}", id.0))),
-            [Value::TypeRep(_), Value::TypeRep(id)] => Ok(Value::String(format!("typerep({})", id.0))),
+            [Value::TypeRep(_), Value::TypeRep(id)] => {
+                Ok(Value::String(format!("typerep({})", id.0)))
+            }
             _ => Err(bad_args("core::intrinsics::to_string")),
         },
         I::Panic => match args.as_slice() {
@@ -2026,12 +2341,16 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::int_mul")),
         },
         I::IntDiv => match args.as_slice() {
-            [Value::Int(_), Value::Int(0)] => Err("core::intrinsics::int_div: division by zero".to_string()),
+            [Value::Int(_), Value::Int(0)] => {
+                Err("core::intrinsics::int_div: division by zero".to_string())
+            }
             [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a / b)),
             _ => Err(bad_args("core::intrinsics::int_div")),
         },
         I::IntMod => match args.as_slice() {
-            [Value::Int(_), Value::Int(0)] => Err("core::intrinsics::int_mod: modulo by zero".to_string()),
+            [Value::Int(_), Value::Int(0)] => {
+                Err("core::intrinsics::int_mod: modulo by zero".to_string())
+            }
             [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a % b)),
             _ => Err(bad_args("core::intrinsics::int_mod")),
         },
@@ -2196,14 +2515,17 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::array_clear")),
         },
         I::ArrayResize => match args.as_slice() {
-            [Value::TypeRep(_), Value::Ref(arr), Value::Int(new_len), fill] => {
+            [
+                Value::TypeRep(_),
+                Value::Ref(arr),
+                Value::Int(new_len),
+                fill,
+            ] => {
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
                 if *new_len < 0 {
-                    return Err(
-                        "core::intrinsics::array_resize: new_len must be >= 0".to_string(),
-                    );
+                    return Err("core::intrinsics::array_resize: new_len must be >= 0".to_string());
                 }
                 let new_len_usize: usize = *new_len as usize;
 
@@ -2233,9 +2555,9 @@ fn eval_core_intrinsic(
                 let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
                     return Err("core::intrinsics::array_insert: expected an array".to_string());
                 };
-                let idx_usize: usize = (*idx)
-                    .try_into()
-                    .map_err(|_| format!("index out of bounds: index={idx}, len={}", items.len()))?;
+                let idx_usize: usize = (*idx).try_into().map_err(|_| {
+                    format!("index out of bounds: index={idx}, len={}", items.len())
+                })?;
                 if idx_usize > items.len() {
                     return Err(format!(
                         "index out of bounds: index={idx}, len={}",
@@ -2255,9 +2577,9 @@ fn eval_core_intrinsic(
                 let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
                     return Err("core::intrinsics::array_remove: expected an array".to_string());
                 };
-                let idx_usize: usize = (*idx)
-                    .try_into()
-                    .map_err(|_| format!("index out of bounds: index={idx}, len={}", items.len()))?;
+                let idx_usize: usize = (*idx).try_into().map_err(|_| {
+                    format!("index out of bounds: index={idx}, len={}", items.len())
+                })?;
                 if idx_usize >= items.len() {
                     return Err(format!(
                         "index out of bounds: index={idx}, len={}",
@@ -2277,7 +2599,8 @@ fn eval_core_intrinsic(
                     HeapValue::Array(items) => items.clone(),
                     _ => {
                         return Err(
-                            "core::intrinsics::array_extend: expected an array for `other`".to_string(),
+                            "core::intrinsics::array_extend: expected an array for `other`"
+                                .to_string(),
                         );
                     }
                 };
@@ -2297,7 +2620,7 @@ fn eval_core_intrinsic(
                     HeapValue::Array(items) => items.clone(),
                     _ => {
                         return Err(
-                            "core::intrinsics::array_concat: expected an array for `a`".to_string(),
+                            "core::intrinsics::array_concat: expected an array for `a`".to_string()
                         );
                     }
                 };
@@ -2305,7 +2628,7 @@ fn eval_core_intrinsic(
                     HeapValue::Array(items) => items.clone(),
                     _ => {
                         return Err(
-                            "core::intrinsics::array_concat: expected an array for `b`".to_string(),
+                            "core::intrinsics::array_concat: expected an array for `b`".to_string()
                         );
                     }
                 };
@@ -2322,7 +2645,8 @@ fn eval_core_intrinsic(
                     HeapValue::Array(items) => items.clone(),
                     _ => {
                         return Err(
-                            "core::intrinsics::array_concat_ro: expected an array for `a`".to_string(),
+                            "core::intrinsics::array_concat_ro: expected an array for `a`"
+                                .to_string(),
                         );
                     }
                 };
@@ -2330,7 +2654,8 @@ fn eval_core_intrinsic(
                     HeapValue::Array(items) => items.clone(),
                     _ => {
                         return Err(
-                            "core::intrinsics::array_concat_ro: expected an array for `b`".to_string(),
+                            "core::intrinsics::array_concat_ro: expected an array for `b`"
+                                .to_string(),
                         );
                     }
                 };
@@ -2342,14 +2667,17 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::array_concat_ro")),
         },
         I::ArraySlice => match args.as_slice() {
-            [Value::TypeRep(_), Value::Ref(arr), Value::Int(start), Value::Int(end)] => {
+            [
+                Value::TypeRep(_),
+                Value::Ref(arr),
+                Value::Int(start),
+                Value::Int(end),
+            ] => {
                 let borrowed = arr.obj.borrow();
                 let items = match &*borrowed {
                     HeapValue::Array(items) => items,
                     _ => {
-                        return Err(
-                            "core::intrinsics::array_slice: expected an array".to_string(),
-                        );
+                        return Err("core::intrinsics::array_slice: expected an array".to_string());
                     }
                 };
                 let len = items.len();
@@ -2361,9 +2689,7 @@ fn eval_core_intrinsic(
                     .try_into()
                     .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
                 if start_usize > end_usize {
-                    return Err(
-                        "core::intrinsics::array_slice: start must be <= end".to_string(),
-                    );
+                    return Err("core::intrinsics::array_slice: start must be <= end".to_string());
                 }
                 if end_usize > len {
                     return Err(format!("index out of bounds: index={end}, len={len}"));
@@ -2375,13 +2701,18 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::array_slice")),
         },
         I::ArraySliceRo => match args.as_slice() {
-            [Value::TypeRep(_), Value::Ref(arr), Value::Int(start), Value::Int(end)] => {
+            [
+                Value::TypeRep(_),
+                Value::Ref(arr),
+                Value::Int(start),
+                Value::Int(end),
+            ] => {
                 let borrowed = arr.obj.borrow();
                 let items = match &*borrowed {
                     HeapValue::Array(items) => items,
                     _ => {
                         return Err(
-                            "core::intrinsics::array_slice_ro: expected an array".to_string(),
+                            "core::intrinsics::array_slice_ro: expected an array".to_string()
                         );
                     }
                 };
@@ -2395,7 +2726,7 @@ fn eval_core_intrinsic(
                     .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
                 if start_usize > end_usize {
                     return Err(
-                        "core::intrinsics::array_slice_ro: start must be <= end".to_string(),
+                        "core::intrinsics::array_slice_ro: start must be <= end".to_string()
                     );
                 }
                 if end_usize > len {
@@ -2417,9 +2748,7 @@ fn eval_core_intrinsic(
                 match &*arr.obj.borrow() {
                     HeapValue::Array(_) => {}
                     _ => {
-                        return Err(
-                            "core::intrinsics::into_iter: expected an array".to_string(),
-                        );
+                        return Err("core::intrinsics::into_iter: expected an array".to_string());
                     }
                 }
 
@@ -2454,10 +2783,11 @@ fn eval_core_intrinsic(
 
                 let (arr_ref, idx) = {
                     let borrowed = iter.obj.borrow();
-                    let HeapValue::Struct { type_name, fields, .. } = &*borrowed else {
-                        return Err(
-                            "core::intrinsics::next: expected iterator struct".to_string(),
-                        );
+                    let HeapValue::Struct {
+                        type_name, fields, ..
+                    } = &*borrowed
+                    else {
+                        return Err("core::intrinsics::next: expected iterator struct".to_string());
                     };
                     if type_name != ARRAY_ITER_TYPE {
                         return Err(format!(
@@ -2467,21 +2797,19 @@ fn eval_core_intrinsic(
 
                     let Some(Value::Ref(arr_ref)) = fields.get(arr_idx).cloned() else {
                         return Err(
-                            "core::intrinsics::next: iterator missing `arr` field".to_string(),
+                            "core::intrinsics::next: iterator missing `arr` field".to_string()
                         );
                     };
                     let Some(Value::Int(idx)) = fields.get(idx_idx).cloned() else {
                         return Err(
-                            "core::intrinsics::next: iterator missing `idx` field".to_string(),
+                            "core::intrinsics::next: iterator missing `idx` field".to_string()
                         );
                     };
                     (arr_ref, idx)
                 };
 
                 if idx < 0 {
-                    return Err(
-                        "core::intrinsics::next: negative iterator index".to_string(),
-                    );
+                    return Err("core::intrinsics::next: negative iterator index".to_string());
                 }
                 let idx_usize: usize = idx as usize;
 
@@ -2489,7 +2817,7 @@ fn eval_core_intrinsic(
                     let borrowed = arr_ref.obj.borrow();
                     let HeapValue::Array(items) = &*borrowed else {
                         return Err(
-                            "core::intrinsics::next: iterator `arr` is not an array".to_string(),
+                            "core::intrinsics::next: iterator `arr` is not an array".to_string()
                         );
                     };
 
@@ -2517,13 +2845,11 @@ fn eval_core_intrinsic(
                 {
                     let mut borrowed = iter.obj.borrow_mut();
                     let HeapValue::Struct { fields, .. } = &mut *borrowed else {
-                        return Err(
-                            "core::intrinsics::next: expected iterator struct".to_string(),
-                        );
+                        return Err("core::intrinsics::next: expected iterator struct".to_string());
                     };
                     let Some(slot) = fields.get_mut(idx_idx) else {
                         return Err(
-                            "core::intrinsics::next: iterator missing `idx` field".to_string(),
+                            "core::intrinsics::next: iterator missing `idx` field".to_string()
                         );
                     };
                     *slot = Value::Int(idx + 1);
@@ -2833,9 +3159,11 @@ pub fn vm_resume(vm: &mut Vm, k: ContinuationHandle, value: AbiValue) -> Result<
 
             Ok(())
         }
-        VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => Err(VmError::InvalidState {
-            message: "vm is not suspended".to_string(),
-        }),
+        VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => {
+            Err(VmError::InvalidState {
+                message: "vm is not suspended".to_string(),
+            })
+        }
     }
 }
 
@@ -2855,21 +3183,26 @@ pub fn vm_drop_continuation(vm: &mut Vm, k: ContinuationHandle) -> Result<(), Vm
             }
             vm.continuation_generation = vm.continuation_generation.wrapping_add(1);
             vm.frames.clear();
+            vm.handlers.clear();
             vm.state = VmState::Trapped {
                 message: "cancelled".to_string(),
             };
             Ok(())
         }
-        VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => Err(VmError::InvalidState {
-            message: "vm is not suspended".to_string(),
-        }),
+        VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => {
+            Err(VmError::InvalidState {
+                message: "vm is not suspended".to_string(),
+            })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusk_bytecode::{AbiType, CallTarget, ExecutableModule, Function, HostFnSig, HostImport, Instruction};
+    use rusk_bytecode::{
+        AbiType, CallTarget, ExecutableModule, Function, HostFnSig, HostImport, Instruction,
+    };
 
     #[test]
     fn step_done_for_trivial_program() {
@@ -2886,7 +3219,12 @@ mod tests {
 
         let mut vm = Vm::new(module).unwrap();
         let got = vm_step(&mut vm, None);
-        assert_eq!(got, StepResult::Done { value: AbiValue::Unit });
+        assert_eq!(
+            got,
+            StepResult::Done {
+                value: AbiValue::Unit
+            }
+        );
     }
 
     #[test]
@@ -2905,11 +3243,15 @@ mod tests {
         let mut vm = Vm::new(module).unwrap();
         assert_eq!(
             vm_step(&mut vm, None),
-            StepResult::Done { value: AbiValue::Unit }
+            StepResult::Done {
+                value: AbiValue::Unit
+            }
         );
         assert_eq!(
             vm_step(&mut vm, None),
-            StepResult::Done { value: AbiValue::Unit }
+            StepResult::Done {
+                value: AbiValue::Unit
+            }
         );
     }
 
@@ -3129,7 +3471,11 @@ mod tests {
                         base: rusk_mir::TypeRepLit::Array,
                         args: vec![1],
                     },
-                    Instruction::StructGet { dst: 5, obj: 2, idx: 0 },
+                    Instruction::StructGet {
+                        dst: 5,
+                        obj: 2,
+                        idx: 0,
+                    },
                     Instruction::Return { value: 5 },
                 ],
             })
@@ -3172,7 +3518,70 @@ mod tests {
             .unwrap();
 
         module.entry = main;
-        module.methods.insert(("S".to_string(), "foo".to_string()), foo);
+        module
+            .methods
+            .insert(("S".to_string(), "foo".to_string()), foo);
+
+        let mut vm = Vm::new(module).unwrap();
+        assert_eq!(
+            vm_step(&mut vm, None),
+            StepResult::Done {
+                value: AbiValue::Int(42)
+            }
+        );
+    }
+
+    #[test]
+    fn in_vm_effect_handler_resume_splices_continuation() {
+        let mut module = ExecutableModule::default();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 5,
+                param_count: 0,
+                code: vec![
+                    Instruction::PushHandler {
+                        clauses: vec![rusk_bytecode::HandlerClause {
+                            effect: rusk_bytecode::EffectSpec {
+                                interface: "Test".to_string(),
+                                interface_args: vec![],
+                                method: "boom".to_string(),
+                            },
+                            arg_patterns: vec![rusk_mir::Pattern::Bind],
+                            target_pc: 6,
+                            param_regs: vec![0, 1],
+                        }],
+                    },
+                    Instruction::Const {
+                        dst: 2,
+                        value: rusk_bytecode::ConstValue::Int(41),
+                    },
+                    Instruction::Perform {
+                        dst: Some(3),
+                        effect: rusk_bytecode::EffectSpec {
+                            interface: "Test".to_string(),
+                            interface_args: vec![],
+                            method: "boom".to_string(),
+                        },
+                        args: vec![2],
+                    },
+                    Instruction::Const {
+                        dst: 4,
+                        value: rusk_bytecode::ConstValue::Int(1),
+                    },
+                    Instruction::IntAdd { dst: 4, a: 3, b: 4 },
+                    Instruction::Return { value: 4 },
+                    Instruction::Resume {
+                        dst: Some(2),
+                        k: 1,
+                        value: 0,
+                    },
+                    Instruction::PopHandler,
+                    Instruction::Return { value: 2 },
+                ],
+            })
+            .unwrap();
+        module.entry = main;
 
         let mut vm = Vm::new(module).unwrap();
         assert_eq!(

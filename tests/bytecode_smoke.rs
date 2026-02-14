@@ -12,6 +12,10 @@ fn bytecode_smoke_runs_simple_int_add() {
     let module = compile_to_bytecode(src).expect("compile");
     let mut vm = Vm::new(module).expect("vm init");
     let got = vm_step(&mut vm, None);
-    assert_eq!(got, StepResult::Done { value: AbiValue::Int(3) });
+    assert_eq!(
+        got,
+        StepResult::Done {
+            value: AbiValue::Int(3)
+        }
+    );
 }
-

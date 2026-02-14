@@ -33,7 +33,10 @@ fn unhandled_externalized_effect_returns_request() {
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
     let got = vm_step(&mut vm, None);
-    let StepResult::Request { effect_id, args, .. } = got else {
+    let StepResult::Request {
+        effect_id, args, ..
+    } = got
+    else {
         panic!("expected request, got {got:?}");
     };
 
@@ -129,4 +132,3 @@ fn drop_cancels_vm() {
     };
     assert!(message.contains("cancelled"), "{message}");
 }
-

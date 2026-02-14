@@ -573,11 +573,13 @@ pub fn compile_to_bytecode_with_options(
                 Span::new(0, 0),
             ));
         };
-        lower_options.external_effects.push(rusk_bytecode::ExternalEffectDecl {
-            interface: decl.interface.clone(),
-            method: decl.method.clone(),
-            sig,
-        });
+        lower_options
+            .external_effects
+            .push(rusk_bytecode::ExternalEffectDecl {
+                interface: decl.interface.clone(),
+                method: decl.method.clone(),
+                sig,
+            });
     }
 
     rusk_bytecode::lower_mir_module_with_options(&mir, &lower_options)
@@ -677,11 +679,13 @@ pub fn compile_file_to_bytecode_with_options(
                 Span::new(0, 0),
             ));
         };
-        lower_options.external_effects.push(rusk_bytecode::ExternalEffectDecl {
-            interface: decl.interface.clone(),
-            method: decl.method.clone(),
-            sig,
-        });
+        lower_options
+            .external_effects
+            .push(rusk_bytecode::ExternalEffectDecl {
+                interface: decl.interface.clone(),
+                method: decl.method.clone(),
+                sig,
+            });
     }
 
     rusk_bytecode::lower_mir_module_with_options(&mir, &lower_options)

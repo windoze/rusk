@@ -196,17 +196,58 @@ pub struct SwitchCase {
     pub param_regs: Vec<Reg>,
 }
 
+/// A performed effect identity (interface + instantiated interface args + method).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectSpec {
+    pub interface: String,
+    /// Runtime `TypeRep` registers used to instantiate the interface type arguments.
+    ///
+    /// These are evaluated at runtime when pushing a handler and when performing an effect.
+    pub interface_args: Vec<Reg>,
+    pub method: String,
+}
+
+/// A lowered effect handler clause.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandlerClause {
+    pub effect: EffectSpec,
+    pub arg_patterns: Vec<rusk_mir::Pattern>,
+    pub target_pc: u32,
+    /// Destination registers for pattern binds, followed by the continuation token.
+    pub param_regs: Vec<Reg>,
+}
+
 /// An in-memory bytecode instruction stream.
 ///
 /// This is not yet a stable serialized format.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
-    Const { dst: Reg, value: ConstValue },
-    Copy { dst: Reg, src: Reg },
-    Move { dst: Reg, src: Reg },
-    AsReadonly { dst: Reg, src: Reg },
-    IsType { dst: Reg, value: Reg, ty: Reg },
-    CheckedCast { dst: Reg, value: Reg, ty: Reg },
+    Const {
+        dst: Reg,
+        value: ConstValue,
+    },
+    Copy {
+        dst: Reg,
+        src: Reg,
+    },
+    Move {
+        dst: Reg,
+        src: Reg,
+    },
+    AsReadonly {
+        dst: Reg,
+        src: Reg,
+    },
+    IsType {
+        dst: Reg,
+        value: Reg,
+        ty: Reg,
+    },
+    CheckedCast {
+        dst: Reg,
+        value: Reg,
+        ty: Reg,
+    },
 
     MakeTypeRep {
         dst: Reg,
@@ -220,8 +261,14 @@ pub enum Instruction {
         type_args: Vec<Reg>,
         fields: Vec<(String, Reg)>,
     },
-    MakeArray { dst: Reg, items: Vec<Reg> },
-    MakeTuple { dst: Reg, items: Vec<Reg> },
+    MakeArray {
+        dst: Reg,
+        items: Vec<Reg>,
+    },
+    MakeTuple {
+        dst: Reg,
+        items: Vec<Reg>,
+    },
     MakeEnum {
         dst: Reg,
         enum_name: String,
@@ -230,35 +277,125 @@ pub enum Instruction {
         fields: Vec<Reg>,
     },
 
-    GetField { dst: Reg, obj: Reg, field: String },
-    SetField { obj: Reg, field: String, value: Reg },
+    GetField {
+        dst: Reg,
+        obj: Reg,
+        field: String,
+    },
+    SetField {
+        obj: Reg,
+        field: String,
+        value: Reg,
+    },
 
-    StructGet { dst: Reg, obj: Reg, idx: usize },
-    StructSet { obj: Reg, idx: usize, value: Reg },
+    StructGet {
+        dst: Reg,
+        obj: Reg,
+        idx: usize,
+    },
+    StructSet {
+        obj: Reg,
+        idx: usize,
+        value: Reg,
+    },
 
-    TupleGet { dst: Reg, tup: Reg, idx: usize },
-    TupleSet { tup: Reg, idx: usize, value: Reg },
+    TupleGet {
+        dst: Reg,
+        tup: Reg,
+        idx: usize,
+    },
+    TupleSet {
+        tup: Reg,
+        idx: usize,
+        value: Reg,
+    },
 
-    IndexGet { dst: Reg, arr: Reg, idx: Reg },
-    IndexSet { arr: Reg, idx: Reg, value: Reg },
-    Len { dst: Reg, arr: Reg },
+    IndexGet {
+        dst: Reg,
+        arr: Reg,
+        idx: Reg,
+    },
+    IndexSet {
+        arr: Reg,
+        idx: Reg,
+        value: Reg,
+    },
+    Len {
+        dst: Reg,
+        arr: Reg,
+    },
 
-    IntAdd { dst: Reg, a: Reg, b: Reg },
-    IntSub { dst: Reg, a: Reg, b: Reg },
-    IntMul { dst: Reg, a: Reg, b: Reg },
-    IntDiv { dst: Reg, a: Reg, b: Reg },
-    IntMod { dst: Reg, a: Reg, b: Reg },
+    IntAdd {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntSub {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntMul {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntDiv {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntMod {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
 
-    IntLt { dst: Reg, a: Reg, b: Reg },
-    IntLe { dst: Reg, a: Reg, b: Reg },
-    IntGt { dst: Reg, a: Reg, b: Reg },
-    IntGe { dst: Reg, a: Reg, b: Reg },
-    IntEq { dst: Reg, a: Reg, b: Reg },
-    IntNe { dst: Reg, a: Reg, b: Reg },
+    IntLt {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntLe {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntGt {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntGe {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntEq {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntNe {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
 
-    BoolNot { dst: Reg, v: Reg },
-    BoolEq { dst: Reg, a: Reg, b: Reg },
-    BoolNe { dst: Reg, a: Reg, b: Reg },
+    BoolNot {
+        dst: Reg,
+        v: Reg,
+    },
+    BoolEq {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    BoolNe {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
 
     Call {
         dst: Option<Reg>,
@@ -278,13 +415,25 @@ pub enum Instruction {
         args: Vec<Reg>,
     },
 
+    PushHandler {
+        clauses: Vec<HandlerClause>,
+    },
+    PopHandler,
+
     Perform {
         dst: Option<Reg>,
-        effect_id: EffectId,
+        effect: EffectSpec,
         args: Vec<Reg>,
     },
+    Resume {
+        dst: Option<Reg>,
+        k: Reg,
+        value: Reg,
+    },
 
-    Jump { target_pc: u32 },
+    Jump {
+        target_pc: u32,
+    },
     JumpIf {
         cond: Reg,
         then_pc: u32,
@@ -296,8 +445,12 @@ pub enum Instruction {
         default_pc: u32,
     },
 
-    Return { value: Reg },
-    Trap { message: String },
+    Return {
+        value: Reg,
+    },
+    Trap {
+        message: String,
+    },
 }
 
 /// A bytecode function body.

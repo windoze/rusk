@@ -10,9 +10,7 @@ use crate::{
     CallTarget, ConstValue, ExecutableModule, ExternalEffectDecl, Function, FunctionId, HostFnSig,
     HostImport, HostImportId, Instruction, Intrinsic, Reg,
 };
-use rusk_mir::{
-    BlockId, CallTarget as MirCallTarget, ConstValue as MirConstValue, Operand,
-};
+use rusk_mir::{BlockId, CallTarget as MirCallTarget, ConstValue as MirConstValue, Operand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerError {
@@ -184,13 +182,24 @@ impl TempAlloc {
 
 #[derive(Clone, Copy, Debug)]
 enum PcPatch {
-    Jump { instr_index: usize, target: BlockId },
+    Jump {
+        instr_index: usize,
+        target: BlockId,
+    },
     SwitchCase {
         instr_index: usize,
         case_index: usize,
         target: BlockId,
     },
-    SwitchDefault { instr_index: usize, target: BlockId },
+    SwitchDefault {
+        instr_index: usize,
+        target: BlockId,
+    },
+    HandlerClause {
+        instr_index: usize,
+        clause_index: usize,
+        target: BlockId,
+    },
 }
 
 fn lower_mir_function(
@@ -236,6 +245,7 @@ fn lower_mir_function(
                 external_effect_ids,
                 &mut temps,
                 &mut code,
+                &mut patches,
             )?;
         }
 
@@ -252,7 +262,10 @@ fn lower_mir_function(
 
     for patch in patches {
         match patch {
-            PcPatch::Jump { instr_index, target } => {
+            PcPatch::Jump {
+                instr_index,
+                target,
+            } => {
                 let target_pc = *block_pcs
                     .get(target.0)
                     .ok_or_else(|| LowerError::new("invalid jump target block id"))?;
@@ -287,7 +300,10 @@ fn lower_mir_function(
                 };
                 case.target_pc = target_pc;
             }
-            PcPatch::SwitchDefault { instr_index, target } => {
+            PcPatch::SwitchDefault {
+                instr_index,
+                target,
+            } => {
                 let target_pc = *block_pcs
                     .get(target.0)
                     .ok_or_else(|| LowerError::new("invalid switch default block id"))?;
@@ -300,6 +316,27 @@ fn lower_mir_function(
                     ));
                 };
                 *default_pc = target_pc;
+            }
+            PcPatch::HandlerClause {
+                instr_index,
+                clause_index,
+                target,
+            } => {
+                let target_pc = *block_pcs
+                    .get(target.0)
+                    .ok_or_else(|| LowerError::new("invalid handler target block id"))?;
+                let Some(slot) = code.get_mut(instr_index) else {
+                    return Err(LowerError::new("invalid handler patch pc"));
+                };
+                let Instruction::PushHandler { clauses } = slot else {
+                    return Err(LowerError::new(
+                        "internal error: handler patch points at non-push_handler opcode",
+                    ));
+                };
+                let Some(clause) = clauses.get_mut(clause_index) else {
+                    return Err(LowerError::new("invalid handler clause index"));
+                };
+                clause.target_pc = target_pc;
             }
         }
     }
@@ -324,6 +361,7 @@ fn lower_mir_instruction(
     external_effect_ids: &BTreeMap<(String, String), crate::EffectId>,
     temps: &mut TempAlloc,
     code: &mut Vec<Instruction>,
+    patches: &mut Vec<PcPatch>,
 ) -> Result<(), LowerError> {
     use rusk_mir::Instruction as I;
 
@@ -679,13 +717,13 @@ fn lower_mir_instruction(
                     if let Some(intr) = core_intrinsic(name) {
                         CallTarget::Intrinsic(intr)
                     } else {
-                    let idx = hid.0 as usize;
-                    let Some(bc_id) = host_id_map.get(idx).and_then(|v| *v) else {
-                        return Err(LowerError::new(format!(
-                            "host import `{name}` is not ABI-safe for bytecode v0"
-                        )));
-                    };
-                    CallTarget::Host(bc_id)
+                        let idx = hid.0 as usize;
+                        let Some(bc_id) = host_id_map.get(idx).and_then(|v| *v) else {
+                            return Err(LowerError::new(format!(
+                                "host import `{name}` is not ABI-safe for bytecode v0"
+                            )));
+                        };
+                        CallTarget::Host(bc_id)
                     }
                 }
             };
@@ -716,9 +754,7 @@ fn lower_mir_instruction(
                 };
                 CallTarget::Host(bc_id)
             } else {
-                return Err(LowerError::new(format!(
-                    "unresolved call target `{func}`"
-                )));
+                return Err(LowerError::new(format!("unresolved call target `{func}`")));
             };
 
             code.push(Instruction::Call {
@@ -769,25 +805,65 @@ fn lower_mir_instruction(
             });
         }
 
-        I::Perform { dst, effect, args } => {
-            if !effect.interface_args.is_empty() {
-                return Err(LowerError::new(
-                    "bytecode v0 does not yet support generic interface args for external effects",
-                ));
+        I::PushHandler {
+            handler_id: _,
+            clauses,
+        } => {
+            let mut bc_clauses = Vec::with_capacity(clauses.len());
+            for clause in clauses {
+                let mut interface_args = Vec::with_capacity(clause.effect.interface_args.len());
+                for op in &clause.effect.interface_args {
+                    interface_args.push(op_reg(op, code, temps)?);
+                }
+
+                let bind_count = count_binds_in_patterns(&clause.arg_patterns);
+                let params = &mir_func
+                    .blocks
+                    .get(clause.target.0)
+                    .ok_or_else(|| LowerError::new("invalid handler target block id"))?
+                    .params;
+                let expected = bind_count + 1;
+                let got = params.len();
+                if expected != got {
+                    return Err(LowerError::new(format!(
+                        "invalid handler target params for {}.{}: expected {expected}, got {got}",
+                        clause.effect.interface, clause.effect.method
+                    )));
+                }
+
+                bc_clauses.push(crate::HandlerClause {
+                    effect: crate::EffectSpec {
+                        interface: clause.effect.interface.clone(),
+                        interface_args,
+                        method: clause.effect.method.clone(),
+                    },
+                    arg_patterns: clause.arg_patterns.clone(),
+                    target_pc: 0,
+                    param_regs: params.iter().map(|l| l.0 as Reg).collect(),
+                });
             }
 
-            let key = (effect.interface.clone(), effect.method.clone());
-            let Some(effect_id) = external_effect_ids.get(&key).copied() else {
-                // Not externalized (yet): lower as an immediate trap at runtime.
-                code.push(Instruction::Trap {
-                    message: format!(
-                        "unhandled effect (not externalized): {}.{}",
-                        effect.interface, effect.method
-                    ),
+            let instr_index = code.len();
+            code.push(Instruction::PushHandler {
+                clauses: bc_clauses,
+            });
+            for (clause_index, clause) in clauses.iter().enumerate() {
+                patches.push(PcPatch::HandlerClause {
+                    instr_index,
+                    clause_index,
+                    target: clause.target,
                 });
-                return Ok(());
-            };
+            }
+        }
+        I::PopHandler => {
+            code.push(Instruction::PopHandler);
+        }
 
+        I::Perform { dst, effect, args } => {
+            let mut interface_args = Vec::with_capacity(effect.interface_args.len());
+            for op in &effect.interface_args {
+                interface_args.push(op_reg(op, code, temps)?);
+            }
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
                 bc_args.push(op_reg(arg, code, temps)?);
@@ -795,8 +871,22 @@ fn lower_mir_instruction(
 
             code.push(Instruction::Perform {
                 dst: dst.map(local),
-                effect_id,
+                effect: crate::EffectSpec {
+                    interface: effect.interface.clone(),
+                    interface_args,
+                    method: effect.method.clone(),
+                },
                 args: bc_args,
+            });
+        }
+
+        I::Resume { dst, k, value } => {
+            let k = op_reg(k, code, temps)?;
+            let value = op_reg(value, code, temps)?;
+            code.push(Instruction::Resume {
+                dst: dst.map(local),
+                k,
+                value,
             });
         }
 
@@ -809,6 +899,7 @@ fn lower_mir_instruction(
 
     let _ = mir_func;
     let _ = external_effect_ids;
+    let _ = patches;
     Ok(())
 }
 
@@ -1008,6 +1099,10 @@ fn count_binds_in_pattern(pat: &rusk_mir::Pattern) -> usize {
     }
 }
 
+fn count_binds_in_patterns(pats: &[rusk_mir::Pattern]) -> usize {
+    pats.iter().map(count_binds_in_pattern).sum()
+}
+
 fn emit_branch_arg_copies(
     mir_module: &rusk_mir::Module,
     params: &[rusk_mir::Local],
@@ -1036,7 +1131,9 @@ fn emit_branch_arg_copies(
     let mut seen = BTreeSet::new();
     for (dst, _src) in &moves {
         if !seen.insert(*dst) {
-            return Err(LowerError::new("branch target block params contain duplicates"));
+            return Err(LowerError::new(
+                "branch target block params contain duplicates",
+            ));
         }
     }
 
@@ -1046,7 +1143,11 @@ fn emit_branch_arg_copies(
     Ok(())
 }
 
-fn emit_parallel_copies(mut moves: Vec<(Reg, Reg)>, temps: &mut TempAlloc, code: &mut Vec<Instruction>) {
+fn emit_parallel_copies(
+    mut moves: Vec<(Reg, Reg)>,
+    temps: &mut TempAlloc,
+    code: &mut Vec<Instruction>,
+) {
     moves.retain(|(dst, src)| dst != src);
     if moves.is_empty() {
         return;
@@ -1066,7 +1167,10 @@ fn emit_parallel_copies(mut moves: Vec<(Reg, Reg)>, temps: &mut TempAlloc, code:
         // some *remaining* move, preserve it first.
         if remaining_uses.get(&dst).copied().unwrap_or(0) > 0 && !saved.contains_key(&dst) {
             let temp = temps.alloc();
-            code.push(Instruction::Copy { dst: temp, src: dst });
+            code.push(Instruction::Copy {
+                dst: temp,
+                src: dst,
+            });
             saved.insert(dst, temp);
         }
 

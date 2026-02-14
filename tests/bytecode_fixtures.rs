@@ -166,7 +166,9 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
         });
         let path = entry.path();
         if path.is_file() {
-            if path.extension().and_then(|s| s.to_str()) == Some("rusk") && is_bytecode_fixture(&path) {
+            if path.extension().and_then(|s| s.to_str()) == Some("rusk")
+                && is_bytecode_fixture(&path)
+            {
                 out.push(FixtureCase {
                     path: path.clone(),
                     kind: FixtureKind::SingleFile(path),
@@ -196,7 +198,10 @@ fn bytecode_fixtures() {
     let fixture_dir = Path::new("fixtures");
     let cases = discover_fixtures(fixture_dir);
     if cases.is_empty() {
-        panic!("no bytecode fixtures found under `{}`", fixture_dir.display());
+        panic!(
+            "no bytecode fixtures found under `{}`",
+            fixture_dir.display()
+        );
     }
 
     let mut options = CompileOptions::default();
@@ -235,21 +240,28 @@ fn bytecode_fixtures() {
                 let module = module.unwrap_or_else(|e| {
                     panic!("fixture {}: compile failed: {e}", entry_path.display())
                 });
-                let mut vm = Vm::new(module.clone())
-                    .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
+                let mut vm = Vm::new(module.clone()).unwrap_or_else(|e| {
+                    panic!("fixture {}: vm init failed: {e}", entry_path.display())
+                });
                 common::install_test_host_fns_vm(&module, &mut vm);
                 common::install_core_host_fns_vm(&module, &mut vm);
                 let got = run_to_completion(&module, &mut vm).unwrap_or_else(|e| {
                     panic!("fixture {}: runtime failed: {e}", entry_path.display())
                 });
-                assert_eq!(got, want, "fixture {}: result mismatch", entry_path.display());
+                assert_eq!(
+                    got,
+                    want,
+                    "fixture {}: result mismatch",
+                    entry_path.display()
+                );
             }
             Expectation::RuntimeError { contains } => {
                 let module = module.unwrap_or_else(|e| {
                     panic!("fixture {}: compile failed: {e}", entry_path.display())
                 });
-                let mut vm = Vm::new(module.clone())
-                    .unwrap_or_else(|e| panic!("fixture {}: vm init failed: {e}", entry_path.display()));
+                let mut vm = Vm::new(module.clone()).unwrap_or_else(|e| {
+                    panic!("fixture {}: vm init failed: {e}", entry_path.display())
+                });
                 common::install_test_host_fns_vm(&module, &mut vm);
                 common::install_core_host_fns_vm(&module, &mut vm);
                 let err = run_to_completion(&module, &mut vm).expect_err("expected trap");
@@ -273,11 +285,7 @@ fn run_to_completion(
             StepResult::Done { value } => return Ok(value),
             StepResult::Trap { message } => return Err(message),
             StepResult::Yield { .. } => return Err("unexpected yield".to_string()),
-            StepResult::Request {
-                effect_id,
-                args,
-                k,
-            } => {
+            StepResult::Request { effect_id, args, k } => {
                 let Some(decl) = module.external_effect(effect_id) else {
                     let _ = vm_drop_continuation(vm, k);
                     return Err(format!("unknown external effect id {}", effect_id.0));
