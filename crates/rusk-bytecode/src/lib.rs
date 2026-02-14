@@ -9,9 +9,11 @@ use alloc::vec::Vec;
 
 pub mod lower;
 pub mod rbc;
+pub mod verify;
 
 pub use lower::{LowerError, LowerOptions, lower_mir_module, lower_mir_module_with_options};
 pub use rbc::{DecodeError, EncodeError, from_bytes, to_bytes};
+pub use verify::{VerifyError, verify_module};
 
 /// A stable identifier for a bytecode function within an [`ExecutableModule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

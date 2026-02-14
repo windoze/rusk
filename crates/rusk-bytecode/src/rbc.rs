@@ -75,7 +75,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<ExecutableModule, DecodeError> {
         )));
     }
 
-    dec.read_module()
+    let module = dec.read_module()?;
+    crate::verify::verify_module(&module).map_err(|e| dec.err(e.message))?;
+    Ok(module)
 }
 
 struct Encoder {

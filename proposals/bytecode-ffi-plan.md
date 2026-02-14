@@ -769,7 +769,7 @@ Deliverables:
 Tracked checklist (mark ✅ as we finish each chunk):
 
 - [x] G1 — Stable `.rbc` encoder/decoder in `rusk-bytecode`
-- [ ] G2 — Verifier for decoded `.rbc` modules
+- [x] G2 — Verifier for decoded `.rbc` modules
 - [ ] G3 — CLI `.rbc` support (`ruskc` emits `.rbc`, `rusk` runs `.rbc`)
 - [ ] G4 — Tests: roundtrip + truncation + version mismatch
 
