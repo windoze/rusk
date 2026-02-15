@@ -29,6 +29,7 @@ pub struct ExternalEffectDecl {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompileOptions {
+    pub opt_level: rusk_bytecode::OptLevel,
     pub host_modules: Vec<(String, HostModuleDecl)>,
     pub external_effects: Vec<ExternalEffectDecl>,
 }

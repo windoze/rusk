@@ -7,7 +7,11 @@ This folder contains small, stable Rusk programs intended for local performance 
 Use the in-tree measurement runner:
 
 ```sh
-cargo run --release --bin rusk-measure -- --json --warmup 2 --iters 10 <file.rusk>
+# Default backend is MIR:
+cargo run --release --bin rusk-measure -- --backend mir --json --warmup 2 --iters 10 <file.rusk>
+
+# To measure bytecode VM + peephole opts:
+cargo run --release --bin rusk-measure -- --backend bytecode --opt-level o2 --metrics --json --warmup 2 --iters 10 <file.rusk>
 ```
 
 To compare against Python (using the repo's `.venv`):

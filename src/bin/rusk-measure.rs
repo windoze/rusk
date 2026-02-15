@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: rusk-measure [--backend mir|bytecode] [--json] [--warmup N] [--iters N] <file.rusk|file.mir|file.rbc>"
+        "usage: rusk-measure [--backend mir|bytecode] [--opt-level o0|o1|o2] [--metrics] [--json] [--warmup N] [--iters N] <file.rusk|file.mir|file.rbc>"
     );
     process::exit(2);
 }
@@ -86,7 +86,9 @@ fn main() {
     let mut iters: usize = 1;
     let mut warmup: usize = 0;
     let mut json = false;
+    let mut metrics = false;
     let mut backend = Backend::Mir;
+    let mut opt_level = rusk_bytecode::OptLevel::default();
     let mut path: Option<String> = None;
 
     let mut args = env::args().skip(1);
@@ -100,6 +102,16 @@ fn main() {
                     _ => usage(),
                 };
             }
+            "--opt-level" => {
+                let Some(value) = args.next() else { usage() };
+                opt_level = match value.as_str() {
+                    "o0" | "O0" => rusk_bytecode::OptLevel::O0,
+                    "o1" | "O1" => rusk_bytecode::OptLevel::O1,
+                    "o2" | "O2" => rusk_bytecode::OptLevel::O2,
+                    _ => usage(),
+                };
+            }
+            "--metrics" => metrics = true,
             "--json" => json = true,
             "--iters" => {
                 let n = args.next().unwrap_or_else(|| usage());
@@ -274,6 +286,7 @@ fn main() {
                 Some("rusk") => {
                     let mut options = CompileOptions::default();
                     std_io::register_host_module(&mut options);
+                    options.opt_level = opt_level;
                     let (mir, mut metrics) =
                         match compile_file_to_mir_with_options_and_metrics(input_path, &options) {
                             Ok(v) => v,
@@ -284,7 +297,7 @@ fn main() {
                         };
 
                     let bc_lower_start = Instant::now();
-                    let bc_module = match rusk_bytecode::lower_mir_module(&mir) {
+                    let mut bc_module = match rusk_bytecode::lower_mir_module(&mir) {
                         Ok(m) => m,
                         Err(e) => {
                             eprintln!("bytecode lowering error: {}", e.message);
@@ -292,8 +305,18 @@ fn main() {
                         }
                     };
                     let bc_lower_time = bc_lower_start.elapsed();
+                    let opt_start = Instant::now();
+                    if let Err(e) =
+                        rusk_bytecode::peephole_optimize_module(&mut bc_module, opt_level)
+                    {
+                        eprintln!("bytecode opt error: {}", e.message);
+                        process::exit(1);
+                    }
+                    let bc_opt_time = opt_start.elapsed();
                     metrics.lower_time += bc_lower_time;
+                    metrics.lower_time += bc_opt_time;
                     metrics.total_time += bc_lower_time;
+                    metrics.total_time += bc_opt_time;
                     (bc_module, metrics)
                 }
                 Some("rbc") => {
@@ -334,7 +357,7 @@ fn main() {
                         }
                     };
                     let bc_lower_start = Instant::now();
-                    let module = match rusk_bytecode::lower_mir_module(&mir) {
+                    let mut module = match rusk_bytecode::lower_mir_module(&mir) {
                         Ok(m) => m,
                         Err(e) => {
                             eprintln!("bytecode lowering error: {}", e.message);
@@ -342,9 +365,16 @@ fn main() {
                         }
                     };
                     let bc_lower_time = bc_lower_start.elapsed();
+                    let opt_start = Instant::now();
+                    if let Err(e) = rusk_bytecode::peephole_optimize_module(&mut module, opt_level)
+                    {
+                        eprintln!("bytecode opt error: {}", e.message);
+                        process::exit(1);
+                    }
+                    let bc_opt_time = opt_start.elapsed();
                     let mut metrics = CompileMetrics::default();
                     metrics.load_time = load_start.elapsed();
-                    metrics.lower_time = bc_lower_time;
+                    metrics.lower_time = bc_lower_time + bc_opt_time;
                     metrics.total_time = metrics.load_time + metrics.lower_time;
                     (module, metrics)
                 }
@@ -357,6 +387,7 @@ fn main() {
             let total_runs = warmup.saturating_add(iters);
             let mut run_time_total = Duration::ZERO;
             let mut last_result: Option<AbiValue> = None;
+            let mut agg_metrics = rusk_vm::VmMetrics::default();
 
             for run_index in 0..total_runs {
                 let mut vm = match Vm::new(module.clone()) {
@@ -367,10 +398,19 @@ fn main() {
                     }
                 };
                 std_io::install_vm(&module, &mut vm);
+                if metrics {
+                    vm.enable_metrics(true);
+                    vm.reset_metrics();
+                }
 
                 let run_start = Instant::now();
                 let step = vm_step(&mut vm, None);
                 let run_time = run_start.elapsed();
+                let run_metrics = if metrics {
+                    Some(vm.take_metrics())
+                } else {
+                    None
+                };
 
                 let result = match step {
                     StepResult::Done { value } => value,
@@ -397,6 +437,9 @@ fn main() {
                 if run_index >= warmup {
                     run_time_total += run_time;
                     last_result = Some(result);
+                    if let Some(m) = run_metrics {
+                        agg_metrics.add_from(&m);
+                    }
                 }
             }
 
@@ -415,7 +458,15 @@ fn main() {
 \"call_instructions\":0,\"icall_instructions\":0,\"vcall_instructions\":0,\
 \"host_calls\":0,\"mir_calls\":0,\
 \"br_terminators\":0,\"cond_br_terminators\":0,\"switch_terminators\":0,\
-\"return_terminators\":0,\"trap_terminators\":0}}}}}}",
+\"return_terminators\":0,\"trap_terminators\":0}},\
+\"vm_metrics\":{{\"executed_instructions\":{vm_ei},\"const_instructions\":{vm_const},\
+\"copy_instructions\":{vm_copy},\"move_instructions\":{vm_move},\"as_readonly_instructions\":{vm_ro},\
+\"int_binop_instructions\":{vm_ibi},\"int_cmp_instructions\":{vm_icmp},\"bool_op_instructions\":{vm_bop},\
+\"call_instructions\":{vm_call},\"icall_instructions\":{vm_icall},\"vcall_instructions\":{vm_vcall},\
+\"push_handler_instructions\":{vm_pushh},\"pop_handler_instructions\":{vm_poph},\
+\"perform_instructions\":{vm_perf},\"resume_instructions\":{vm_res},\
+\"jump_instructions\":{vm_j},\"jumpif_instructions\":{vm_jif},\"switch_instructions\":{vm_sw},\
+\"return_instructions\":{vm_ret},\"trap_instructions\":{vm_trap},\"other_instructions\":{vm_other}}}}}}}",
                     load_ns = duration_ns(compile_metrics.load_time),
                     read_ns = duration_ns(compile_metrics.read_time),
                     parse_ns = duration_ns(compile_metrics.parse_time),
@@ -426,11 +477,33 @@ fn main() {
                     bytes_read = compile_metrics.bytes_read,
                     run_total_ns = duration_ns(run_time_total),
                     run_avg_ns = duration_ns(avg_run_time),
+                    vm_ei = agg_metrics.executed_instructions,
+                    vm_const = agg_metrics.const_instructions,
+                    vm_copy = agg_metrics.copy_instructions,
+                    vm_move = agg_metrics.move_instructions,
+                    vm_ro = agg_metrics.as_readonly_instructions,
+                    vm_ibi = agg_metrics.int_binop_instructions,
+                    vm_icmp = agg_metrics.int_cmp_instructions,
+                    vm_bop = agg_metrics.bool_op_instructions,
+                    vm_call = agg_metrics.call_instructions,
+                    vm_icall = agg_metrics.icall_instructions,
+                    vm_vcall = agg_metrics.vcall_instructions,
+                    vm_pushh = agg_metrics.push_handler_instructions,
+                    vm_poph = agg_metrics.pop_handler_instructions,
+                    vm_perf = agg_metrics.perform_instructions,
+                    vm_res = agg_metrics.resume_instructions,
+                    vm_j = agg_metrics.jump_instructions,
+                    vm_jif = agg_metrics.jumpif_instructions,
+                    vm_sw = agg_metrics.switch_instructions,
+                    vm_ret = agg_metrics.return_instructions,
+                    vm_trap = agg_metrics.trap_instructions,
+                    vm_other = agg_metrics.other_instructions,
                 );
                 return;
             }
 
             println!("Backend: bytecode");
+            println!("Opt level: {:?}", opt_level);
             println!("Input: {path}");
             println!("Compile:");
             println!("  load:      {:?}", compile_metrics.load_time);
@@ -446,7 +519,11 @@ fn main() {
             println!("  iters:     {iters} (warmup: {warmup})");
             println!("  total:     {:?}", run_time_total);
             println!("  avg:       {:?}", avg_run_time);
-            println!("  metrics:   <not collected>");
+            if metrics {
+                println!("  metrics:   {agg_metrics:?}");
+            } else {
+                println!("  metrics:   <not collected; pass --metrics>");
+            }
 
             if let Some(result) = last_result
                 && result != AbiValue::Unit

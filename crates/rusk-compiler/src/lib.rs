@@ -21,6 +21,7 @@ pub use compiler::{
 pub use host::{
     CompileOptions, ExternalEffectDecl, HostFunctionDecl, HostModuleDecl, HostVisibility,
 };
+pub use rusk_bytecode::OptLevel;
 pub use rusk_mir::{HostFnSig, HostType};
 
 /// Source text span utilities used by the front-end.

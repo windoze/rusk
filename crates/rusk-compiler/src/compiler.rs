@@ -584,6 +584,11 @@ pub fn compile_to_bytecode_with_options(
 
     rusk_bytecode::lower_mir_module_with_options(&mir, &lower_options)
         .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))
+        .and_then(|mut module| {
+            rusk_bytecode::peephole_optimize_module(&mut module, options.opt_level)
+                .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
+            Ok(module)
+        })
 }
 
 /// Compiles a single Rusk source string into MIR, returning pipeline timing metrics.
@@ -690,6 +695,11 @@ pub fn compile_file_to_bytecode_with_options(
 
     rusk_bytecode::lower_mir_module_with_options(&mir, &lower_options)
         .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))
+        .and_then(|mut module| {
+            rusk_bytecode::peephole_optimize_module(&mut module, options.opt_level)
+                .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
+            Ok(module)
+        })
 }
 
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR with timing metrics.
