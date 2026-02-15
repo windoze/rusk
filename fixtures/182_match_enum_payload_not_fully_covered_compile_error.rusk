@@ -1,0 +1,8 @@
+// expect: compile_error missing variants: Option::Some
+
+fn main() -> int {
+    match Option::Some(0) {
+        Option::Some(0) => 1
+        Option::None => 0
+    }
+}

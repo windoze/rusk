@@ -1,0 +1,10 @@
+// expect: ok int 3
+
+struct Point { x: int, y: int }
+
+fn main() -> int {
+    let p = Point { x: 1, y: 2 };
+    match p {
+        Point { x, y } => x + y
+    }
+}

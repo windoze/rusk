@@ -558,7 +558,7 @@ fn array_prefix_patterns_work() {
 }
 
 #[test]
-fn match_non_exhaustive_traps() {
+fn match_non_exhaustive_is_compile_error() {
     let src = r#"
         fn test() -> int {
             match 1 {
@@ -567,8 +567,11 @@ fn match_non_exhaustive_traps() {
         }
     "#;
 
-    let err = run0(src, "test").expect_err("should trap");
-    assert!(matches!(err, RuntimeError::Trap { .. }), "{err:?}");
+    let err = compile_to_mir(src).expect_err("should be a compile error");
+    assert!(
+        err.message.contains("non-exhaustive match"),
+        "unexpected compile error: {err}"
+    );
 }
 
 #[test]
