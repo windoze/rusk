@@ -20,6 +20,59 @@ fn run_to_completion(module: &rusk_bytecode::ExecutableModule) -> StepResult {
 }
 
 #[test]
+fn peephole_o1_rewrites_resume_return_into_resume_tail() {
+    let src = r#"
+interface Tick { fn tick(n: int) -> int; }
+
+fn main() -> int {
+    match @Tick.tick(1) {
+        @Tick.tick(n) => resume(n + 1)
+        v => v
+    }
+}
+"#;
+
+    let module_o0 = compile_with_opt_level(src, OptLevel::O0);
+    let module_o1 = compile_with_opt_level(src, OptLevel::O1);
+
+    let count_tail = |m: &rusk_bytecode::ExecutableModule| {
+        m.functions
+            .iter()
+            .flat_map(|f| f.code.iter())
+            .filter(|i| matches!(i, rusk_bytecode::Instruction::ResumeTail { .. }))
+            .count()
+    };
+
+    assert_eq!(
+        count_tail(&module_o0),
+        0,
+        "O0 should not contain ResumeTail"
+    );
+    if count_tail(&module_o1) == 0 {
+        eprintln!("O1 module contains no ResumeTail; dumping match helper bytecode:");
+        for func in &module_o1.functions {
+            if !func.name.contains("$match") {
+                continue;
+            }
+            eprintln!("function {}:", func.name);
+            for (pc, instr) in func.code.iter().enumerate() {
+                eprintln!("  {pc}: {instr:?}");
+            }
+        }
+    }
+    assert!(
+        count_tail(&module_o1) > 0,
+        "O1 should contain ResumeTail after peephole optimization"
+    );
+    assert_eq!(
+        run_to_completion(&module_o1),
+        StepResult::Done {
+            value: AbiValue::Int(2)
+        }
+    );
+}
+
+#[test]
 fn peephole_o1_matches_o0_semantics_on_branch_switch_and_handler() {
     let src = r#"
 interface Tick { fn tick(n: int) -> int; }

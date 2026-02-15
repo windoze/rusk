@@ -403,13 +403,84 @@ fn remove_redundant_block_instructions(block: &mut Vec<IndexedInstr>) {
     }
 
     let mut out = Vec::with_capacity(block.len());
-    for (idx, item) in block.iter().cloned().enumerate() {
+    let mut idx = 0;
+    while idx < block.len() {
+        let item = block[idx].clone();
+
+        // Rule B3: Tail resume rewrite.
+        //
+        // Replace:
+        //   Resume { dst: Some(r), k, value }
+        //   Return { value: r }
+        // or:
+        //   Resume { dst: Some(r0), k, value }
+        //   (Copy|Move) { dst: r1, src: r0 }
+        //   Return { value: r1 }
+        // with:
+        //   ResumeTail { k, value }
+        if let Instruction::Resume {
+            dst: Some(dst),
+            k,
+            value,
+        } = &item.instr
+        {
+            // Resume; Return
+            if let Some(next) = block.get(idx + 1)
+                && let Instruction::Return { value: ret } = &next.instr
+                && dst == ret
+            {
+                out.push(IndexedInstr {
+                    old_pc: item.old_pc,
+                    instr: Instruction::ResumeTail {
+                        k: *k,
+                        value: *value,
+                    },
+                });
+                idx = idx.saturating_add(2);
+                continue;
+            }
+
+            // Resume; (Copy|Move); Return
+            if let Some(next) = block.get(idx + 1)
+                && let Some(next2) = block.get(idx + 2)
+                && let Instruction::Return { value: ret } = &next2.instr
+            {
+                let forwarded = match &next.instr {
+                    Instruction::Copy {
+                        dst: copy_dst,
+                        src: copy_src,
+                    } => copy_src == dst && copy_dst == ret,
+                    Instruction::Move {
+                        dst: move_dst,
+                        src: move_src,
+                    } => move_src == dst && move_dst == ret,
+                    _ => false,
+                };
+
+                if forwarded {
+                    out.push(IndexedInstr {
+                        old_pc: item.old_pc,
+                        instr: Instruction::ResumeTail {
+                            k: *k,
+                            value: *value,
+                        },
+                    });
+                    idx = idx.saturating_add(3);
+                    continue;
+                }
+            }
+        }
+
         match &item.instr {
-            Instruction::Copy { dst, src } if dst == src => continue,
+            Instruction::Copy { dst, src } if dst == src => {
+                idx = idx.saturating_add(1);
+                continue;
+            }
             Instruction::Jump { target_pc } => {
                 if let Some(next) = block.get(idx + 1) {
                     let next_pc: u32 = next.old_pc.try_into().unwrap_or(u32::MAX);
                     if *target_pc == next_pc {
+                        idx = idx.saturating_add(1);
                         continue;
                     }
                 }
@@ -418,6 +489,7 @@ fn remove_redundant_block_instructions(block: &mut Vec<IndexedInstr>) {
         }
 
         out.push(item);
+        idx = idx.saturating_add(1);
     }
 
     *block = out;
@@ -614,6 +686,7 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
             .chain(args.iter().copied())
             .collect(),
         Instruction::Resume { k, value, .. } => vec![*k, *value],
+        Instruction::ResumeTail { k, value } => vec![*k, *value],
 
         Instruction::Jump { .. } => Vec::new(),
         Instruction::JumpIf { cond, .. } => vec![*cond],
@@ -814,6 +887,10 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
             }
         }
         Instruction::Resume { k, value, .. } => {
+            *k = f(*k);
+            *value = f(*value);
+        }
+        Instruction::ResumeTail { k, value } => {
             *k = f(*k);
             *value = f(*value);
         }

@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 1;
+const VERSION_MINOR: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -866,6 +866,11 @@ impl Encoder {
                 self.write_u32(*k);
                 self.write_u32(*value);
             }
+            Instruction::ResumeTail { k, value } => {
+                self.write_u8(46);
+                self.write_u32(*k);
+                self.write_u32(*value);
+            }
             Instruction::Jump { target_pc } => {
                 self.write_u8(41);
                 self.write_u32(*target_pc);
@@ -1694,6 +1699,10 @@ impl<'a> Decoder<'a> {
             }),
             40 => Ok(Instruction::Resume {
                 dst: self.read_option_reg()?,
+                k: self.read_u32()?,
+                value: self.read_u32()?,
+            }),
+            46 => Ok(Instruction::ResumeTail {
                 k: self.read_u32()?,
                 value: self.read_u32()?,
             }),

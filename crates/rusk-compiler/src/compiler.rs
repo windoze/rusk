@@ -6015,13 +6015,34 @@ impl<'a> FunctionLowerer<'a> {
                 bind_names.extend(binds);
             }
 
+            let cont_name = effect_pat
+                .cont
+                .as_ref()
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "resume".to_string());
+
+            let wants_continuation = {
+                let mut bound = BTreeSet::new();
+                for name in &bind_names {
+                    bound.insert(name.clone());
+                }
+                let mut free = BTreeSet::new();
+                free_value_vars_in_expr(body, &bound, &mut free);
+                free.contains(&cont_name)
+            };
+
             let handler_block = self.new_block(format!("handler_{idx}"));
-            let mut params = Vec::with_capacity(bind_names.len() + 1);
+            let mut params = Vec::with_capacity(bind_names.len() + usize::from(wants_continuation));
             for _ in 0..bind_names.len() {
                 params.push(self.alloc_local());
             }
-            let k_local = self.alloc_local();
-            params.push(k_local);
+            let k_local = if wants_continuation {
+                let k_local = self.alloc_local();
+                params.push(k_local);
+                Some(k_local)
+            } else {
+                None
+            };
             self.blocks[handler_block.0].params = params.clone();
 
             clauses.push(HandlerClause {
@@ -6037,9 +6058,10 @@ impl<'a> FunctionLowerer<'a> {
             // Compile handler block: bind args, enable `resume`, compute value, wrap and return.
             self.set_current(handler_block);
             self.push_scope();
+            let bind_count = bind_names.len();
             for (name, local) in bind_names
                 .into_iter()
-                .zip(params[..params.len() - 1].iter().copied())
+                .zip(params.iter().copied().take(bind_count))
             {
                 self.bind_var(
                     &name,
@@ -6049,22 +6071,97 @@ impl<'a> FunctionLowerer<'a> {
                     },
                 );
             }
-            let cont_name = effect_pat
-                .cont
-                .as_ref()
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| "resume".to_string());
-            self.bind_var(
-                &cont_name,
-                VarInfo {
-                    storage: VarStorage::Local(k_local),
-                    kind: BindingKind::Const,
-                },
-            );
-            let value_local = self.lower_expr(body)?;
+
+            if let Some(k_local) = k_local {
+                self.bind_var(
+                    &cont_name,
+                    VarInfo {
+                        storage: VarStorage::Local(k_local),
+                        kind: BindingKind::Const,
+                    },
+                );
+            }
+
+            // Tail resume fast path (ExprHelper-only): if the handler body is exactly `resume(v)`
+            // (optionally preceded by statements in a block), return the continuation's control
+            // token directly so bytecode can optimize it into `ResumeTail`.
+            let mut did_tail_resume = false;
+            if let Some(k_local) = k_local {
+                match body {
+                    Expr::Call { callee, args, .. } => {
+                        let is_resume_name = matches!(
+                            callee.as_ref(),
+                            Expr::Path { path, .. }
+                                if path.segments.len() == 1 && path.segments[0].name == cont_name
+                        );
+                        if is_resume_name && args.len() == 1 {
+                            let v = self.lower_expr(&args[0])?;
+                            let control = self.alloc_local();
+                            self.emit(Instruction::Resume {
+                                dst: Some(control),
+                                k: Operand::Local(k_local),
+                                value: Operand::Local(v),
+                            });
+                            self.set_terminator(Terminator::Return {
+                                value: Operand::Local(control),
+                            })?;
+                            did_tail_resume = true;
+                        }
+                    }
+                    Expr::Block { block, .. } => {
+                        if let Some(tail) = block.tail.as_deref()
+                            && let Expr::Call { callee, args, .. } = tail
+                            && args.len() == 1
+                            && matches!(
+                                callee.as_ref(),
+                                Expr::Path { path, .. }
+                                    if path.segments.len() == 1 && path.segments[0].name == cont_name
+                            )
+                        {
+                            self.push_scope();
+                            for stmt in &block.stmts {
+                                self.lower_stmt(stmt)?;
+                                if self.is_current_terminated() {
+                                    break;
+                                }
+                            }
+                            if !self.is_current_terminated() {
+                                let v = self.lower_expr(&args[0])?;
+                                let control = self.alloc_local();
+                                self.emit(Instruction::Resume {
+                                    dst: Some(control),
+                                    k: Operand::Local(k_local),
+                                    value: Operand::Local(v),
+                                });
+                                self.set_terminator(Terminator::Return {
+                                    value: Operand::Local(control),
+                                })?;
+                            }
+                            self.pop_scope();
+                            did_tail_resume = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // If we already emitted a tail `resume` terminator above, the block is terminated and
+            // we must not emit any more instructions (even dead stores), otherwise the bytecode
+            // peephole rules cannot reliably recognize `Resume; Return` patterns.
+            let value_local = if did_tail_resume {
+                None
+            } else {
+                Some(self.lower_expr(body)?)
+            };
             self.pop_scope();
 
             if !self.is_current_terminated() {
+                let Some(value_local) = value_local else {
+                    return Err(CompileError::new(
+                        "internal error: handler block missing value after tail-resume fast path",
+                        span,
+                    ));
+                };
                 let control =
                     self.make_control(CONTROL_VARIANT_VALUE, vec![Operand::Local(value_local)]);
                 self.set_terminator(Terminator::Return {

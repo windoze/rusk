@@ -207,7 +207,10 @@ pub struct HandlerClause {
     pub effect: EffectSpec,
     pub arg_patterns: Vec<rusk_mir::Pattern>,
     pub target_pc: u32,
-    /// Destination registers for pattern binds, followed by the continuation token.
+    /// Destination registers for pattern binds, optionally followed by the continuation token.
+    ///
+    /// When the continuation is omitted (`param_regs.len() == bind_count`), the clause is
+    /// **abortive** and the VM may skip capturing a continuation at the `perform` site.
     pub param_regs: Vec<Reg>,
 }
 
@@ -421,6 +424,14 @@ pub enum Instruction {
     },
     Resume {
         dst: Option<Reg>,
+        k: Reg,
+        value: Reg,
+    },
+    /// Tail-call variant of [`Instruction::Resume`].
+    ///
+    /// This consumes the continuation and splices execution to the resumed computation without
+    /// returning to the current frame (tail resume).
+    ResumeTail {
         k: Reg,
         value: Reg,
     },

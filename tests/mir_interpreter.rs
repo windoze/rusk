@@ -1109,8 +1109,11 @@ fn push_handler_validates_target_param_arity() {
                 },
                 BasicBlock {
                     label: "handler".to_string(),
-                    // should be 2 params (bind + k); only 1 means `push_handler` should trap
-                    params: vec![l(0)],
+                    // bind_count is 1, so valid handler params are:
+                    // - 1 param (abortive: bind only)
+                    // - 2 params (bind + continuation token)
+                    // 0 params should trap.
+                    params: vec![],
                     instructions: vec![],
                     terminator: Terminator::Return {
                         value: Operand::Literal(ConstValue::Unit),

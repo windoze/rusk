@@ -414,19 +414,23 @@ fn verify_instruction(
                 for r in &clause.param_regs {
                     verify_reg(reg_count, *r, &format!("{}: handler param reg", here()))?;
                 }
-                let expected = clause
+                let bind_count = clause
                     .arg_patterns
                     .iter()
                     .map(count_pattern_binds)
-                    .sum::<usize>()
-                    + 1;
-                if clause.param_regs.len() != expected {
+                    .sum::<usize>();
+                let expected_min = bind_count;
+                let expected_max = bind_count + 1;
+                if clause.param_regs.len() != expected_min
+                    && clause.param_regs.len() != expected_max
+                {
                     return Err(VerifyError {
                         message: format!(
-                            "{}: handler clause param_regs length {} does not match expected {}",
+                            "{}: handler clause param_regs length {} does not match expected {} or {}",
                             here(),
                             clause.param_regs.len(),
-                            expected
+                            expected_min,
+                            expected_max
                         ),
                     });
                 }
@@ -446,6 +450,10 @@ fn verify_instruction(
             if let Some(dst) = dst {
                 verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             }
+            verify_reg(reg_count, *k, &format!("{}: k", here()))?;
+            verify_reg(reg_count, *value, &format!("{}: value", here()))?;
+        }
+        Instruction::ResumeTail { k, value } => {
             verify_reg(reg_count, *k, &format!("{}: k", here()))?;
             verify_reg(reg_count, *value, &format!("{}: value", here()))?;
         }

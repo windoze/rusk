@@ -76,6 +76,7 @@ pub struct VmMetrics {
     pub pop_handler_instructions: u64,
     pub perform_instructions: u64,
     pub resume_instructions: u64,
+    pub resume_tail_instructions: u64,
 
     pub jump_instructions: u64,
     pub jumpif_instructions: u64,
@@ -84,6 +85,21 @@ pub struct VmMetrics {
     pub return_instructions: u64,
     pub trap_instructions: u64,
     pub other_instructions: u64,
+
+    /// Maximum observed VM frame stack size during execution (best-effort; requires metrics enabled).
+    pub max_frames_len: u64,
+    /// Maximum observed handler stack size during execution (best-effort; requires metrics enabled).
+    pub max_handlers_len: u64,
+
+    /// Number of successful handler-cache hits in `Perform` (best-effort; requires metrics enabled).
+    pub handler_cache_hits: u64,
+    /// Number of handler-cache misses/fallbacks in `Perform` (best-effort; requires metrics enabled).
+    pub handler_cache_misses: u64,
+
+    /// Number of captured continuations created by in-VM `perform` (best-effort; requires metrics enabled).
+    pub continuations_captured: u64,
+    /// Number of `perform`s where continuation capture was skipped due to an abortive handler clause.
+    pub continuations_skipped_abortive: u64,
 }
 
 impl VmMetrics {
@@ -123,6 +139,7 @@ impl VmMetrics {
             I::PopHandler => self.pop_handler_instructions += 1,
             I::Perform { .. } => self.perform_instructions += 1,
             I::Resume { .. } => self.resume_instructions += 1,
+            I::ResumeTail { .. } => self.resume_tail_instructions += 1,
 
             I::Jump { .. } => self.jump_instructions += 1,
             I::JumpIf { .. } => self.jumpif_instructions += 1,
@@ -185,6 +202,9 @@ impl VmMetrics {
         self.resume_instructions = self
             .resume_instructions
             .saturating_add(other.resume_instructions);
+        self.resume_tail_instructions = self
+            .resume_tail_instructions
+            .saturating_add(other.resume_tail_instructions);
 
         self.jump_instructions = self
             .jump_instructions
@@ -205,6 +225,23 @@ impl VmMetrics {
         self.other_instructions = self
             .other_instructions
             .saturating_add(other.other_instructions);
+
+        self.max_frames_len = self.max_frames_len.max(other.max_frames_len);
+        self.max_handlers_len = self.max_handlers_len.max(other.max_handlers_len);
+
+        self.handler_cache_hits = self
+            .handler_cache_hits
+            .saturating_add(other.handler_cache_hits);
+        self.handler_cache_misses = self
+            .handler_cache_misses
+            .saturating_add(other.handler_cache_misses);
+
+        self.continuations_captured = self
+            .continuations_captured
+            .saturating_add(other.continuations_captured);
+        self.continuations_skipped_abortive = self
+            .continuations_skipped_abortive
+            .saturating_add(other.continuations_skipped_abortive);
     }
 }
 
@@ -535,6 +572,15 @@ struct HandlerEntry {
     clauses: Vec<RuntimeHandlerClause>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HandlerLookupCacheEntry {
+    generation: u32,
+    handlers_len: usize,
+    effect_hash: u64,
+    handler_index: usize,
+    clause_index: usize,
+}
+
 #[derive(Debug, Clone)]
 struct Frame {
     func: FunctionId,
@@ -565,6 +611,8 @@ pub struct Vm {
     state: VmState,
     frames: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
+    handler_stack_generation: u32,
+    handler_lookup_cache: Option<HandlerLookupCacheEntry>,
     generic_specializations: HashMap<GenericSpecializationKey, HostImportId>,
     host_fns: Vec<Option<Box<dyn HostFn>>>,
     in_host_call: bool,
@@ -613,6 +661,8 @@ impl Vm {
                 return_dst: None,
             }],
             handlers: Vec::new(),
+            handler_stack_generation: 0,
+            handler_lookup_cache: None,
             generic_specializations: HashMap::new(),
             in_host_call: false,
             continuation_generation: 0,
@@ -784,6 +834,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             vm.collect_garbage_now();
         }
 
+        record_stack_maxima(vm);
+
         let frame_index = match vm.frames.len() {
             0 => {
                 vm.state = VmState::Done {
@@ -810,7 +862,13 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             let ret = Value::Unit;
             let return_dst = frame.return_dst;
             vm.frames.pop();
-            unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
+            let popped_handlers = unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
+            if popped_handlers {
+                handler_stack_changed(
+                    &mut vm.handler_stack_generation,
+                    &mut vm.handler_lookup_cache,
+                );
+            }
             if let Some(caller) = vm.frames.last_mut() {
                 if let Some(dst) = return_dst {
                     let idx: usize = match dst.try_into() {
@@ -2081,6 +2139,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     owner_depth,
                     clauses: runtime_clauses,
                 });
+                handler_stack_changed(
+                    &mut vm.handler_stack_generation,
+                    &mut vm.handler_lookup_cache,
+                );
             }
             rusk_bytecode::Instruction::PopHandler => {
                 let Some(top) = vm.handlers.last() else {
@@ -2090,6 +2152,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     return trap(vm, "mismatched pop_handler".to_string());
                 }
                 vm.handlers.pop();
+                handler_stack_changed(
+                    &mut vm.handler_stack_generation,
+                    &mut vm.handler_lookup_cache,
+                );
             }
 
             rusk_bytecode::Instruction::Perform { dst, effect, args } => {
@@ -2101,11 +2167,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     };
                     interface_args.push(id);
                 }
-                let effect_id = RuntimeEffectId {
-                    interface: effect.interface.clone(),
-                    interface_args,
-                    method: effect.method.clone(),
-                };
+                let effect_interface = effect.interface.as_str();
+                let effect_method = effect.method.as_str();
+                let effect_hash =
+                    effect_hash_spec(effect_interface, effect_method, &interface_args);
 
                 let mut arg_values = Vec::with_capacity(args.len());
                 for reg in args {
@@ -2116,182 +2181,290 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     arg_values.push(v);
                 }
 
-                match find_handler_for_effect(
-                    &vm.module,
-                    &mut vm.heap,
-                    &mut vm.gc_allocations_since_collect,
-                    vm.handlers.as_slice(),
-                    &effect_id,
-                    &arg_values,
-                ) {
-                    Ok(Some((handler_index, clause_index, binds))) => {
-                        let handler_owner_depth = vm.handlers[handler_index].owner_depth;
+                let mut handled: Option<(usize, usize, Vec<Value>)> = None;
 
-                        let mut captured_frames = vm.frames[handler_owner_depth..].to_vec();
-                        let captured_handlers = vm
-                            .handlers
-                            .iter()
-                            .filter_map(|entry| {
-                                let owner_depth =
-                                    entry.owner_depth.checked_sub(handler_owner_depth)?;
-                                Some(HandlerEntry {
-                                    owner_depth,
-                                    clauses: entry.clauses.clone(),
-                                })
-                            })
-                            .collect::<Vec<_>>();
+                // Fast path: try cached handler/clause under a stable handler stack.
+                if let Some(cache) = vm.handler_lookup_cache
+                    && cache.generation == vm.handler_stack_generation
+                    && cache.handlers_len == vm.handlers.len()
+                    && cache.effect_hash == effect_hash
+                {
+                    match match_cached_handler_for_effect(
+                        &vm.module,
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        vm.handlers.as_slice(),
+                        cache.handler_index,
+                        cache.clause_index,
+                        effect_interface,
+                        &interface_args,
+                        effect_method,
+                        &arg_values,
+                    ) {
+                        Ok(Some(binds)) => {
+                            if vm.collect_metrics {
+                                vm.metrics.handler_cache_hits =
+                                    vm.metrics.handler_cache_hits.saturating_add(1);
+                            }
+                            handled = Some((cache.handler_index, cache.clause_index, binds));
+                        }
+                        Ok(None) => {
+                            if vm.collect_metrics {
+                                vm.metrics.handler_cache_misses =
+                                    vm.metrics.handler_cache_misses.saturating_add(1);
+                            }
+                        }
+                        Err(msg) => return trap(vm, msg),
+                    }
+                }
 
-                        if let Some(dst_reg) = dst {
-                            let Some(top) = captured_frames.last_mut() else {
-                                return trap(
-                                    vm,
-                                    format!(
-                                        "unhandled effect: {}.{}",
-                                        effect_id.interface, effect_id.method
-                                    ),
-                                );
-                            };
-                            let idx: usize = (*dst_reg).try_into().unwrap_or(usize::MAX);
-                            let Some(slot) = top.regs.get_mut(idx) else {
-                                return trap(vm, format!("perform dst reg {dst_reg} out of range"));
-                            };
-                            *slot = None;
+                if handled.is_none() {
+                    match find_handler_for_effect_spec(
+                        &vm.module,
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        vm.handlers.as_slice(),
+                        effect_interface,
+                        &interface_args,
+                        effect_method,
+                        &arg_values,
+                    ) {
+                        Ok(Some((handler_index, clause_index, binds))) => {
+                            vm.handler_lookup_cache = Some(HandlerLookupCacheEntry {
+                                generation: vm.handler_stack_generation,
+                                handlers_len: vm.handlers.len(),
+                                effect_hash,
+                                handler_index,
+                                clause_index,
+                            });
+                            handled = Some((handler_index, clause_index, binds));
+                        }
+                        Ok(None) => {}
+                        Err(msg) => return trap(vm, msg),
+                    }
+                }
+
+                if let Some((handler_index, clause_index, binds)) = handled {
+                    let handler_owner_depth = vm.handlers[handler_index].owner_depth;
+
+                    let (clause_target_pc, clause_param_regs) = {
+                        let Some(clause) = vm.handlers[handler_index].clauses.get(clause_index)
+                        else {
+                            return trap(vm, "invalid handler clause index".to_string());
+                        };
+                        (clause.target_pc, clause.param_regs.clone())
+                    };
+
+                    let expected_min = binds.len();
+                    let expected_max = binds.len() + 1;
+                    let wants_continuation = if clause_param_regs.len() == expected_min {
+                        false
+                    } else if clause_param_regs.len() == expected_max {
+                        true
+                    } else {
+                        return trap(
+                            vm,
+                            format!(
+                                "invalid handler params for {effect_interface}.{effect_method}: expected {expected_min} or {expected_max}, got {}",
+                                clause_param_regs.len()
+                            ),
+                        );
+                    };
+
+                    if !wants_continuation {
+                        if vm.collect_metrics {
+                            vm.metrics.continuations_skipped_abortive =
+                                vm.metrics.continuations_skipped_abortive.saturating_add(1);
                         }
 
-                        let token = ContinuationToken::new(ContinuationState {
-                            frames: captured_frames,
-                            handlers: captured_handlers,
-                            perform_dst: *dst,
-                        });
-
-                        let clause = vm.handlers[handler_index]
-                            .clauses
-                            .get(clause_index)
-                            .cloned()
-                            .expect("handler clause index is valid");
-
+                        // Abortive handler: unwind and jump to handler clause without capturing.
                         vm.frames.truncate(handler_owner_depth + 1);
+                        let old_handlers_len = vm.handlers.len();
                         vm.handlers.truncate(handler_index + 1);
+                        if vm.handlers.len() != old_handlers_len {
+                            handler_stack_changed(
+                                &mut vm.handler_stack_generation,
+                                &mut vm.handler_lookup_cache,
+                            );
+                        }
 
                         let Some(handler_frame) = vm.frames.get_mut(handler_owner_depth) else {
                             return trap(vm, "invalid handler owner frame".to_string());
                         };
 
-                        let expected_params = binds.len() + 1;
-                        if clause.param_regs.len() != expected_params {
-                            return trap(
-                                vm,
-                                format!(
-                                    "invalid handler params for {}.{}: expected {expected_params}, got {}",
-                                    effect_id.interface,
-                                    effect_id.method,
-                                    clause.param_regs.len()
-                                ),
-                            );
-                        }
-
-                        for (dst_reg, value) in clause
-                            .param_regs
-                            .iter()
-                            .copied()
-                            .take(binds.len())
-                            .zip(binds.into_iter())
+                        for (dst_reg, value) in
+                            clause_param_regs.iter().copied().zip(binds.into_iter())
                         {
                             if let Err(msg) = write_value(handler_frame, dst_reg, value) {
                                 return trap(vm, format!("handler bind dst: {msg}"));
                             }
                         }
 
-                        let k_reg = clause.param_regs[expected_params - 1];
-                        if let Err(msg) =
-                            write_value(handler_frame, k_reg, Value::Continuation(token))
-                        {
-                            return trap(vm, format!("handler k dst: {msg}"));
-                        }
-
-                        handler_frame.pc = clause.target_pc as usize;
+                        handler_frame.pc = clause_target_pc as usize;
+                        continue;
                     }
-                    Ok(None) => {
-                        let external_id = if effect_id.interface_args.is_empty() {
-                            vm.module.external_effect_id(
-                                effect_id.interface.as_str(),
-                                effect_id.method.as_str(),
-                            )
-                        } else {
-                            None
-                        };
 
-                        let Some(effect_id_u32) = external_id else {
+                    if vm.collect_metrics {
+                        vm.metrics.continuations_captured =
+                            vm.metrics.continuations_captured.saturating_add(1);
+                    }
+
+                    // Capture: snapshot the owning frame, move everything above it.
+                    let Some(owner_snapshot) = vm.frames.get(handler_owner_depth).cloned() else {
+                        return trap(vm, "invalid handler owner frame".to_string());
+                    };
+                    let moved_frames = vm.frames.split_off(handler_owner_depth + 1);
+                    let mut captured_frames = Vec::with_capacity(1 + moved_frames.len());
+                    captured_frames.push(owner_snapshot);
+                    captured_frames.extend(moved_frames);
+
+                    // Capture handler entries: clone entries that remain, move the unwound suffix.
+                    let moved_handlers_above = vm.handlers.split_off(handler_index + 1);
+                    if !moved_handlers_above.is_empty() {
+                        handler_stack_changed(
+                            &mut vm.handler_stack_generation,
+                            &mut vm.handler_lookup_cache,
+                        );
+                    }
+
+                    let mut captured_handlers = Vec::new();
+                    for entry in &vm.handlers {
+                        if entry.owner_depth < handler_owner_depth {
+                            continue;
+                        }
+                        captured_handlers.push(HandlerEntry {
+                            owner_depth: entry.owner_depth.saturating_sub(handler_owner_depth),
+                            clauses: entry.clauses.clone(),
+                        });
+                    }
+                    for mut entry in moved_handlers_above {
+                        let Some(rebased) = entry.owner_depth.checked_sub(handler_owner_depth)
+                        else {
+                            return trap(vm, "invalid handler owner depth".to_string());
+                        };
+                        entry.owner_depth = rebased;
+                        captured_handlers.push(entry);
+                    }
+
+                    // Ensure the destination is uninitialized in the captured state until resume injects it.
+                    if let Some(dst_reg) = dst {
+                        let Some(top) = captured_frames.last_mut() else {
                             return trap(
                                 vm,
-                                format!(
-                                    "unhandled effect: {}.{}",
-                                    effect_id.interface, effect_id.method
-                                ),
+                                format!("unhandled effect: {effect_interface}.{effect_method}"),
                             );
                         };
-
-                        let Some(effect) = vm.module.external_effect(effect_id_u32) else {
-                            return trap(vm, format!("invalid effect id {}", effect_id_u32.0));
+                        let idx: usize = (*dst_reg).try_into().unwrap_or(usize::MAX);
+                        let Some(slot) = top.regs.get_mut(idx) else {
+                            return trap(vm, format!("perform dst reg {dst_reg} out of range"));
                         };
-                        if arg_values.len() != effect.sig.params.len() {
-                            return trap(
-                                vm,
-                                format!(
-                                    "external effect `{}.{}` arity mismatch: expected {} args but got {}",
-                                    effect.interface,
-                                    effect.method,
-                                    effect.sig.params.len(),
-                                    arg_values.len()
-                                ),
-                            );
-                        }
-
-                        let mut abi_args = Vec::with_capacity(arg_values.len());
-                        for (v, expected) in arg_values.iter().zip(effect.sig.params.iter()) {
-                            let Some(abi) = v.to_abi() else {
-                                return trap(
-                                    vm,
-                                    format!(
-                                        "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
-                                        effect.interface,
-                                        effect.method,
-                                        expected,
-                                        v.kind()
-                                    ),
-                                );
-                            };
-                            if abi.ty() != *expected {
-                                return trap(
-                                    vm,
-                                    format!(
-                                        "external effect `{}.{}` arg type mismatch: expected {:?}, got {:?}",
-                                        effect.interface,
-                                        effect.method,
-                                        expected,
-                                        abi.ty()
-                                    ),
-                                );
-                            }
-                            abi_args.push(abi);
-                        }
-
-                        let k = ContinuationHandle {
-                            index: 0,
-                            generation: vm.continuation_generation,
-                        };
-                        vm.state = VmState::Suspended {
-                            k: k.clone(),
-                            perform_dst: *dst,
-                        };
-                        return StepResult::Request {
-                            effect_id: effect_id_u32,
-                            args: abi_args,
-                            k,
-                        };
+                        *slot = None;
                     }
-                    Err(msg) => return trap(vm, msg),
+
+                    let token = ContinuationToken::new(ContinuationState {
+                        frames: captured_frames,
+                        handlers: captured_handlers,
+                        perform_dst: *dst,
+                    });
+
+                    let Some(handler_frame) = vm.frames.get_mut(handler_owner_depth) else {
+                        return trap(vm, "invalid handler owner frame".to_string());
+                    };
+
+                    for (dst_reg, value) in clause_param_regs
+                        .iter()
+                        .copied()
+                        .take(binds.len())
+                        .zip(binds.into_iter())
+                    {
+                        if let Err(msg) = write_value(handler_frame, dst_reg, value) {
+                            return trap(vm, format!("handler bind dst: {msg}"));
+                        }
+                    }
+
+                    let k_reg = clause_param_regs[expected_max - 1];
+                    if let Err(msg) = write_value(handler_frame, k_reg, Value::Continuation(token))
+                    {
+                        return trap(vm, format!("handler k dst: {msg}"));
+                    }
+
+                    handler_frame.pc = clause_target_pc as usize;
+                    continue;
                 }
+
+                // No in-VM handler: attempt externalized effect request.
+                let external_id = if interface_args.is_empty() {
+                    vm.module
+                        .external_effect_id(effect_interface, effect_method)
+                } else {
+                    None
+                };
+
+                let Some(effect_id_u32) = external_id else {
+                    return trap(
+                        vm,
+                        format!("unhandled effect: {effect_interface}.{effect_method}"),
+                    );
+                };
+
+                let Some(effect) = vm.module.external_effect(effect_id_u32) else {
+                    return trap(vm, format!("invalid effect id {}", effect_id_u32.0));
+                };
+                if arg_values.len() != effect.sig.params.len() {
+                    return trap(
+                        vm,
+                        format!(
+                            "external effect `{}.{}` arity mismatch: expected {} args but got {}",
+                            effect.interface,
+                            effect.method,
+                            effect.sig.params.len(),
+                            arg_values.len()
+                        ),
+                    );
+                }
+
+                let mut abi_args = Vec::with_capacity(arg_values.len());
+                for (v, expected) in arg_values.iter().zip(effect.sig.params.iter()) {
+                    let Some(abi) = v.to_abi() else {
+                        return trap(
+                            vm,
+                            format!(
+                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
+                                effect.interface,
+                                effect.method,
+                                expected,
+                                v.kind()
+                            ),
+                        );
+                    };
+                    if abi.ty() != *expected {
+                        return trap(
+                            vm,
+                            format!(
+                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {:?}",
+                                effect.interface,
+                                effect.method,
+                                expected,
+                                abi.ty()
+                            ),
+                        );
+                    }
+                    abi_args.push(abi);
+                }
+
+                let k = ContinuationHandle {
+                    index: 0,
+                    generation: vm.continuation_generation,
+                };
+                vm.state = VmState::Suspended {
+                    k: k.clone(),
+                    perform_dst: *dst,
+                };
+                return StepResult::Request {
+                    effect_id: effect_id_u32,
+                    args: abi_args,
+                    k,
+                };
             }
 
             rusk_bytecode::Instruction::Resume { dst, k, value } => {
@@ -2332,7 +2505,68 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
 
                 vm.frames.extend(cont.frames);
+                let handlers_changed = !cont.handlers.is_empty();
                 vm.handlers.extend(cont.handlers);
+                if handlers_changed {
+                    handler_stack_changed(
+                        &mut vm.handler_stack_generation,
+                        &mut vm.handler_lookup_cache,
+                    );
+                }
+            }
+
+            rusk_bytecode::Instruction::ResumeTail { k, value } => {
+                let k_value = match read_value(frame, *k) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("resume_tail k: {msg}")),
+                };
+                let Value::Continuation(token) = k_value else {
+                    return trap(vm, "invalid resume".to_string());
+                };
+
+                let v = match read_value(frame, *value) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("resume_tail value: {msg}")),
+                };
+                let Some(mut cont) = token.take_state() else {
+                    return trap(vm, "invalid resume".to_string());
+                };
+
+                if let Some(perform_dst) = cont.perform_dst {
+                    let top_index = cont.frames.len().saturating_sub(1);
+                    let Some(top_frame) = cont.frames.get_mut(top_index) else {
+                        return trap(vm, "invalid resume".to_string());
+                    };
+                    if let Err(msg) = write_value(top_frame, perform_dst, v) {
+                        return trap(vm, format!("resume_tail inject: {msg}"));
+                    }
+                }
+
+                // Tail call: replace the current frame with the captured continuation segment.
+                let base_depth = frame_index;
+                let return_dst = frame.return_dst;
+
+                let Some(bottom) = cont.frames.first_mut() else {
+                    return trap(vm, "invalid resume".to_string());
+                };
+                bottom.return_dst = return_dst;
+
+                for handler in &mut cont.handlers {
+                    handler.owner_depth = handler.owner_depth.saturating_add(base_depth);
+                }
+
+                vm.frames.truncate(base_depth);
+                let popped_handlers = unwind_handlers_to_stack_len(&mut vm.handlers, base_depth);
+
+                vm.frames.extend(cont.frames);
+                let handlers_changed = !cont.handlers.is_empty();
+                vm.handlers.extend(cont.handlers);
+                if popped_handlers || handlers_changed {
+                    handler_stack_changed(
+                        &mut vm.handler_stack_generation,
+                        &mut vm.handler_lookup_cache,
+                    );
+                }
             }
 
             rusk_bytecode::Instruction::Jump { target_pc } => {
@@ -2412,7 +2646,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 let return_dst = frame.return_dst;
                 vm.frames.pop();
-                unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
+                let popped_handlers =
+                    unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
+                if popped_handlers {
+                    handler_stack_changed(
+                        &mut vm.handler_stack_generation,
+                        &mut vm.handler_lookup_cache,
+                    );
+                }
                 if let Some(caller) = vm.frames.last_mut() {
                     if let Some(dst) = return_dst {
                         let idx: usize = match dst.try_into() {
@@ -2456,32 +2697,115 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 }
 
 fn trap(vm: &mut Vm, message: String) -> StepResult {
+    record_stack_maxima(vm);
     vm.state = VmState::Trapped {
         message: message.clone(),
     };
     StepResult::Trap { message }
 }
 
-fn unwind_handlers_to_stack_len(handlers: &mut Vec<HandlerEntry>, stack_len: usize) {
+fn handler_stack_changed(
+    handler_stack_generation: &mut u32,
+    handler_lookup_cache: &mut Option<HandlerLookupCacheEntry>,
+) {
+    *handler_stack_generation = handler_stack_generation.wrapping_add(1);
+    *handler_lookup_cache = None;
+}
+
+fn record_stack_maxima(vm: &mut Vm) {
+    if !vm.collect_metrics {
+        return;
+    }
+    vm.metrics.max_frames_len = vm.metrics.max_frames_len.max(vm.frames.len() as u64);
+    vm.metrics.max_handlers_len = vm.metrics.max_handlers_len.max(vm.handlers.len() as u64);
+}
+
+fn unwind_handlers_to_stack_len(handlers: &mut Vec<HandlerEntry>, stack_len: usize) -> bool {
+    let mut popped = false;
     while let Some(top) = handlers.last() {
         if top.owner_depth < stack_len {
             break;
         }
         handlers.pop();
+        popped = true;
     }
+    popped
 }
 
-fn find_handler_for_effect(
+fn effect_hash_spec(interface: &str, method: &str, interface_args: &[TypeRepId]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    interface.hash(&mut hasher);
+    interface_args.hash(&mut hasher);
+    method.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_cached_handler_for_effect(
     module: &ExecutableModule,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
     handlers: &[HandlerEntry],
-    effect: &RuntimeEffectId,
+    handler_index: usize,
+    clause_index: usize,
+    effect_interface: &str,
+    interface_args: &[TypeRepId],
+    effect_method: &str,
+    args: &[Value],
+) -> Result<Option<Vec<Value>>, String> {
+    let Some(handler) = handlers.get(handler_index) else {
+        return Ok(None);
+    };
+    let Some(clause) = handler.clauses.get(clause_index) else {
+        return Ok(None);
+    };
+
+    if clause.effect.interface != effect_interface
+        || clause.effect.method != effect_method
+        || clause.effect.interface_args.as_slice() != interface_args
+    {
+        return Ok(None);
+    }
+    if clause.arg_patterns.len() != args.len() {
+        return Ok(None);
+    }
+
+    let mut binds = Vec::new();
+    for (pat, arg) in clause.arg_patterns.iter().zip(args.iter()) {
+        if !match_pattern(
+            module,
+            heap,
+            gc_allocations_since_collect,
+            pat,
+            arg,
+            &mut binds,
+        )? {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(binds))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_handler_for_effect_spec(
+    module: &ExecutableModule,
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
+    handlers: &[HandlerEntry],
+    effect_interface: &str,
+    interface_args: &[TypeRepId],
+    effect_method: &str,
     args: &[Value],
 ) -> Result<Option<(usize, usize, Vec<Value>)>, String> {
     for (handler_index, handler) in handlers.iter().enumerate().rev() {
         for (clause_index, clause) in handler.clauses.iter().enumerate() {
-            if &clause.effect != effect {
+            if clause.effect.interface != effect_interface
+                || clause.effect.method != effect_method
+                || clause.effect.interface_args.as_slice() != interface_args
+            {
                 continue;
             }
             if clause.arg_patterns.len() != args.len() {

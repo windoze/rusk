@@ -836,11 +836,12 @@ fn lower_mir_instruction(
                     .get(clause.target.0)
                     .ok_or_else(|| LowerError::new("invalid handler target block id"))?
                     .params;
-                let expected = bind_count + 1;
                 let got = params.len();
-                if expected != got {
+                let expected_min = bind_count;
+                let expected_max = bind_count + 1;
+                if got != expected_min && got != expected_max {
                     return Err(LowerError::new(format!(
-                        "invalid handler target params for {}.{}: expected {expected}, got {got}",
+                        "invalid handler target params for {}.{}: expected {expected_min} or {expected_max}, got {got}",
                         clause.effect.interface, clause.effect.method
                     )));
                 }

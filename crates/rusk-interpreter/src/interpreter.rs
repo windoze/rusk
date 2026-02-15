@@ -2220,12 +2220,13 @@ impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
                 for clause in clauses {
                     let bind_count = count_binds_in_patterns(&clause.arg_patterns);
                     let block = Self::block(function, clause.target)?;
-                    let expected = bind_count + 1;
                     let got = block.params.len();
-                    if expected != got {
+                    let expected_min = bind_count;
+                    let expected_max = bind_count + 1;
+                    if got != expected_min && got != expected_max {
                         return Err(RuntimeError::Trap {
                             message: format!(
-                                "invalid handler target params for {}.{}: expected {expected}, got {got}",
+                                "invalid handler target params for {}.{}: expected {expected_min} or {expected_max}, got {got}",
                                 clause.effect.interface, clause.effect.method
                             ),
                         });
@@ -2700,18 +2701,22 @@ impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
         let function = Self::function(module, handler_func_id)?;
         let clause = &self.handlers[handler_index].clauses[clause_index];
         let handler_block = Self::block(function, clause.target)?;
-        let expected_params = binds.len() + 1;
         let got_params = handler_block.params.len();
-        if expected_params != got_params {
+        let expected_min = binds.len();
+        let expected_max = binds.len() + 1;
+        if got_params != expected_min && got_params != expected_max {
             return Err(RuntimeError::InvalidBlockArgs {
                 target: clause.target,
-                expected: expected_params,
+                expected: expected_max,
                 got: got_params,
             });
         }
 
         let mut block_args = binds;
-        block_args.push(Value::Continuation(token));
+        if got_params == expected_max {
+            // Capturing handler clause: pass the continuation token as the last param.
+            block_args.push(Value::Continuation(token));
+        }
         self.enter_block(module, handler_frame_index, clause.target, block_args)?;
         Ok(())
     }
