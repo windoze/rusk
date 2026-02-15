@@ -915,6 +915,13 @@ Rules:
 - Multiple effect arms are tried in source order; the first whose parameter
   patterns match the effect arguments is selected.
 - A `match` expression must include at least one value arm.
+- Value arms must be **exhaustive** over the scrutinee value; a non-exhaustive
+  value match is a **compile-time error** (baseline message: `non-exhaustive match`).
+  Effect arms are ignored for value exhaustiveness.
+- For scrutinee domains that cannot be exhaustively enumerated in general
+  (e.g. `int`, `string`, arrays, most structs/tuples), a `match` typically must
+  include a catch-all value arm (e.g. `_ => ...`) unless it contains another
+  irrefutable value pattern.
 
 ### 7.3 Continuations and `resume`
 

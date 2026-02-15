@@ -1,8 +1,7 @@
-// expect: runtime_error non-exhaustive match
+// expect: compile_error add `_ => ...`
 
 fn main() -> int {
     match 1 {
         0 => 0
     }
 }
-

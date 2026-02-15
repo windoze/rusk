@@ -4035,7 +4035,314 @@ impl<'a> FnTypechecker<'a> {
             });
         }
 
+        self.check_match_value_exhaustive(scrutinee_ty, arms, span)?;
+
         Ok(self.infer.resolve_ty(result_ty))
+    }
+
+    fn check_match_value_exhaustive(
+        &mut self,
+        scrutinee_ty: Ty,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Result<(), TypeError> {
+        let value_pats: Vec<&Pattern> = arms
+            .iter()
+            .filter_map(|arm| match &arm.pat {
+                MatchPat::Value(pat) => Some(pat),
+                MatchPat::Effect(_) => None,
+            })
+            .collect();
+
+        let scrutinee_ty = self.infer.resolve_ty(scrutinee_ty);
+
+        // 5.2: Accept immediately if any value arm is irrefutable for the scrutinee type.
+        if value_pats
+            .iter()
+            .any(|pat| self.pattern_is_irrefutable(pat, scrutinee_ty.clone()))
+        {
+            return Ok(());
+        }
+
+        let scrutinee_ty = self.infer.resolve_ty(scrutinee_ty);
+        let (is_ro, inner_scrutinee) = match scrutinee_ty {
+            Ty::Readonly(inner) => (true, *inner),
+            other => (false, other),
+        };
+
+        match inner_scrutinee {
+            // 5.3: Finite coverage check (unit / bool / enum).
+            Ty::Unit => {
+                let has_unit = value_pats.iter().any(|pat| {
+                    matches!(
+                        pat,
+                        Pattern::Literal {
+                            lit: PatLiteral::Unit,
+                            ..
+                        }
+                    )
+                });
+                if has_unit {
+                    Ok(())
+                } else {
+                    Err(TypeError {
+                        message: "non-exhaustive match: missing `()`".to_string(),
+                        span,
+                    })
+                }
+            }
+            Ty::Bool => {
+                let mut saw_true = false;
+                let mut saw_false = false;
+                for pat in &value_pats {
+                    match pat {
+                        Pattern::Literal {
+                            lit: PatLiteral::Bool(true),
+                            ..
+                        } => saw_true = true,
+                        Pattern::Literal {
+                            lit: PatLiteral::Bool(false),
+                            ..
+                        } => saw_false = true,
+                        _ => {}
+                    }
+                }
+                if saw_true && saw_false {
+                    Ok(())
+                } else {
+                    let message = match (saw_true, saw_false) {
+                        (true, false) => "non-exhaustive match: missing `false`".to_string(),
+                        (false, true) => "non-exhaustive match: missing `true`".to_string(),
+                        (false, false) => {
+                            "non-exhaustive match: missing `true` and `false`".to_string()
+                        }
+                        (true, true) => unreachable!("saw_true && saw_false handled above"),
+                    };
+                    Err(TypeError { message, span })
+                }
+            }
+            Ty::App(TyCon::Named(enum_name), enum_args)
+                if self.env.enums.contains_key(&enum_name) =>
+            {
+                let Some(def) = self.env.enums.get(&enum_name) else {
+                    // Should not happen: the match arm patterns typechecked against this enum.
+                    return Err(TypeError {
+                        message: format!("internal error: unknown enum `{enum_name}`"),
+                        span,
+                    });
+                };
+
+                let enum_args: Vec<Ty> = enum_args
+                    .into_iter()
+                    .map(|ty| self.infer.resolve_ty(ty))
+                    .collect();
+                let ty_subst: HashMap<GenId, Ty> = enum_args.iter().cloned().enumerate().collect();
+                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                let mut covered = BTreeSet::<String>::new();
+                for pat in value_pats {
+                    match pat {
+                        Pattern::Enum { variant, .. } => {
+                            if def
+                                .variants
+                                .get(&variant.name)
+                                .is_some_and(|fields| fields.is_empty())
+                            {
+                                covered.insert(variant.name.clone());
+                            }
+                        }
+                        Pattern::Ctor { path, args, .. } => {
+                            let Some(variant) = path.segments.last() else {
+                                continue;
+                            };
+                            let Some(fields) = def.variants.get(&variant.name) else {
+                                continue;
+                            };
+                            if fields.len() != args.len() {
+                                continue;
+                            }
+
+                            let mut all_irrefutable = true;
+                            for (subpat, fty) in args.iter().zip(fields.iter()) {
+                                let mut fty = subst_ty(fty.clone(), &ty_subst, &con_subst);
+                                if is_ro {
+                                    fty = fty.as_readonly_view();
+                                }
+                                if !self.pattern_is_irrefutable(subpat, fty) {
+                                    all_irrefutable = false;
+                                    break;
+                                }
+                            }
+                            if all_irrefutable {
+                                covered.insert(variant.name.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut missing = Vec::new();
+                for variant in def.variants.keys() {
+                    if !covered.contains(variant) {
+                        missing.push(format!("{enum_name}::{variant}"));
+                    }
+                }
+                if missing.is_empty() {
+                    Ok(())
+                } else {
+                    Err(TypeError {
+                        message: format!(
+                            "non-exhaustive match: missing variants: {}",
+                            missing.join(", ")
+                        ),
+                        span,
+                    })
+                }
+            }
+            other => Err(TypeError {
+                message: format!(
+                    "non-exhaustive match: cannot prove exhaustiveness for type `{other}`; add `_ => ...`"
+                ),
+                span,
+            }),
+        }
+    }
+
+    fn pattern_is_irrefutable(&mut self, pat: &Pattern, expected: Ty) -> bool {
+        let expected = self.infer.resolve_ty(expected);
+        let (is_ro, expected) = match expected {
+            Ty::Readonly(inner) => (true, *inner),
+            other => (false, other),
+        };
+
+        match pat {
+            Pattern::Wildcard { .. } | Pattern::Bind { .. } => true,
+
+            Pattern::Literal {
+                lit: PatLiteral::Unit,
+                ..
+            } => matches!(expected, Ty::Unit),
+
+            Pattern::Literal { .. } => false,
+
+            Pattern::Tuple {
+                prefix,
+                rest,
+                suffix,
+                ..
+            } => {
+                let Ty::Tuple(items) = expected else {
+                    return false;
+                };
+                let prefix_len = prefix.len();
+                let suffix_len = suffix.len();
+                if rest.is_some() {
+                    if items.len() < prefix_len + suffix_len {
+                        return false;
+                    }
+                } else if items.len() != prefix_len + suffix_len {
+                    return false;
+                }
+
+                for (idx, subpat) in prefix.iter().enumerate() {
+                    let mut elem_ty = items[idx].clone();
+                    if is_ro {
+                        elem_ty = elem_ty.as_readonly_view();
+                    }
+                    if !self.pattern_is_irrefutable(subpat, elem_ty) {
+                        return false;
+                    }
+                }
+
+                for (idx, subpat) in suffix.iter().enumerate() {
+                    let item_idx = items.len() - suffix_len + idx;
+                    let mut elem_ty = items[item_idx].clone();
+                    if is_ro {
+                        elem_ty = elem_ty.as_readonly_view();
+                    }
+                    if !self.pattern_is_irrefutable(subpat, elem_ty) {
+                        return false;
+                    }
+                }
+
+                true
+            }
+
+            Pattern::Struct { fields, .. } => {
+                let Ty::App(TyCon::Named(type_name), type_args) = expected else {
+                    return false;
+                };
+                let Some(def) = self.env.structs.get(&type_name) else {
+                    return false;
+                };
+
+                let type_args: Vec<Ty> = type_args
+                    .into_iter()
+                    .map(|ty| self.infer.resolve_ty(ty))
+                    .collect();
+                let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                for (fname, subpat) in fields {
+                    let Some((_n, field_ty)) = def.fields.iter().find(|(n, _)| n == &fname.name)
+                    else {
+                        return false;
+                    };
+                    let mut field_ty = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
+                    if is_ro {
+                        field_ty = field_ty.as_readonly_view();
+                    }
+                    if !self.pattern_is_irrefutable(subpat, field_ty) {
+                        return false;
+                    }
+                }
+
+                true
+            }
+
+            Pattern::Ctor { args, .. } => {
+                let Ty::App(TyCon::Named(type_name), type_args) = expected else {
+                    return false;
+                };
+                let Some(def) = self.env.structs.get(&type_name) else {
+                    return false;
+                };
+                if !def.is_newtype || args.len() != 1 {
+                    return false;
+                }
+
+                let type_args: Vec<Ty> = type_args
+                    .into_iter()
+                    .map(|ty| self.infer.resolve_ty(ty))
+                    .collect();
+                let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                let Some((_fname, field_ty)) = def.fields.first() else {
+                    return false;
+                };
+                let mut field_ty = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
+                if is_ro {
+                    field_ty = field_ty.as_readonly_view();
+                }
+
+                self.pattern_is_irrefutable(&args[0], field_ty)
+            }
+
+            Pattern::Array {
+                prefix,
+                rest,
+                suffix,
+                ..
+            } => {
+                let Ty::Array(_elem) = expected else {
+                    return false;
+                };
+                rest.is_some() && prefix.is_empty() && suffix.is_empty()
+            }
+
+            Pattern::Enum { .. } => false,
+        }
     }
 
     fn typecheck_for(

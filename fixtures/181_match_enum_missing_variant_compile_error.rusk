@@ -1,0 +1,7 @@
+// expect: compile_error missing variants: Option::None
+
+fn main() -> int {
+    match Option::Some(1) {
+        Option::Some(x) => x
+    }
+}

@@ -1,0 +1,10 @@
+// expect: ok int 6
+
+interface Tick { fn tick(n: int) -> int; }
+
+fn main() -> int {
+    match @Tick.tick(5) {
+        @Tick.tick(n) => resume(n + 1)
+        x => x
+    }
+}

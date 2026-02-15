@@ -1,0 +1,8 @@
+// expect: compile_error missing `false`
+
+fn main() -> int {
+    let b = true;
+    match b {
+        true => 1
+    }
+}

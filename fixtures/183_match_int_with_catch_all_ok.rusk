@@ -1,0 +1,9 @@
+// expect: ok string "many"
+
+fn main() -> string {
+    match 2 {
+        0 => "zero"
+        1 => "one"
+        _ => "many"
+    }
+}
