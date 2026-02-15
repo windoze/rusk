@@ -26,11 +26,13 @@ use core::{cell::RefCell, mem};
 #[cfg(feature = "std")]
 use std::time::Instant;
 
-use crate::gc::{GcHeap, GcRef, MarkSweepHeap, Trace, Tracer};
+use rusk_gc::{GcHeap, GcRef, Trace, Tracer};
 use rusk_mir::{
     BasicBlock, BlockId, CallTarget, ConstValue, EffectSpec, Function, FunctionId, HostImportId,
     Instruction, Local, Module, Mutability, Operand, Pattern, SwitchCase, Terminator, TypeRepLit,
 };
+
+pub type MarkSweepHeap = rusk_gc::MarkSweepHeap<HeapValue>;
 
 /// An internal runtime type representation identifier.
 ///
@@ -405,7 +407,7 @@ pub type Interpreter = InterpreterImpl<MarkSweepHeap>;
 /// This type is generic over the GC heap implementation to allow swapping
 /// collectors. Most users should use the `Interpreter` type alias, which uses
 /// `MarkSweepHeap`.
-pub struct InterpreterImpl<GC: GcHeap> {
+pub struct InterpreterImpl<GC: GcHeap<HeapValue>> {
     module: Rc<Module>,
     type_reps: Vec<TypeRepNode>,
     type_rep_intern: HashMap<TypeRepNode, TypeRepId>,
@@ -472,7 +474,7 @@ struct CoreIntrinsicIds {
     int_ge: Option<HostImportId>,
 }
 
-impl<GC: GcHeap + Default> InterpreterImpl<GC> {
+impl<GC: GcHeap<HeapValue> + Default> InterpreterImpl<GC> {
     /// Creates a new interpreter instance for the given MIR module.
     pub fn new(module: Module) -> Self {
         Self::with_heap(module, GC::default())
@@ -487,7 +489,7 @@ impl<GC: GcHeap + Default> InterpreterImpl<GC> {
     }
 }
 
-impl<GC: GcHeap> InterpreterImpl<GC> {
+impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
     const DEFAULT_GC_THRESHOLD: usize = 10_000;
 
     /// Creates a new interpreter instance using an explicit GC heap implementation.
@@ -616,7 +618,7 @@ impl<GC: GcHeap> InterpreterImpl<GC> {
             stack: &self.stack,
             roots: &self.roots,
         };
-        self.heap.collect_garbage(&roots);
+        self.heap.collect(&roots);
         #[cfg(feature = "std")]
         {
             self.metrics.gc_nanos = self
@@ -3083,7 +3085,7 @@ fn count_binds_in_pattern(p: &Pattern) -> usize {
     }
 }
 
-fn match_pattern<GC: GcHeap>(
+fn match_pattern<GC: GcHeap<HeapValue>>(
     heap: &mut GC,
     allocations_since_gc: &mut usize,
     struct_layouts: &HashMap<String, StructLayout>,

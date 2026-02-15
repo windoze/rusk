@@ -288,11 +288,15 @@ Rationale: this phase isolates “VM semantics changes” from “Immix complexi
 
 ## Open Questions
 
-1) Should we share types with the MIR interpreter GC (`crates/rusk-interpreter/src/gc.rs`), or keep
-   the VM heap fully separate for now?
+1) Should we share types with the MIR interpreter GC (`crates/rusk-interpreter/src/gc.rs`), or keep the VM heap fully separate for now?
+
+  We should look forward to single GC implementation that can be used by both the MIR interpreter and the bytecode VM. You can make change to both components if needed.
 
 2) Do we want the VM heap to ever expose “pinned” objects (non-movable) for future FFI needs?
 
-3) What block/line sizes should we start with (tunable constants), and how do we want to measure
-   fragmentation in practice for selecting defrag candidates?
+  We can support pinned objects by adding a flag in the slot metadata and skipping them during defrag. But we can defer the actual API for allocating pinned objects until we have a concrete use case.
+
+3) What block/line sizes should we start with (tunable constants), and how do we want to measure fragmentation in practice for selecting defrag candidates?
+
+  Start with common defaults (e.g. 32KiB blocks, 128B lines) and add metrics for fragmentation (e.g. % of lines in use, largest contiguous free region) to guide future tuning.
 

@@ -5,6 +5,7 @@ edition.workspace = true
 
 
 [dependencies]
+rusk-gc = { path = "../rusk-gc", default-features = false }
 rusk-mir = { path = "../rusk-mir", default-features = false }
 hashbrown = { version = "0.16", default-features = false, features = [
     "inline-more",
@@ -21,7 +22,7 @@ serde = { version = "1", default-features = false, optional = true, features = [
 [features]
 default = ["std", "serde"]
 
-std = ["serde?/std", "bitcode?/std", "rusk-mir/std"]
+std = ["serde?/std", "bitcode?/std", "rusk-mir/std", "rusk-gc/std"]
 
 # Enable serde support, can be used in both std and no-std builds.
 serde = ["dep:serde", "dep:bitcode", "bitcode/serde", "rusk-mir/serde"]

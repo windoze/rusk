@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
 use rusk_bytecode::{AbiType, EffectId, ExecutableModule, FunctionId, HostImportId};
+use rusk_gc::{GcHeap, GcRef, ImmixHeap, Trace, Tracer};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+const VM_GC_TRIGGER_ALLOCATIONS: usize = 50_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AbiValue {
@@ -177,31 +180,26 @@ impl TypeReps {
 #[derive(Clone, Debug)]
 struct RefValue {
     readonly: bool,
-    obj: Rc<RefCell<HeapValue>>,
+    handle: GcRef,
 }
 
 impl RefValue {
-    fn new(obj: Rc<RefCell<HeapValue>>) -> Self {
+    fn new(handle: GcRef) -> Self {
         Self {
             readonly: false,
-            obj,
+            handle,
         }
     }
 
     fn as_readonly(&self) -> Self {
         Self {
             readonly: true,
-            obj: Rc::clone(&self.obj),
+            handle: self.handle,
         }
     }
 
     fn is_readonly(&self) -> bool {
         self.readonly
-    }
-
-    #[allow(unused)]
-    fn ptr_eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.obj, &other.obj)
     }
 }
 
@@ -309,6 +307,60 @@ enum HeapValue {
     },
 }
 
+impl Trace for Value {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        match self {
+            Value::Ref(r) => tracer.mark(r.handle),
+            Value::Continuation(k) => k.trace(tracer),
+            Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::String(_)
+            | Value::Bytes(_)
+            | Value::TypeRep(_)
+            | Value::Function(_) => {}
+        }
+    }
+}
+
+impl Trace for HeapValue {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        match self {
+            HeapValue::Struct { fields, .. } => {
+                for v in fields {
+                    v.trace(tracer);
+                }
+            }
+            HeapValue::Array(items) | HeapValue::Tuple(items) => {
+                for v in items {
+                    v.trace(tracer);
+                }
+            }
+            HeapValue::Enum { fields, .. } => {
+                for v in fields {
+                    v.trace(tracer);
+                }
+            }
+        }
+    }
+}
+
+impl Trace for ContinuationToken {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        let borrowed = self.state.borrow();
+        let Some(state) = borrowed.as_ref() else {
+            return;
+        };
+
+        for frame in &state.frames {
+            for v in frame.regs.iter().flatten() {
+                v.trace(tracer);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeEffectId {
     interface: String,
@@ -354,6 +406,8 @@ enum VmState {
 }
 
 pub struct Vm {
+    heap: ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: usize,
     module: ExecutableModule,
     state: VmState,
     frames: Vec<Frame>,
@@ -386,6 +440,8 @@ impl Vm {
         regs.resize(reg_count, None);
 
         Ok(Self {
+            heap: ImmixHeap::new(),
+            gc_allocations_since_collect: 0,
             host_fns: {
                 let mut host_fns: Vec<Option<Box<dyn HostFn>>> =
                     Vec::with_capacity(module.host_imports.len());
@@ -489,6 +545,32 @@ impl Vm {
         );
         Ok(())
     }
+
+    pub fn heap_live_objects(&self) -> usize {
+        self.heap.live_objects()
+    }
+
+    pub fn collect_garbage_now(&mut self) {
+        let roots = VmRoots {
+            frames: &self.frames,
+        };
+        self.heap.collect(&roots);
+        self.gc_allocations_since_collect = 0;
+    }
+}
+
+struct VmRoots<'a> {
+    frames: &'a [Frame],
+}
+
+impl Trace for VmRoots<'_> {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        for frame in self.frames {
+            for v in frame.regs.iter().flatten() {
+                v.trace(tracer);
+            }
+        }
+    }
 }
 
 pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
@@ -522,6 +604,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
     loop {
         if fuel.is_some() && remaining == 0 {
             return StepResult::Yield { remaining_fuel: 0 };
+        }
+
+        if vm.gc_allocations_since_collect >= VM_GC_TRIGGER_ALLOCATIONS {
+            vm.collect_garbage_now();
         }
 
         let frame_index = match vm.frames.len() {
@@ -682,7 +768,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(id) => id,
                     Err(msg) => return trap(vm, format!("is_type ty: {msg}")),
                 };
-                let ok = match type_test(&vm.module, &vm.type_reps, &v, target) {
+                let ok = match type_test(&vm.module, &vm.type_reps, &vm.heap, &v, target) {
                     Ok(ok) => ok,
                     Err(msg) => return trap(vm, msg),
                 };
@@ -699,7 +785,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(id) => id,
                     Err(msg) => return trap(vm, format!("checked_cast ty: {msg}")),
                 };
-                let ok = match type_test(&vm.module, &vm.type_reps, &v, target) {
+                let ok = match type_test(&vm.module, &vm.type_reps, &vm.heap, &v, target) {
                     Ok(ok) => ok,
                     Err(msg) => return trap(vm, msg),
                 };
@@ -708,12 +794,16 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 } else {
                     ("None".to_string(), Vec::new())
                 };
-                let option = alloc_ref(HeapValue::Enum {
-                    enum_name: "Option".to_string(),
-                    type_args: vec![target],
-                    variant,
-                    fields,
-                });
+                let option = alloc_ref(
+                    &mut vm.heap,
+                    &mut vm.gc_allocations_since_collect,
+                    HeapValue::Enum {
+                        enum_name: "Option".to_string(),
+                        type_args: vec![target],
+                        variant,
+                        fields,
+                    },
+                );
                 if let Err(msg) = write_value(frame, *dst, option) {
                     return trap(vm, format!("checked_cast dst: {msg}"));
                 }
@@ -792,7 +882,11 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     type_args: arg_ids,
                     fields: values,
                 };
-                if let Err(msg) = write_value(frame, *dst, alloc_ref(obj)) {
+                if let Err(msg) = write_value(
+                    frame,
+                    *dst,
+                    alloc_ref(&mut vm.heap, &mut vm.gc_allocations_since_collect, obj),
+                ) {
                     return trap(vm, format!("make_struct dst: {msg}"));
                 }
             }
@@ -805,7 +899,15 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     };
                     values.push(v);
                 }
-                if let Err(msg) = write_value(frame, *dst, alloc_ref(HeapValue::Array(values))) {
+                if let Err(msg) = write_value(
+                    frame,
+                    *dst,
+                    alloc_ref(
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        HeapValue::Array(values),
+                    ),
+                ) {
                     return trap(vm, format!("make_array dst: {msg}"));
                 }
             }
@@ -824,7 +926,15 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     };
                     values.push(v);
                 }
-                if let Err(msg) = write_value(frame, *dst, alloc_ref(HeapValue::Tuple(values))) {
+                if let Err(msg) = write_value(
+                    frame,
+                    *dst,
+                    alloc_ref(
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        HeapValue::Tuple(values),
+                    ),
+                ) {
                     return trap(vm, format!("make_tuple dst: {msg}"));
                 }
             }
@@ -857,7 +967,11 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     variant: variant.clone(),
                     fields: values,
                 };
-                if let Err(msg) = write_value(frame, *dst, alloc_ref(obj)) {
+                if let Err(msg) = write_value(
+                    frame,
+                    *dst,
+                    alloc_ref(&mut vm.heap, &mut vm.gc_allocations_since_collect, obj),
+                ) {
                     return trap(vm, format!("make_enum dst: {msg}"));
                 }
             }
@@ -877,7 +991,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     );
                 };
 
-                let value = match &*r.obj.borrow() {
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "get_field: dangling reference".to_string());
+                };
+                let value = match obj {
                     HeapValue::Struct {
                         type_name, fields, ..
                     } => {
@@ -945,7 +1062,11 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Err(msg) => return trap(vm, format!("set_field value: {msg}")),
                 };
 
-                match &mut *r.obj.borrow_mut() {
+                let Some(obj) = vm.heap.get_mut(r.handle) else {
+                    return trap(vm, "set_field: dangling reference".to_string());
+                };
+
+                match obj {
                     HeapValue::Struct {
                         type_name, fields, ..
                     } => {
@@ -994,7 +1115,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         ),
                     );
                 };
-                let value = match &*r.obj.borrow() {
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "struct_get: dangling reference".to_string());
+                };
+                let value = match obj {
                     HeapValue::Struct {
                         type_name, fields, ..
                     } => {
@@ -1046,7 +1170,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("struct_set value: {msg}")),
                 };
-                match &mut *r.obj.borrow_mut() {
+                let Some(obj) = vm.heap.get_mut(r.handle) else {
+                    return trap(vm, "struct_set: dangling reference".to_string());
+                };
+                match obj {
                     HeapValue::Struct { fields, .. } => {
                         let Some(slot) = fields.get_mut(*idx) else {
                             return trap(vm, format!("missing field: #{idx}"));
@@ -1076,7 +1203,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         ),
                     );
                 };
-                let value = match &*r.obj.borrow() {
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "tuple_get: dangling reference".to_string());
+                };
+                let value = match obj {
                     HeapValue::Tuple(items) => {
                         let Some(v) = items.get(*idx) else {
                             return trap(vm, format!("missing field: .{idx}"));
@@ -1119,7 +1249,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("tuple_set value: {msg}")),
                 };
-                match &mut *r.obj.borrow_mut() {
+                let Some(obj) = vm.heap.get_mut(r.handle) else {
+                    return trap(vm, "tuple_set: dangling reference".to_string());
+                };
+                match obj {
                     HeapValue::Tuple(items) => {
                         let Some(slot) = items.get_mut(*idx) else {
                             return trap(vm, format!("missing field: .{idx}"));
@@ -1159,7 +1292,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     }
                 };
 
-                let element = match &*r.obj.borrow() {
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "index_get: dangling reference".to_string());
+                };
+                let element = match obj {
                     HeapValue::Array(items) => {
                         let idx_usize: usize = match i.try_into() {
                             Ok(u) => u,
@@ -1224,32 +1360,37 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Err(msg) => return trap(vm, format!("index_set value: {msg}")),
                 };
 
-                match &mut *r.obj.borrow_mut() {
-                    HeapValue::Array(items) => {
-                        let idx_usize: usize = match i.try_into() {
-                            Ok(u) => u,
-                            Err(_) => {
-                                return trap(
-                                    vm,
-                                    format!("index out of bounds: index={i}, len={}", items.len()),
-                                );
-                            }
-                        };
-                        if idx_usize >= items.len() {
-                            return trap(
-                                vm,
-                                format!("index out of bounds: index={i}, len={}", items.len()),
-                            );
-                        }
-                        items[idx_usize] = val;
-                    }
-                    _ => {
+                let len = match vm.heap.get(r.handle) {
+                    Some(HeapValue::Array(items)) => items.len(),
+                    Some(_) => {
                         return trap(
                             vm,
                             "type error in index_set: expected array, got ref".to_string(),
                         );
                     }
+                    None => return trap(vm, "index_set: dangling reference".to_string()),
+                };
+
+                let idx_usize: usize = match i.try_into() {
+                    Ok(u) => u,
+                    Err(_) => {
+                        return trap(vm, format!("index out of bounds: index={i}, len={len}"));
+                    }
+                };
+                if idx_usize >= len {
+                    return trap(vm, format!("index out of bounds: index={i}, len={len}"));
                 }
+
+                let Some(obj) = vm.heap.get_mut(r.handle) else {
+                    return trap(vm, "index_set: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
+                    return trap(
+                        vm,
+                        "type error in index_set: expected array, got ref".to_string(),
+                    );
+                };
+                items[idx_usize] = val;
             }
             rusk_bytecode::Instruction::Len { dst, arr } => {
                 let arr_v = match read_value(frame, *arr) {
@@ -1265,7 +1406,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         ),
                     );
                 };
-                let len = match &*r.obj.borrow() {
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "len: dangling reference".to_string());
+                };
+                let len = match obj {
                     HeapValue::Array(items) => items.len(),
                     _ => {
                         return trap(vm, "type error in len: expected array, got ref".to_string());
@@ -1560,7 +1704,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     }
                 }
                 rusk_bytecode::CallTarget::Intrinsic(intr) => {
-                    let out = match eval_core_intrinsic(&vm.module, frame, *intr, args.as_slice()) {
+                    let out = match eval_core_intrinsic(
+                        &vm.module,
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        frame,
+                        *intr,
+                        args.as_slice(),
+                    ) {
                         Ok(v) => v,
                         Err(msg) => return trap(vm, msg),
                     };
@@ -1640,7 +1791,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     );
                 };
 
-                let (type_name, type_args) = match &*r.obj.borrow() {
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "vcall: dangling reference".to_string());
+                };
+                let (type_name, type_args) = match obj {
                     HeapValue::Struct {
                         type_name,
                         type_args,
@@ -1786,6 +1940,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 match find_handler_for_effect(
                     &vm.module,
+                    &mut vm.heap,
+                    &mut vm.gc_allocations_since_collect,
                     vm.handlers.as_slice(),
                     &effect_id,
                     &arg_values,
@@ -2028,8 +2184,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 let mut matched = false;
                 for case in cases {
                     let mut binds = Vec::new();
-                    let ok = match match_pattern(&vm.module, &case.pattern, &scrutinee, &mut binds)
-                    {
+                    let ok = match match_pattern(
+                        &vm.module,
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        &case.pattern,
+                        &scrutinee,
+                        &mut binds,
+                    ) {
                         Ok(ok) => ok,
                         Err(msg) => return trap(vm, msg),
                     };
@@ -2133,6 +2295,8 @@ fn unwind_handlers_to_stack_len(handlers: &mut Vec<HandlerEntry>, stack_len: usi
 
 fn find_handler_for_effect(
     module: &ExecutableModule,
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
     handlers: &[HandlerEntry],
     effect: &RuntimeEffectId,
     args: &[Value],
@@ -2149,7 +2313,14 @@ fn find_handler_for_effect(
             let mut binds = Vec::new();
             let mut ok = true;
             for (pat, arg) in clause.arg_patterns.iter().zip(args.iter()) {
-                if !match_pattern(module, pat, arg, &mut binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    pat,
+                    arg,
+                    &mut binds,
+                )? {
                     ok = false;
                     break;
                 }
@@ -2164,8 +2335,13 @@ fn find_handler_for_effect(
     Ok(None)
 }
 
-fn alloc_ref(obj: HeapValue) -> Value {
-    Value::Ref(RefValue::new(Rc::new(RefCell::new(obj))))
+fn alloc_ref(
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
+    obj: HeapValue,
+) -> Value {
+    *gc_allocations_since_collect = gc_allocations_since_collect.saturating_add(1);
+    Value::Ref(RefValue::new(heap.alloc(obj)))
 }
 
 fn read_value(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<Value, String> {
@@ -2210,6 +2386,7 @@ fn struct_field_index(
 fn type_test(
     module: &ExecutableModule,
     type_reps: &TypeReps,
+    heap: &ImmixHeap<HeapValue>,
     value: &Value,
     target: TypeRepId,
 ) -> Result<bool, String> {
@@ -2225,36 +2402,43 @@ fn type_test(
         TypeCtor::String => matches!(value, Value::String(_)),
         TypeCtor::Bytes => matches!(value, Value::Bytes(_)),
         TypeCtor::Array => match value {
-            Value::Ref(r) => matches!(&*r.obj.borrow(), HeapValue::Array(_)),
+            Value::Ref(r) => match heap.get(r.handle) {
+                Some(HeapValue::Array(_)) => true,
+                Some(_) => false,
+                None => return Err("dangling reference in type test".to_string()),
+            },
             _ => false,
         },
         TypeCtor::Tuple(arity) => match value {
             Value::Unit => *arity == 0,
-            Value::Ref(r) => match &*r.obj.borrow() {
-                HeapValue::Tuple(items) => items.len() == *arity,
-                _ => false,
+            Value::Ref(r) => match heap.get(r.handle) {
+                Some(HeapValue::Tuple(items)) => items.len() == *arity,
+                Some(_) => false,
+                None => return Err("dangling reference in type test".to_string()),
             },
             _ => false,
         },
         TypeCtor::Struct(name) => match value {
-            Value::Ref(r) => match &*r.obj.borrow() {
-                HeapValue::Struct {
+            Value::Ref(r) => match heap.get(r.handle) {
+                Some(HeapValue::Struct {
                     type_name,
                     type_args,
                     ..
-                } => type_name == name && type_args.as_slice() == target.args.as_slice(),
-                _ => false,
+                }) => type_name == name && type_args.as_slice() == target.args.as_slice(),
+                Some(_) => false,
+                None => return Err("dangling reference in type test".to_string()),
             },
             _ => false,
         },
         TypeCtor::Enum(name) => match value {
-            Value::Ref(r) => match &*r.obj.borrow() {
-                HeapValue::Enum {
+            Value::Ref(r) => match heap.get(r.handle) {
+                Some(HeapValue::Enum {
                     enum_name,
                     type_args,
                     ..
-                } => enum_name == name && type_args.as_slice() == target.args.as_slice(),
-                _ => false,
+                }) => enum_name == name && type_args.as_slice() == target.args.as_slice(),
+                Some(_) => false,
+                None => return Err("dangling reference in type test".to_string()),
             },
             _ => false,
         },
@@ -2263,8 +2447,10 @@ fn type_test(
                 return Ok(false);
             };
 
-            let borrowed = r.obj.borrow();
-            let (dyn_type, dyn_type_args) = match &*borrowed {
+            let Some(obj) = heap.get(r.handle) else {
+                return Err("dangling reference in type test".to_string());
+            };
+            let (dyn_type, dyn_type_args) = match obj {
                 HeapValue::Struct {
                     type_name,
                     type_args,
@@ -2304,6 +2490,8 @@ const ARRAY_ITER_FIELD_INDEX: &str = "idx";
 
 fn eval_core_intrinsic(
     module: &ExecutableModule,
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
     frame: &Frame,
     intr: rusk_bytecode::Intrinsic,
     arg_regs: &[rusk_bytecode::Reg],
@@ -2480,17 +2668,27 @@ fn eval_core_intrinsic(
         },
 
         I::ArrayLen => match args.as_slice() {
-            [Value::TypeRep(_), Value::Ref(arr)] => match &*arr.obj.borrow() {
-                HeapValue::Array(items) => Ok(Value::Int(items.len() as i64)),
-                _ => Err("core::intrinsics::array_len: expected an array".to_string()),
-            },
+            [Value::TypeRep(_), Value::Ref(arr)] => {
+                let Some(obj) = heap.get(arr.handle) else {
+                    return Err("core::intrinsics::array_len: dangling reference".to_string());
+                };
+                match obj {
+                    HeapValue::Array(items) => Ok(Value::Int(items.len() as i64)),
+                    _ => Err("core::intrinsics::array_len: expected an array".to_string()),
+                }
+            }
             _ => Err(bad_args("core::intrinsics::array_len")),
         },
         I::ArrayLenRo => match args.as_slice() {
-            [Value::TypeRep(_), Value::Ref(arr)] => match &*arr.obj.borrow() {
-                HeapValue::Array(items) => Ok(Value::Int(items.len() as i64)),
-                _ => Err("core::intrinsics::array_len_ro: expected an array".to_string()),
-            },
+            [Value::TypeRep(_), Value::Ref(arr)] => {
+                let Some(obj) = heap.get(arr.handle) else {
+                    return Err("core::intrinsics::array_len_ro: dangling reference".to_string());
+                };
+                match obj {
+                    HeapValue::Array(items) => Ok(Value::Int(items.len() as i64)),
+                    _ => Err("core::intrinsics::array_len_ro: expected an array".to_string()),
+                }
+            }
             _ => Err(bad_args("core::intrinsics::array_len_ro")),
         },
         I::ArrayPush => match args.as_slice() {
@@ -2498,7 +2696,10 @@ fn eval_core_intrinsic(
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                let Some(obj) = heap.get_mut(arr.handle) else {
+                    return Err("core::intrinsics::array_push: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
                     return Err("core::intrinsics::array_push: expected an array".to_string());
                 };
                 items.push(value.clone());
@@ -2511,22 +2712,36 @@ fn eval_core_intrinsic(
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
-                    return Err("core::intrinsics::array_pop: expected an array".to_string());
+                let popped = {
+                    let Some(obj) = heap.get_mut(arr.handle) else {
+                        return Err("core::intrinsics::array_pop: dangling reference".to_string());
+                    };
+                    let HeapValue::Array(items) = obj else {
+                        return Err("core::intrinsics::array_pop: expected an array".to_string());
+                    };
+                    items.pop()
                 };
-                match items.pop() {
-                    Some(v) => Ok(alloc_ref(HeapValue::Enum {
-                        enum_name: "Option".to_string(),
-                        type_args: vec![*elem_rep],
-                        variant: "Some".to_string(),
-                        fields: vec![v],
-                    })),
-                    None => Ok(alloc_ref(HeapValue::Enum {
-                        enum_name: "Option".to_string(),
-                        type_args: vec![*elem_rep],
-                        variant: "None".to_string(),
-                        fields: Vec::new(),
-                    })),
+                match popped {
+                    Some(v) => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![v],
+                        },
+                    )),
+                    None => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    )),
                 }
             }
             _ => Err(bad_args("core::intrinsics::array_pop")),
@@ -2536,7 +2751,10 @@ fn eval_core_intrinsic(
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                let Some(obj) = heap.get_mut(arr.handle) else {
+                    return Err("core::intrinsics::array_clear: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
                     return Err("core::intrinsics::array_clear: expected an array".to_string());
                 };
                 items.clear();
@@ -2559,7 +2777,10 @@ fn eval_core_intrinsic(
                 }
                 let new_len_usize: usize = *new_len as usize;
 
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                let Some(obj) = heap.get_mut(arr.handle) else {
+                    return Err("core::intrinsics::array_resize: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
                     return Err("core::intrinsics::array_resize: expected an array".to_string());
                 };
 
@@ -2582,7 +2803,10 @@ fn eval_core_intrinsic(
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                let Some(obj) = heap.get_mut(arr.handle) else {
+                    return Err("core::intrinsics::array_insert: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
                     return Err("core::intrinsics::array_insert: expected an array".to_string());
                 };
                 let idx_usize: usize = (*idx).try_into().map_err(|_| {
@@ -2604,7 +2828,10 @@ fn eval_core_intrinsic(
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                let Some(obj) = heap.get_mut(arr.handle) else {
+                    return Err("core::intrinsics::array_remove: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
                     return Err("core::intrinsics::array_remove: expected an array".to_string());
                 };
                 let idx_usize: usize = (*idx).try_into().map_err(|_| {
@@ -2625,16 +2852,27 @@ fn eval_core_intrinsic(
                 if arr.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
-                let other_items = match &*other.obj.borrow() {
-                    HeapValue::Array(items) => items.clone(),
-                    _ => {
+                let other_items = match heap.get(other.handle) {
+                    Some(HeapValue::Array(items)) => items.clone(),
+                    Some(_) => {
                         return Err(
                             "core::intrinsics::array_extend: expected an array for `other`"
                                 .to_string(),
                         );
                     }
+                    None => {
+                        return Err(
+                            "core::intrinsics::array_extend: dangling reference for `other`"
+                                .to_string(),
+                        );
+                    }
                 };
-                let HeapValue::Array(items) = &mut *arr.obj.borrow_mut() else {
+                let Some(obj) = heap.get_mut(arr.handle) else {
+                    return Err(
+                        "core::intrinsics::array_extend: dangling reference for `arr`".to_string(),
+                    );
+                };
+                let HeapValue::Array(items) = obj else {
                     return Err(
                         "core::intrinsics::array_extend: expected an array for `arr`".to_string(),
                     );
@@ -2646,45 +2884,69 @@ fn eval_core_intrinsic(
         },
         I::ArrayConcat => match args.as_slice() {
             [Value::TypeRep(_), Value::Ref(a), Value::Ref(b)] => {
-                let a_items = match &*a.obj.borrow() {
-                    HeapValue::Array(items) => items.clone(),
-                    _ => {
+                let a_items = match heap.get(a.handle) {
+                    Some(HeapValue::Array(items)) => items.clone(),
+                    Some(_) => {
                         return Err(
                             "core::intrinsics::array_concat: expected an array for `a`".to_string()
                         );
                     }
+                    None => {
+                        return Err("core::intrinsics::array_concat: dangling reference for `a`"
+                            .to_string());
+                    }
                 };
-                let b_items = match &*b.obj.borrow() {
-                    HeapValue::Array(items) => items.clone(),
-                    _ => {
+                let b_items = match heap.get(b.handle) {
+                    Some(HeapValue::Array(items)) => items.clone(),
+                    Some(_) => {
                         return Err(
                             "core::intrinsics::array_concat: expected an array for `b`".to_string()
                         );
+                    }
+                    None => {
+                        return Err("core::intrinsics::array_concat: dangling reference for `b`"
+                            .to_string());
                     }
                 };
                 let mut items = Vec::with_capacity(a_items.len() + b_items.len());
                 items.extend(a_items);
                 items.extend(b_items);
-                Ok(alloc_ref(HeapValue::Array(items)))
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(items),
+                ))
             }
             _ => Err(bad_args("core::intrinsics::array_concat")),
         },
         I::ArrayConcatRo => match args.as_slice() {
             [Value::TypeRep(_), Value::Ref(a), Value::Ref(b)] => {
-                let a_items = match &*a.obj.borrow() {
-                    HeapValue::Array(items) => items.clone(),
-                    _ => {
+                let a_items = match heap.get(a.handle) {
+                    Some(HeapValue::Array(items)) => items.clone(),
+                    Some(_) => {
                         return Err(
                             "core::intrinsics::array_concat_ro: expected an array for `a`"
                                 .to_string(),
                         );
                     }
+                    None => {
+                        return Err(
+                            "core::intrinsics::array_concat_ro: dangling reference for `a`"
+                                .to_string(),
+                        );
+                    }
                 };
-                let b_items = match &*b.obj.borrow() {
-                    HeapValue::Array(items) => items.clone(),
-                    _ => {
+                let b_items = match heap.get(b.handle) {
+                    Some(HeapValue::Array(items)) => items.clone(),
+                    Some(_) => {
                         return Err(
                             "core::intrinsics::array_concat_ro: expected an array for `b`"
+                                .to_string(),
+                        );
+                    }
+                    None => {
+                        return Err(
+                            "core::intrinsics::array_concat_ro: dangling reference for `b`"
                                 .to_string(),
                         );
                     }
@@ -2692,7 +2954,11 @@ fn eval_core_intrinsic(
                 let mut items = Vec::with_capacity(a_items.len() + b_items.len());
                 items.extend(a_items.into_iter().map(Value::into_readonly_view));
                 items.extend(b_items.into_iter().map(Value::into_readonly_view));
-                Ok(alloc_ref(HeapValue::Array(items)))
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(items),
+                ))
             }
             _ => Err(bad_args("core::intrinsics::array_concat_ro")),
         },
@@ -2703,30 +2969,36 @@ fn eval_core_intrinsic(
                 Value::Int(start),
                 Value::Int(end),
             ] => {
-                let borrowed = arr.obj.borrow();
-                let items = match &*borrowed {
-                    HeapValue::Array(items) => items,
-                    _ => {
+                let slice_items = {
+                    let Some(obj) = heap.get(arr.handle) else {
+                        return Err("core::intrinsics::array_slice: dangling reference".to_string());
+                    };
+                    let HeapValue::Array(items) = obj else {
                         return Err("core::intrinsics::array_slice: expected an array".to_string());
-                    }
-                };
-                let len = items.len();
+                    };
+                    let len = items.len();
 
-                let start_usize: usize = (*start)
-                    .try_into()
-                    .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
-                let end_usize: usize = (*end)
-                    .try_into()
-                    .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
-                if start_usize > end_usize {
-                    return Err("core::intrinsics::array_slice: start must be <= end".to_string());
-                }
-                if end_usize > len {
-                    return Err(format!("index out of bounds: index={end}, len={len}"));
-                }
-                Ok(alloc_ref(HeapValue::Array(
-                    items[start_usize..end_usize].to_vec(),
-                )))
+                    let start_usize: usize = (*start)
+                        .try_into()
+                        .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
+                    let end_usize: usize = (*end)
+                        .try_into()
+                        .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
+                    if start_usize > end_usize {
+                        return Err(
+                            "core::intrinsics::array_slice: start must be <= end".to_string()
+                        );
+                    }
+                    if end_usize > len {
+                        return Err(format!("index out of bounds: index={end}, len={len}"));
+                    }
+                    items[start_usize..end_usize].to_vec()
+                };
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(slice_items),
+                ))
             }
             _ => Err(bad_args("core::intrinsics::array_slice")),
         },
@@ -2737,50 +3009,59 @@ fn eval_core_intrinsic(
                 Value::Int(start),
                 Value::Int(end),
             ] => {
-                let borrowed = arr.obj.borrow();
-                let items = match &*borrowed {
-                    HeapValue::Array(items) => items,
-                    _ => {
+                let slice_items = {
+                    let Some(obj) = heap.get(arr.handle) else {
+                        return Err(
+                            "core::intrinsics::array_slice_ro: dangling reference".to_string()
+                        );
+                    };
+                    let HeapValue::Array(items) = obj else {
                         return Err(
                             "core::intrinsics::array_slice_ro: expected an array".to_string()
                         );
-                    }
-                };
-                let len = items.len();
+                    };
+                    let len = items.len();
 
-                let start_usize: usize = (*start)
-                    .try_into()
-                    .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
-                let end_usize: usize = (*end)
-                    .try_into()
-                    .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
-                if start_usize > end_usize {
-                    return Err(
-                        "core::intrinsics::array_slice_ro: start must be <= end".to_string()
-                    );
-                }
-                if end_usize > len {
-                    return Err(format!("index out of bounds: index={end}, len={len}"));
-                }
-                Ok(alloc_ref(HeapValue::Array(
+                    let start_usize: usize = (*start)
+                        .try_into()
+                        .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
+                    let end_usize: usize = (*end)
+                        .try_into()
+                        .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
+                    if start_usize > end_usize {
+                        return Err(
+                            "core::intrinsics::array_slice_ro: start must be <= end".to_string()
+                        );
+                    }
+                    if end_usize > len {
+                        return Err(format!("index out of bounds: index={end}, len={len}"));
+                    }
                     items[start_usize..end_usize]
                         .iter()
                         .cloned()
                         .map(Value::into_readonly_view)
-                        .collect(),
-                )))
+                        .collect::<Vec<_>>()
+                };
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(slice_items),
+                ))
             }
             _ => Err(bad_args("core::intrinsics::array_slice_ro")),
         },
 
         I::IntoIter => match args.as_slice() {
             [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
-                match &*arr.obj.borrow() {
-                    HeapValue::Array(_) => {}
-                    _ => {
+                match heap.get(arr.handle) {
+                    Some(HeapValue::Array(_)) => {}
+                    Some(_) => {
                         return Err("core::intrinsics::into_iter: expected an array".to_string());
                     }
-                }
+                    None => {
+                        return Err("core::intrinsics::into_iter: dangling reference".to_string());
+                    }
+                };
 
                 let layout = module
                     .struct_layouts
@@ -2794,11 +3075,15 @@ fn eval_core_intrinsic(
                 fields[arr_idx] = Value::Ref(arr.clone());
                 fields[idx_idx] = Value::Int(0);
 
-                Ok(alloc_ref(HeapValue::Struct {
-                    type_name: ARRAY_ITER_TYPE.to_string(),
-                    type_args: vec![*elem_rep],
-                    fields,
-                }))
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Struct {
+                        type_name: ARRAY_ITER_TYPE.to_string(),
+                        type_args: vec![*elem_rep],
+                        fields,
+                    },
+                ))
             }
             _ => Err(bad_args("core::intrinsics::into_iter")),
         },
@@ -2812,10 +3097,12 @@ fn eval_core_intrinsic(
                 let idx_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_INDEX)?;
 
                 let (arr_ref, idx) = {
-                    let borrowed = iter.obj.borrow();
+                    let Some(obj) = heap.get(iter.handle) else {
+                        return Err("core::intrinsics::next: dangling reference".to_string());
+                    };
                     let HeapValue::Struct {
                         type_name, fields, ..
-                    } = &*borrowed
+                    } = obj
                     else {
                         return Err("core::intrinsics::next: expected iterator struct".to_string());
                     };
@@ -2843,38 +3130,53 @@ fn eval_core_intrinsic(
                 }
                 let idx_usize: usize = idx as usize;
 
-                let out = {
-                    let borrowed = arr_ref.obj.borrow();
-                    let HeapValue::Array(items) = &*borrowed else {
+                let item = match heap.get(arr_ref.handle) {
+                    Some(HeapValue::Array(items)) => items.get(idx_usize).cloned(),
+                    Some(_) => {
                         return Err(
                             "core::intrinsics::next: iterator `arr` is not an array".to_string()
                         );
-                    };
+                    }
+                    None => {
+                        return Err(
+                            "core::intrinsics::next: dangling reference for iterator `arr`"
+                                .to_string(),
+                        );
+                    }
+                };
 
-                    if idx_usize < items.len() {
-                        let mut item = items[idx_usize].clone();
-                        if arr_ref.is_readonly() {
-                            item = item.into_readonly_view();
-                        }
-                        alloc_ref(HeapValue::Enum {
+                let out = if let Some(mut item) = item {
+                    if arr_ref.is_readonly() {
+                        item = item.into_readonly_view();
+                    }
+                    alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
                             enum_name: "Option".to_string(),
                             type_args: vec![*elem_rep],
                             variant: "Some".to_string(),
                             fields: vec![item],
-                        })
-                    } else {
-                        alloc_ref(HeapValue::Enum {
+                        },
+                    )
+                } else {
+                    alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
                             enum_name: "Option".to_string(),
                             type_args: vec![*elem_rep],
                             variant: "None".to_string(),
                             fields: Vec::new(),
-                        })
-                    }
+                        },
+                    )
                 };
 
                 {
-                    let mut borrowed = iter.obj.borrow_mut();
-                    let HeapValue::Struct { fields, .. } = &mut *borrowed else {
+                    let Some(obj) = heap.get_mut(iter.handle) else {
+                        return Err("core::intrinsics::next: dangling reference".to_string());
+                    };
+                    let HeapValue::Struct { fields, .. } = obj else {
                         return Err("core::intrinsics::next: expected iterator struct".to_string());
                     };
                     let Some(slot) = fields.get_mut(idx_idx) else {
@@ -2894,6 +3196,8 @@ fn eval_core_intrinsic(
 
 fn match_pattern(
     module: &ExecutableModule,
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
     pat: &rusk_mir::Pattern,
     value: &Value,
     binds: &mut Vec<Value>,
@@ -2924,7 +3228,10 @@ fn match_pattern(
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let (e, v, actual_fields) = match &*r.obj.borrow() {
+            let Some(obj) = heap.get(r.handle) else {
+                return Err("dangling reference in pattern match".to_string());
+            };
+            let (e, v, actual_fields) = match obj {
                 HeapValue::Enum {
                     enum_name,
                     variant,
@@ -2942,7 +3249,14 @@ fn match_pattern(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(module, p, &actual, binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2956,7 +3270,10 @@ fn match_pattern(
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let actual_items = match &*r.obj.borrow() {
+            let Some(obj) = heap.get(r.handle) else {
+                return Err("dangling reference in pattern match".to_string());
+            };
+            let actual_items = match obj {
                 HeapValue::Tuple(items) => items.clone(),
                 _ => return Ok(false),
             };
@@ -2977,7 +3294,14 @@ fn match_pattern(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(module, p, &actual, binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -2996,7 +3320,7 @@ fn match_pattern(
                         let rest_value = if slice.is_empty() {
                             Value::Unit
                         } else {
-                            alloc_ref(HeapValue::Tuple(slice))
+                            alloc_ref(heap, gc_allocations_since_collect, HeapValue::Tuple(slice))
                         };
                         binds.push(rest_value);
                     }
@@ -3013,7 +3337,14 @@ fn match_pattern(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(module, p, &actual, binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -3023,7 +3354,10 @@ fn match_pattern(
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let (actual_ty, actual_fields) = match &*r.obj.borrow() {
+            let Some(obj) = heap.get(r.handle) else {
+                return Err("dangling reference in pattern match".to_string());
+            };
+            let (actual_ty, actual_fields) = match obj {
                 HeapValue::Struct {
                     type_name, fields, ..
                 } => (type_name.clone(), fields.clone()),
@@ -3047,7 +3381,14 @@ fn match_pattern(
                 } else {
                     field_value.clone()
                 };
-                if !match_pattern(module, field_pat, &field_value, binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    field_pat,
+                    &field_value,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -3061,7 +3402,10 @@ fn match_pattern(
             let Value::Ref(r) = value else {
                 return Ok(false);
             };
-            let actual_items = match &*r.obj.borrow() {
+            let Some(obj) = heap.get(r.handle) else {
+                return Err("dangling reference in pattern match".to_string());
+            };
+            let actual_items = match obj {
                 HeapValue::Array(items) => items.clone(),
                 _ => return Ok(false),
             };
@@ -3082,7 +3426,14 @@ fn match_pattern(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(module, p, &actual, binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -3098,7 +3449,11 @@ fn match_pattern(
                 match rest_pat.as_ref() {
                     Pattern::Wildcard => {}
                     Pattern::Bind => {
-                        binds.push(alloc_ref(HeapValue::Array(slice)));
+                        binds.push(alloc_ref(
+                            heap,
+                            gc_allocations_since_collect,
+                            HeapValue::Array(slice),
+                        ));
                     }
                     _ => return Ok(false),
                 }
@@ -3113,7 +3468,14 @@ fn match_pattern(
                 } else {
                     actual.clone()
                 };
-                if !match_pattern(module, p, &actual, binds)? {
+                if !match_pattern(
+                    module,
+                    heap,
+                    gc_allocations_since_collect,
+                    p,
+                    &actual,
+                    binds,
+                )? {
                     return Ok(false);
                 }
             }
@@ -3319,6 +3681,7 @@ mod tests {
     use rusk_bytecode::{
         AbiType, CallTarget, ExecutableModule, Function, HostFnSig, HostImport, Instruction,
     };
+    use rusk_gc::GcHeap;
 
     #[test]
     fn step_done_for_trivial_program() {
@@ -3728,5 +4091,178 @@ mod tests {
             panic!("expected trap, got {got:?}");
         };
         assert!(message.contains("re-entered"), "{message}");
+    }
+
+    #[test]
+    fn gc_collects_unreachable_objects() {
+        let mut module = ExecutableModule::default();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 1,
+                param_count: 0,
+                code: vec![],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+
+        let root = alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Array(vec![Value::Int(1), Value::Int(2)]),
+        );
+        vm.frames[0].regs[0] = Some(root);
+
+        alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Array(vec![Value::Int(9)]),
+        );
+        assert_eq!(vm.heap_live_objects(), 2);
+
+        vm.collect_garbage_now();
+        assert_eq!(vm.heap_live_objects(), 1);
+
+        vm.frames[0].regs[0] = None;
+        vm.collect_garbage_now();
+        assert_eq!(vm.heap_live_objects(), 0);
+    }
+
+    #[test]
+    fn gc_prevents_stale_handle_use_after_reuse() {
+        let mut module = ExecutableModule::default();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 2,
+                param_count: 0,
+                code: vec![Instruction::Len { dst: 1, arr: 0 }],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+
+        let stale = alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        );
+        let Value::Ref(stale_ref) = &stale else {
+            panic!("expected ref");
+        };
+        let old_handle = stale_ref.handle;
+        vm.frames[0].regs[0] = Some(stale.clone());
+
+        vm.collect_garbage_now();
+        assert_eq!(vm.heap_live_objects(), 1);
+
+        vm.frames[0].regs[0] = None;
+        vm.collect_garbage_now();
+        assert_eq!(vm.heap_live_objects(), 0);
+
+        let new = alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Array(vec![Value::Int(0)]),
+        );
+        let Value::Ref(new_ref) = &new else {
+            panic!("expected ref");
+        };
+        assert_eq!(new_ref.handle.index, old_handle.index);
+        assert_ne!(new_ref.handle.generation, old_handle.generation);
+        assert!(vm.heap.get(old_handle).is_none());
+
+        vm.frames[0].regs[0] = Some(stale);
+        let got = vm_step(&mut vm, None);
+        let StepResult::Trap { message } = got else {
+            panic!("expected trap, got {got:?}");
+        };
+        assert!(message.contains("dangling"), "{message}");
+    }
+
+    #[test]
+    fn readonly_view_propagates_through_tuple_get() {
+        let mut module = ExecutableModule::default();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 2,
+                param_count: 0,
+                code: vec![Instruction::TupleGet {
+                    dst: 1,
+                    tup: 0,
+                    idx: 0,
+                }],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+
+        let arr = alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Array(vec![Value::Int(7)]),
+        );
+        let Value::Ref(arr_ref) = &arr else {
+            panic!("expected array ref");
+        };
+        let arr_handle = arr_ref.handle;
+
+        let tup = alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Tuple(vec![arr]),
+        );
+        vm.frames[0].regs[0] = Some(tup.into_readonly_view());
+
+        let got = vm_step(&mut vm, Some(1));
+        assert_eq!(got, StepResult::Yield { remaining_fuel: 0 });
+
+        let frame = vm.frames.last().unwrap();
+        let got = frame.regs[1].as_ref().unwrap();
+        let Value::Ref(got_ref) = got else {
+            panic!("expected ref, got {got:?}");
+        };
+        assert!(got_ref.is_readonly());
+        assert_eq!(got_ref.handle, arr_handle);
+    }
+
+    #[test]
+    fn readonly_write_traps() {
+        let mut module = ExecutableModule::default();
+        let main = module
+            .add_function(Function {
+                name: "main".to_string(),
+                reg_count: 3,
+                param_count: 0,
+                code: vec![Instruction::IndexSet {
+                    arr: 0,
+                    idx: 1,
+                    value: 2,
+                }],
+            })
+            .unwrap();
+        module.entry = main;
+
+        let mut vm = Vm::new(module).unwrap();
+
+        let arr = alloc_ref(
+            &mut vm.heap,
+            &mut vm.gc_allocations_since_collect,
+            HeapValue::Array(vec![Value::Int(1)]),
+        );
+        vm.frames[0].regs[0] = Some(arr.into_readonly_view());
+        vm.frames[0].regs[1] = Some(Value::Int(0));
+        vm.frames[0].regs[2] = Some(Value::Int(99));
+
+        let got = vm_step(&mut vm, None);
+        let StepResult::Trap { message } = got else {
+            panic!("expected trap, got {got:?}");
+        };
+        assert!(message.contains("readonly"), "{message}");
     }
 }

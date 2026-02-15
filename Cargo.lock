@@ -97,6 +97,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusk-gc"
+version = "0.1.0"
+
+[[package]]
 name = "rusk-host"
 version = "0.1.0"
 dependencies = [
@@ -112,6 +116,7 @@ version = "0.1.0"
 dependencies = [
  "bitcode",
  "hashbrown",
+ "rusk-gc",
  "rusk-mir",
  "serde",
 ]
@@ -128,6 +133,7 @@ name = "rusk-vm"
 version = "0.1.0"
 dependencies = [
  "rusk-bytecode",
+ "rusk-gc",
  "rusk-mir",
 ]
 
