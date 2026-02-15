@@ -354,10 +354,8 @@ impl Trace for ContinuationToken {
         };
 
         for frame in &state.frames {
-            for reg in &frame.regs {
-                if let Some(v) = reg {
-                    v.trace(tracer);
-                }
+            for v in frame.regs.iter().flatten() {
+                v.trace(tracer);
             }
         }
     }
@@ -568,10 +566,8 @@ struct VmRoots<'a> {
 impl Trace for VmRoots<'_> {
     fn trace(&self, tracer: &mut dyn Tracer) {
         for frame in self.frames {
-            for reg in &frame.regs {
-                if let Some(v) = reg {
-                    v.trace(tracer);
-                }
+            for v in frame.regs.iter().flatten() {
+                v.trace(tracer);
             }
         }
     }

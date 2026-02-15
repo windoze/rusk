@@ -240,7 +240,7 @@ impl<T: Trace> ImmixHeap<T> {
         required_size: usize,
         exclude_block: Option<usize>,
     ) -> (*mut SegmentHeader, usize) {
-        debug_assert!(required_size % self.object_layout.align == 0);
+        debug_assert!(required_size.is_multiple_of(self.object_layout.align));
 
         if !self.blocks.is_empty() {
             if self.alloc_block >= self.blocks.len() {
