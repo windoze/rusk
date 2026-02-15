@@ -1,0 +1,208 @@
+%YAML 1.2
+---
+# Sublime Text syntax definition for Rusk
+# See http://www.sublimetext.com/docs/syntax.html
+name: Rusk
+file_extensions:
+  - rusk
+scope: source.rusk
+
+contexts:
+  main:
+    - include: comments
+    - include: keywords
+    - include: types
+    - include: constants
+    - include: strings
+    - include: numbers
+    - include: effect-call
+    - include: function-definition
+    - include: type-declaration
+    - include: operators
+    - include: punctuation
+
+  comments:
+    # Shebang line
+    - match: '^#!.*$'
+      scope: comment.line.shebang.rusk
+
+    # Block comments (nested)
+    - match: '/\*'
+      scope: punctuation.definition.comment.begin.rusk
+      push:
+        - meta_scope: comment.block.rusk
+        - match: '\*/'
+          scope: punctuation.definition.comment.end.rusk
+          pop: true
+        - include: comments
+
+    # Line comments
+    - match: '//.*$'
+      scope: comment.line.double-slash.rusk
+
+  keywords:
+    # Control flow keywords
+    - match: '\b(if|else|match|return|loop|while|for|in|break|continue)\b'
+      scope: keyword.control.rusk
+
+    # Declaration keywords
+    - match: '\b(pub|use|mod|fn|cont|let|const|readonly|static|struct|enum|interface|impl)\b'
+      scope: keyword.other.rusk
+
+    # Type-related keywords
+    - match: '\b(as|is)\b'
+      scope: keyword.operator.rusk
+
+    # Self keyword
+    - match: '\bself\b'
+      scope: variable.language.self.rusk
+
+  types:
+    # Primitive types
+    - match: '\b(unit|bool|int|float|string|bytes)\b'
+      scope: storage.type.primitive.rusk
+
+    # Type names (capitalized identifiers)
+    - match: '\b([A-Z][a-zA-Z0-9_]*)\b'
+      scope: entity.name.type.rusk
+
+  constants:
+    # Boolean constants
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.rusk
+
+  strings:
+    # Formatted string literal (f"...")
+    - match: 'f"'
+      scope: punctuation.definition.string.begin.rusk
+      push:
+        - meta_scope: string.quoted.double.fstring.rusk
+        - match: '"'
+          scope: punctuation.definition.string.end.rusk
+          pop: true
+        - match: '\\(\\|"|n|r|t|0|u\{[0-9a-fA-F]+\})'
+          scope: constant.character.escape.rusk
+        - match: '\{\{|\}\}'
+          scope: constant.character.escape.rusk
+        - match: '\{'
+          scope: punctuation.section.interpolation.begin.rusk
+          push:
+            - meta_scope: meta.interpolation.rusk
+            - match: '\}'
+              scope: punctuation.section.interpolation.end.rusk
+              pop: true
+            - include: main
+
+    # Byte string literal (b"...")
+    - match: 'b"'
+      scope: punctuation.definition.string.begin.rusk
+      push:
+        - meta_scope: string.quoted.double.bytes.rusk
+        - match: '"'
+          scope: punctuation.definition.string.end.rusk
+          pop: true
+        - match: '\\(\\|"|n|r|t|0|x[0-9a-fA-F]{2})'
+          scope: constant.character.escape.rusk
+
+    # Regular string literal
+    - match: '"'
+      scope: punctuation.definition.string.begin.rusk
+      push:
+        - meta_scope: string.quoted.double.rusk
+        - match: '"'
+          scope: punctuation.definition.string.end.rusk
+          pop: true
+        - match: '\\(\\|"|n|r|t|0|u\{[0-9a-fA-F]+\})'
+          scope: constant.character.escape.rusk
+
+  numbers:
+    # Floating point literal
+    - match: '\b[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?\b|\b[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*\b'
+      scope: constant.numeric.float.rusk
+
+    # Binary integer literal
+    - match: '\b0b[01][01_]*\b'
+      scope: constant.numeric.integer.binary.rusk
+
+    # Octal integer literal
+    - match: '\b0o[0-7][0-7_]*\b'
+      scope: constant.numeric.integer.octal.rusk
+
+    # Hexadecimal integer literal
+    - match: '\b0x[0-9a-fA-F][0-9a-fA-F_]*\b'
+      scope: constant.numeric.integer.hexadecimal.rusk
+
+    # Decimal integer literal
+    - match: '\b[0-9][0-9_]*\b'
+      scope: constant.numeric.integer.decimal.rusk
+
+  effect-call:
+    # Effect call @Interface<...>.method(...)
+    - match: '@([A-Z][a-zA-Z0-9_]*)(?:<[^>]+>)?\.([a-z_][a-zA-Z0-9_]*)'
+      captures:
+        1: entity.name.type.interface.rusk
+        2: entity.name.function.effect.rusk
+
+  function-definition:
+    # Function definition: fn function_name
+    - match: '\b(fn)\s+([a-z_][a-zA-Z0-9_]*)\b'
+      captures:
+        1: keyword.other.rusk
+        2: entity.name.function.rusk
+
+  type-declaration:
+    # Struct/Enum/Interface/Impl declaration
+    - match: '\b(struct|enum|interface|impl)\s+([A-Z][a-zA-Z0-9_]*)\b'
+      captures:
+        1: keyword.other.rusk
+        2: entity.name.type.rusk
+
+  operators:
+    # Comparison operators
+    - match: '==|!=|<=|>=|<|>'
+      scope: keyword.operator.comparison.rusk
+
+    # Logical operators
+    - match: '&&|\|\||!'
+      scope: keyword.operator.logical.rusk
+
+    # Arithmetic operators
+    - match: '\+|-|\*|/|%'
+      scope: keyword.operator.arithmetic.rusk
+
+    # Assignment operator
+    - match: '=(?!=)'
+      scope: keyword.operator.assignment.rusk
+
+    # Effect marker
+    - match: '@'
+      scope: keyword.operator.effect.rusk
+
+  punctuation:
+    # Path separator
+    - match: '::'
+      scope: punctuation.accessor.rusk
+
+    # Arrow operator
+    - match: '=>'
+      scope: punctuation.separator.arrow.rusk
+
+    # Return type arrow
+    - match: '->'
+      scope: punctuation.separator.type.rusk
+
+    # Dot accessor
+    - match: '\.'
+      scope: punctuation.accessor.dot.rusk
+
+    # Semicolon
+    - match: ';'
+      scope: punctuation.terminator.rusk
+
+    # Comma
+    - match: ','
+      scope: punctuation.separator.comma.rusk
+
+    # Colon
+    - match: ':'
+      scope: punctuation.separator.colon.rusk
