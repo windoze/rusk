@@ -17,7 +17,7 @@ Rusk 设计为可嵌入式（CLI、WASM、嵌入式设备），因此 I/O 和平
 
 ## 语言特性
 
-源语言在 [`RUSK_SPEC.md`](RUSK_SPEC.md) 中规定（当前版本 v0.4）。MIR 在 [`MIR_SPEC.md`](MIR_SPEC.md) 中规定（当前版本 v0.2 草案）。
+源语言在 [`RUSK_SPEC.md`](RUSK_SPEC.md) 中规定（当前版本 v0.4）。MIR 在 [`MIR_SPEC.md`](MIR_SPEC.md) 中规定（当前版本 v0.2 草案）。字节码在 [`BYTECODE_SPEC.md`](BYTECODE_SPEC.md) 中规定（当前版本 v0.1 草案）。
 
 一个简单的示例：
 

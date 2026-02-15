@@ -26,7 +26,8 @@ In this repo, the `rusk` CLI registers a minimal host-defined `std` module with
 ## The Language
 
 The source language is specified in [`RUSK_SPEC.md`](RUSK_SPEC.md) (currently v0.4). MIR is
-specified in [`MIR_SPEC.md`](MIR_SPEC.md) (currently v0.2 draft).
+specified in [`MIR_SPEC.md`](MIR_SPEC.md) (currently v0.2 draft). Bytecode is specified in
+[`BYTECODE_SPEC.md`](BYTECODE_SPEC.md) (currently v0.1 draft).
 
 A tiny example:
 

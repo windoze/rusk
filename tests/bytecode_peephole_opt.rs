@@ -2,20 +2,20 @@ use rusk_compiler::{CompileOptions, OptLevel, compile_to_bytecode_with_options};
 use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 
 fn compile_with_opt_level(src: &str, opt_level: OptLevel) -> rusk_bytecode::ExecutableModule {
-    let mut options = CompileOptions::default();
-    options.opt_level = opt_level;
+    let options = CompileOptions {
+        opt_level,
+        ..Default::default()
+    };
     compile_to_bytecode_with_options(src, &options).expect("compile")
 }
 
 fn run_to_completion(module: &rusk_bytecode::ExecutableModule) -> StepResult {
     let mut vm = Vm::new(module.clone()).expect("vm init");
-    loop {
-        match vm_step(&mut vm, None) {
-            StepResult::Done { value } => return StepResult::Done { value },
-            StepResult::Trap { message } => return StepResult::Trap { message },
-            StepResult::Yield { .. } => panic!("unexpected yield"),
-            StepResult::Request { .. } => panic!("unexpected external request"),
-        }
+    match vm_step(&mut vm, None) {
+        StepResult::Done { value } => StepResult::Done { value },
+        StepResult::Trap { message } => StepResult::Trap { message },
+        StepResult::Yield { .. } => panic!("unexpected yield"),
+        StepResult::Request { .. } => panic!("unexpected external request"),
     }
 }
 

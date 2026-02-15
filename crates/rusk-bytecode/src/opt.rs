@@ -129,10 +129,10 @@ fn peephole_optimize_function(func: &mut Function, level: OptLevel) -> Result<()
                 .map_err(|_| OptError::new("function too large (pc overflow)"))?;
 
             // Rule B1: delete `Copy dst <- src` when `dst == src`.
-            if let Instruction::Copy { dst, src } = instr {
-                if dst == src {
-                    continue;
-                }
+            if let Instruction::Copy { dst, src } = instr
+                && dst == src
+            {
+                continue;
             }
 
             // Rule B2: delete `Jump next_pc`.
@@ -348,11 +348,11 @@ fn block_copy_propagation(block: &mut [IndexedInstr]) {
             }
         }
 
-        if let Instruction::Copy { dst, src } = &item.instr {
-            if dst != src {
-                let src = resolve(*src, &alias);
-                alias.insert(*dst, src);
-            }
+        if let Instruction::Copy { dst, src } = &item.instr
+            && dst != src
+        {
+            let src = resolve(*src, &alias);
+            alias.insert(*dst, src);
         }
     }
 }

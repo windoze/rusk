@@ -17,7 +17,11 @@ cargo run --release --bin rusk-measure -- --backend bytecode --opt-level o2 --me
 To compare against Python (using the repo's `.venv`):
 
 ```sh
-.venv/bin/python benchmarks/compare.py --validate
+# Rusk vs Python suite (writes `benchmarks/results.md` + `benchmarks/results.json`):
+.venv/bin/python benchmarks/compare.py --validate --backend bytecode --opt-level o2
+
+# To benchmark the MIR interpreter backend instead:
+.venv/bin/python benchmarks/compare.py --validate --backend mir
 ```
 
 Defaults are tuned to finish quickly (`--warmup 1 --iters 3 --repeats 5`), and a few heavy cases

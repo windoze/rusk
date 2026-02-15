@@ -218,6 +218,8 @@ def run_suite(
     warmup: int,
     iters: int,
     repeats: int,
+    backend: str,
+    opt_level: str,
     validate: bool,
 ) -> dict[str, Any]:
     repo_root = _repo_root()
@@ -244,16 +246,21 @@ def run_suite(
         print(f"[{case.name}] warmup={case_warmup} iters={case_iters} repeats={repeats}", file=sys.stderr)
         for rep in range(repeats):
             print(f"[{case.name}] repeat {rep + 1}/{repeats}: rusk", file=sys.stderr)
+            rusk_cmd = [
+                str(rusk_measure),
+                "--json",
+                "--warmup",
+                str(case_warmup),
+                "--iters",
+                str(case_iters),
+                "--backend",
+                backend,
+            ]
+            if backend == "bytecode":
+                rusk_cmd += ["--opt-level", opt_level]
+            rusk_cmd.append(str(case.rusk_path))
             rusk_json = _check_json(
-                [
-                    str(rusk_measure),
-                    "--json",
-                    "--warmup",
-                    str(case_warmup),
-                    "--iters",
-                    str(case_iters),
-                    str(case.rusk_path),
-                ],
+                rusk_cmd,
                 cwd=repo_root,
             )
             rusk_runs.append(rusk_json)
@@ -310,7 +317,17 @@ def run_suite(
             }
         )
 
-    return {"env": env, "params": {"warmup": warmup, "iters": iters, "repeats": repeats}, "benchmarks": benches}
+    return {
+        "env": env,
+        "params": {
+            "warmup": warmup,
+            "iters": iters,
+            "repeats": repeats,
+            "backend": backend,
+            "opt_level": opt_level if backend == "bytecode" else None,
+        },
+        "benchmarks": benches,
+    }
 
 
 def _render_markdown(report: dict[str, Any]) -> str:
@@ -332,6 +349,9 @@ def _render_markdown(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Parameters")
     lines.append("")
+    lines.append(f"- Rusk backend: `{params['backend']}`")
+    if params.get("backend") == "bytecode":
+        lines.append(f"- Bytecode opt level: `{params['opt_level']}`")
     lines.append(f"- Warmup: `{params['warmup']}`")
     lines.append(f"- Iters: `{params['iters']}`")
     lines.append(f"- Repeats: `{params['repeats']}` (outer repeats for median/stdev)")
@@ -371,6 +391,13 @@ def _render_markdown(report: dict[str, Any]) -> str:
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description="Run Rusk vs Python micro-benchmarks.")
+    p.add_argument("--backend", choices=["mir", "bytecode"], default="mir")
+    p.add_argument(
+        "--opt-level",
+        choices=["o0", "o1", "o2"],
+        default="o2",
+        help="Bytecode optimization level (only used with --backend bytecode).",
+    )
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--iters", type=int, default=3)
     p.add_argument("--repeats", type=int, default=5, help="Outer repeats to reduce noise.")
@@ -394,6 +421,8 @@ def main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     report = run_suite(
+        backend=args.backend,
+        opt_level=args.opt_level,
         warmup=args.warmup,
         iters=args.iters,
         repeats=args.repeats,
