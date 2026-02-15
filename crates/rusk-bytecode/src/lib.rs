@@ -8,10 +8,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub mod lower;
+pub mod opt;
 pub mod rbc;
 pub mod verify;
 
 pub use lower::{LowerError, LowerOptions, lower_mir_module, lower_mir_module_with_options};
+pub use opt::{OptError, OptLevel, peephole_optimize_module};
 pub use rbc::{DecodeError, EncodeError, from_bytes, to_bytes};
 pub use verify::{VerifyError, verify_module};
 
