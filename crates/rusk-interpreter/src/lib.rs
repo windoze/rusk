@@ -1,9 +1,6 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-/// Garbage collection (GC) abstraction and implementations.
-pub mod gc;
-
 /// A small interpreter for executing Rusk MIR.
 pub mod interpreter;
 
@@ -12,8 +9,8 @@ pub mod corelib;
 
 // Re-export commonly used types
 pub use corelib::register_core_host_fns;
-pub use gc::{GcHeap, GcRef, MarkSweepHeap};
-pub use interpreter::{Interpreter, InterpreterMetrics, RuntimeError, Value};
+pub use interpreter::{Interpreter, InterpreterMetrics, MarkSweepHeap, RuntimeError, Value};
+pub use rusk_gc::{GcHeap, GcRef};
 
 #[cfg(feature = "serde")]
 #[derive(Debug)]

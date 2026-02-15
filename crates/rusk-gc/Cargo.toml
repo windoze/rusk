@@ -1,0 +1,9 @@
+[package]
+name = "rusk-gc"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
