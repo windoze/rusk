@@ -348,21 +348,21 @@ impl TypeReps {
         self.nodes.get(id.0 as usize)
     }
 
-    fn ctor_from_lit(lit: &rusk_mir::TypeRepLit) -> TypeCtor {
+    fn ctor_from_lit(lit: &rusk_bytecode::TypeRepLit) -> TypeCtor {
         match lit {
-            rusk_mir::TypeRepLit::Unit => TypeCtor::Unit,
-            rusk_mir::TypeRepLit::Bool => TypeCtor::Bool,
-            rusk_mir::TypeRepLit::Int => TypeCtor::Int,
-            rusk_mir::TypeRepLit::Float => TypeCtor::Float,
-            rusk_mir::TypeRepLit::String => TypeCtor::String,
-            rusk_mir::TypeRepLit::Bytes => TypeCtor::Bytes,
-            rusk_mir::TypeRepLit::Array => TypeCtor::Array,
-            rusk_mir::TypeRepLit::Tuple(arity) => TypeCtor::Tuple(*arity),
-            rusk_mir::TypeRepLit::Struct(name) => TypeCtor::Struct(name.clone()),
-            rusk_mir::TypeRepLit::Enum(name) => TypeCtor::Enum(name.clone()),
-            rusk_mir::TypeRepLit::Interface(name) => TypeCtor::Interface(name.clone()),
-            rusk_mir::TypeRepLit::Fn => TypeCtor::Fn,
-            rusk_mir::TypeRepLit::Cont => TypeCtor::Cont,
+            rusk_bytecode::TypeRepLit::Unit => TypeCtor::Unit,
+            rusk_bytecode::TypeRepLit::Bool => TypeCtor::Bool,
+            rusk_bytecode::TypeRepLit::Int => TypeCtor::Int,
+            rusk_bytecode::TypeRepLit::Float => TypeCtor::Float,
+            rusk_bytecode::TypeRepLit::String => TypeCtor::String,
+            rusk_bytecode::TypeRepLit::Bytes => TypeCtor::Bytes,
+            rusk_bytecode::TypeRepLit::Array => TypeCtor::Array,
+            rusk_bytecode::TypeRepLit::Tuple(arity) => TypeCtor::Tuple(*arity),
+            rusk_bytecode::TypeRepLit::Struct(name) => TypeCtor::Struct(name.clone()),
+            rusk_bytecode::TypeRepLit::Enum(name) => TypeCtor::Enum(name.clone()),
+            rusk_bytecode::TypeRepLit::Interface(name) => TypeCtor::Interface(name.clone()),
+            rusk_bytecode::TypeRepLit::Fn => TypeCtor::Fn,
+            rusk_bytecode::TypeRepLit::Cont => TypeCtor::Cont,
         }
     }
 }
@@ -561,7 +561,7 @@ struct RuntimeEffectId {
 #[derive(Clone, Debug)]
 struct RuntimeHandlerClause {
     effect: RuntimeEffectId,
-    arg_patterns: Vec<rusk_mir::Pattern>,
+    arg_patterns: Vec<rusk_bytecode::Pattern>,
     target_pc: u32,
     param_regs: Vec<rusk_bytecode::Reg>,
 }
@@ -705,7 +705,7 @@ impl Vm {
 
     pub fn intern_type_rep(
         &mut self,
-        base: &rusk_mir::TypeRepLit,
+        base: &rusk_bytecode::TypeRepLit,
         args: &[TypeRepId],
     ) -> TypeRepId {
         self.type_reps.intern(TypeRepNode {
@@ -2193,6 +2193,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         &vm.module,
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
+                        &vm.type_reps,
                         vm.handlers.as_slice(),
                         cache.handler_index,
                         cache.clause_index,
@@ -2223,6 +2224,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         &vm.module,
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
+                        &vm.type_reps,
                         vm.handlers.as_slice(),
                         effect_interface,
                         &interface_args,
@@ -2600,6 +2602,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         &vm.module,
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
+                        &vm.type_reps,
                         &case.pattern,
                         &scrutinee,
                         &mut binds,
@@ -2747,6 +2750,7 @@ fn match_cached_handler_for_effect(
     module: &ExecutableModule,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
+    type_reps: &TypeReps,
     handlers: &[HandlerEntry],
     handler_index: usize,
     clause_index: usize,
@@ -2778,6 +2782,7 @@ fn match_cached_handler_for_effect(
             module,
             heap,
             gc_allocations_since_collect,
+            type_reps,
             pat,
             arg,
             &mut binds,
@@ -2794,6 +2799,7 @@ fn find_handler_for_effect_spec(
     module: &ExecutableModule,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
+    type_reps: &TypeReps,
     handlers: &[HandlerEntry],
     effect_interface: &str,
     interface_args: &[TypeRepId],
@@ -2819,6 +2825,7 @@ fn find_handler_for_effect_spec(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     pat,
                     arg,
                     &mut binds,
@@ -3700,11 +3707,12 @@ fn match_pattern(
     module: &ExecutableModule,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
-    pat: &rusk_mir::Pattern,
+    type_reps: &TypeReps,
+    pat: &rusk_bytecode::Pattern,
     value: &Value,
     binds: &mut Vec<Value>,
 ) -> Result<bool, String> {
-    use rusk_mir::{ConstValue, Pattern};
+    use rusk_bytecode::{ConstValue, Pattern};
 
     match pat {
         Pattern::Wildcard => Ok(true),
@@ -3719,7 +3727,10 @@ fn match_pattern(
             (ConstValue::Float(a), Value::Float(b)) => a == b,
             (ConstValue::String(a), Value::String(b)) => a == b,
             (ConstValue::Bytes(a), Value::Bytes(b)) => a == b,
-            (ConstValue::FunctionId(a), Value::Function(b)) => a.0 == b.0,
+            (ConstValue::TypeRep(lit), Value::TypeRep(id)) => type_reps
+                .node(*id)
+                .is_some_and(|n| n.ctor == TypeReps::ctor_from_lit(lit) && n.args.is_empty()),
+            (ConstValue::Function(a), Value::Function(b)) => a == b,
             _ => false,
         }),
         Pattern::Enum {
@@ -3755,6 +3766,7 @@ fn match_pattern(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     p,
                     &actual,
                     binds,
@@ -3800,6 +3812,7 @@ fn match_pattern(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     p,
                     &actual,
                     binds,
@@ -3843,6 +3856,7 @@ fn match_pattern(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     p,
                     &actual,
                     binds,
@@ -3887,6 +3901,7 @@ fn match_pattern(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     field_pat,
                     &field_value,
                     binds,
@@ -3932,6 +3947,7 @@ fn match_pattern(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     p,
                     &actual,
                     binds,
@@ -3974,6 +3990,7 @@ fn match_pattern(
                     module,
                     heap,
                     gc_allocations_since_collect,
+                    type_reps,
                     p,
                     &actual,
                     binds,
@@ -4444,12 +4461,12 @@ mod tests {
                 code: vec![
                     Instruction::MakeTypeRep {
                         dst: 3,
-                        base: rusk_mir::TypeRepLit::Array,
+                        base: rusk_bytecode::TypeRepLit::Array,
                         args: vec![0],
                     },
                     Instruction::MakeTypeRep {
                         dst: 4,
-                        base: rusk_mir::TypeRepLit::Array,
+                        base: rusk_bytecode::TypeRepLit::Array,
                         args: vec![1],
                     },
                     Instruction::StructGet {
@@ -4470,11 +4487,11 @@ mod tests {
                 code: vec![
                     Instruction::Const {
                         dst: 0,
-                        value: rusk_bytecode::ConstValue::TypeRep(rusk_mir::TypeRepLit::Int),
+                        value: rusk_bytecode::ConstValue::TypeRep(rusk_bytecode::TypeRepLit::Int),
                     },
                     Instruction::Const {
                         dst: 1,
-                        value: rusk_bytecode::ConstValue::TypeRep(rusk_mir::TypeRepLit::Bool),
+                        value: rusk_bytecode::ConstValue::TypeRep(rusk_bytecode::TypeRepLit::Bool),
                     },
                     Instruction::Const {
                         dst: 2,
@@ -4528,7 +4545,7 @@ mod tests {
                                 interface_args: vec![],
                                 method: "boom".to_string(),
                             },
-                            arg_patterns: vec![rusk_mir::Pattern::Bind],
+                            arg_patterns: vec![rusk_bytecode::Pattern::Bind],
                             target_pc: 6,
                             param_regs: vec![0, 1],
                         }],

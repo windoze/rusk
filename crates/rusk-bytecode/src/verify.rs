@@ -203,12 +203,12 @@ fn verify_pc(code_len: u32, pc: u32, context: &str) -> Result<(), VerifyError> {
     Ok(())
 }
 
-fn count_pattern_binds(p: &rusk_mir::Pattern) -> usize {
+fn count_pattern_binds(p: &crate::Pattern) -> usize {
     match p {
-        rusk_mir::Pattern::Wildcard => 0,
-        rusk_mir::Pattern::Bind => 1,
-        rusk_mir::Pattern::Literal(_) => 0,
-        rusk_mir::Pattern::Tuple {
+        crate::Pattern::Wildcard => 0,
+        crate::Pattern::Bind => 1,
+        crate::Pattern::Literal(_) => 0,
+        crate::Pattern::Tuple {
             prefix,
             rest,
             suffix,
@@ -217,11 +217,11 @@ fn count_pattern_binds(p: &rusk_mir::Pattern) -> usize {
                 + rest.as_deref().map(count_pattern_binds).unwrap_or(0)
                 + suffix.iter().map(count_pattern_binds).sum::<usize>()
         }
-        rusk_mir::Pattern::Enum { fields, .. } => fields.iter().map(count_pattern_binds).sum(),
-        rusk_mir::Pattern::Struct { fields, .. } => {
+        crate::Pattern::Enum { fields, .. } => fields.iter().map(count_pattern_binds).sum(),
+        crate::Pattern::Struct { fields, .. } => {
             fields.iter().map(|(_, pat)| count_pattern_binds(pat)).sum()
         }
-        rusk_mir::Pattern::Array {
+        crate::Pattern::Array {
             prefix,
             rest,
             suffix,

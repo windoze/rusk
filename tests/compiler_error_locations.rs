@@ -1,4 +1,4 @@
-use rusk_compiler::{compile_file_to_mir, compile_to_mir};
+use rusk_compiler::{compile_file_to_bytecode, compile_to_bytecode};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,9 +22,9 @@ fn create_temp_dir(prefix: &str) -> PathBuf {
 }
 
 #[test]
-fn compile_to_mir_renders_string_locations_with_line_and_column() {
+fn compile_to_bytecode_renders_string_locations_with_line_and_column() {
     let src = "fn main() {\n#\n}\n";
-    let err = compile_to_mir(src).expect_err("expected a compile error");
+    let err = compile_to_bytecode(src).expect_err("expected a compile error");
 
     assert_eq!(
         err.rendered_location.as_deref(),
@@ -43,7 +43,7 @@ fn compile_to_mir_renders_string_locations_with_line_and_column() {
 }
 
 #[test]
-fn compile_file_to_mir_renders_module_file_locations() {
+fn compile_file_to_bytecode_renders_module_file_locations() {
     let dir = create_temp_dir("rusk_error_loc");
     let main_path = dir.join("main.rusk");
     let foo_path = dir.join("foo.rusk");
@@ -51,7 +51,7 @@ fn compile_file_to_mir_renders_module_file_locations() {
     fs::write(&main_path, "mod foo;\nfn main() { () }\n").expect("write main");
     fs::write(&foo_path, "#\n").expect("write foo");
 
-    let err = compile_file_to_mir(&main_path).expect_err("expected a compile error");
+    let err = compile_file_to_bytecode(&main_path).expect_err("expected a compile error");
     let display = err.to_string();
 
     assert!(

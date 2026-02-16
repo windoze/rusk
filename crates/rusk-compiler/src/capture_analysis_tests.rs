@@ -1,4 +1,4 @@
-use rusk_compiler::compile_to_mir;
+use crate::compiler::compile_to_mir;
 use rusk_mir::Instruction;
 
 fn count_index_gets(func: &rusk_mir::Function) -> usize {

@@ -3,9 +3,6 @@ name = "rusk-bytecode"
 version.workspace = true
 edition.workspace = true
 
-[dependencies]
-rusk-mir = { path = "../rusk-mir", default-features = false }
-
 [features]
 default = ["std"]
-std = ["rusk-mir/std"]
+std = []

@@ -17,8 +17,8 @@ provided via **host functions**:
 
 - The **compiler** is given host *prototypes* (names + signatures) before compilation, so name
   resolution and typechecking can succeed.
-- The **runtime** (VM / interpreter) is given concrete host implementations at runtime; it will
-  trap if the module declares host imports that are not installed.
+- The **runtime** (VM) is given concrete host implementations at runtime; it will trap if the
+  module declares host imports that are not installed.
 
 In this repo, the `rusk` CLI registers a minimal host-defined `std` module with
 `std::print(string) -> unit` and `std::println(string) -> unit`.
@@ -43,9 +43,8 @@ fn main() -> int {
 
 - `src/main.rs`: `rusk` CLI (`rusk <file.rusk|file.rbc>`)
 - `src/bin/ruskc.rs`: `ruskc` compiler CLI (emits `.rbc`)
-- `crates/rusk-compiler/`: parser/typechecker + lowering from Rusk → MIR
-- `crates/rusk-mir/`: MIR data structures (and optional serialization)
-- `crates/rusk-interpreter/`: MIR interpreter + GC + core runtime intrinsics
+- `crates/rusk-compiler/`: parser/typechecker + lowering from Rusk → bytecode (via an internal MIR)
+- `crates/rusk-mir/`: compiler-internal MIR data structures (not a runtime backend)
 - `crates/rusk-bytecode/`: bytecode module + `.rbc` serialization + verifier
 - `crates/rusk-vm/`: bytecode VM runtime (step API, host imports, effects)
 - `crates/rusk-host/`: reusable host-module declarations + installers (e.g. `std::print`)

@@ -10,8 +10,11 @@
 - `src/`: Root binary crate source (entry point: `src/main.rs`).
 - `crates/`: Workspace member crates.
 - `crates/rusk-compiler/`: Compiler crate (entry point: `crates/rusk-compiler/src/lib.rs`).
-- `crates/rusk-interpreter/`: Interpreter crate (entry point: `crates/rusk-interpreter/src/lib.rs`).
-- `crates/rusk-mir/`: MIR crate (entry point: `crates/rusk-mir/src/lib.rs`).
+- `crates/rusk-mir/`: MIR crate (compiler-internal IR; entry point: `crates/rusk-mir/src/lib.rs`).
+- `crates/rusk-bytecode/`: Bytecode module + `.rbc` format (entry point: `crates/rusk-bytecode/src/lib.rs`).
+- `crates/rusk-vm/`: Bytecode VM runtime (entry point: `crates/rusk-vm/src/lib.rs`).
+- `crates/rusk-host/`: Host module declarations + installers (entry point: `crates/rusk-host/src/lib.rs`).
+- `crates/rusk-gc/`: GC primitives used by the VM (entry point: `crates/rusk-gc/src/lib.rs`).
 - `tests/`: Integration tests for the workspace.
 - `fixtures/`: Test fixtures and sample inputs.
 - `RUSK_SPEC.md`, `MIR_SPEC.md`: Design/spec notes—update these when behavior changes.

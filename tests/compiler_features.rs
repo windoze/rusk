@@ -1,14 +1,42 @@
-use rusk_compiler::compile_to_mir;
-use rusk_interpreter::corelib::register_core_host_fns;
-use rusk_interpreter::{Interpreter, RuntimeError, Value};
+use rusk_compiler::compile_to_bytecode;
+use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 
-fn run0(src: &str, fn_name: &str) -> Result<Value, RuntimeError> {
-    let module = compile_to_mir(src).map_err(|e| RuntimeError::Trap {
-        message: format!("compile error: {e}"),
-    })?;
-    let mut interp = Interpreter::new(module);
-    register_core_host_fns(&mut interp);
-    interp.run_function(fn_name, vec![])
+fn ensure_has_main(src: &str) -> String {
+    if src.contains("fn main") {
+        return src.to_string();
+    }
+
+    format!(
+        r#"{src}
+
+fn main() -> unit {{
+    ()
+}}
+"#
+    )
+}
+
+fn compile(src: &str) -> Result<rusk_bytecode::ExecutableModule, rusk_compiler::CompileError> {
+    let src = ensure_has_main(src);
+    compile_to_bytecode(&src)
+}
+
+fn run0(src: &str, fn_name: &str) -> Result<AbiValue, String> {
+    let mut module = compile(src).map_err(|e| format!("compile error: {e}"))?;
+    module.entry = module
+        .function_id(fn_name)
+        .ok_or_else(|| format!("unknown function `{fn_name}`"))?;
+
+    let mut vm = Vm::new(module).map_err(|e| format!("vm init error: {e}"))?;
+    match vm_step(&mut vm, None) {
+        StepResult::Done { value } => Ok(value),
+        StepResult::Trap { message } => Err(message),
+        StepResult::Request { effect_id, .. } => Err(format!(
+            "unexpected external effect request (id={})",
+            effect_id.0
+        )),
+        StepResult::Yield { .. } => Err("unexpected yield".to_string()),
+    }
 }
 
 #[test]
@@ -21,13 +49,13 @@ fn supports_literals_and_numeric_ops() {
 
     assert_eq!(
         run0(src, "int_math").expect("run"),
-        Value::Int(1 + 2 * 3 - 4 / 2)
+        AbiValue::Int(1 + 2 * 3 - 4 / 2)
     );
     assert_eq!(
         run0(src, "float_math").expect("run"),
-        Value::Float(1.5 + 2.0 * 2.0)
+        AbiValue::Float(1.5 + 2.0 * 2.0)
     );
-    assert_eq!(run0(src, "float_cmp").expect("run"), Value::Bool(true));
+    assert_eq!(run0(src, "float_cmp").expect("run"), AbiValue::Bool(true));
 }
 
 #[test]
@@ -39,10 +67,10 @@ fn supports_primitive_equality() {
         fn unit_eq() -> bool { () == () && () != () == false }
     "#;
 
-    assert_eq!(run0(src, "bool_eq").expect("run"), Value::Bool(true));
-    assert_eq!(run0(src, "string_eq").expect("run"), Value::Bool(true));
-    assert_eq!(run0(src, "bytes_eq").expect("run"), Value::Bool(true));
-    assert_eq!(run0(src, "unit_eq").expect("run"), Value::Bool(true));
+    assert_eq!(run0(src, "bool_eq").expect("run"), AbiValue::Bool(true));
+    assert_eq!(run0(src, "string_eq").expect("run"), AbiValue::Bool(true));
+    assert_eq!(run0(src, "bytes_eq").expect("run"), AbiValue::Bool(true));
+    assert_eq!(run0(src, "unit_eq").expect("run"), AbiValue::Bool(true));
 }
 
 #[test]
@@ -60,8 +88,8 @@ fn supports_arrays_indexing_and_assignment() {
         }
     "#;
 
-    assert_eq!(run0(src, "get").expect("run"), Value::Int(20));
-    assert_eq!(run0(src, "set").expect("run"), Value::Int(99));
+    assert_eq!(run0(src, "get").expect("run"), AbiValue::Int(20));
+    assert_eq!(run0(src, "set").expect("run"), AbiValue::Int(99));
 }
 
 #[test]
@@ -74,10 +102,7 @@ fn traps_on_array_index_out_of_bounds() {
     "#;
 
     let err = run0(src, "oob").expect_err("should trap");
-    assert!(
-        matches!(err, RuntimeError::IndexOutOfBounds { .. }),
-        "{err:?}"
-    );
+    assert!(err.contains("index out of bounds"), "{err}");
 }
 
 #[test]
@@ -106,7 +131,7 @@ fn supports_structs_fields_and_methods() {
 
     let out = run0(src, "test").expect("run");
     // After mutation, p.sum() == 12; Add::add(p,5)==17; p.add(7)==19
-    assert_eq!(out, Value::Int(12 + 17 + 19));
+    assert_eq!(out, AbiValue::Int(12 + 17 + 19));
 }
 
 #[test]
@@ -126,7 +151,7 @@ fn method_call_sugar_is_ambiguous_error() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message.contains("ambiguous method"),
         "unexpected error: {err:?}"
@@ -148,7 +173,7 @@ fn closures_capture_let_bindings() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(3));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(3));
 }
 
 #[test]
@@ -161,7 +186,7 @@ fn function_items_can_be_used_as_values() {
         fn test() -> int { apply(add1, 41) }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(42));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
 }
 
 #[test]
@@ -172,7 +197,7 @@ fn unit_return_type_can_be_omitted_on_function_items() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Unit);
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Unit);
 }
 
 #[test]
@@ -193,7 +218,7 @@ fn fn_type_syntax_can_omit_unit_return_type() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Unit);
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Unit);
 }
 
 #[test]
@@ -218,7 +243,7 @@ fn interface_method_signatures_can_omit_unit_return_type() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Unit);
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Unit);
 }
 
 #[test]
@@ -229,10 +254,10 @@ fn generic_functions_infer_type_arguments() {
         fn test_string() -> string { id("ok") }
     "#;
 
-    assert_eq!(run0(src, "test_int").expect("run"), Value::Int(123));
+    assert_eq!(run0(src, "test_int").expect("run"), AbiValue::Int(123));
     assert_eq!(
         run0(src, "test_string").expect("run"),
-        Value::String("ok".to_string())
+        AbiValue::String("ok".to_string())
     );
 }
 
@@ -247,7 +272,7 @@ fn generic_calls_error_when_type_arguments_cannot_be_inferred() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message
             .contains("cannot infer type arguments for generic call"),
@@ -280,7 +305,7 @@ fn generic_calls_support_explicit_type_arguments_with_turbofish() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(123));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(123));
 }
 
 #[test]
@@ -292,7 +317,7 @@ fn rejects_uninitialized_let_bindings() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message
             .contains("`let` bindings require an initializer"),
@@ -311,7 +336,7 @@ fn readonly_prevents_assignment_through_view() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message.contains("readonly view"),
         "unexpected error: {err:?}"
@@ -338,8 +363,8 @@ fn effects_resume_and_handler_result() {
         }
     "#;
 
-    assert_eq!(run0(src, "test_resume").expect("run"), Value::Int(30));
-    assert_eq!(run0(src, "test_no_resume").expect("run"), Value::Int(99));
+    assert_eq!(run0(src, "test_resume").expect("run"), AbiValue::Int(30));
+    assert_eq!(run0(src, "test_no_resume").expect("run"), AbiValue::Int(99));
 }
 
 #[test]
@@ -359,7 +384,7 @@ fn match_helpers_can_mutate_captured_let_bindings() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(7));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(7));
 }
 
 #[test]
@@ -372,10 +397,7 @@ fn traps_on_unhandled_effect_outside_match() {
     "#;
 
     let err = run0(src, "bad").expect_err("should error");
-    assert!(
-        matches!(err, RuntimeError::UnhandledEffect { .. }),
-        "{err:?}"
-    );
+    assert!(err.contains("unhandled effect"), "{err}");
 }
 
 #[test]
@@ -393,10 +415,7 @@ fn effect_handlers_are_scoped_to_scrutinee_only() {
     "#;
 
     let err = run0(src, "bad").expect_err("should error");
-    assert!(
-        matches!(err, RuntimeError::UnhandledEffect { .. }),
-        "{err:?}"
-    );
+    assert!(err.contains("unhandled effect"), "{err}");
 }
 
 #[test]
@@ -416,7 +435,7 @@ fn resume_is_one_shot() {
     "#;
 
     let err = run0(src, "bad").expect_err("should error");
-    assert!(matches!(err, RuntimeError::InvalidResume), "{err:?}");
+    assert!(err.contains("invalid resume"), "{err}");
 }
 
 #[test]
@@ -453,11 +472,11 @@ fn can_store_and_resume_a_captured_continuation_later() {
 
     assert_eq!(
         run0(src, "test_default_binder").expect("run"),
-        Value::Int(41)
+        AbiValue::Int(41)
     );
     assert_eq!(
         run0(src, "test_explicit_binder").expect("run"),
-        Value::Int(42)
+        AbiValue::Int(42)
     );
 }
 
@@ -486,7 +505,7 @@ fn calling_a_continuation_value_is_one_shot() {
     "#;
 
     let err = run0(src, "bad").expect_err("should error");
-    assert!(matches!(err, RuntimeError::InvalidResume), "{err:?}");
+    assert!(err.contains("invalid resume"), "{err}");
 }
 
 #[test]
@@ -503,7 +522,7 @@ fn evaluation_order_is_left_to_right_for_array_literals() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(123));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(123));
 }
 
 #[test]
@@ -516,7 +535,7 @@ fn formatted_strings_desugar_via_core_intrinsics() {
 
     assert_eq!(
         run0(src, "test").expect("run"),
-        Value::String("hello 1 world true".to_string())
+        AbiValue::String("hello 1 world true".to_string())
     );
 }
 
@@ -539,8 +558,8 @@ fn enum_construction_via_call_and_matching() {
         }
     "#;
 
-    assert_eq!(run0(src, "some").expect("run"), Value::Int(42));
-    assert_eq!(run0(src, "none").expect("run"), Value::Int(7));
+    assert_eq!(run0(src, "some").expect("run"), AbiValue::Int(42));
+    assert_eq!(run0(src, "none").expect("run"), AbiValue::Int(7));
 }
 
 #[test]
@@ -554,7 +573,7 @@ fn array_prefix_patterns_work() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(12));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(12));
 }
 
 #[test]
@@ -567,7 +586,7 @@ fn match_non_exhaustive_is_compile_error() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should be a compile error");
+    let err = compile(src).expect_err("should be a compile error");
     assert!(
         err.message.contains("non-exhaustive match"),
         "unexpected compile error: {err}"
@@ -598,10 +617,10 @@ fn loop_break_and_continue_work() {
         }
     "#;
 
-    assert_eq!(run0(src, "test_loop").expect("run"), Value::Int(3));
+    assert_eq!(run0(src, "test_loop").expect("run"), AbiValue::Int(3));
     assert_eq!(
         run0(src, "test_while").expect("run"),
-        Value::Int(1 + 2 + 4 + 5)
+        AbiValue::Int(1 + 2 + 4 + 5)
     );
 }
 
@@ -613,7 +632,7 @@ fn break_outside_loop_is_type_error() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message.contains("outside of a loop"),
         "unexpected error: {err:?}"
@@ -627,7 +646,7 @@ fn lambda_params_can_be_inferred_from_call_site() {
         fn test() -> int { apply(|n| { n + 1 }, 41) }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(42));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
 }
 
 #[test]
@@ -641,7 +660,7 @@ fn using_generic_function_as_value_is_rejected() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message.contains("generic function"),
         "unexpected error: {err:?}"
@@ -658,7 +677,7 @@ fn readonly_array_rejects_index_assignment() {
         }
     "#;
 
-    let err = compile_to_mir(src).expect_err("should fail");
+    let err = compile(src).expect_err("should fail");
     assert!(
         err.message.contains("readonly view"),
         "unexpected error: {err:?}"
@@ -679,5 +698,5 @@ fn effect_arm_order_is_source_order() {
         }
     "#;
 
-    assert_eq!(run0(src, "test").expect("run"), Value::Int(1));
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(1));
 }

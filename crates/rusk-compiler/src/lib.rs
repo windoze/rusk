@@ -1,28 +1,29 @@
 #![forbid(unsafe_code)]
 
 mod ast;
+mod bytecode_lower;
+#[cfg(test)]
+mod capture_analysis_tests;
 pub mod host;
 mod lexer;
 mod modules;
 mod parser;
 mod typeck;
 
-/// Script front-end: parses and compiles Rusk source to MIR.
-pub mod compiler;
+/// Script front-end: parses and compiles Rusk source to bytecode (via an internal MIR).
+mod compiler;
 
 // Re-export commonly used types
 pub use compiler::{
     CompileError, CompileMetrics, compile_file_to_bytecode, compile_file_to_bytecode_with_options,
-    compile_file_to_mir, compile_file_to_mir_with_options,
-    compile_file_to_mir_with_options_and_metrics, compile_to_bytecode,
-    compile_to_bytecode_with_options, compile_to_mir, compile_to_mir_with_options,
-    compile_to_mir_with_options_and_metrics,
+    compile_file_to_bytecode_with_options_and_metrics, compile_to_bytecode,
+    compile_to_bytecode_with_options, compile_to_bytecode_with_options_and_metrics,
 };
 pub use host::{
-    CompileOptions, ExternalEffectDecl, HostFunctionDecl, HostModuleDecl, HostVisibility,
+    CompileOptions, ExternalEffectDecl, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType,
+    HostVisibility,
 };
 pub use rusk_bytecode::OptLevel;
-pub use rusk_mir::{HostFnSig, HostType};
 
 /// Source text span utilities used by the front-end.
 pub mod source;
@@ -30,21 +31,4 @@ pub mod source;
 /// Source map for tracking source locations.
 pub mod source_map;
 
-#[cfg(feature = "serde")]
-#[derive(Debug)]
-pub struct SaveError(bitcode::Error);
-
-#[cfg(feature = "serde")]
-impl core::fmt::Display for SaveError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "failed to save module: {}", self.0)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl core::error::Error for SaveError {}
-
-#[cfg(feature = "serde")]
-pub fn to_bytes(module: &rusk_mir::Module) -> Result<Vec<u8>, SaveError> {
-    bitcode::serialize(module).map_err(SaveError)
-}
+// NOTE: MIR serialization APIs intentionally not exposed: MIR is an internal compiler IR.

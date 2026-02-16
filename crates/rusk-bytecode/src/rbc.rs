@@ -19,12 +19,12 @@ use alloc::vec::Vec;
 use crate::{
     AbiType, CallTarget, ConstValue, EffectId, EffectSpec, ExecutableModule, ExternalEffectDecl,
     Function, FunctionId, HandlerClause, HostFnSig, HostImport, HostImportId, Instruction,
-    Intrinsic, Reg, SwitchCase,
+    Intrinsic, Pattern, Reg, SwitchCase, TypeRepLit,
 };
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 2;
+const VERSION_MINOR: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -305,124 +305,49 @@ impl Encoder {
         Ok(())
     }
 
-    fn write_type_rep_lit(&mut self, lit: &rusk_mir::TypeRepLit) -> Result<(), EncodeError> {
+    fn write_type_rep_lit(&mut self, lit: &TypeRepLit) -> Result<(), EncodeError> {
         match lit {
-            rusk_mir::TypeRepLit::Unit => self.write_u8(0),
-            rusk_mir::TypeRepLit::Bool => self.write_u8(1),
-            rusk_mir::TypeRepLit::Int => self.write_u8(2),
-            rusk_mir::TypeRepLit::Float => self.write_u8(3),
-            rusk_mir::TypeRepLit::String => self.write_u8(4),
-            rusk_mir::TypeRepLit::Bytes => self.write_u8(5),
-            rusk_mir::TypeRepLit::Array => self.write_u8(6),
-            rusk_mir::TypeRepLit::Tuple(arity) => {
+            TypeRepLit::Unit => self.write_u8(0),
+            TypeRepLit::Bool => self.write_u8(1),
+            TypeRepLit::Int => self.write_u8(2),
+            TypeRepLit::Float => self.write_u8(3),
+            TypeRepLit::String => self.write_u8(4),
+            TypeRepLit::Bytes => self.write_u8(5),
+            TypeRepLit::Array => self.write_u8(6),
+            TypeRepLit::Tuple(arity) => {
                 self.write_u8(7);
                 let a: u32 = (*arity).try_into().map_err(|_| EncodeError {
                     message: "tuple arity overflow".to_string(),
                 })?;
                 self.write_u32(a);
             }
-            rusk_mir::TypeRepLit::Struct(name) => {
+            TypeRepLit::Struct(name) => {
                 self.write_u8(8);
                 self.write_string(name)?;
             }
-            rusk_mir::TypeRepLit::Enum(name) => {
+            TypeRepLit::Enum(name) => {
                 self.write_u8(9);
                 self.write_string(name)?;
             }
-            rusk_mir::TypeRepLit::Interface(name) => {
+            TypeRepLit::Interface(name) => {
                 self.write_u8(10);
                 self.write_string(name)?;
             }
-            rusk_mir::TypeRepLit::Fn => self.write_u8(11),
-            rusk_mir::TypeRepLit::Cont => self.write_u8(12),
+            TypeRepLit::Fn => self.write_u8(11),
+            TypeRepLit::Cont => self.write_u8(12),
         }
         Ok(())
     }
 
-    fn write_mir_const_value(&mut self, v: &rusk_mir::ConstValue) -> Result<(), EncodeError> {
-        match v {
-            rusk_mir::ConstValue::Unit => self.write_u8(0),
-            rusk_mir::ConstValue::Bool(b) => {
-                self.write_u8(1);
-                self.write_bool(*b);
-            }
-            rusk_mir::ConstValue::Int(n) => {
-                self.write_u8(2);
-                self.write_i64(*n);
-            }
-            rusk_mir::ConstValue::Float(x) => {
-                self.write_u8(3);
-                self.write_f64(*x);
-            }
-            rusk_mir::ConstValue::String(s) => {
-                self.write_u8(4);
-                self.write_string(s)?;
-            }
-            rusk_mir::ConstValue::Bytes(b) => {
-                self.write_u8(5);
-                self.write_blob(b)?;
-            }
-            rusk_mir::ConstValue::TypeRep(lit) => {
-                self.write_u8(6);
-                self.write_type_rep_lit(lit)?;
-            }
-            rusk_mir::ConstValue::Function(name) => {
-                self.write_u8(7);
-                self.write_string(name)?;
-            }
-            rusk_mir::ConstValue::FunctionId(fid) => {
-                self.write_u8(8);
-                self.write_u32(fid.0);
-            }
-            rusk_mir::ConstValue::Array(items) => {
-                self.write_u8(9);
-                self.write_len(items.len())?;
-                for item in items {
-                    self.write_mir_const_value(item)?;
-                }
-            }
-            rusk_mir::ConstValue::Tuple(items) => {
-                self.write_u8(10);
-                self.write_len(items.len())?;
-                for item in items {
-                    self.write_mir_const_value(item)?;
-                }
-            }
-            rusk_mir::ConstValue::Struct { type_name, fields } => {
-                self.write_u8(11);
-                self.write_string(type_name)?;
-                self.write_len(fields.len())?;
-                for (name, value) in fields {
-                    self.write_string(name)?;
-                    self.write_mir_const_value(value)?;
-                }
-            }
-            rusk_mir::ConstValue::Enum {
-                enum_name,
-                variant,
-                fields,
-            } => {
-                self.write_u8(12);
-                self.write_string(enum_name)?;
-                self.write_string(variant)?;
-                self.write_len(fields.len())?;
-                for value in fields {
-                    self.write_mir_const_value(value)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn write_pattern(&mut self, pat: &rusk_mir::Pattern) -> Result<(), EncodeError> {
+    fn write_pattern(&mut self, pat: &Pattern) -> Result<(), EncodeError> {
         match pat {
-            rusk_mir::Pattern::Wildcard => self.write_u8(0),
-            rusk_mir::Pattern::Bind => self.write_u8(1),
-            rusk_mir::Pattern::Literal(v) => {
+            Pattern::Wildcard => self.write_u8(0),
+            Pattern::Bind => self.write_u8(1),
+            Pattern::Literal(v) => {
                 self.write_u8(2);
-                self.write_mir_const_value(v)?;
+                self.write_const_value(v)?;
             }
-            rusk_mir::Pattern::Tuple {
+            Pattern::Tuple {
                 prefix,
                 rest,
                 suffix,
@@ -444,7 +369,7 @@ impl Encoder {
                     self.write_pattern(p)?;
                 }
             }
-            rusk_mir::Pattern::Enum {
+            Pattern::Enum {
                 enum_name,
                 variant,
                 fields,
@@ -457,7 +382,7 @@ impl Encoder {
                     self.write_pattern(p)?;
                 }
             }
-            rusk_mir::Pattern::Struct { type_name, fields } => {
+            Pattern::Struct { type_name, fields } => {
                 self.write_u8(5);
                 self.write_string(type_name)?;
                 self.write_len(fields.len())?;
@@ -466,7 +391,7 @@ impl Encoder {
                     self.write_pattern(p)?;
                 }
             }
-            rusk_mir::Pattern::Array {
+            Pattern::Array {
                 prefix,
                 rest,
                 suffix,
@@ -1214,93 +1139,35 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_type_rep_lit(&mut self) -> Result<rusk_mir::TypeRepLit, DecodeError> {
+    fn read_type_rep_lit(&mut self) -> Result<TypeRepLit, DecodeError> {
         match self.read_u8()? {
-            0 => Ok(rusk_mir::TypeRepLit::Unit),
-            1 => Ok(rusk_mir::TypeRepLit::Bool),
-            2 => Ok(rusk_mir::TypeRepLit::Int),
-            3 => Ok(rusk_mir::TypeRepLit::Float),
-            4 => Ok(rusk_mir::TypeRepLit::String),
-            5 => Ok(rusk_mir::TypeRepLit::Bytes),
-            6 => Ok(rusk_mir::TypeRepLit::Array),
+            0 => Ok(TypeRepLit::Unit),
+            1 => Ok(TypeRepLit::Bool),
+            2 => Ok(TypeRepLit::Int),
+            3 => Ok(TypeRepLit::Float),
+            4 => Ok(TypeRepLit::String),
+            5 => Ok(TypeRepLit::Bytes),
+            6 => Ok(TypeRepLit::Array),
             7 => {
                 let arity = self.read_u32()?;
                 let arity_usize: usize = usize::try_from(arity)
                     .map_err(|_| self.err("tuple arity overflow".to_string()))?;
-                Ok(rusk_mir::TypeRepLit::Tuple(arity_usize))
+                Ok(TypeRepLit::Tuple(arity_usize))
             }
-            8 => Ok(rusk_mir::TypeRepLit::Struct(self.read_string()?)),
-            9 => Ok(rusk_mir::TypeRepLit::Enum(self.read_string()?)),
-            10 => Ok(rusk_mir::TypeRepLit::Interface(self.read_string()?)),
-            11 => Ok(rusk_mir::TypeRepLit::Fn),
-            12 => Ok(rusk_mir::TypeRepLit::Cont),
+            8 => Ok(TypeRepLit::Struct(self.read_string()?)),
+            9 => Ok(TypeRepLit::Enum(self.read_string()?)),
+            10 => Ok(TypeRepLit::Interface(self.read_string()?)),
+            11 => Ok(TypeRepLit::Fn),
+            12 => Ok(TypeRepLit::Cont),
             other => Err(self.err(format!("invalid TypeRepLit tag {other}"))),
         }
     }
 
-    fn read_mir_const_value(&mut self) -> Result<rusk_mir::ConstValue, DecodeError> {
+    fn read_pattern(&mut self) -> Result<Pattern, DecodeError> {
         match self.read_u8()? {
-            0 => Ok(rusk_mir::ConstValue::Unit),
-            1 => Ok(rusk_mir::ConstValue::Bool(self.read_bool()?)),
-            2 => Ok(rusk_mir::ConstValue::Int(self.read_i64()?)),
-            3 => Ok(rusk_mir::ConstValue::Float(self.read_f64()?)),
-            4 => Ok(rusk_mir::ConstValue::String(self.read_string()?)),
-            5 => Ok(rusk_mir::ConstValue::Bytes(self.read_blob()?)),
-            6 => Ok(rusk_mir::ConstValue::TypeRep(self.read_type_rep_lit()?)),
-            7 => Ok(rusk_mir::ConstValue::Function(self.read_string()?)),
-            8 => Ok(rusk_mir::ConstValue::FunctionId(rusk_mir::FunctionId(
-                self.read_u32()?,
-            ))),
-            9 => {
-                let n = self.read_len()?;
-                let mut items = Vec::with_capacity(n);
-                for _ in 0..n {
-                    items.push(self.read_mir_const_value()?);
-                }
-                Ok(rusk_mir::ConstValue::Array(items))
-            }
-            10 => {
-                let n = self.read_len()?;
-                let mut items = Vec::with_capacity(n);
-                for _ in 0..n {
-                    items.push(self.read_mir_const_value()?);
-                }
-                Ok(rusk_mir::ConstValue::Tuple(items))
-            }
-            11 => {
-                let type_name = self.read_string()?;
-                let n = self.read_len()?;
-                let mut fields = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let name = self.read_string()?;
-                    let value = self.read_mir_const_value()?;
-                    fields.push((name, value));
-                }
-                Ok(rusk_mir::ConstValue::Struct { type_name, fields })
-            }
-            12 => {
-                let enum_name = self.read_string()?;
-                let variant = self.read_string()?;
-                let n = self.read_len()?;
-                let mut fields = Vec::with_capacity(n);
-                for _ in 0..n {
-                    fields.push(self.read_mir_const_value()?);
-                }
-                Ok(rusk_mir::ConstValue::Enum {
-                    enum_name,
-                    variant,
-                    fields,
-                })
-            }
-            other => Err(self.err(format!("invalid MIR ConstValue tag {other}"))),
-        }
-    }
-
-    fn read_pattern(&mut self) -> Result<rusk_mir::Pattern, DecodeError> {
-        match self.read_u8()? {
-            0 => Ok(rusk_mir::Pattern::Wildcard),
-            1 => Ok(rusk_mir::Pattern::Bind),
-            2 => Ok(rusk_mir::Pattern::Literal(self.read_mir_const_value()?)),
+            0 => Ok(Pattern::Wildcard),
+            1 => Ok(Pattern::Bind),
+            2 => Ok(Pattern::Literal(self.read_const_value()?)),
             3 => {
                 let pre_n = self.read_len()?;
                 let mut prefix = Vec::with_capacity(pre_n);
@@ -1317,7 +1184,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..suf_n {
                     suffix.push(self.read_pattern()?);
                 }
-                Ok(rusk_mir::Pattern::Tuple {
+                Ok(Pattern::Tuple {
                     prefix,
                     rest,
                     suffix,
@@ -1331,7 +1198,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..n {
                     fields.push(self.read_pattern()?);
                 }
-                Ok(rusk_mir::Pattern::Enum {
+                Ok(Pattern::Enum {
                     enum_name,
                     variant,
                     fields,
@@ -1346,7 +1213,7 @@ impl<'a> Decoder<'a> {
                     let pat = self.read_pattern()?;
                     fields.push((name, pat));
                 }
-                Ok(rusk_mir::Pattern::Struct { type_name, fields })
+                Ok(Pattern::Struct { type_name, fields })
             }
             6 => {
                 let pre_n = self.read_len()?;
@@ -1364,7 +1231,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..suf_n {
                     suffix.push(self.read_pattern()?);
                 }
-                Ok(rusk_mir::Pattern::Array {
+                Ok(Pattern::Array {
                     prefix,
                     rest,
                     suffix,

@@ -703,5 +703,5 @@ These design choices together form a powerful and predictable effect system suit
 
 - [RUSK_SPEC.md §7: Effects and Handlers](../RUSK_SPEC.md#7-effects-and-handlers)
 - [MIR_SPEC.md](../MIR_SPEC.md)
-- Interpreter implementation: [crates/rusk-interpreter/src/interpreter.rs](../crates/rusk-interpreter/src/interpreter.rs)
+- VM implementation: [crates/rusk-vm/src/lib.rs](../crates/rusk-vm/src/lib.rs)
 - Test fixtures: [fixtures/](../fixtures/)

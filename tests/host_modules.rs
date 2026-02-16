@@ -1,8 +1,9 @@
+use rusk_bytecode::AbiType;
 use rusk_compiler::{
     CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-    compile_file_to_mir_with_options, compile_to_mir, compile_to_mir_with_options,
+    compile_file_to_bytecode_with_options, compile_to_bytecode, compile_to_bytecode_with_options,
 };
-use rusk_interpreter::{Interpreter, RuntimeError, Value};
+use rusk_vm::{StepResult, Vm, vm_step};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,7 +23,7 @@ fn std_host_module() -> HostModuleDecl {
 
 #[test]
 fn std_is_not_built_in_without_host_registration() {
-    let err = compile_to_mir(
+    let err = compile_to_bytecode(
         r#"
 fn main() {
     std::println("hi");
@@ -56,7 +57,7 @@ fn compiles_with_host_module_and_records_host_imports() {
         .register_host_module("std", std_host_module())
         .unwrap();
 
-    let module = compile_to_mir_with_options(
+    let module = compile_to_bytecode_with_options(
         r#"
 fn main() {
     std::println("hi");
@@ -71,21 +72,21 @@ fn main() {
     let sig = &module.host_import(import_id).unwrap().sig;
     assert_eq!(
         sig,
-        &HostFnSig {
-            params: vec![HostType::String],
-            ret: HostType::Unit,
+        &rusk_bytecode::HostFnSig {
+            params: vec![AbiType::String],
+            ret: AbiType::Unit,
         }
     );
 }
 
 #[test]
-fn interpreter_fails_fast_if_declared_host_missing() {
+fn vm_traps_if_declared_host_missing() {
     let mut options = CompileOptions::default();
     options
         .register_host_module("std", std_host_module())
         .unwrap();
 
-    let module = compile_to_mir_with_options(
+    let module = compile_to_bytecode_with_options(
         r#"
 fn main() {
     std::println("hi");
@@ -96,13 +97,14 @@ fn main() {
     )
     .unwrap();
 
-    let mut interp = Interpreter::new(module);
-    let err = interp.run_function("main", vec![]).unwrap_err();
-    assert_eq!(
-        err,
-        RuntimeError::MissingHostFunctions {
-            names: vec!["std::println".to_string()]
-        }
+    let mut vm = Vm::new(module).expect("vm init");
+    let got = vm_step(&mut vm, None);
+    let StepResult::Trap { message } = got else {
+        panic!("expected trap, got {got:?}");
+    };
+    assert!(
+        message.contains("missing host import implementation") && message.contains("std::println"),
+        "{message}"
     );
 }
 
@@ -114,7 +116,7 @@ fn nested_modules_must_use_crate_prefix_for_host_modules() {
         .unwrap();
 
     // `std::...` is not in scope inside `mod m` unless you use `crate::std` or import it.
-    let err = compile_to_mir_with_options(
+    let err = compile_to_bytecode_with_options(
         r#"
 mod m {
     pub fn f() {
@@ -137,7 +139,7 @@ fn main() {
     );
 
     // `crate::std::...` resolves.
-    compile_to_mir_with_options(
+    compile_to_bytecode_with_options(
         r#"
 mod m {
     pub fn f() {
@@ -163,7 +165,7 @@ fn host_module_conflicts_with_source_module_inline() {
         .register_host_module("std", std_host_module())
         .unwrap();
 
-    let err = compile_to_mir_with_options(
+    let err = compile_to_bytecode_with_options(
         r#"
 mod std {}
 fn main() { () }
@@ -206,7 +208,7 @@ fn main() { () }
         .register_host_module("std", std_host_module())
         .unwrap();
 
-    let err = compile_file_to_mir_with_options(&main_path, &options).unwrap_err();
+    let err = compile_file_to_bytecode_with_options(&main_path, &options).unwrap_err();
     assert!(
         err.message
             .contains("host module `std` conflicts with an existing source module"),
@@ -234,7 +236,7 @@ fn host_function_visibility_is_enforced() {
         )
         .unwrap();
 
-    let err = compile_to_mir_with_options(
+    let err = compile_to_bytecode_with_options(
         r#"
 fn main() {
     std::print("hi");
@@ -267,7 +269,7 @@ fn wrapper_modules_can_reexport_flat_host_modules_into_nested_namespaces() {
         )
         .unwrap();
 
-    compile_to_mir_with_options(
+    compile_to_bytecode_with_options(
         r#"
 mod wasi {
     pub mod io {
@@ -282,14 +284,4 @@ fn main() -> string {
         &options,
     )
     .unwrap();
-}
-
-#[test]
-fn interpreter_lists_registered_host_functions() {
-    let mut interp = Interpreter::new(rusk_mir::Module::default());
-    interp.register_host_fn("b", |_interp, _args| Ok(Value::Unit));
-    interp.register_host_fn("a", |_interp, _args| Ok(Value::Unit));
-
-    let names: Vec<&str> = interp.host_function_names().collect();
-    assert_eq!(names, vec!["a", "b"]);
 }

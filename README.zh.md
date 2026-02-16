@@ -11,7 +11,7 @@ Rusk 是一个实验性的编程语言和运行时，使用 Rust 实现。它的
 Rusk 设计为可嵌入式（CLI、WASM、嵌入式设备），因此 I/O 和平台集成通过**宿主函数**提供：
 
 - **编译器**在编译前会获得宿主*原型*（名称 + 签名），以便名称解析和类型检查能够成功。
-- **运行时**（VM / 解释器）在运行时会获得具体的宿主实现；如果模块声明的宿主导入未安装，它会在执行时 trap。
+- **运行时**（VM）在运行时会获得具体的宿主实现；如果模块声明的宿主导入未安装，它会在执行时 trap。
 
 在本仓库中，`rusk` CLI 注册了一个最小的宿主定义的 `std` 模块，包含 `std::print(string) -> unit` 和 `std::println(string) -> unit`。
 
@@ -33,9 +33,8 @@ fn main() -> int {
 
 - `src/main.rs`：`rusk` CLI（`rusk <file.rusk|file.rbc>`）
 - `src/bin/ruskc.rs`：`ruskc` 编译器 CLI（输出 `.rbc`）
-- `crates/rusk-compiler/`：解析器/类型检查器 + 从 Rusk 到 MIR 的降级
-- `crates/rusk-mir/`：MIR 数据结构（以及可选的序列化）
-- `crates/rusk-interpreter/`：MIR 解释器 + GC + 核心运行时内建函数
+- `crates/rusk-compiler/`：解析器/类型检查器 + 从 Rusk 到字节码的降级（内部会经过 MIR）
+- `crates/rusk-mir/`：编译器内部的 MIR 数据结构（不是运行时后端）
 - `crates/rusk-bytecode/`：字节码模块 + `.rbc` 序列化 + verifier
 - `crates/rusk-vm/`：字节码 VM 运行时（step API、宿主导入、效应）
 - `crates/rusk-host/`：可重用的宿主模块声明 + 安装器（例如 `std::print`）

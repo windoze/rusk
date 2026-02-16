@@ -1,6 +1,5 @@
-use rusk_compiler::compile_to_mir;
-use rusk_interpreter::corelib::register_core_host_fns;
-use rusk_interpreter::{Interpreter, Value};
+use rusk_compiler::compile_to_bytecode;
+use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 
 #[test]
 fn for_loop_iterates_using_iterator_protocol() {
@@ -13,14 +12,21 @@ fn for_loop_iterates_using_iterator_protocol() {
             };
             total
         }
+
+        fn main() -> unit { () }
     "#;
 
-    let module = compile_to_mir(src).expect("compile");
-    let mut interp = Interpreter::new(module);
-    register_core_host_fns(&mut interp);
+    let mut module = compile_to_bytecode(src).expect("compile");
+    module.entry = module.function_id("sum").expect("sum fn id");
 
-    let out = interp.run_function("sum", vec![]).expect("run");
-    assert_eq!(out, Value::Int(6));
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Int(6)
+        }
+    );
 }
 
 #[test]
@@ -34,12 +40,19 @@ fn for_loop_over_readonly_array_is_allowed() {
             };
             total
         }
+
+        fn main() -> unit { () }
     "#;
 
-    let module = compile_to_mir(src).expect("compile");
-    let mut interp = Interpreter::new(module);
-    register_core_host_fns(&mut interp);
+    let mut module = compile_to_bytecode(src).expect("compile");
+    module.entry = module.function_id("sum").expect("sum fn id");
 
-    let out = interp.run_function("sum", vec![]).expect("run");
-    assert_eq!(out, Value::Int(6));
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Int(6)
+        }
+    );
 }

@@ -335,7 +335,7 @@ Pattern matching is used by:
 - `switch` cases, and
 - effect handler clause argument patterns.
 
-The pattern language is the MIR pattern language (`rusk_mir::Pattern`):
+The pattern language is defined by `rusk_bytecode::Pattern`:
 
 - wildcard `_`
 - bind (captures the matched value)
@@ -550,7 +550,7 @@ The current intrinsic set includes:
 
 ---
 
-## 10. `.rbc` serialization format (v0.1)
+## 10. `.rbc` serialization format (v0.3)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -604,7 +604,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `1`
+- minor = `3`
 
 The reference decoder requires an **exact** version match.
 
@@ -676,31 +676,13 @@ This format uses tag bytes/words for enums. The tags are normative.
 | 11 | `Fn` | — |
 | 12 | `Cont` | — |
 
-#### MIR `ConstValue` (used in patterns) (`u8`)
-
-| Tag | Variant | Payload |
-| --- | ------- | ------- |
-| 0 | `Unit` | — |
-| 1 | `Bool` | `bool(u8)` |
-| 2 | `Int` | `i64` |
-| 3 | `Float` | `f64` |
-| 4 | `String` | `string` |
-| 5 | `Bytes` | `blob` |
-| 6 | `TypeRep` | `TypeRepLit` |
-| 7 | `Function(name)` | `string` |
-| 8 | `FunctionId(id)` | `u32` |
-| 9 | `Array(items)` | `len + items` |
-| 10 | `Tuple(items)` | `len + items` |
-| 11 | `Struct { type_name, fields }` | `string + len + (string + value)*` |
-| 12 | `Enum { enum_name, variant, fields }` | `string + string + len + value*` |
-
 #### Patterns (`u8`)
 
 | Tag | Variant | Payload |
 | --- | ------- | ------- |
 | 0 | `Wildcard` | — |
 | 1 | `Bind` | — |
-| 2 | `Literal` | MIR `ConstValue` |
+| 2 | `Literal` | Bytecode `ConstValue` |
 | 3 | `Tuple { prefix, rest, suffix }` | `len + prefix* + opt(rest) + len + suffix*` |
 | 4 | `Enum { enum_name, variant, fields }` | `string + string + len + field*` |
 | 5 | `Struct { type_name, fields }` | `string + len + (string + pat)*` |

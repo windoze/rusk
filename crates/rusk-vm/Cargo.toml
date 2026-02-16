@@ -6,4 +6,3 @@ edition.workspace = true
 [dependencies]
 rusk-bytecode = { path = "../rusk-bytecode" }
 rusk-gc = { path = "../rusk-gc" }
-rusk-mir = { path = "../rusk-mir" }

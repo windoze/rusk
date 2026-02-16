@@ -3,16 +3,15 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub mod lower;
 pub mod opt;
 pub mod rbc;
 pub mod verify;
 
-pub use lower::{LowerError, LowerOptions, lower_mir_module, lower_mir_module_with_options};
 pub use opt::{OptError, OptLevel, peephole_optimize_module};
 pub use rbc::{DecodeError, EncodeError, from_bytes, to_bytes};
 pub use verify::{VerifyError, verify_module};
@@ -40,39 +39,11 @@ pub enum AbiType {
     Bytes,
 }
 
-impl AbiType {
-    pub fn from_host_type(ty: &rusk_mir::HostType) -> Option<Self> {
-        match ty {
-            rusk_mir::HostType::Unit => Some(Self::Unit),
-            rusk_mir::HostType::Bool => Some(Self::Bool),
-            rusk_mir::HostType::Int => Some(Self::Int),
-            rusk_mir::HostType::Float => Some(Self::Float),
-            rusk_mir::HostType::String => Some(Self::String),
-            rusk_mir::HostType::Bytes => Some(Self::Bytes),
-            rusk_mir::HostType::Any
-            | rusk_mir::HostType::TypeRep
-            | rusk_mir::HostType::Array(_)
-            | rusk_mir::HostType::Tuple(_) => None,
-        }
-    }
-}
-
 /// A host import signature restricted to [`AbiType`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostFnSig {
     pub params: Vec<AbiType>,
     pub ret: AbiType,
-}
-
-impl HostFnSig {
-    pub fn from_host_sig(sig: &rusk_mir::HostFnSig) -> Option<Self> {
-        let mut params = Vec::with_capacity(sig.params.len());
-        for ty in &sig.params {
-            params.push(AbiType::from_host_type(ty)?);
-        }
-        let ret = AbiType::from_host_type(&sig.ret)?;
-        Some(Self { params, ret })
-    }
 }
 
 /// A declared host import entry required by an [`ExecutableModule`].
@@ -90,6 +61,24 @@ pub struct ExternalEffectDecl {
     pub sig: HostFnSig,
 }
 
+/// A compile-time type constructor used to build runtime `typerep` values.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TypeRepLit {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Array,
+    Tuple(usize),
+    Struct(String),
+    Enum(String),
+    Interface(String),
+    Fn,
+    Cont,
+}
+
 /// A literal value embedded in bytecode (v0: ABI-safe primitives only).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConstValue {
@@ -99,7 +88,7 @@ pub enum ConstValue {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
-    TypeRep(rusk_mir::TypeRepLit),
+    TypeRep(TypeRepLit),
     Function(FunctionId),
 }
 
@@ -181,10 +170,54 @@ pub enum CallTarget {
     Intrinsic(Intrinsic),
 }
 
+/// A pattern for `switch` and effect handler clauses.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+    /// `_`
+    Wildcard,
+    /// A binding site (captured into the clause bind list).
+    Bind,
+    /// A literal match (unit/bool/int/float/string/bytes/typerep/function).
+    Literal(ConstValue),
+    /// Tuple destructuring: `(p1, p2, .., pk)` / `(p1, p2)` / `(..rest)`.
+    ///
+    /// If `rest` is:
+    /// - `None`: arity must match exactly (`prefix.len() + suffix.len()`).
+    /// - `Some(Pattern::Wildcard)`: variable-length match, rest ignored.
+    /// - `Some(Pattern::Bind)`: variable-length match, rest captured as a tuple.
+    Tuple {
+        prefix: Vec<Pattern>,
+        rest: Option<Box<Pattern>>,
+        suffix: Vec<Pattern>,
+    },
+    /// `Enum::Variant(p1, p2, ...)`
+    Enum {
+        enum_name: String,
+        variant: String,
+        fields: Vec<Pattern>,
+    },
+    /// `Type { field: pat, ... }`
+    Struct {
+        type_name: String,
+        fields: Vec<(String, Pattern)>,
+    },
+    /// Array destructuring: `[p1, p2, .., pk]` / `[p1, p2]` / `[..rest]`.
+    ///
+    /// If `rest` is:
+    /// - `None`: length must match exactly (`prefix.len() + suffix.len()`).
+    /// - `Some(Pattern::Wildcard)`: variable-length match, rest ignored.
+    /// - `Some(Pattern::Bind)`: variable-length match, rest captured as a new array.
+    Array {
+        prefix: Vec<Pattern>,
+        rest: Option<Box<Pattern>>,
+        suffix: Vec<Pattern>,
+    },
+}
+
 /// A lowered `switch` case (pattern + jump target).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitchCase {
-    pub pattern: rusk_mir::Pattern,
+    pub pattern: Pattern,
     pub target_pc: u32,
     /// The destination registers for pattern binds (must match `count_binds(pattern)`).
     pub param_regs: Vec<Reg>,
@@ -205,7 +238,7 @@ pub struct EffectSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HandlerClause {
     pub effect: EffectSpec,
-    pub arg_patterns: Vec<rusk_mir::Pattern>,
+    pub arg_patterns: Vec<Pattern>,
     pub target_pc: u32,
     /// Destination registers for pattern binds, optionally followed by the continuation token.
     ///
@@ -248,7 +281,7 @@ pub enum Instruction {
 
     MakeTypeRep {
         dst: Reg,
-        base: rusk_mir::TypeRepLit,
+        base: TypeRepLit,
         args: Vec<Reg>,
     },
 

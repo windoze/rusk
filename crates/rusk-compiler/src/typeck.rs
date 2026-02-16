@@ -410,18 +410,18 @@ fn add_host_modules(env: &mut ProgramEnv, options: &CompileOptions) -> Result<()
     Ok(())
 }
 
-fn ty_from_host_type(ty: &rusk_mir::HostType) -> Result<Ty, String> {
+fn ty_from_host_type(ty: &crate::host::HostType) -> Result<Ty, String> {
     match ty {
-        rusk_mir::HostType::Any => Err("unsupported host type: `any`".to_string()),
-        rusk_mir::HostType::Unit => Ok(Ty::Unit),
-        rusk_mir::HostType::Bool => Ok(Ty::Bool),
-        rusk_mir::HostType::Int => Ok(Ty::Int),
-        rusk_mir::HostType::Float => Ok(Ty::Float),
-        rusk_mir::HostType::String => Ok(Ty::String),
-        rusk_mir::HostType::Bytes => Ok(Ty::Bytes),
-        rusk_mir::HostType::TypeRep => Err("unsupported host type: `typerep`".to_string()),
-        rusk_mir::HostType::Array(elem) => Ok(Ty::Array(Box::new(ty_from_host_type(elem)?))),
-        rusk_mir::HostType::Tuple(items) => Ok(Ty::Tuple(
+        crate::host::HostType::Any => Err("unsupported host type: `any`".to_string()),
+        crate::host::HostType::Unit => Ok(Ty::Unit),
+        crate::host::HostType::Bool => Ok(Ty::Bool),
+        crate::host::HostType::Int => Ok(Ty::Int),
+        crate::host::HostType::Float => Ok(Ty::Float),
+        crate::host::HostType::String => Ok(Ty::String),
+        crate::host::HostType::Bytes => Ok(Ty::Bytes),
+        crate::host::HostType::TypeRep => Err("unsupported host type: `typerep`".to_string()),
+        crate::host::HostType::Array(elem) => Ok(Ty::Array(Box::new(ty_from_host_type(elem)?))),
+        crate::host::HostType::Tuple(items) => Ok(Ty::Tuple(
             items
                 .iter()
                 .map(ty_from_host_type)

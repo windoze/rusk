@@ -2,6 +2,7 @@
 name = "rusk-mir"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 serde = { version = "1", default-features = false, optional = true, features = [

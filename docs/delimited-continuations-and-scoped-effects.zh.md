@@ -703,5 +703,5 @@ fn main() -> int {
 
 - [RUSK_SPEC.md §7: Effects and Handlers](../RUSK_SPEC.md#7-effects-and-handlers)
 - [MIR_SPEC.md](../MIR_SPEC.md)
-- 解释器实现：[crates/rusk-interpreter/src/interpreter.rs](../crates/rusk-interpreter/src/interpreter.rs)
+- VM 实现：[crates/rusk-vm/src/lib.rs](../crates/rusk-vm/src/lib.rs)
 - 测试用例：[fixtures/](../fixtures/)

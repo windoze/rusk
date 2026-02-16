@@ -1,4 +1,24 @@
-use rusk_mir::HostFnSig;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostFnSig {
+    pub params: Vec<HostType>,
+    pub ret: HostType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostType {
+    /// A dynamically typed value. Used when a more precise type is not available.
+    Any,
+    Unit,
+    Bool,
+    Int,
+    Float,
+    String,
+    Bytes,
+    /// A runtime type representation (`typerep`), used by some core intrinsics.
+    TypeRep,
+    Array(Box<HostType>),
+    Tuple(Vec<HostType>),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostVisibility {

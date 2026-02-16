@@ -1,5 +1,5 @@
-use rusk_compiler::compile_to_mir;
-use rusk_interpreter::{Interpreter, Value};
+use rusk_compiler::compile_to_bytecode;
+use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 
 #[test]
 fn compiles_and_runs_a_minimal_program() {
@@ -9,8 +9,13 @@ fn compiles_and_runs_a_minimal_program() {
         }
     "#;
 
-    let module = compile_to_mir(src).expect("compile");
-    let mut interp = Interpreter::new(module);
-    let out = interp.run_function("main", vec![]).expect("run");
-    assert_eq!(out, Value::Unit);
+    let module = compile_to_bytecode(src).expect("compile");
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Unit
+        }
+    );
 }

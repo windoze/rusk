@@ -527,7 +527,9 @@ pub struct CompileMetrics {
 
 /// Compiles a single Rusk source file into MIR.
 ///
-/// This is the front-end entrypoint used by tests and the CLI.
+/// This exists only for compiler-internal tests; MIR is an internal compiler IR and is not part
+/// of the public API.
+#[cfg(test)]
 pub fn compile_to_mir(source: &str) -> Result<Module, CompileError> {
     compile_to_mir_with_options(source, &CompileOptions::default())
 }
@@ -562,9 +564,9 @@ pub fn compile_to_bytecode_with_options(
     options: &CompileOptions,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
     let mir = compile_to_mir_with_options(source, options)?;
-    let mut lower_options = rusk_bytecode::LowerOptions::default();
+    let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
-        let Some(sig) = rusk_bytecode::HostFnSig::from_host_sig(&decl.sig) else {
+        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
             return Err(CompileError::new(
                 format!(
                     "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
@@ -582,13 +584,82 @@ pub fn compile_to_bytecode_with_options(
             });
     }
 
-    rusk_bytecode::lower_mir_module_with_options(&mir, &lower_options)
+    crate::bytecode_lower::lower_mir_module_with_options(&mir, &lower_options)
         .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))
         .and_then(|mut module| {
             rusk_bytecode::peephole_optimize_module(&mut module, options.opt_level)
                 .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
             Ok(module)
         })
+}
+
+/// Compiles a single Rusk source string into bytecode, returning pipeline timing metrics.
+pub fn compile_to_bytecode_with_options_and_metrics(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<(rusk_bytecode::ExecutableModule, CompileMetrics), CompileError> {
+    let total_start = Instant::now();
+
+    let (mir, mut metrics) = compile_to_mir_with_options_and_metrics(source, options)?;
+
+    let mut lower_options = crate::bytecode_lower::LowerOptions::default();
+    for decl in &options.external_effects {
+        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
+            return Err(CompileError::new(
+                format!(
+                    "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
+                    decl.interface, decl.method
+                ),
+                Span::new(0, 0),
+            ));
+        };
+        lower_options
+            .external_effects
+            .push(rusk_bytecode::ExternalEffectDecl {
+                interface: decl.interface.clone(),
+                method: decl.method.clone(),
+                sig,
+            });
+    }
+
+    let bc_lower_start = Instant::now();
+    let mut module = crate::bytecode_lower::lower_mir_module_with_options(&mir, &lower_options)
+        .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
+    let bc_lower_time = bc_lower_start.elapsed();
+
+    let opt_start = Instant::now();
+    rusk_bytecode::peephole_optimize_module(&mut module, options.opt_level)
+        .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
+    let bc_opt_time = opt_start.elapsed();
+
+    metrics.lower_time += bc_lower_time + bc_opt_time;
+    metrics.total_time = total_start.elapsed();
+
+    Ok((module, metrics))
+}
+
+fn abi_type_from_host_type(ty: &crate::host::HostType) -> Option<rusk_bytecode::AbiType> {
+    use crate::host::HostType as H;
+    use rusk_bytecode::AbiType as A;
+
+    match ty {
+        H::Unit => Some(A::Unit),
+        H::Bool => Some(A::Bool),
+        H::Int => Some(A::Int),
+        H::Float => Some(A::Float),
+        H::String => Some(A::String),
+        H::Bytes => Some(A::Bytes),
+        H::Any | H::TypeRep | H::Array(_) | H::Tuple(_) => None,
+    }
+}
+
+fn abi_sig_from_host_sig(sig: &crate::host::HostFnSig) -> Option<rusk_bytecode::HostFnSig> {
+    let mut params = Vec::with_capacity(sig.params.len());
+    for ty in &sig.params {
+        params.push(abi_type_from_host_type(ty)?);
+    }
+    let ret = abi_type_from_host_type(&sig.ret)?;
+    Some(rusk_bytecode::HostFnSig { params, ret })
 }
 
 /// Compiles a single Rusk source string into MIR, returning pipeline timing metrics.
@@ -630,11 +701,6 @@ pub fn compile_to_mir_with_options_and_metrics(
         .map_err(|e| e.with_source_map(&source_map))
 }
 
-/// Compiles an entry file (and its `mod foo;` dependencies) into MIR.
-pub fn compile_file_to_mir(entry_path: &Path) -> Result<Module, CompileError> {
-    compile_file_to_mir_with_options(entry_path, &CompileOptions::default())
-}
-
 pub fn compile_file_to_bytecode(
     entry_path: &Path,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
@@ -673,9 +739,9 @@ pub fn compile_file_to_bytecode_with_options(
     options: &CompileOptions,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
     let mir = compile_file_to_mir_with_options(entry_path, options)?;
-    let mut lower_options = rusk_bytecode::LowerOptions::default();
+    let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
-        let Some(sig) = rusk_bytecode::HostFnSig::from_host_sig(&decl.sig) else {
+        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
             return Err(CompileError::new(
                 format!(
                     "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
@@ -693,13 +759,58 @@ pub fn compile_file_to_bytecode_with_options(
             });
     }
 
-    rusk_bytecode::lower_mir_module_with_options(&mir, &lower_options)
+    crate::bytecode_lower::lower_mir_module_with_options(&mir, &lower_options)
         .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))
         .and_then(|mut module| {
             rusk_bytecode::peephole_optimize_module(&mut module, options.opt_level)
                 .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
             Ok(module)
         })
+}
+
+/// Compiles an entry file (and its `mod foo;` dependencies) into bytecode with timing metrics.
+pub fn compile_file_to_bytecode_with_options_and_metrics(
+    entry_path: &Path,
+    options: &CompileOptions,
+) -> Result<(rusk_bytecode::ExecutableModule, CompileMetrics), CompileError> {
+    let total_start = Instant::now();
+
+    let (mir, mut metrics) = compile_file_to_mir_with_options_and_metrics(entry_path, options)?;
+
+    let mut lower_options = crate::bytecode_lower::LowerOptions::default();
+    for decl in &options.external_effects {
+        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
+            return Err(CompileError::new(
+                format!(
+                    "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
+                    decl.interface, decl.method
+                ),
+                Span::new(0, 0),
+            ));
+        };
+        lower_options
+            .external_effects
+            .push(rusk_bytecode::ExternalEffectDecl {
+                interface: decl.interface.clone(),
+                method: decl.method.clone(),
+                sig,
+            });
+    }
+
+    let bc_lower_start = Instant::now();
+    let mut module = crate::bytecode_lower::lower_mir_module_with_options(&mir, &lower_options)
+        .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
+    let bc_lower_time = bc_lower_start.elapsed();
+
+    let opt_start = Instant::now();
+    rusk_bytecode::peephole_optimize_module(&mut module, options.opt_level)
+        .map_err(|e| CompileError::new(e.message, Span::new(0, 0)))?;
+    let bc_opt_time = opt_start.elapsed();
+
+    metrics.lower_time += bc_lower_time + bc_opt_time;
+    metrics.total_time = total_start.elapsed();
+
+    Ok((module, metrics))
 }
 
 /// Compiles an entry file (and its `mod foo;` dependencies) into MIR with timing metrics.

@@ -1,14 +1,20 @@
+//! MIR -> bytecode lowering.
+//!
+//! Note: this is a compiler-internal module; bytecode execution does not depend on MIR.
+
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{
-    CallTarget, ConstValue, ExecutableModule, ExternalEffectDecl, Function, FunctionId, HostFnSig,
-    HostImport, HostImportId, Instruction, Intrinsic, Reg,
+use rusk_bytecode::{
+    AbiType, CallTarget, ConstValue, EffectId, EffectSpec, ExecutableModule, ExternalEffectDecl,
+    Function, FunctionId, HandlerClause, HostFnSig, HostImport, HostImportId, Instruction,
+    Intrinsic, Pattern, Reg, SwitchCase, TypeRepLit,
 };
 use rusk_mir::{BlockId, CallTarget as MirCallTarget, ConstValue as MirConstValue, Operand};
 
@@ -33,6 +39,139 @@ impl core::fmt::Display for LowerError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for LowerError {}
+
+fn abi_type_from_host_type(ty: &rusk_mir::HostType) -> Option<AbiType> {
+    use rusk_mir::HostType as H;
+
+    match ty {
+        H::Unit => Some(AbiType::Unit),
+        H::Bool => Some(AbiType::Bool),
+        H::Int => Some(AbiType::Int),
+        H::Float => Some(AbiType::Float),
+        H::String => Some(AbiType::String),
+        H::Bytes => Some(AbiType::Bytes),
+        H::Any | H::TypeRep | H::Array(_) | H::Tuple(_) => None,
+    }
+}
+
+fn abi_sig_from_host_sig(sig: &rusk_mir::HostFnSig) -> Option<HostFnSig> {
+    let mut params = Vec::with_capacity(sig.params.len());
+    for ty in &sig.params {
+        params.push(abi_type_from_host_type(ty)?);
+    }
+    let ret = abi_type_from_host_type(&sig.ret)?;
+    Some(HostFnSig { params, ret })
+}
+
+fn lower_type_rep_lit(lit: &rusk_mir::TypeRepLit) -> TypeRepLit {
+    match lit {
+        rusk_mir::TypeRepLit::Unit => TypeRepLit::Unit,
+        rusk_mir::TypeRepLit::Bool => TypeRepLit::Bool,
+        rusk_mir::TypeRepLit::Int => TypeRepLit::Int,
+        rusk_mir::TypeRepLit::Float => TypeRepLit::Float,
+        rusk_mir::TypeRepLit::String => TypeRepLit::String,
+        rusk_mir::TypeRepLit::Bytes => TypeRepLit::Bytes,
+        rusk_mir::TypeRepLit::Array => TypeRepLit::Array,
+        rusk_mir::TypeRepLit::Tuple(arity) => TypeRepLit::Tuple(*arity),
+        rusk_mir::TypeRepLit::Struct(name) => TypeRepLit::Struct(name.clone()),
+        rusk_mir::TypeRepLit::Enum(name) => TypeRepLit::Enum(name.clone()),
+        rusk_mir::TypeRepLit::Interface(name) => TypeRepLit::Interface(name.clone()),
+        rusk_mir::TypeRepLit::Fn => TypeRepLit::Fn,
+        rusk_mir::TypeRepLit::Cont => TypeRepLit::Cont,
+    }
+}
+
+fn lower_pattern(mir: &rusk_mir::Module, pat: &rusk_mir::Pattern) -> Result<Pattern, LowerError> {
+    use rusk_mir::Pattern as P;
+
+    Ok(match pat {
+        P::Wildcard => Pattern::Wildcard,
+        P::Bind => Pattern::Bind,
+        P::Literal(lit) => Pattern::Literal(lower_pattern_lit(mir, lit)?),
+        P::Tuple {
+            prefix,
+            rest,
+            suffix,
+        } => Pattern::Tuple {
+            prefix: prefix
+                .iter()
+                .map(|p| lower_pattern(mir, p))
+                .collect::<Result<Vec<_>, _>>()?,
+            rest: match rest {
+                None => None,
+                Some(p) => Some(Box::new(lower_pattern(mir, p)?)),
+            },
+            suffix: suffix
+                .iter()
+                .map(|p| lower_pattern(mir, p))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        P::Enum {
+            enum_name,
+            variant,
+            fields,
+        } => Pattern::Enum {
+            enum_name: enum_name.clone(),
+            variant: variant.clone(),
+            fields: fields
+                .iter()
+                .map(|p| lower_pattern(mir, p))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        P::Struct { type_name, fields } => Pattern::Struct {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(name, p)| Ok((name.clone(), lower_pattern(mir, p)?)))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        P::Array {
+            prefix,
+            rest,
+            suffix,
+        } => Pattern::Array {
+            prefix: prefix
+                .iter()
+                .map(|p| lower_pattern(mir, p))
+                .collect::<Result<Vec<_>, _>>()?,
+            rest: match rest {
+                None => None,
+                Some(p) => Some(Box::new(lower_pattern(mir, p)?)),
+            },
+            suffix: suffix
+                .iter()
+                .map(|p| lower_pattern(mir, p))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+    })
+}
+
+fn lower_pattern_lit(
+    mir: &rusk_mir::Module,
+    lit: &rusk_mir::ConstValue,
+) -> Result<ConstValue, LowerError> {
+    match lit {
+        rusk_mir::ConstValue::Unit => Ok(ConstValue::Unit),
+        rusk_mir::ConstValue::Bool(b) => Ok(ConstValue::Bool(*b)),
+        rusk_mir::ConstValue::Int(n) => Ok(ConstValue::Int(*n)),
+        rusk_mir::ConstValue::Float(x) => Ok(ConstValue::Float(*x)),
+        rusk_mir::ConstValue::String(s) => Ok(ConstValue::String(s.clone())),
+        rusk_mir::ConstValue::Bytes(b) => Ok(ConstValue::Bytes(b.clone())),
+        rusk_mir::ConstValue::TypeRep(rep) => Ok(ConstValue::TypeRep(lower_type_rep_lit(rep))),
+        rusk_mir::ConstValue::Function(name) => {
+            let Some(id) = mir.function_id(name.as_str()) else {
+                return Err(LowerError::new(format!(
+                    "pattern literal refers to unknown function `{name}`"
+                )));
+            };
+            Ok(ConstValue::Function(FunctionId(id.0)))
+        }
+        rusk_mir::ConstValue::FunctionId(id) => Ok(ConstValue::Function(FunctionId(id.0))),
+        other => Err(LowerError::new(format!(
+            "unsupported pattern literal value: {other:?}"
+        ))),
+    }
+}
 
 fn core_intrinsic(name: &str) -> Option<Intrinsic> {
     Some(match name {
@@ -96,6 +235,7 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
     })
 }
 
+#[cfg(test)]
 pub fn lower_mir_module(mir: &rusk_mir::Module) -> Result<ExecutableModule, LowerError> {
     lower_mir_module_with_options(mir, &LowerOptions::default())
 }
@@ -124,7 +264,7 @@ pub fn lower_mir_module_with_options(
         if core_intrinsic(import.name.as_str()).is_some() {
             continue;
         }
-        let Some(sig) = HostFnSig::from_host_sig(&import.sig) else {
+        let Some(sig) = abi_sig_from_host_sig(&import.sig) else {
             continue;
         };
         let id = out
@@ -220,7 +360,7 @@ fn lower_mir_function(
     mir_module: &rusk_mir::Module,
     mir_func: &rusk_mir::Function,
     host_id_map: &[Option<HostImportId>],
-    external_effect_ids: &BTreeMap<(String, String), crate::EffectId>,
+    external_effect_ids: &BTreeMap<(String, String), EffectId>,
 ) -> Result<Function, LowerError> {
     for (idx, param) in mir_func.params.iter().enumerate() {
         if param.local.0 != idx {
@@ -372,7 +512,7 @@ fn lower_mir_instruction(
     mir_func: &rusk_mir::Function,
     instr: &rusk_mir::Instruction,
     host_id_map: &[Option<HostImportId>],
-    external_effect_ids: &BTreeMap<(String, String), crate::EffectId>,
+    external_effect_ids: &BTreeMap<(String, String), EffectId>,
     temps: &mut TempAlloc,
     code: &mut Vec<Instruction>,
     patches: &mut Vec<PcPatch>,
@@ -437,7 +577,7 @@ fn lower_mir_instruction(
             }
             code.push(Instruction::MakeTypeRep {
                 dst: local(*dst),
-                base: base.clone(),
+                base: lower_type_rep_lit(base),
                 args: bc_args,
             });
         }
@@ -846,13 +986,18 @@ fn lower_mir_instruction(
                     )));
                 }
 
-                bc_clauses.push(crate::HandlerClause {
-                    effect: crate::EffectSpec {
+                let mut bc_arg_patterns = Vec::with_capacity(clause.arg_patterns.len());
+                for pat in &clause.arg_patterns {
+                    bc_arg_patterns.push(lower_pattern(mir_module, pat)?);
+                }
+
+                bc_clauses.push(HandlerClause {
+                    effect: EffectSpec {
                         interface: clause.effect.interface.clone(),
                         interface_args,
                         method: clause.effect.method.clone(),
                     },
-                    arg_patterns: clause.arg_patterns.clone(),
+                    arg_patterns: bc_arg_patterns,
                     target_pc: 0,
                     param_regs: params.iter().map(|l| l.0 as Reg).collect(),
                 });
@@ -886,7 +1031,7 @@ fn lower_mir_instruction(
 
             code.push(Instruction::Perform {
                 dst: dst.map(local),
-                effect: crate::EffectSpec {
+                effect: EffectSpec {
                     interface: effect.interface.clone(),
                     interface_args,
                     method: effect.method.clone(),
@@ -1036,8 +1181,8 @@ fn lower_mir_terminator(
                     )));
                 }
                 let param_regs = params.iter().map(|l| l.0 as Reg).collect::<Vec<_>>();
-                bc_cases.push(crate::SwitchCase {
-                    pattern: case.pattern.clone(),
+                bc_cases.push(SwitchCase {
+                    pattern: lower_pattern(mir_module, &case.pattern)?,
                     target_pc: 0,
                     param_regs,
                 });
@@ -1220,7 +1365,7 @@ fn lower_const_value(
         MirConstValue::Float(x) => ConstValue::Float(*x),
         MirConstValue::String(s) => ConstValue::String(s.clone()),
         MirConstValue::Bytes(b) => ConstValue::Bytes(b.clone()),
-        MirConstValue::TypeRep(rep) => ConstValue::TypeRep(rep.clone()),
+        MirConstValue::TypeRep(rep) => ConstValue::TypeRep(lower_type_rep_lit(rep)),
         MirConstValue::Function(name) => {
             let Some(id) = mir_module.function_id(name.as_str()) else {
                 return Err(LowerError::new(format!(
@@ -1280,11 +1425,11 @@ mod tests {
         assert_eq!(
             main.code,
             vec![
-                crate::Instruction::Const {
+                rusk_bytecode::Instruction::Const {
                     dst: 0,
-                    value: crate::ConstValue::Int(42)
+                    value: rusk_bytecode::ConstValue::Int(42)
                 },
-                crate::Instruction::Return { value: 0 }
+                rusk_bytecode::Instruction::Return { value: 0 }
             ]
         );
     }
@@ -1339,7 +1484,7 @@ mod tests {
         assert!(
             main.code
                 .iter()
-                .any(|i| matches!(i, crate::Instruction::Copy { dst: 2, .. })),
+                .any(|i| matches!(i, rusk_bytecode::Instruction::Copy { dst: 2, .. })),
             "expected parallel move lowering to use a temp register"
         );
     }

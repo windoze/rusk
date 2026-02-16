@@ -1402,7 +1402,7 @@ mod tests {
                 Instruction::Switch {
                     value: 0,
                     cases: vec![SwitchCase {
-                        pattern: rusk_mir::Pattern::Wildcard,
+                        pattern: crate::Pattern::Wildcard,
                         target_pc: 4,
                         param_regs: vec![],
                     }],
@@ -1418,11 +1418,12 @@ mod tests {
         verify_module(&module).expect("verify");
 
         let main = module.function(module.entry).unwrap();
-        // After deletion, old pc4 becomes new pc3.
+        // After optimization, the no-op copy at old pc0 is removed. O1 may also remove the
+        // redundant jump-to-next at old pc3, so old pc4 becomes new pc2.
         let Instruction::PushHandler { clauses } = &main.code[0] else {
             panic!("expected push_handler at pc0, got {:?}", main.code[0]);
         };
-        assert_eq!(clauses[0].target_pc, 3);
+        assert_eq!(clauses[0].target_pc, 2);
 
         let Instruction::Switch {
             cases, default_pc, ..
@@ -1430,7 +1431,7 @@ mod tests {
         else {
             panic!("expected switch at pc1, got {:?}", main.code[1]);
         };
-        assert_eq!(cases[0].target_pc, 3);
+        assert_eq!(cases[0].target_pc, 2);
         assert_eq!(*default_pc, 2);
     }
 

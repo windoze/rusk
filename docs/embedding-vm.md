@@ -494,9 +494,9 @@ evolve (this is a v0 runtime).
   - Fix: register the function’s prototype in `CompileOptions` via `register_host_module(...)`.
 
 - **“host import … is not ABI-safe for bytecode v0”**
-  - Symptom: compiling to MIR works, but compiling to bytecode fails.
+  - Symptom: compilation fails while producing bytecode.
   - Fix: restrict host function signatures to ABI-safe primitives for code meant to run on
-    `rusk-vm`, or run the program on the MIR interpreter instead.
+    `rusk-vm`, or extend the VM/ABI to support the types you need.
 
 - **“external effect … has non-ABI-safe signature for bytecode v0”**
   - Symptom: `register_external_effect(...)` works but compiling to bytecode fails.

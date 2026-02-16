@@ -62,7 +62,7 @@ fn generic_specialization_dispatches_to_host_impl_for_exact_type_args() {
     .expect("register host import");
 
     let fn_id = module.function_id("id").expect("id function id");
-    let int_ty = vm.intern_type_rep(&rusk_mir::TypeRepLit::Int, &[]);
+    let int_ty = vm.intern_type_rep(&rusk_bytecode::TypeRepLit::Int, &[]);
     vm.register_generic_specialization(fn_id, vec![int_ty], host_id)
         .expect("register specialization");
 
@@ -111,7 +111,7 @@ fn generic_specialization_falls_back_when_type_args_do_not_match() {
     .expect("register host import");
 
     let fn_id = module.function_id("id").expect("id function id");
-    let int_ty = vm.intern_type_rep(&rusk_mir::TypeRepLit::Int, &[]);
+    let int_ty = vm.intern_type_rep(&rusk_bytecode::TypeRepLit::Int, &[]);
     vm.register_generic_specialization(fn_id, vec![int_ty], host_id)
         .expect("register specialization");
 
