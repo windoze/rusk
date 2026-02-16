@@ -1,0 +1,10 @@
+// expect: ok string "hé"
+
+fn main() -> string {
+    let out = "";
+    for c in "hé" {
+        out = core::intrinsics::string_concat(out, c);
+    };
+    out
+}
+

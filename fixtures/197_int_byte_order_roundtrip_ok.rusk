@@ -1,0 +1,8 @@
+// expect: ok bool true
+
+fn main() -> bool {
+    let x = 0x0102030405060708;
+    core::intrinsics::int_from_le(core::intrinsics::int_to_le(x)) == x
+        && core::intrinsics::int_from_be(core::intrinsics::int_to_be(x)) == x
+}
+

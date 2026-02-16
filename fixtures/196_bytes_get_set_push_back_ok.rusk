@@ -1,0 +1,16 @@
+// expect: ok string "CB"
+
+fn main() -> string {
+    let b = core::intrinsics::bytes_new();
+    b = b.push_back(65);
+    b = b.push_back(66);
+
+    let got = match b.get(1) { Option::Some(v) => v Option::None => -1 };
+    if got != 66 { return "bad"; };
+
+    if b.get(2).is_some() { return "bad"; };
+
+    let b2 = b.set(0, 67);
+    core::intrinsics::bytes_to_string_utf8_strict(b2)
+}
+

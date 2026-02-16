@@ -187,7 +187,7 @@ impl RefValue {
         self.readonly
     }
 
-    fn ptr_eq(&self, other: &Self) -> bool {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
         self.handle == other.handle
     }
 }
@@ -221,7 +221,7 @@ impl ContinuationToken {
         })))
     }
 
-    fn ptr_eq(&self, other: &Self) -> bool {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
 
@@ -678,6 +678,11 @@ impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
     pub fn alloc_array(&mut self, items: Vec<Value>) -> Value {
         let handle = self.alloc_heap(HeapValue::Array(items));
         Value::Ref(RefValue::new(handle))
+    }
+
+    /// Interns a runtime `TypeRep` literal and returns its id.
+    pub fn intern_type_rep_lit(&mut self, lit: rusk_mir::TypeRepLit) -> TypeRepId {
+        self.eval_type_rep_lit(&lit)
     }
 
     /// Allocates a heap struct with named fields and returns it as a value.

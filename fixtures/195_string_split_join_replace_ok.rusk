@@ -1,0 +1,8 @@
+// expect: ok string "a,b,c"
+
+fn main() -> string {
+    let parts = "a,b,c".split(",");
+    let dashed = parts.join("-");
+    dashed.replace("-", ",")
+}
+

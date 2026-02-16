@@ -531,6 +531,10 @@ pub enum BinaryOp {
     Mod,
     Eq,
     Ne,
+    /// Identity equality: `===`
+    IdEq,
+    /// Identity inequality: `!==`
+    IdNe,
     Lt,
     Le,
     Gt,

@@ -1,0 +1,24 @@
+// expect: ok int 7
+
+fn main() -> int {
+    let s = "hé";
+    let b = core::intrinsics::string_to_utf8_bytes(s);
+
+    let n = 0;
+    n = n + s.len();
+    n = n + core::intrinsics::string_len(s);
+    n = n + b.len();
+
+    let empty = core::intrinsics::bytes_new();
+    n = n + empty.len();
+
+    let c = core::intrinsics::bytes_concat(b, empty);
+    let s2 = core::intrinsics::bytes_to_string_utf8_strict(c);
+    if s2 != s { return 0; };
+
+    let h_bytes = core::intrinsics::bytes_slice(b, 0, 1);
+    let h_str = core::intrinsics::bytes_to_string_utf8_strict(h_bytes);
+    if h_str != "h" { return 0; };
+
+    n
+}

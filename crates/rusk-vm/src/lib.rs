@@ -1942,6 +1942,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 rusk_bytecode::CallTarget::Intrinsic(intr) => {
                     let out = match eval_core_intrinsic(
                         &vm.module,
+                        &mut vm.type_reps,
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
                         frame,
@@ -3115,6 +3116,7 @@ const ARRAY_ITER_FIELD_INDEX: &str = "idx";
 
 fn eval_core_intrinsic(
     module: &ExecutableModule,
+    type_reps: &mut TypeReps,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
     frame: &Frame,
@@ -3135,6 +3137,65 @@ fn eval_core_intrinsic(
             [Value::String(a), Value::String(b)] => Ok(Value::String(format!("{a}{b}"))),
             _ => Err(bad_args("core::intrinsics::string_concat")),
         },
+        I::StringLen => match args.as_slice() {
+            [Value::String(s)] => Ok(Value::Int(s.chars().count() as i64)),
+            _ => Err(bad_args("core::intrinsics::string_len")),
+        },
+        I::StringSplit => match args.as_slice() {
+            [Value::String(s), Value::String(sep)] => {
+                if sep.is_empty() {
+                    return Err(
+                        "core::intrinsics::string_split: separator must not be empty".to_string(),
+                    );
+                }
+                let items: Vec<Value> = s
+                    .split(sep)
+                    .map(|part| Value::String(part.to_string()))
+                    .collect();
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(items),
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::string_split")),
+        },
+        I::StringJoin => match args.as_slice() {
+            [Value::Ref(arr), Value::String(sep)] => {
+                let Some(obj) = heap.get(arr.handle) else {
+                    return Err("core::intrinsics::string_join: dangling reference".to_string());
+                };
+                let HeapValue::Array(items) = obj else {
+                    return Err("core::intrinsics::string_join: expected an array".to_string());
+                };
+                let mut out = String::new();
+                for (idx, item) in items.iter().enumerate() {
+                    if idx != 0 {
+                        out.push_str(sep);
+                    }
+                    let Value::String(s) = item else {
+                        return Err(
+                            "core::intrinsics::string_join: expected array items of type string"
+                                .to_string(),
+                        );
+                    };
+                    out.push_str(s);
+                }
+                Ok(Value::String(out))
+            }
+            _ => Err(bad_args("core::intrinsics::string_join")),
+        },
+        I::StringReplace => match args.as_slice() {
+            [Value::String(s), Value::String(from), Value::String(to)] => {
+                if from.is_empty() {
+                    return Err(
+                        "core::intrinsics::string_replace: `from` must not be empty".to_string(),
+                    );
+                }
+                Ok(Value::String(s.replace(from, to)))
+            }
+            _ => Err(bad_args("core::intrinsics::string_replace")),
+        },
         I::ToString => match args.as_slice() {
             [Value::TypeRep(_), Value::Unit] => Ok(Value::String("()".to_string())),
             [Value::TypeRep(_), Value::Bool(v)] => Ok(Value::String(v.to_string())),
@@ -3152,6 +3213,21 @@ fn eval_core_intrinsic(
                 Ok(Value::String(format!("typerep({})", id.0)))
             }
             _ => Err(bad_args("core::intrinsics::to_string")),
+        },
+        I::StringToUtf8Bytes => match args.as_slice() {
+            [Value::String(s)] => Ok(Value::Bytes(s.as_bytes().to_vec())),
+            _ => Err(bad_args("core::intrinsics::string_to_utf8_bytes")),
+        },
+        I::StringToArray => match args.as_slice() {
+            [Value::String(s)] => {
+                let items = s.chars().map(|ch| Value::String(ch.to_string())).collect();
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(items),
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::string_to_array")),
         },
         I::Panic => match args.as_slice() {
             [Value::TypeRep(_), Value::String(msg)] => Err(format!("panic: {msg}")),
@@ -3221,6 +3297,22 @@ fn eval_core_intrinsic(
             [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a >= b)),
             _ => Err(bad_args("core::intrinsics::int_ge")),
         },
+        I::IntToLe => match args.as_slice() {
+            [Value::Int(v)] => Ok(Value::Int(v.to_le())),
+            _ => Err(bad_args("core::intrinsics::int_to_le")),
+        },
+        I::IntToBe => match args.as_slice() {
+            [Value::Int(v)] => Ok(Value::Int(v.to_be())),
+            _ => Err(bad_args("core::intrinsics::int_to_be")),
+        },
+        I::IntFromLe => match args.as_slice() {
+            [Value::Int(v)] => Ok(Value::Int(i64::from_le(*v))),
+            _ => Err(bad_args("core::intrinsics::int_from_le")),
+        },
+        I::IntFromBe => match args.as_slice() {
+            [Value::Int(v)] => Ok(Value::Int(i64::from_be(*v))),
+            _ => Err(bad_args("core::intrinsics::int_from_be")),
+        },
 
         I::FloatAdd => match args.as_slice() {
             [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a + b)),
@@ -3283,6 +3375,140 @@ fn eval_core_intrinsic(
             [Value::Bytes(a), Value::Bytes(b)] => Ok(Value::Bool(a != b)),
             _ => Err(bad_args("core::intrinsics::bytes_ne")),
         },
+        I::BytesNew => match args.as_slice() {
+            [] => Ok(Value::Bytes(Vec::new())),
+            _ => Err(bad_args("core::intrinsics::bytes_new")),
+        },
+        I::BytesLen => match args.as_slice() {
+            [Value::Bytes(b)] => Ok(Value::Int(b.len() as i64)),
+            _ => Err(bad_args("core::intrinsics::bytes_len")),
+        },
+        I::BytesToArray => match args.as_slice() {
+            [Value::Bytes(b)] => {
+                let items = b.iter().map(|v| Value::Int(*v as i64)).collect();
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(items),
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_to_array")),
+        },
+        I::BytesSlice => match args.as_slice() {
+            [Value::Bytes(b), Value::Int(start), Value::Int(end)] => {
+                let len = b.len();
+                let start_usize: usize = (*start)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={start}, len={len}"))?;
+                let end_usize: usize = (*end)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={end}, len={len}"))?;
+                if start_usize > end_usize {
+                    return Err("core::intrinsics::bytes_slice: start must be <= end".to_string());
+                }
+                if end_usize > len {
+                    return Err(format!("index out of bounds: index={end}, len={len}"));
+                }
+                Ok(Value::Bytes(b[start_usize..end_usize].to_vec()))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_slice")),
+        },
+        I::BytesConcat => match args.as_slice() {
+            [Value::Bytes(a), Value::Bytes(b)] => {
+                let mut out = Vec::with_capacity(a.len() + b.len());
+                out.extend_from_slice(a);
+                out.extend_from_slice(b);
+                Ok(Value::Bytes(out))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_concat")),
+        },
+        I::BytesGet => match args.as_slice() {
+            [Value::Bytes(b), Value::Int(idx)] => {
+                let int_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Int,
+                    args: Vec::new(),
+                });
+                if *idx < 0 {
+                    return Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![int_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    ));
+                }
+                let idx_usize = (*idx) as usize;
+                if idx_usize >= b.len() {
+                    return Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![int_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    ));
+                }
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Enum {
+                        enum_name: "Option".to_string(),
+                        type_args: vec![int_rep],
+                        variant: "Some".to_string(),
+                        fields: vec![Value::Int(b[idx_usize] as i64)],
+                    },
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_get")),
+        },
+        I::BytesSet => match args.as_slice() {
+            [Value::Bytes(b), Value::Int(idx), Value::Int(value)] => {
+                let len = b.len();
+                let idx_usize: usize = (*idx)
+                    .try_into()
+                    .map_err(|_| format!("index out of bounds: index={idx}, len={len}"))?;
+                if idx_usize >= len {
+                    return Err(format!("index out of bounds: index={idx}, len={len}"));
+                }
+                let v_u8: u8 = (*value).try_into().map_err(|_| {
+                    format!("core::intrinsics::bytes_set: value out of range for byte: {value}")
+                })?;
+                let mut out = b.clone();
+                out[idx_usize] = v_u8;
+                Ok(Value::Bytes(out))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_set")),
+        },
+        I::BytesPushBack => match args.as_slice() {
+            [Value::Bytes(b), Value::Int(value)] => {
+                let v_u8: u8 = (*value).try_into().map_err(|_| {
+                    format!(
+                        "core::intrinsics::bytes_push_back: value out of range for byte: {value}"
+                    )
+                })?;
+                let mut out = b.clone();
+                out.push(v_u8);
+                Ok(Value::Bytes(out))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_push_back")),
+        },
+        I::BytesToStringUtf8Strict => match args.as_slice() {
+            [Value::Bytes(b)] => String::from_utf8(b.clone())
+                .map(Value::String)
+                .map_err(|e| {
+                    format!("core::intrinsics::bytes_to_string_utf8_strict: invalid UTF-8: {e}")
+                }),
+            _ => Err(bad_args("core::intrinsics::bytes_to_string_utf8_strict")),
+        },
+        I::BytesToStringUtf8Lossy => match args.as_slice() {
+            [Value::Bytes(b)] => Ok(Value::String(String::from_utf8_lossy(b).to_string())),
+            _ => Err(bad_args("core::intrinsics::bytes_to_string_utf8_lossy")),
+        },
         I::UnitEq => match args.as_slice() {
             [Value::Unit, Value::Unit] => Ok(Value::Bool(true)),
             _ => Err(bad_args("core::intrinsics::unit_eq")),
@@ -3290,6 +3516,138 @@ fn eval_core_intrinsic(
         I::UnitNe => match args.as_slice() {
             [Value::Unit, Value::Unit] => Ok(Value::Bool(false)),
             _ => Err(bad_args("core::intrinsics::unit_ne")),
+        },
+
+        I::IdentityEq => match args.as_slice() {
+            [Value::TypeRep(_), Value::TypeRep(_), a, b] => Ok(Value::Bool(match (a, b) {
+                (Value::Ref(ra), Value::Ref(rb)) => ra.handle == rb.handle,
+                (Value::Unit, Value::Unit) => true,
+                (Value::Bool(x), Value::Bool(y)) => x == y,
+                (Value::Int(x), Value::Int(y)) => x == y,
+                (Value::Float(x), Value::Float(y)) => x == y,
+                (Value::String(x), Value::String(y)) => x == y,
+                (Value::Bytes(x), Value::Bytes(y)) => x == y,
+                (Value::TypeRep(x), Value::TypeRep(y)) => x == y,
+                (Value::Function(x), Value::Function(y)) => x == y,
+                (Value::Continuation(x), Value::Continuation(y)) => Rc::ptr_eq(&x.state, &y.state),
+                _ => false,
+            })),
+            _ => Err(bad_args("core::intrinsics::identity_eq")),
+        },
+        I::IdentityNe => match args.as_slice() {
+            [Value::TypeRep(_), Value::TypeRep(_), a, b] => Ok(Value::Bool(!match (a, b) {
+                (Value::Ref(ra), Value::Ref(rb)) => ra.handle == rb.handle,
+                (Value::Unit, Value::Unit) => true,
+                (Value::Bool(x), Value::Bool(y)) => x == y,
+                (Value::Int(x), Value::Int(y)) => x == y,
+                (Value::Float(x), Value::Float(y)) => x == y,
+                (Value::String(x), Value::String(y)) => x == y,
+                (Value::Bytes(x), Value::Bytes(y)) => x == y,
+                (Value::TypeRep(x), Value::TypeRep(y)) => x == y,
+                (Value::Function(x), Value::Function(y)) => x == y,
+                (Value::Continuation(x), Value::Continuation(y)) => Rc::ptr_eq(&x.state, &y.state),
+                _ => false,
+            })),
+            _ => Err(bad_args("core::intrinsics::identity_ne")),
+        },
+
+        I::OptionIsSome => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(opt)] => {
+                let Some(obj) = heap.get(opt.handle) else {
+                    return Err("Option::is_some: dangling reference".to_string());
+                };
+                let HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    ..
+                } = obj
+                else {
+                    return Err("Option::is_some: expected an enum".to_string());
+                };
+                if enum_name != "Option" {
+                    return Err(format!(
+                        "Option::is_some: expected `Option`, got `{enum_name}`"
+                    ));
+                }
+                Ok(Value::Bool(variant == "Some"))
+            }
+            _ => Err(bad_args("Option::is_some")),
+        },
+        I::OptionIsNone => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(opt)] => {
+                let Some(obj) = heap.get(opt.handle) else {
+                    return Err("Option::is_none: dangling reference".to_string());
+                };
+                let HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    ..
+                } = obj
+                else {
+                    return Err("Option::is_none: expected an enum".to_string());
+                };
+                if enum_name != "Option" {
+                    return Err(format!(
+                        "Option::is_none: expected `Option`, got `{enum_name}`"
+                    ));
+                }
+                Ok(Value::Bool(variant == "None"))
+            }
+            _ => Err(bad_args("Option::is_none")),
+        },
+        I::OptionUnwrap => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(opt)] => {
+                let Some(obj) = heap.get(opt.handle) else {
+                    return Err("Option::unwrap: dangling reference".to_string());
+                };
+                let HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    fields,
+                    ..
+                } = obj
+                else {
+                    return Err("Option::unwrap: expected an enum".to_string());
+                };
+                if enum_name != "Option" {
+                    return Err(format!(
+                        "Option::unwrap: expected `Option`, got `{enum_name}`"
+                    ));
+                }
+                match (variant.as_str(), fields.as_slice()) {
+                    ("Some", [v]) => Ok(v.clone()),
+                    ("None", []) => Err("panic: Option::unwrap: called on None".to_string()),
+                    _ => Err("Option::unwrap: malformed Option value".to_string()),
+                }
+            }
+            _ => Err(bad_args("Option::unwrap")),
+        },
+        I::OptionExpect => match args.as_slice() {
+            [Value::TypeRep(_), Value::Ref(opt), Value::String(msg)] => {
+                let Some(obj) = heap.get(opt.handle) else {
+                    return Err("Option::expect: dangling reference".to_string());
+                };
+                let HeapValue::Enum {
+                    enum_name,
+                    variant,
+                    fields,
+                    ..
+                } = obj
+                else {
+                    return Err("Option::expect: expected an enum".to_string());
+                };
+                if enum_name != "Option" {
+                    return Err(format!(
+                        "Option::expect: expected `Option`, got `{enum_name}`"
+                    ));
+                }
+                match (variant.as_str(), fields.as_slice()) {
+                    ("Some", [v]) => Ok(v.clone()),
+                    ("None", []) => Err(format!("panic: {msg}")),
+                    _ => Err("Option::expect: malformed Option value".to_string()),
+                }
+            }
+            _ => Err(bad_args("Option::expect")),
         },
 
         I::ArrayLen => match args.as_slice() {
@@ -3370,6 +3728,53 @@ fn eval_core_intrinsic(
                 }
             }
             _ => Err(bad_args("core::intrinsics::array_pop")),
+        },
+        I::ArrayPopFront => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
+                if arr.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+                let removed = {
+                    let Some(obj) = heap.get_mut(arr.handle) else {
+                        return Err(
+                            "core::intrinsics::array_pop_front: dangling reference".to_string()
+                        );
+                    };
+                    let HeapValue::Array(items) = obj else {
+                        return Err(
+                            "core::intrinsics::array_pop_front: expected an array".to_string()
+                        );
+                    };
+                    if items.is_empty() {
+                        None
+                    } else {
+                        Some(items.remove(0))
+                    }
+                };
+                match removed {
+                    Some(v) => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![v],
+                        },
+                    )),
+                    None => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    )),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::array_pop_front")),
         },
         I::ArrayClear => match args.as_slice() {
             [Value::TypeRep(_), Value::Ref(arr)] => {
@@ -3471,6 +3876,90 @@ fn eval_core_intrinsic(
                 Ok(items.remove(idx_usize))
             }
             _ => Err(bad_args("core::intrinsics::array_remove")),
+        },
+        I::ArrayGet => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(arr), Value::Int(idx)] => {
+                let item = {
+                    let Some(obj) = heap.get(arr.handle) else {
+                        return Err("core::intrinsics::array_get: dangling reference".to_string());
+                    };
+                    let HeapValue::Array(items) = obj else {
+                        return Err("core::intrinsics::array_get: expected an array".to_string());
+                    };
+                    if *idx < 0 {
+                        None
+                    } else {
+                        let idx_usize = (*idx) as usize;
+                        items.get(idx_usize).cloned()
+                    }
+                };
+                match item {
+                    Some(v) => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![v],
+                        },
+                    )),
+                    None => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    )),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::array_get")),
+        },
+        I::ArrayGetRo => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(arr), Value::Int(idx)] => {
+                let item = {
+                    let Some(obj) = heap.get(arr.handle) else {
+                        return Err(
+                            "core::intrinsics::array_get_ro: dangling reference".to_string()
+                        );
+                    };
+                    let HeapValue::Array(items) = obj else {
+                        return Err("core::intrinsics::array_get_ro: expected an array".to_string());
+                    };
+                    if *idx < 0 {
+                        None
+                    } else {
+                        let idx_usize = (*idx) as usize;
+                        items.get(idx_usize).cloned()
+                    }
+                };
+                match item {
+                    Some(v) => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![v.into_readonly_view()],
+                        },
+                    )),
+                    None => Ok(alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    )),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::array_get_ro")),
         },
         I::ArrayExtend => match args.as_slice() {
             [Value::TypeRep(_), Value::Ref(arr), Value::Ref(other)] => {

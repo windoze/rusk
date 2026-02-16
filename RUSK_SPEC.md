@@ -1181,6 +1181,31 @@ Other primitive equality:
 - `bytes`: `core::intrinsics::bytes_eq`, `core::intrinsics::bytes_ne`
 - `unit`: `core::intrinsics::unit_eq`, `core::intrinsics::unit_ne`
 
+Identity equality:
+
+- `a === b` lowers to `core::intrinsics::identity_eq(a, b)` (returns `bool`)
+- `a !== b` lowers to `core::intrinsics::identity_ne(a, b)` (returns `bool`)
+
+Type rule:
+
+- If both operands are **definitely reference-like** (arrays, tuples, and nominal types including
+  interface values), the operand types do **not** need to unify (this makes `s === (s as I)` work).
+- Otherwise the operand types must unify.
+
+Semantics:
+
+- For reference-like operands, identity equality compares **object identity** (i.e. the same heap
+  reference / continuation token).
+- For non-reference-like primitive operands (`unit`/`bool`/`int`/`float`/`string`/`bytes`), identity
+  equality is equivalent to the corresponding primitive `==` / `!=`.
+
+Integer byte order helpers (library intrinsics):
+
+- `core::intrinsics::int_to_le(x: int) -> int`
+- `core::intrinsics::int_to_be(x: int) -> int`
+- `core::intrinsics::int_from_le(x: int) -> int`
+- `core::intrinsics::int_from_be(x: int) -> int`
+
 ### 9.2 Boolean Operators
 
 - `!x` lowers to `core::intrinsics::bool_not(x)`
@@ -1209,11 +1234,20 @@ loop {
 }
 ```
 
+`for` over `string` / `bytes` is supported by first lowering to an array:
+
+- `for c in s { body }` where `s: string` desugars to `for c in core::intrinsics::string_to_array(s) { body }`
+  and yields one-character `string` values.
+- `for b in bs { body }` where `bs: bytes` desugars to `for b in core::intrinsics::bytes_to_array(bs) { body }`
+  and yields `int` values in `0..=255`.
+
 Required core intrinsics functions and types:
 
 - `struct core::intrinsics::ArrayIter<T> { arr: [T], idx: int }` (iterator state object)
 - `core::intrinsics::into_iter<T>([T]) -> core::intrinsics::ArrayIter<T>`
 - `core::intrinsics::next<T>(core::intrinsics::ArrayIter<T>) -> Option<T>`
+- `core::intrinsics::string_to_array(s: string) -> [string]`
+- `core::intrinsics::bytes_to_array(b: bytes) -> [int]`
 - `enum Option<T> { Some(T), None }`
 
 ### 9.5 Panic
@@ -1241,6 +1275,10 @@ Required array intrinsics (v0.4 reference implementation):
 - Push/pop:
   - `core::intrinsics::array_push<T>(xs: [T], value: T) -> unit`
   - `core::intrinsics::array_pop<T>(xs: [T]) -> Option<T>` (returns `Option::None` if empty)
+  - `core::intrinsics::array_pop_front<T>(xs: [T]) -> Option<T>` (returns `Option::None` if empty)
+- Safe indexing:
+  - `core::intrinsics::array_get<T>(xs: [T], idx: int) -> Option<T>`
+  - `core::intrinsics::array_get_ro<T>(xs: readonly [T], idx: int) -> Option<readonly T>`
 - Insert/remove:
   - `core::intrinsics::array_insert<T>(xs: [T], idx: int, value: T) -> unit`
   - `core::intrinsics::array_remove<T>(xs: [T], idx: int) -> T`
@@ -1261,10 +1299,86 @@ Error behavior:
 - The mutating intrinsics (`array_push`, `array_pop`, `array_insert`, `array_remove`, `array_clear`,
   `array_resize`, `array_extend`) cannot be called with a `readonly [T]` receiver (type error), and
   also trap at runtime if a readonly reference is somehow passed.
+- `array_get` / `array_get_ro` do not trap on out-of-bounds indices; instead they return
+  `Option::None` if `idx < 0` or `idx >= len(xs)`.
 - `array_insert` traps if `idx` is out of bounds (`idx < 0` or `idx > len(xs)`).
 - `array_remove` traps if `idx` is out of bounds (`idx < 0` or `idx >= len(xs)`).
 - `array_slice`/`array_slice_ro` trap if `start` or `end` is out of bounds (`start < 0`,
   `end < 0`, `end > len(xs)`) or if `start > end`.
+
+Method sugar (built-in):
+
+- `xs.len()` desugars to `core::intrinsics::array_len(xs)` (or `array_len_ro` for `readonly [T]`)
+- `xs.get(i)` desugars to `core::intrinsics::array_get(xs, i)` (or `array_get_ro` for
+  `readonly [T]`)
+- `xs.push_back(v)` desugars to `core::intrinsics::array_push(xs, v)`
+- `xs.push_front(v)` desugars to `core::intrinsics::array_insert(xs, 0, v)`
+- `xs.pop_back()` desugars to `core::intrinsics::array_pop(xs)`
+- `xs.pop_front()` desugars to `core::intrinsics::array_pop_front(xs)`
+- `xs.join(sep)` (only for `[string]`) desugars to `core::intrinsics::string_join(xs, sep)`
+
+### 9.7 Strings and Bytes (Library Intrinsics)
+
+String intrinsics:
+
+- `core::intrinsics::string_len(s: string) -> int`
+  - Returns the number of Unicode scalar values (i.e. `chars().count()`), not the UTF-8 byte
+    length.
+- `core::intrinsics::string_split(s: string, sep: string) -> [string]`
+  - Traps if `sep` is empty.
+- `core::intrinsics::string_join(parts: [string], sep: string) -> string`
+- `core::intrinsics::string_replace(s: string, from: string, to: string) -> string`
+  - Traps if `from` is empty.
+- `core::intrinsics::string_to_utf8_bytes(s: string) -> bytes`
+- `core::intrinsics::string_to_array(s: string) -> [string]`
+  - Returns an array of one-character strings (Unicode scalar values).
+
+Bytes intrinsics:
+
+- `core::intrinsics::bytes_new() -> bytes`
+- `core::intrinsics::bytes_len(b: bytes) -> int`
+- `core::intrinsics::bytes_to_array(b: bytes) -> [int]`
+- `core::intrinsics::bytes_slice(b: bytes, start: int, end: int) -> bytes`
+  - Traps if `start`/`end` are out of bounds, or if `start > end`.
+- `core::intrinsics::bytes_concat(a: bytes, b: bytes) -> bytes`
+- `core::intrinsics::bytes_get(b: bytes, idx: int) -> Option<int>`
+  - Returns `Option::None` if `idx < 0` or `idx >= len(b)`.
+- `core::intrinsics::bytes_set(b: bytes, idx: int, value: int) -> bytes`
+  - Traps if `idx` is out of bounds or `value` is not in `0..=255`.
+- `core::intrinsics::bytes_push_back(b: bytes, value: int) -> bytes`
+  - Traps if `value` is not in `0..=255`.
+- `core::intrinsics::bytes_to_string_utf8_strict(b: bytes) -> string`
+  - Traps if `b` is not valid UTF-8.
+- `core::intrinsics::bytes_to_string_utf8_lossy(b: bytes) -> string`
+  - Replaces invalid sequences with `U+FFFD`.
+
+Method sugar (built-in):
+
+- `s.len()` desugars to `core::intrinsics::string_len(s)`
+- `s.split(sep)` desugars to `core::intrinsics::string_split(s, sep)`
+- `s.replace(from, to)` desugars to `core::intrinsics::string_replace(s, from, to)`
+- `parts.join(sep)` (only for `[string]`) desugars to `core::intrinsics::string_join(parts, sep)`
+- `b.len()` desugars to `core::intrinsics::bytes_len(b)`
+- `b.get(i)` desugars to `core::intrinsics::bytes_get(b, i)`
+- `b.set(i, v)` desugars to `core::intrinsics::bytes_set(b, i, v)`
+- `b.push_back(v)` desugars to `core::intrinsics::bytes_push_back(b, v)`
+- `b.slice(start, end)` desugars to `core::intrinsics::bytes_slice(b, start, end)`
+- `b.concat(other)` desugars to `core::intrinsics::bytes_concat(b, other)`
+
+### 9.8 `Option<T>` methods
+
+`Option<T>` is a required built-in enum:
+
+```rust
+enum Option<T> { Some(T), None }
+```
+
+The core runtime also provides a minimal method surface for `Option<T>`:
+
+- `Option<T>.is_some() -> bool`
+- `Option<T>.is_none() -> bool`
+- `Option<T>.unwrap() -> T` (traps if `None`)
+- `Option<T>.expect(msg: string) -> T` (traps if `None`)
 
 
 ## 10. Compilation to MIR (Normative)

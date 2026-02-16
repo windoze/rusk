@@ -864,10 +864,29 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             vec![HostType::String, HostType::String],
             HostType::String,
         )),
+        "core::intrinsics::string_len" => Some(sig(vec![HostType::String], HostType::Int)),
+        "core::intrinsics::string_split" => Some(sig(
+            vec![HostType::String, HostType::String],
+            HostType::Array(Box::new(HostType::String)),
+        )),
+        "core::intrinsics::string_join" => Some(sig(
+            vec![HostType::Array(Box::new(HostType::String)), HostType::String],
+            HostType::String,
+        )),
+        "core::intrinsics::string_replace" => Some(sig(
+            vec![HostType::String, HostType::String, HostType::String],
+            HostType::String,
+        )),
         "core::intrinsics::to_string" => Some(sig(
             vec![HostType::TypeRep, HostType::Any],
             HostType::String,
         )),
+        "core::intrinsics::string_to_utf8_bytes" => {
+            Some(sig(vec![HostType::String], HostType::Bytes))
+        }
+        "core::intrinsics::string_to_array" => {
+            Some(sig(vec![HostType::String], HostType::Array(Box::new(HostType::String))))
+        }
         // Panic.
         "core::intrinsics::panic" => Some(sig(
             vec![HostType::TypeRep, HostType::String],
@@ -894,6 +913,10 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         | "core::intrinsics::int_ge" => {
             Some(sig(vec![HostType::Int, HostType::Int], HostType::Bool))
         }
+        "core::intrinsics::int_to_le"
+        | "core::intrinsics::int_to_be"
+        | "core::intrinsics::int_from_le"
+        | "core::intrinsics::int_from_be" => Some(sig(vec![HostType::Int], HostType::Int)),
         // Float arithmetic & comparisons.
         "core::intrinsics::float_add"
         | "core::intrinsics::float_sub"
@@ -918,9 +941,57 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         "core::intrinsics::bytes_eq" | "core::intrinsics::bytes_ne" => {
             Some(sig(vec![HostType::Bytes, HostType::Bytes], HostType::Bool))
         }
+        "core::intrinsics::bytes_new" => Some(sig(vec![], HostType::Bytes)),
+        "core::intrinsics::bytes_len" => Some(sig(vec![HostType::Bytes], HostType::Int)),
+        "core::intrinsics::bytes_to_array" => Some(sig(
+            vec![HostType::Bytes],
+            HostType::Array(Box::new(HostType::Int)),
+        )),
+        "core::intrinsics::bytes_slice" => Some(sig(
+            vec![HostType::Bytes, HostType::Int, HostType::Int],
+            HostType::Bytes,
+        )),
+        "core::intrinsics::bytes_concat" => {
+            Some(sig(vec![HostType::Bytes, HostType::Bytes], HostType::Bytes))
+        }
+        "core::intrinsics::bytes_get" => Some(sig(
+            vec![HostType::Bytes, HostType::Int],
+            HostType::Any,
+        )),
+        "core::intrinsics::bytes_set" => Some(sig(
+            vec![HostType::Bytes, HostType::Int, HostType::Int],
+            HostType::Bytes,
+        )),
+        "core::intrinsics::bytes_push_back" => {
+            Some(sig(vec![HostType::Bytes, HostType::Int], HostType::Bytes))
+        }
+        "core::intrinsics::bytes_to_string_utf8_strict"
+        | "core::intrinsics::bytes_to_string_utf8_lossy" => {
+            Some(sig(vec![HostType::Bytes], HostType::String))
+        }
         "core::intrinsics::unit_eq" | "core::intrinsics::unit_ne" => {
             Some(sig(vec![HostType::Unit, HostType::Unit], HostType::Bool))
         }
+        // Identity equality.
+        "core::intrinsics::identity_eq" | "core::intrinsics::identity_ne" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::TypeRep,
+                HostType::Any,
+                HostType::Any,
+            ],
+            HostType::Bool,
+        )),
+
+        // Built-in `Option<T>` methods.
+        "Option::is_some" | "Option::is_none" => {
+            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Bool))
+        }
+        "Option::unwrap" => Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any)),
+        "Option::expect" => Some(sig(
+            vec![HostType::TypeRep, HostType::Any, HostType::String],
+            HostType::Any,
+        )),
         // Iterator protocol.
         "core::intrinsics::into_iter" => Some(sig(
             vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
@@ -947,6 +1018,10 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
             HostType::Any,
         )),
+        "core::intrinsics::array_pop_front" => Some(sig(
+            vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
+            HostType::Any,
+        )),
         "core::intrinsics::array_clear" => Some(sig(
             vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
             HostType::Unit,
@@ -961,6 +1036,14 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             HostType::Unit,
         )),
         "core::intrinsics::array_remove" => Some(sig(
+            vec![
+                HostType::TypeRep,
+                HostType::Array(Box::new(HostType::Any)),
+                HostType::Int,
+            ],
+            HostType::Any,
+        )),
+        "core::intrinsics::array_get" | "core::intrinsics::array_get_ro" => Some(sig(
             vec![
                 HostType::TypeRep,
                 HostType::Array(Box::new(HostType::Any)),
@@ -5121,11 +5204,35 @@ impl<'a> FunctionLowerer<'a> {
                 iter.span(),
             )
         })?;
-        let elem_ty = match self.strip_readonly_ty(iter_ty) {
-            Ty::Array(elem) => elem.as_ref().clone(),
+        let (arr_local, elem_ty) = match self.strip_readonly_ty(iter_ty) {
+            Ty::Array(elem) => (iter_val, elem.as_ref().clone()),
+            Ty::String => {
+                // Desugar `for c in string` by lowering the string to an array of 1-character
+                // strings, then using the standard array iterator protocol.
+                let arr = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(arr),
+                    func: "core::intrinsics::string_to_array".to_string(),
+                    args: vec![Operand::Local(iter_val)],
+                });
+                (arr, Ty::String)
+            }
+            Ty::Bytes => {
+                // Desugar `for b in bytes` by lowering the byte sequence to an array of ints
+                // (`0..=255`), then using the standard array iterator protocol.
+                let arr = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(arr),
+                    func: "core::intrinsics::bytes_to_array".to_string(),
+                    args: vec![Operand::Local(iter_val)],
+                });
+                (arr, Ty::Int)
+            }
             other => {
                 return Err(CompileError::new(
-                    format!("internal error: `for` expects an array iterator, got `{other}`"),
+                    format!(
+                        "internal error: `for` expects an array/string/bytes iterator, got `{other}`"
+                    ),
                     iter.span(),
                 ));
             }
@@ -5136,7 +5243,7 @@ impl<'a> FunctionLowerer<'a> {
         self.emit(Instruction::Call {
             dst: Some(it_local),
             func: "core::intrinsics::into_iter".to_string(),
-            args: vec![elem_rep.clone(), Operand::Local(iter_val)],
+            args: vec![elem_rep.clone(), Operand::Local(arr_local)],
         });
 
         let loop_head = self.new_block("for_head");
@@ -5444,6 +5551,33 @@ impl<'a> FunctionLowerer<'a> {
                 let l = self.lower_expr(left)?;
                 let r = self.lower_expr(right)?;
                 let operand_ty = self.strip_readonly_ty(&ty);
+
+                if matches!(op, BinaryOp::IdEq | BinaryOp::IdNe) {
+                    let lt = self
+                        .expr_ty(left)
+                        .ok_or_else(|| {
+                        CompileError::new("internal error: missing type for `===`/`!==` lhs", span)
+                    })?
+                        .clone();
+                    let rt = self
+                        .expr_ty(right)
+                        .ok_or_else(|| {
+                        CompileError::new("internal error: missing type for `===`/`!==` rhs", span)
+                    })?
+                        .clone();
+                    let lt_rep = self.lower_type_rep_for_ty(&lt, span)?;
+                    let rt_rep = self.lower_type_rep_for_ty(&rt, span)?;
+                    let func = match op {
+                        BinaryOp::IdEq => "core::intrinsics::identity_eq",
+                        BinaryOp::IdNe => "core::intrinsics::identity_ne",
+                        _ => unreachable!("checked by matches!"),
+                    };
+                    return self.lower_named_call(
+                        func,
+                        vec![lt_rep, rt_rep, Operand::Local(l), Operand::Local(r)],
+                    );
+                }
+
                 match (op, operand_ty) {
                     (BinaryOp::Add, Ty::Int) => {
                         let dst = self.alloc_local();
@@ -6399,6 +6533,237 @@ impl<'a> FunctionLowerer<'a> {
                 )
             })?
             .clone();
+
+        // Built-in methods on non-nominal core types.
+        //
+        // These are validated during typechecking; lowering rewrites them to `core::intrinsics::*`
+        // calls so they work uniformly in both the MIR interpreter and the bytecode VM.
+        let recv_is_readonly = matches!(recv_ty, Ty::Readonly(_));
+        match self.strip_readonly_ty(&recv_ty) {
+            Ty::Array(elem) => {
+                let elem_rep = self.lower_type_rep_for_ty(elem, span)?;
+                let recv_local = self.lower_expr(receiver)?;
+                match method.name.as_str() {
+                    "len" => {
+                        let func = if recv_is_readonly {
+                            "core::intrinsics::array_len_ro"
+                        } else {
+                            "core::intrinsics::array_len"
+                        };
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: func.to_string(),
+                            args: vec![elem_rep, Operand::Local(recv_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    "join" => {
+                        let sep_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::string_join".to_string(),
+                            args: vec![Operand::Local(recv_local), Operand::Local(sep_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    "get" => {
+                        let func = if recv_is_readonly {
+                            "core::intrinsics::array_get_ro"
+                        } else {
+                            "core::intrinsics::array_get"
+                        };
+                        let idx_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: func.to_string(),
+                            args: vec![
+                                elem_rep,
+                                Operand::Local(recv_local),
+                                Operand::Local(idx_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "push_back" => {
+                        let value_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::array_push".to_string(),
+                            args: vec![
+                                elem_rep,
+                                Operand::Local(recv_local),
+                                Operand::Local(value_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "push_front" => {
+                        let value_local = self.lower_expr(&args[0])?;
+                        let zero = self.alloc_int(0);
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::array_insert".to_string(),
+                            args: vec![
+                                elem_rep,
+                                Operand::Local(recv_local),
+                                Operand::Local(zero),
+                                Operand::Local(value_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "pop_back" => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::array_pop".to_string(),
+                            args: vec![elem_rep, Operand::Local(recv_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    "pop_front" => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::array_pop_front".to_string(),
+                            args: vec![elem_rep, Operand::Local(recv_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    _ => {}
+                }
+            }
+            Ty::String => {
+                let recv_local = self.lower_expr(receiver)?;
+                match method.name.as_str() {
+                    "len" => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::string_len".to_string(),
+                            args: vec![Operand::Local(recv_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    "split" => {
+                        let sep_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::string_split".to_string(),
+                            args: vec![Operand::Local(recv_local), Operand::Local(sep_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    "replace" => {
+                        let from_local = self.lower_expr(&args[0])?;
+                        let to_local = self.lower_expr(&args[1])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::string_replace".to_string(),
+                            args: vec![
+                                Operand::Local(recv_local),
+                                Operand::Local(from_local),
+                                Operand::Local(to_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    _ => {}
+                }
+            }
+            Ty::Bytes => {
+                let recv_local = self.lower_expr(receiver)?;
+                match method.name.as_str() {
+                    "len" => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::bytes_len".to_string(),
+                            args: vec![Operand::Local(recv_local)],
+                        });
+                        return Ok(dst);
+                    }
+                    "get" => {
+                        let idx_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::bytes_get".to_string(),
+                            args: vec![
+                                Operand::Local(recv_local),
+                                Operand::Local(idx_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "set" => {
+                        let idx_local = self.lower_expr(&args[0])?;
+                        let value_local = self.lower_expr(&args[1])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::bytes_set".to_string(),
+                            args: vec![
+                                Operand::Local(recv_local),
+                                Operand::Local(idx_local),
+                                Operand::Local(value_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "push_back" => {
+                        let value_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::bytes_push_back".to_string(),
+                            args: vec![
+                                Operand::Local(recv_local),
+                                Operand::Local(value_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "slice" => {
+                        let start_local = self.lower_expr(&args[0])?;
+                        let end_local = self.lower_expr(&args[1])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::bytes_slice".to_string(),
+                            args: vec![
+                                Operand::Local(recv_local),
+                                Operand::Local(start_local),
+                                Operand::Local(end_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    "concat" => {
+                        let other_local = self.lower_expr(&args[0])?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: "core::intrinsics::bytes_concat".to_string(),
+                            args: vec![
+                                Operand::Local(recv_local),
+                                Operand::Local(other_local),
+                            ],
+                        });
+                        return Ok(dst);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
 
         // Inherent methods first (if the receiver has a nominal type name).
         if let Some(recv_nom) = nominal_type_name(&recv_ty) {

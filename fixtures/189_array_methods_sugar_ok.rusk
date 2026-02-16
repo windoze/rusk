@@ -1,0 +1,26 @@
+// expect: ok int 87
+
+fn main() -> int {
+    let xs = [10, 20, 30];
+
+    let sum = 0;
+    sum = sum + xs.len();
+    sum = sum + match xs.get(1) { Option::Some(v) => v Option::None => 0 };
+    sum = sum + match xs.get(3) { Option::Some(_) => 1000 Option::None => 1 };
+    sum = sum + match xs.get(-1) { Option::Some(_) => 1000 Option::None => 2 };
+
+    xs.push_front(5);
+    xs.push_back(40);
+
+    sum = sum + match xs.pop_front() { Option::Some(v) => v Option::None => 0 };
+    sum = sum + match xs.pop_back() { Option::Some(v) => v Option::None => 0 };
+
+    sum = sum + xs.len();
+
+    readonly ro = xs;
+    sum = sum + ro.len();
+    sum = sum + match ro.get(0) { Option::Some(v) => v Option::None => 0 };
+
+    sum
+}
+

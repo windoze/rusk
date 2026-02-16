@@ -132,6 +132,12 @@ pub enum Intrinsic {
     IntGt,
     IntGe,
 
+    // Integer byte order helpers.
+    IntToLe,
+    IntToBe,
+    IntFromLe,
+    IntFromBe,
+
     // Float arithmetic & comparisons.
     FloatAdd,
     FloatSub,
@@ -153,6 +159,34 @@ pub enum Intrinsic {
     UnitEq,
     UnitNe,
 
+    // Identity equality (reference identity).
+    IdentityEq,
+    IdentityNe,
+
+    // Built-in `Option<T>` methods.
+    OptionIsSome,
+    OptionIsNone,
+    OptionUnwrap,
+    OptionExpect,
+
+    // String / bytes helpers.
+    StringLen,
+    StringSplit,
+    StringJoin,
+    StringReplace,
+    StringToArray,
+    BytesNew,
+    BytesLen,
+    BytesToArray,
+    BytesSlice,
+    BytesConcat,
+    BytesGet,
+    BytesSet,
+    BytesPushBack,
+    StringToUtf8Bytes,
+    BytesToStringUtf8Strict,
+    BytesToStringUtf8Lossy,
+
     // Iterator protocol.
     IntoIter,
     Next,
@@ -162,10 +196,13 @@ pub enum Intrinsic {
     ArrayLenRo,
     ArrayPush,
     ArrayPop,
+    ArrayPopFront,
     ArrayClear,
     ArrayResize,
     ArrayInsert,
     ArrayRemove,
+    ArrayGet,
+    ArrayGetRo,
     ArrayExtend,
     ArrayConcat,
     ArrayConcatRo,

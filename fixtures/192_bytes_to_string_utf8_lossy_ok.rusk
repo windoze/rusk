@@ -1,0 +1,6 @@
+// expect: ok int 1
+
+fn main() -> int {
+    let s = core::intrinsics::bytes_to_string_utf8_lossy(b"\xFF");
+    s.len()
+}

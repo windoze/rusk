@@ -1,0 +1,13 @@
+// expect: ok int 126
+
+fn main() -> int {
+    let some = Option::Some(10);
+    let none: Option<int> = Option::None;
+
+    let out = 0;
+    if some.is_some() { out = out + 1 };
+    if !some.is_none() { out = out + 10 };
+    if none.is_none() { out = out + 100 };
+
+    out + some.unwrap() + Option::Some(5).expect("unreachable")
+}

@@ -1,0 +1,31 @@
+// expect: ok bool true
+
+struct S { x: int }
+
+interface I {
+    fn x() -> int;
+}
+
+impl I for S {
+    fn x() -> int { self.x }
+}
+
+fn main() -> bool {
+    let a = [1, 2, 3];
+    let b = a;
+    let c = [1, 2, 3];
+    readonly ro = a;
+
+    let s = S { x: 1 };
+    let i = s as I;
+
+    (a === b)
+        && (a !== c)
+        && (ro === a)
+        && (s === i)
+        && (1 === 1)
+        && (1 !== 2)
+        && ("a" === "a")
+        && ("a" !== "b")
+}
+

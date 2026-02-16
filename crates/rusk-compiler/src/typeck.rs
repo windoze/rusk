@@ -554,6 +554,43 @@ fn add_prelude(env: &mut ProgramEnv) {
         },
     );
 
+    // Built-in `Option<T>` convenience methods.
+    //
+    // These are implemented as VM/interpreter intrinsics (not user-defined Rusk code).
+    let option_generics = vec![GenericParamInfo {
+        name: "T".to_string(),
+        arity: 0,
+        bounds: Vec::new(),
+        span: Span::new(0, 0),
+    }];
+    let option_ty = |t: Ty| Ty::App(TyCon::Named("Option".to_string()), vec![t]);
+    let option_recv = option_ty(Ty::Gen(0));
+    let option_recv_ro = Ty::Readonly(Box::new(option_recv.clone()));
+    for (method, params, ret, readonly) in [
+        ("is_some", vec![option_recv_ro.clone()], Ty::Bool, true),
+        ("is_none", vec![option_recv_ro.clone()], Ty::Bool, true),
+        ("unwrap", vec![option_recv.clone()], Ty::Gen(0), false),
+        ("expect", vec![option_recv.clone(), Ty::String], Ty::Gen(0), false),
+    ] {
+        let name = format!("Option::{method}");
+        env.inherent_method_kinds
+            .insert(name.clone(), InherentMethodKind::Instance { readonly });
+        env.functions.insert(
+            name.clone(),
+            FnSig {
+                name,
+                vis: Visibility::Public {
+                    span: Span::new(0, 0),
+                },
+                defining_module: ModulePath::root(),
+                generics: option_generics.clone(),
+                params,
+                ret,
+                span: Span::new(0, 0),
+            },
+        );
+    }
+
     // Built-in iterator struct used by `for` desugaring.
     env.structs.insert(
         "core::intrinsics::ArrayIter".to_string(),
@@ -598,6 +635,30 @@ fn add_prelude(env: &mut ProgramEnv) {
         Ty::String,
     );
     add_fn(
+        "core::intrinsics::string_len",
+        Vec::new(),
+        vec![Ty::String],
+        Ty::Int,
+    );
+    add_fn(
+        "core::intrinsics::string_split",
+        Vec::new(),
+        vec![Ty::String, Ty::String],
+        Ty::Array(Box::new(Ty::String)),
+    );
+    add_fn(
+        "core::intrinsics::string_join",
+        Vec::new(),
+        vec![Ty::Array(Box::new(Ty::String)), Ty::String],
+        Ty::String,
+    );
+    add_fn(
+        "core::intrinsics::string_replace",
+        Vec::new(),
+        vec![Ty::String, Ty::String, Ty::String],
+        Ty::String,
+    );
+    add_fn(
         "core::intrinsics::to_string",
         vec![GenericParamInfo {
             name: "T".to_string(),
@@ -607,6 +668,18 @@ fn add_prelude(env: &mut ProgramEnv) {
         }],
         vec![Ty::Gen(0)],
         Ty::String,
+    );
+    add_fn(
+        "core::intrinsics::string_to_utf8_bytes",
+        Vec::new(),
+        vec![Ty::String],
+        Ty::Bytes,
+    );
+    add_fn(
+        "core::intrinsics::string_to_array",
+        Vec::new(),
+        vec![Ty::String],
+        Ty::Array(Box::new(Ty::String)),
     );
 
     // Panic (diverging) intrinsic.
@@ -658,6 +731,14 @@ fn add_prelude(env: &mut ProgramEnv) {
     ] {
         add_fn(name, Vec::new(), vec![Ty::Int, Ty::Int], ret);
     }
+    for name in [
+        "core::intrinsics::int_to_le",
+        "core::intrinsics::int_to_be",
+        "core::intrinsics::int_from_le",
+        "core::intrinsics::int_from_be",
+    ] {
+        add_fn(name, Vec::new(), vec![Ty::Int], Ty::Int);
+    }
 
     // Float arithmetic & comparisons.
     for (name, ret) in [
@@ -687,6 +768,91 @@ fn add_prelude(env: &mut ProgramEnv) {
     ] {
         add_fn(name, Vec::new(), vec![ty.clone(), ty.clone()], Ty::Bool);
     }
+
+    // Bytes helpers.
+    add_fn("core::intrinsics::bytes_new", Vec::new(), vec![], Ty::Bytes);
+    add_fn(
+        "core::intrinsics::bytes_len",
+        Vec::new(),
+        vec![Ty::Bytes],
+        Ty::Int,
+    );
+    add_fn(
+        "core::intrinsics::bytes_to_array",
+        Vec::new(),
+        vec![Ty::Bytes],
+        Ty::Array(Box::new(Ty::Int)),
+    );
+    add_fn(
+        "core::intrinsics::bytes_slice",
+        Vec::new(),
+        vec![Ty::Bytes, Ty::Int, Ty::Int],
+        Ty::Bytes,
+    );
+    add_fn(
+        "core::intrinsics::bytes_concat",
+        Vec::new(),
+        vec![Ty::Bytes, Ty::Bytes],
+        Ty::Bytes,
+    );
+    add_fn(
+        "core::intrinsics::bytes_get",
+        Vec::new(),
+        vec![Ty::Bytes, Ty::Int],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
+    );
+    add_fn(
+        "core::intrinsics::bytes_set",
+        Vec::new(),
+        vec![Ty::Bytes, Ty::Int, Ty::Int],
+        Ty::Bytes,
+    );
+    add_fn(
+        "core::intrinsics::bytes_push_back",
+        Vec::new(),
+        vec![Ty::Bytes, Ty::Int],
+        Ty::Bytes,
+    );
+    add_fn(
+        "core::intrinsics::bytes_to_string_utf8_strict",
+        Vec::new(),
+        vec![Ty::Bytes],
+        Ty::String,
+    );
+    add_fn(
+        "core::intrinsics::bytes_to_string_utf8_lossy",
+        Vec::new(),
+        vec![Ty::Bytes],
+        Ty::String,
+    );
+
+    // Identity equality (primarily for reference identity).
+    let id_generics = vec![
+        GenericParamInfo {
+            name: "T".to_string(),
+            arity: 0,
+            bounds: Vec::new(),
+            span: Span::new(0, 0),
+        },
+        GenericParamInfo {
+            name: "U".to_string(),
+            arity: 0,
+            bounds: Vec::new(),
+            span: Span::new(0, 0),
+        },
+    ];
+    add_fn(
+        "core::intrinsics::identity_eq",
+        id_generics.clone(),
+        vec![Ty::Gen(0), Ty::Gen(1)],
+        Ty::Bool,
+    );
+    add_fn(
+        "core::intrinsics::identity_ne",
+        id_generics,
+        vec![Ty::Gen(0), Ty::Gen(1)],
+        Ty::Bool,
+    );
 
     // Iterator protocol (currently for dynamic arrays only).
     let iter_generics = vec![GenericParamInfo {
@@ -750,6 +916,12 @@ fn add_prelude(env: &mut ProgramEnv) {
         option_ty(Ty::Gen(0)),
     );
     add_fn(
+        "core::intrinsics::array_pop_front",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0))],
+        option_ty(Ty::Gen(0)),
+    );
+    add_fn(
         "core::intrinsics::array_clear",
         array_generics.clone(),
         vec![array_ty(Ty::Gen(0))],
@@ -772,6 +944,18 @@ fn add_prelude(env: &mut ProgramEnv) {
         array_generics.clone(),
         vec![array_ty(Ty::Gen(0)), Ty::Int],
         Ty::Gen(0),
+    );
+    add_fn(
+        "core::intrinsics::array_get",
+        array_generics.clone(),
+        vec![array_ty(Ty::Gen(0)), Ty::Int],
+        option_ty(Ty::Gen(0)),
+    );
+    add_fn(
+        "core::intrinsics::array_get_ro",
+        array_generics.clone(),
+        vec![ro_array_ty(Ty::Gen(0)), Ty::Int],
+        option_ty(Ty::Readonly(Box::new(Ty::Gen(0)))),
     );
     add_fn(
         "core::intrinsics::array_extend",
@@ -5452,16 +5636,22 @@ impl<'a> FnTypechecker<'a> {
             Ty::Readonly(inner) => (true, *inner),
             other => (false, other),
         };
-        let Ty::Array(elem) = inner else {
-            return Err(TypeError {
-                message: format!("`for` expects an array iterable, got `{inner}`"),
-                span,
-            });
-        };
-        let elem_ty = if is_readonly {
-            elem.as_ref().as_readonly_view()
-        } else {
-            *elem
+        let elem_ty = match inner {
+            Ty::Array(elem) => {
+                if is_readonly {
+                    elem.as_ref().as_readonly_view()
+                } else {
+                    *elem
+                }
+            }
+            Ty::String => Ty::String,
+            Ty::Bytes => Ty::Int,
+            other => {
+                return Err(TypeError {
+                    message: format!("`for` expects an array/string/bytes iterable, got `{other}`"),
+                    span,
+                });
+            }
         };
 
         self.push_scope();
@@ -6579,6 +6769,289 @@ impl<'a> FnTypechecker<'a> {
         let receiver_is_readonly = matches!(recv_ty_resolved, Ty::Readonly(_));
         let mut static_inherent: Option<String> = None;
 
+        // Built-in methods on primitive / built-in container types that are not nominal.
+        //
+        // (Nominal types like `Option<T>` can use the regular inherent method table.)
+        match strip_readonly(&recv_ty_resolved) {
+            Ty::Array(elem) => {
+                if !explicit_type_args.is_empty() {
+                    return Err(TypeError {
+                        message: "type arguments are not supported on built-in array methods"
+                            .to_string(),
+                        span: method.span,
+                    });
+                }
+
+                let elem_ty = (**elem).clone();
+                let option_ty = |t: Ty| Ty::App(TyCon::Named("Option".to_string()), vec![t]);
+
+                match method.name.as_str() {
+                    "len" => {
+                        if !args.is_empty() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `{}.len`: expected 0, got {}",
+                                    recv_ty_resolved,
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        return Ok(Ty::Int);
+                    }
+                    "join" => {
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `{}.join`: expected 1, got {}",
+                                    recv_ty_resolved,
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let got_sep = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(got_sep, Ty::String, args[0].span())?;
+                        let _ = self
+                            .infer
+                            .unify(elem_ty, Ty::String, receiver.span())?;
+                        return Ok(Ty::String);
+                    }
+                    "get" => {
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `{}.get`: expected 1, got {}",
+                                    recv_ty_resolved,
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let idx_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(idx_ty, Ty::Int, args[0].span())?;
+                        let out_elem = if receiver_is_readonly {
+                            elem_ty.as_readonly_view()
+                        } else {
+                            elem_ty
+                        };
+                        return Ok(option_ty(out_elem));
+                    }
+                    "push_back" | "push_front" => {
+                        if receiver_is_readonly {
+                            return Err(TypeError {
+                                message: format!(
+                                    "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                                    method.name
+                                ),
+                                span: receiver.span(),
+                            });
+                        }
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `{}.{}: expected 1, got {}",
+                                    recv_ty_resolved,
+                                    method.name,
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(elem_ty, got, args[0].span())?;
+                        return Ok(Ty::Unit);
+                    }
+                    "pop_back" | "pop_front" => {
+                        if receiver_is_readonly {
+                            return Err(TypeError {
+                                message: format!(
+                                    "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                                    method.name
+                                ),
+                                span: receiver.span(),
+                            });
+                        }
+                        if !args.is_empty() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `{}.{}: expected 0, got {}",
+                                    recv_ty_resolved,
+                                    method.name,
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        return Ok(option_ty(elem_ty));
+                    }
+                    _ => {
+                        return Err(TypeError {
+                            message: format!(
+                                "unknown method `{}` on `{recv_ty_resolved}`",
+                                method.name
+                            ),
+                            span: method.span,
+                        });
+                    }
+                }
+            }
+            Ty::String => {
+                if !explicit_type_args.is_empty() {
+                    return Err(TypeError {
+                        message: "type arguments are not supported on built-in string methods"
+                            .to_string(),
+                        span: method.span,
+                    });
+                }
+                match method.name.as_str() {
+                    "len" => {
+                        if !args.is_empty() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `string.len`: expected 0, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        return Ok(Ty::Int);
+                    }
+                    "split" => {
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `string.split`: expected 1, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(got, Ty::String, args[0].span())?;
+                        return Ok(Ty::Array(Box::new(Ty::String)));
+                    }
+                    "replace" => {
+                        if args.len() != 2 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `string.replace`: expected 2, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        for arg in args {
+                            let got = self.typecheck_expr(arg, ExprUse::Value)?;
+                            self.infer.unify(got, Ty::String, arg.span())?;
+                        }
+                        return Ok(Ty::String);
+                    }
+                    _ => {}
+                }
+            }
+            Ty::Bytes => {
+                if !explicit_type_args.is_empty() {
+                    return Err(TypeError {
+                        message: "type arguments are not supported on built-in bytes methods"
+                            .to_string(),
+                        span: method.span,
+                    });
+                }
+                let option_int = Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]);
+                match method.name.as_str() {
+                    "len" => {
+                        if !args.is_empty() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `bytes.len`: expected 0, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        return Ok(Ty::Int);
+                    }
+                    "get" => {
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `bytes.get`: expected 1, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let idx_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(idx_ty, Ty::Int, args[0].span())?;
+                        return Ok(option_int);
+                    }
+                    "set" => {
+                        if args.len() != 2 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `bytes.set`: expected 2, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let idx_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(idx_ty, Ty::Int, args[0].span())?;
+                        let val_ty = self.typecheck_expr(&args[1], ExprUse::Value)?;
+                        self.infer.unify(val_ty, Ty::Int, args[1].span())?;
+                        return Ok(Ty::Bytes);
+                    }
+                    "push_back" => {
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `bytes.push_back`: expected 1, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let val_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(val_ty, Ty::Int, args[0].span())?;
+                        return Ok(Ty::Bytes);
+                    }
+                    "slice" => {
+                        if args.len() != 2 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `bytes.slice`: expected 2, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        for arg in args {
+                            let got = self.typecheck_expr(arg, ExprUse::Value)?;
+                            self.infer.unify(got, Ty::Int, arg.span())?;
+                        }
+                        return Ok(Ty::Bytes);
+                    }
+                    "concat" => {
+                        if args.len() != 1 {
+                            return Err(TypeError {
+                                message: format!(
+                                    "arity mismatch for `bytes.concat`: expected 1, got {}",
+                                    args.len()
+                                ),
+                                span: method.span,
+                            });
+                        }
+                        let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                        self.infer.unify(got, Ty::Bytes, args[0].span())?;
+                        return Ok(Ty::Bytes);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+
         // Inherent method wins whenever the receiver has a nominal name.
         if let Some(type_name) = nominal_type_name(&recv_ty_resolved) {
             let inherent_name = format!("{type_name}::{}", method.name);
@@ -7079,6 +7552,27 @@ impl<'a> FnTypechecker<'a> {
                         span,
                     }),
                 }
+            }
+            BinaryOp::IdEq | BinaryOp::IdNe => {
+                let lt = self.typecheck_expr(left, ExprUse::Value)?;
+                let rt = self.typecheck_expr(right, ExprUse::Value)?;
+                let lt = self.infer.resolve_ty(lt);
+                let rt = self.infer.resolve_ty(rt);
+
+                // Identity comparisons are primarily for reference-like values, but we also allow
+                // them on non-reference-like values when the types unify (e.g. `int === int`).
+                //
+                // We intentionally do *not* require the types to unify when both sides are
+                // definitely reference-like so that common cases like `S === (s as I)` work.
+                let def_ref_like = |ty: &Ty| match strip_readonly(ty) {
+                    Ty::Array(_) | Ty::Tuple(_) | Ty::App(..) => true,
+                    _ => false,
+                };
+
+                if !(def_ref_like(&lt) && def_ref_like(&rt)) {
+                    let _ = self.infer.unify(lt, rt, span)?;
+                }
+                Ok(Ty::Bool)
             }
             BinaryOp::Eq
             | BinaryOp::Ne

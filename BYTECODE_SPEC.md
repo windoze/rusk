@@ -1,4 +1,4 @@
-# Rusk Bytecode Specification (v0.1 Draft)
+# Rusk Bytecode Specification (v0.2 Draft)
 
 This document specifies the **Rusk bytecode layer** as implemented by:
 
@@ -549,18 +549,23 @@ The current intrinsic set includes:
 - f-string helpers: `StringConcat`, `ToString`, `Panic`
 - bool ops: `BoolNot`, `BoolEq`, `BoolNe`
 - int ops: `IntAdd`, `IntSub`, `IntMul`, `IntDiv`, `IntMod`, `IntEq`, `IntNe`, `IntLt`, `IntLe`,
-  `IntGt`, `IntGe`
+  `IntGt`, `IntGe`, `IntToLe`, `IntToBe`, `IntFromLe`, `IntFromBe`
 - float ops: `FloatAdd`, `FloatSub`, `FloatMul`, `FloatDiv`, `FloatMod`, `FloatEq`, `FloatNe`,
   `FloatLt`, `FloatLe`, `FloatGt`, `FloatGe`
 - primitive equality helpers: `StringEq`, `StringNe`, `BytesEq`, `BytesNe`, `UnitEq`, `UnitNe`
+- identity equality: `IdentityEq`, `IdentityNe`
+- built-in `Option<T>` methods: `OptionIsSome`, `OptionIsNone`, `OptionUnwrap`, `OptionExpect`
+- string/bytes helpers: `StringLen`, `StringSplit`, `StringJoin`, `StringReplace`, `StringToArray`,
+  `BytesNew`, `BytesLen`, `BytesToArray`, `BytesSlice`, `BytesConcat`, `BytesGet`, `BytesSet`,
+  `BytesPushBack`, `StringToUtf8Bytes`, `BytesToStringUtf8Strict`, `BytesToStringUtf8Lossy`
 - iterator protocol: `IntoIter`, `Next`
 - array ops: `ArrayLen`, `ArrayLenRo`, `ArrayPush`, `ArrayPop`, `ArrayClear`, `ArrayResize`,
-  `ArrayInsert`, `ArrayRemove`, `ArrayExtend`, `ArrayConcat`, `ArrayConcatRo`, `ArraySlice`,
-  `ArraySliceRo`
+  `ArrayPopFront`, `ArrayInsert`, `ArrayRemove`, `ArrayGet`, `ArrayGetRo`, `ArrayExtend`,
+  `ArrayConcat`, `ArrayConcatRo`, `ArraySlice`, `ArraySliceRo`
 
 ---
 
-## 10. `.rbc` serialization format (v0.1)
+## 10. `.rbc` serialization format (v0.2)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -614,7 +619,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `1`
+- minor = `2`
 
 The reference decoder requires an **exact** version match.
 
@@ -723,7 +728,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### Intrinsics (`u16`)
 
-Intrinsics use `u16` tags `0..=48`:
+Intrinsics use `u16` tags `0..=77`:
 
 - `0`: `StringConcat`
 - `1`: `ToString`
@@ -774,6 +779,35 @@ Intrinsics use `u16` tags `0..=48`:
 - `46`: `ArrayConcatRo`
 - `47`: `ArraySlice`
 - `48`: `ArraySliceRo`
+- `49`: `IdentityEq`
+- `50`: `IdentityNe`
+- `51`: `OptionIsSome`
+- `52`: `OptionIsNone`
+- `53`: `OptionUnwrap`
+- `54`: `OptionExpect`
+- `55`: `StringLen`
+- `56`: `BytesNew`
+- `57`: `BytesLen`
+- `58`: `BytesSlice`
+- `59`: `BytesConcat`
+- `60`: `StringToUtf8Bytes`
+- `61`: `BytesToStringUtf8Strict`
+- `62`: `BytesToStringUtf8Lossy`
+- `63`: `ArrayPopFront`
+- `64`: `ArrayGet`
+- `65`: `ArrayGetRo`
+- `66`: `IntToLe`
+- `67`: `IntToBe`
+- `68`: `IntFromLe`
+- `69`: `IntFromBe`
+- `70`: `StringSplit`
+- `71`: `StringJoin`
+- `72`: `StringReplace`
+- `73`: `StringToArray`
+- `74`: `BytesToArray`
+- `75`: `BytesGet`
+- `76`: `BytesSet`
+- `77`: `BytesPushBack`
 
 #### Call targets (`u8`)
 

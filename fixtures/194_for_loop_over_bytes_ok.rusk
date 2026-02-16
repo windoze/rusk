@@ -1,0 +1,10 @@
+// expect: ok int 6
+
+fn main() -> int {
+    let total = 0;
+    for b in b"\x01\x02\x03" {
+        total = total + b;
+    };
+    total
+}
+

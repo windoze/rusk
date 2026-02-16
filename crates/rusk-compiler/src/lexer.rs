@@ -73,7 +73,9 @@ pub enum TokenKind {
     Slash,
     Percent,
     EqEq,
+    EqEqEq,
     NotEq,
+    NotEqEq,
     Lt,
     LtEq,
     Gt,
@@ -252,7 +254,12 @@ impl<'a> Lexer<'a> {
                 match self.peek_char() {
                     Some('=') => {
                         self.bump_char();
-                        TokenKind::EqEq
+                        if self.peek_char() == Some('=') {
+                            self.bump_char();
+                            TokenKind::EqEqEq
+                        } else {
+                            TokenKind::EqEq
+                        }
                     }
                     Some('>') => {
                         self.bump_char();
@@ -265,7 +272,12 @@ impl<'a> Lexer<'a> {
                 self.bump_char();
                 if self.peek_char() == Some('=') {
                     self.bump_char();
-                    TokenKind::NotEq
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        TokenKind::NotEqEq
+                    } else {
+                        TokenKind::NotEq
+                    }
                 } else {
                     TokenKind::Bang
                 }

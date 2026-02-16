@@ -1,0 +1,5 @@
+// expect: runtime_error invalid UTF-8
+
+fn main() -> string {
+    core::intrinsics::bytes_to_string_utf8_strict(b"\xFF")
+}
