@@ -17,19 +17,18 @@ impl I for A {
 
 impl I for B {
     fn base(n: int) -> int { self.x + n }
-    fn double(n: int) -> int { 1000 + self.base(n) }
+    fn double(n: int) -> int { 1000 + I::base(self, n) }
 }
 
 fn main() -> int {
     let a = A { x: 5 };
     let b = B { x: 5 };
 
-    let r1 = a.double(1);
+    let r1 = I::double(a, 1);
     let r2 = (a as I).double(1);
 
-    let r3 = b.double(1);
+    let r3 = I::double(b, 1);
     let r4 = (b as I).double(1);
 
     r1 + r2 * 100 + r3 * 10 + r4 * 1000
 }
-

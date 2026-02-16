@@ -586,6 +586,7 @@ fn set_instr_dst(instr: &mut Instruction, new_dst: Reg) -> bool {
 
         Instruction::Call { dst, .. }
         | Instruction::ICall { dst, .. }
+        | Instruction::ICallTypeArgs { dst, .. }
         | Instruction::VCall { dst, .. }
         | Instruction::Perform { dst, .. }
         | Instruction::Resume { dst, .. } => {
@@ -661,6 +662,20 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
             out.extend(args.iter().copied());
             out
         }
+        Instruction::ICallTypeArgs {
+            fnptr,
+            recv,
+            method_type_args,
+            args,
+            ..
+        } => {
+            let mut out = Vec::with_capacity(2 + method_type_args.len() + args.len());
+            out.push(*fnptr);
+            out.push(*recv);
+            out.extend(method_type_args.iter().copied());
+            out.extend(args.iter().copied());
+            out
+        }
         Instruction::VCall {
             obj,
             method_type_args,
@@ -733,6 +748,7 @@ fn instr_write_regs(instr: &Instruction) -> Vec<Reg> {
 
         Instruction::Call { dst: Some(dst), .. }
         | Instruction::ICall { dst: Some(dst), .. }
+        | Instruction::ICallTypeArgs { dst: Some(dst), .. }
         | Instruction::VCall { dst: Some(dst), .. }
         | Instruction::Perform { dst: Some(dst), .. }
         | Instruction::Resume { dst: Some(dst), .. } => vec![*dst],
@@ -851,6 +867,22 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
         }
         Instruction::ICall { fnptr, args, .. } => {
             *fnptr = f(*fnptr);
+            for r in args {
+                *r = f(*r);
+            }
+        }
+        Instruction::ICallTypeArgs {
+            fnptr,
+            recv,
+            method_type_args,
+            args,
+            ..
+        } => {
+            *fnptr = f(*fnptr);
+            *recv = f(*recv);
+            for r in method_type_args {
+                *r = f(*r);
+            }
             for r in args {
                 *r = f(*r);
             }

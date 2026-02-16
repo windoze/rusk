@@ -1,0 +1,11 @@
+// expect: compile_error generic bound must be a trait
+
+interface I { fn m() -> int; }
+
+fn f<T: I>(x: T) -> int {
+    let _ = x;
+    0
+}
+
+fn main() -> int { 0 }
+

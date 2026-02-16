@@ -52,7 +52,7 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `impl`
+`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `trait`, `impl`, `Self`
 
 Control flow:
 
@@ -60,7 +60,7 @@ Control flow:
 
 Reserved identifiers:
 
-- In an **instance method** body (including default interface method bodies), `self` is a reserved identifier that refers to the implicit receiver. It cannot be declared or shadowed by locals, parameters, or patterns within that method.
+- In an **instance method** body (including default `interface` / `trait` method bodies), `self` is a reserved identifier that refers to the implicit receiver. It cannot be declared or shadowed by locals, parameters, or patterns within that method.
 - In a `static fn` body, `self` is not in scope.
 - `self::...` in paths continues to mean “relative to the current module” (§3.2.7); this is distinct from the receiver `self` value, which is accessed as an expression (`self`), field (`self.x`), or method call (`self.m(...)`).
 
@@ -97,7 +97,7 @@ The grammar below is descriptive and intended to be unambiguous for implementati
 ```
 Program        := Item* ;
 
-Item           := Visibility? (FnItem | StructItem | EnumItem | InterfaceItem | ImplItem | ModItem | UseItem) ;
+Item           := Visibility? (FnItem | StructItem | EnumItem | InterfaceItem | TraitItem | ImplItem | ModItem | UseItem) ;
 
 Visibility     := "pub" ;
 ```
@@ -155,17 +155,24 @@ TypeList       := Type ("," Type)* (",")? ;
 
 Enum values are heap-allocated tagged unions.
 
-#### 3.2.4 Interfaces
+#### 3.2.4 Interfaces and Traits
 
-Interfaces define:
-- (1) method signatures for static dispatch (compile-time resolved calls), and
-- (2) effect signatures for `@Interface.method(...)`.
+Rusk distinguishes **static capability constraints** (`trait`) from **runtime interface values /
+dynamic dispatch / effect namespaces** (`interface`):
+
+- `trait` is **not a type** (it cannot appear in `Type`, and cannot be used with `as` / `is`).
+- `interface` **is a type** (it can appear in `Type`, and supports `expr as I` upcasts).
 
 ```
 InterfaceItem  := "interface" Ident GenericParams?
                  ( ":" PathType ( "+" PathType )* )?
                  "{" InterfaceMember* "}" ;
 InterfaceMember:= ("readonly")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
+                  ( ";" | Block ) ;
+
+TraitItem      := "trait" Ident GenericParams?
+                 "{" TraitMember* "}" ;
+TraitMember    := ("readonly")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
                   ( ";" | Block ) ;
 ```
 
@@ -178,13 +185,17 @@ Notes:
 - Cycles in the interface inheritance graph are rejected.
 - In v0.4, multiple inheritance is rejected if two inherited interfaces introduce the same method
   name from different origins (diamond duplication of the same origin is allowed).
+- `Self` is **not allowed** inside `interface` method signatures or default bodies.
+- `trait` members are always instance methods (they take an implicit receiver). `static fn` is not allowed in traits.
+- A trait member with a body (`{ ... }`) is a **default method**. An `impl` may omit methods that have defaults.
+- `Self` is allowed only in `trait` method signatures / default bodies, and in `impl Trait for Type` method signatures / bodies.
 
 #### 3.2.5 Implementations
 
 ```
 ImplItem       := "impl" ImplHeader "{" ImplMember* "}" ;
 ImplHeader     := Ident GenericArgs?                    // inherent impl: impl Type { ... }
-               | Ident GenericArgs? "for" Ident GenericArgs? ; // interface impl: impl Interface for Type { ... }
+               | Ident GenericArgs? "for" Ident GenericArgs? ; // interface/trait impl: impl Target for Type { ... }
 
 ImplMember     := ("readonly" | "static")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? Block ;
 ```
@@ -194,6 +205,7 @@ Notes:
 - `readonly fn` defines an instance method whose receiver is a readonly view inside the method body.
 - `static fn` defines a receiver-less static method, callable only as `Type::method(...)`.
 - In `impl Interface for Type { ... }`, `static fn` is forbidden and method receiver mutability (`readonly` vs non-`readonly`) must match the interface declaration.
+- In `impl Trait for Type { ... }`, `static fn` is forbidden and method receiver mutability (`readonly` vs non-`readonly`) must match the trait declaration. `Self` may be used in method signatures and bodies inside trait impl blocks.
 
 #### 3.2.6 Modules
 
@@ -274,6 +286,7 @@ TypeAtom       := PrimType
                | "(" ")"                           // empty tuple type (aka unit)
                | "(" Type ")"                      // parenthesized type
                | "(" Type "," TypeList? ")"        // tuple type (comma required)
+               | "Self"                            // trait `Self` type (context-sensitive)
                | PathType ;
 
 PrimType       := "unit" | "bool" | "int" | "float" | "string" | "bytes" ;
@@ -282,7 +295,7 @@ PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
 ```
 
 Notes:
-- `PathType` is used for nominal types (structs/enums/interfaces) and associated names.
+- `PathType` is used for nominal types (structs/enums/interfaces) and associated names. `trait` names are not types and are rejected in `Type` positions.
 - Type arguments may appear on any path segment. Semantically, all type arguments on the path are
   collected left-to-right and applied to the nominal type named by the path.
 - This implementation reifies arity-0 type arguments (kind `Type`) at runtime as an internal
@@ -721,60 +734,63 @@ statement position (ends with `;`), in which case missing `else` yields `unit`.
 
 ---
 
-## 6. Interfaces and Methods
+## 6. Traits, Interfaces, and Methods
 
-Rusk uses `interface` + `impl` similarly to Rust traits, but also reuses interfaces
-as effect namespaces (see §7).
+Rusk has two related but distinct abstractions:
+
+- `trait`: **static** capability constraints + static dispatch. A trait is **not a type**.
+- `interface`: **dynamic** interface values + dynamic dispatch + effect namespaces. An interface **is a type**.
 
 Methods have an **implicit receiver**:
 
 - In an **instance method**, the receiver is in scope as `self` inside the method body.
 - The receiver is **not written** in the method’s parameter list. Calls pass the receiver separately:
-  - `I::m(recv, args...)` (explicit qualification), or
-  - `recv.m(args...)` (method-call sugar, if unambiguous).
+  - `Trait::m(recv, args...)` / `Interface::m(recv, args...)` (explicit qualification), or
+  - `recv.m(args...)` (method-call sugar, if unambiguous; see §6.4).
 - `readonly fn m(...)` declares that `self` is a readonly view inside `m`.
 - A non-`readonly` (mutable) method cannot be called on a `readonly T` receiver; a `readonly fn` method can be called on both `T` and `readonly T` receivers.
 - `static fn m(...)` declares a receiver-less method, callable only as `Type::m(...)`. Static methods are allowed only in inherent `impl Type { ... }` blocks.
-- Interface members may provide a body (`{ ... }`) as a **default method**. An `impl` may omit methods that have defaults.
 
-### 6.1 Interface Methods (non-effect calls)
+### 6.1 Trait Methods (static)
 
-Interface methods are called using explicit qualification:
+Trait methods are called using explicit qualification:
+
+```rust
+Hash::hash(x)
+```
+
+Trait method calls are always **statically selected** (no runtime dynamic-type lookup). Trait default methods are supported, and `Self` is allowed inside trait method signatures and bodies.
+
+### 6.2 Interface Methods (dynamic on interface-typed receivers)
+
+Interface methods can always be called using explicit qualification:
 
 ```rust
 Logger::log(console, "hello");
 ```
 
-If `Logger` is declared as:
+If the static receiver type is a concrete nominal type (struct/enum), the compiler resolves the selected `impl` statically.
+
+If the static receiver type is an `interface` type, the call is dynamically dispatched at runtime based on the receiver’s dynamic type.
+
+Method-call sugar resolves to interface methods **only when** the receiver’s static type is an `interface` type:
 
 ```rust
 interface Logger { fn log(msg: string) -> unit; }
+
+struct Console {}
+impl Logger for Console { fn log(msg: string) -> unit { std::println(msg) } }
+
+fn main() -> unit {
+    let c = Console {};
+    Logger::log(c, "static"); // static: receiver is a concrete type
+
+    let l = c as Logger;
+    l.log("dynamic"); // dynamic: receiver is an interface value
+}
 ```
 
-then the call `Logger::log(console, "hello")` passes:
-- `console` as the implicit receiver (`self` inside the implementation),
-- `"hello"` as the `msg` parameter.
-
-If the static receiver type is a concrete nominal type (struct/enum), this may be statically
-resolved by the compiler based on the selected `impl`.
-
-If the static receiver type is an `interface` type (or an interface-constrained generic), the call
-is dynamically dispatched at runtime based on the receiver’s dynamic type.
-
-Method-call sugar is allowed:
-
-```rust
-console.log("hello")
-```
-
-and is equivalent to `Logger::log(console, "hello")` **only if** the call is
-unambiguous (exactly one canonical interface method named `log` is applicable). Otherwise,
-the compiler reports an ambiguity error and requires explicit qualification.
-
-> Rationale: this keeps “TypeScript-like ergonomics” while maintaining “Rust-like”
-> explicitness where it matters.
-
-### 6.2 Inherent Methods
+### 6.3 Inherent Methods
 
 Inherent methods are defined with `impl Type { ... }` and called as:
 
@@ -789,18 +805,21 @@ Within an inherent impl:
 - `readonly fn m(...) { ... }` declares an instance method whose receiver is a readonly view.
 - `static fn m(...) { ... }` declares a static method with no receiver.
 
-Resolution rules:
+### 6.4 Method Resolution (for `recv.m(...)`)
+
+Resolution rules for method-call sugar are:
 
 1. Inherent methods on the receiver’s nominal type
-2. Interface methods (if unambiguous)
-3. Otherwise: error
+2. Trait methods (if unambiguous)
+3. Interface methods **only if** the receiver’s static type is an `interface` type (and unambiguous)
+4. Otherwise: error
 
-### 6.3 Overloading
+### 6.5 Default Methods
 
-There is no ad-hoc overloading by argument types. A name resolves to at most one
-call target after the method resolution rules above are applied.
+- `interface` default methods run in an **interface-typed** receiver context and may use dynamic dispatch on the interface value.
+- `trait` default methods run in a **`Self`-typed** receiver context and may call other trait methods; such calls must respect overrides in the current `impl`.
 
-### 6.4 Interface Inheritance and Upcasts
+### 6.6 Interface Inheritance and Upcasts
 
 Interfaces may inherit from one or more super-interfaces:
 
@@ -821,28 +840,26 @@ Interface methods may also be generic:
 interface Pair<T> { fn pair<U>(u: U) -> (T, U); }
 ```
 
-Method-generic parameters may include interface bounds:
+Method-generic parameters may include trait bounds:
 
 ```rust
+trait Show { fn show() -> string; }
 interface Pair<T> { fn pair<U: Show>(u: U) -> (T, U); }
 ```
 
-In an interface impl, the method-generic arities and bounds must match the interface method
-signature.
+In an interface impl, the method-generic arities and bounds must match the interface method signature.
 
 Rules:
 
 - An interface’s *full* method set includes all methods declared in its transitive super-interfaces.
-- Interface methods are identified by their **origin interface** and method name. In diamond graphs,
-  inherited methods with the same origin are treated as a single method.
+- Interface methods are identified by their **origin interface** and method name. In diamond graphs, inherited methods with the same origin are treated as a single method.
 - In v0.4, multiple inheritance is rejected if two unrelated origins introduce the same method name.
 - `impl X for T { ... }` must implement every method in `X`’s full method set (including inherited ones), **except** methods that have a default body in the origin interface.
-- `expr as I` performs an explicit upcast to an interface type. Upcasts are the primary mechanism for
-  producing interface-typed values without introducing implicit subtyping into inference.
+- `expr as I` performs an explicit upcast to an interface type. Upcasts are the primary mechanism for producing interface-typed values without introducing implicit subtyping into inference.
 
 Initial-stage coherence restriction (“no specialization yet”):
 
-- An interface impl header must not select an impl body by choosing concrete interface type arguments.
+- An interface/trait impl header must not select an impl body by choosing concrete target type arguments.
   In particular, `impl I<int> for S { ... }` is rejected; only “forall instantiations” headers such as
   `impl<T> I<T> for S<T> { ... }` are accepted in this stage.
 
@@ -1004,6 +1021,7 @@ The following must be fully annotated:
 - all `struct` field types
 - all `enum` variant field types
 - all `interface` method parameter and non-`unit` return types (a `unit` return type may be omitted)
+- all `trait` method parameter and non-`unit` return types (a `unit` return type may be omitted)
 
 Local `let` bindings may omit types (inferred).
 
@@ -1019,6 +1037,7 @@ Nominal types:
 - functions: `fn(T1, T2, ...) -> R` (or `fn(T1, T2, ...)` as sugar for `-> unit`)
 - continuations: `cont(T) -> R` (values are introduced by effect handlers, but the type is usable in annotations)
 - interfaces: `Interface<...>`
+- traits are not types: a `trait` name cannot appear as a `Type` and cannot be used with `as` / `is`
 - readonly views: `readonly T` (only meaningful when `T` is a reference-like type; it forbids mutation through that reference)
 
 ### 8.4 Generics and Kinds
@@ -1053,26 +1072,24 @@ Rusk uses a deliberately implementable form of local type inference:
 
 Where inference cannot determine a unique type, an explicit annotation is required.
 
-### 8.6 Interfaces as Constraints
+### 8.6 Traits as Constraints
 
-One or more `interface` bounds can be used as constraints in a generic parameter list:
+One or more `trait` bounds can be used as constraints in a generic parameter list:
 
 ```rust
-fn log_all<T: Logger + Show>(xs: [T]) -> unit { ... }
+fn show_and_hash<T: Hash + Show>(x: T) -> int { ... }
 ```
 
 Rules:
 
-- Bounds use `+` as a separator: `T: I + J + K`.
-- Each bound element must resolve to an interface type (possibly instantiated), e.g. `Iterator<int>`.
+- Bounds use `+` as a separator: `T: Trait1 + Trait2 + ...`.
+- Each bound element must resolve to a `trait` (possibly instantiated), e.g. `Iterable<int>`.
 - Bounds are supported only on arity-0 type parameters in `fn`/method generics (bounds on HKTs and
-  on `impl`/`struct`/`enum`/`interface` generics are deferred).
+  on `impl`/`struct`/`enum`/`interface`/`trait` generics are deferred).
+- Constraint satisfaction is based on the existence of an `impl Trait for Type` for each bound trait.
 
-Constraint satisfaction is based on the existence of an `impl` of each bound interface for the
-chosen type.
-
-Interface inheritance is respected for constraints: if `J` inherits from `I`, then `T: J` also
-satisfies `T: I`.
+Rusk does **not** allow using `interface` bounds (`T: Interface`) in this model. If you need dynamic
+dispatch, use an explicit interface-typed value (`x: I`) or an explicit upcast (`let i = x as I;`).
 
 ### 8.7 Effects Typing
 

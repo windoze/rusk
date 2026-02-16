@@ -1,0 +1,19 @@
+// expect: ok int 42
+
+trait Inc {
+    fn base() -> int;
+    fn inc() -> int { self.base() + 1 }
+    fn inc2() -> int { self.inc() + 1 }
+}
+
+struct S { x: int }
+
+impl Inc for S {
+    fn base() -> int { self.x }
+}
+
+fn main() -> int {
+    let s = S { x: 40 };
+    s.inc2()
+}
+

@@ -100,7 +100,9 @@ fn supports_structs_fields_and_methods() {
         fn test() -> int {
             let p = Point { x: 1, y: 2 };
             p.x = 10;
-            p.sum() + Add::add(p, 5) + p.add(7)
+            let s = p.sum();
+            let i = p as Add;
+            s + Add::add(i, 5) + i.add(7)
         }
     "#;
 
@@ -114,8 +116,8 @@ fn method_call_sugar_is_ambiguous_error() {
     let src = r#"
         struct S { x: int }
 
-        interface A { fn foo() -> int; }
-        interface B { fn foo() -> int; }
+        trait A { fn foo() -> int; }
+        trait B { fn foo() -> int; }
 
         impl A for S { fn foo() -> int { self.x + 1 } }
         impl B for S { fn foo() -> int { self.x + 2 } }

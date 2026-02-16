@@ -791,11 +791,48 @@ fn lower_mir_instruction(
             });
         }
 
+        I::ICallTypeArgs {
+            dst,
+            fnptr,
+            recv,
+            method_type_args,
+            dict_args,
+            args,
+        } => {
+            let fnptr = op_reg(fnptr, code, temps)?;
+            let recv = op_reg(recv, code, temps)?;
+
+            let mut bc_method_type_args = Vec::with_capacity(method_type_args.len());
+            for arg in method_type_args {
+                bc_method_type_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let mut bc_dict_args = Vec::with_capacity(dict_args.len());
+            for arg in dict_args {
+                bc_dict_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(arg, code, temps)?);
+            }
+
+            code.push(Instruction::ICallTypeArgs {
+                dst: dst.map(local),
+                fnptr,
+                recv,
+                method_type_args: bc_method_type_args,
+                dict_args: bc_dict_args,
+                args: bc_args,
+            });
+        }
+
         I::VCall {
             dst,
             obj,
             method,
             method_type_args,
+            dict_args,
             args,
         } => {
             let obj = op_reg(obj, code, temps)?;
@@ -803,6 +840,11 @@ fn lower_mir_instruction(
             let mut bc_method_type_args = Vec::with_capacity(method_type_args.len());
             for arg in method_type_args {
                 bc_method_type_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let mut bc_dict_args = Vec::with_capacity(dict_args.len());
+            for arg in dict_args {
+                bc_dict_args.push(op_reg(arg, code, temps)?);
             }
 
             let mut bc_args = Vec::with_capacity(args.len());
@@ -815,6 +857,7 @@ fn lower_mir_instruction(
                 obj,
                 method: method.clone(),
                 method_type_args: bc_method_type_args,
+                dict_args: bc_dict_args,
                 args: bc_args,
             });
         }

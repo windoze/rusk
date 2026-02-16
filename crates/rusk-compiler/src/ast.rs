@@ -22,6 +22,7 @@ pub enum Item {
     Function(FnItem),
     Struct(StructItem),
     Enum(EnumItem),
+    Trait(TraitItem),
     Interface(InterfaceItem),
     Impl(ImplItem),
     Mod(ModItem),
@@ -140,6 +141,15 @@ pub struct InterfaceItem {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TraitItem {
+    pub vis: Visibility,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub members: Vec<TraitMember>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ModItem {
     pub vis: Visibility,
     pub name: Ident,
@@ -176,6 +186,18 @@ pub struct InterfaceMember {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TraitMember {
+    pub readonly: bool,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub params: Vec<Param>,
+    pub ret: TypeExpr,
+    /// Optional default implementation body.
+    pub body: Option<Block>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ImplItem {
     pub generics: Vec<GenericParam>,
     pub header: ImplHeader,
@@ -189,8 +211,8 @@ pub enum ImplHeader {
         ty: PathType,
         span: Span,
     },
-    InterfaceForType {
-        interface: PathType,
+    ForType {
+        target: PathType,
         ty: PathType,
         span: Span,
     },
@@ -215,6 +237,9 @@ pub struct GenericParam {
 pub enum TypeExpr {
     Readonly {
         inner: Box<TypeExpr>,
+        span: Span,
+    },
+    SelfType {
         span: Span,
     },
     Prim {
@@ -246,6 +271,7 @@ impl TypeExpr {
     pub fn span(&self) -> Span {
         match self {
             TypeExpr::Readonly { span, .. }
+            | TypeExpr::SelfType { span }
             | TypeExpr::Prim { span, .. }
             | TypeExpr::Array { span, .. }
             | TypeExpr::Tuple { span, .. }

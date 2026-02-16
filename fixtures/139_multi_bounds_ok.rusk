@@ -1,7 +1,7 @@
 // expect: ok int 7
 
-interface Hash { fn hash() -> int; }
-interface Show { fn show() -> string; }
+trait Hash { fn hash() -> int; }
+trait Show { fn show() -> string; }
 
 struct S { x: int }
 

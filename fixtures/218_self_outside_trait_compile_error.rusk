@@ -1,0 +1,8 @@
+// expect: compile_error `Self` is only allowed in `trait` definitions and `impl Trait for Type`
+
+struct S {}
+
+fn bad() -> Self { S {} }
+
+fn main() -> int { 0 }
+

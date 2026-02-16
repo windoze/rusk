@@ -2006,11 +2006,126 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 });
             }
 
+            rusk_bytecode::Instruction::ICallTypeArgs {
+                dst,
+                fnptr,
+                recv,
+                method_type_args,
+                dict_args,
+                args,
+            } => {
+                let fn_value = match read_value(frame, *fnptr) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("icall_type_args fnptr: {msg}")),
+                };
+                let Value::Function(id) = fn_value else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in icall_type_args: expected fn reference, got {}",
+                            fn_value.kind()
+                        ),
+                    );
+                };
+
+                let recv_value = match read_value(frame, *recv) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("icall_type_args recv: {msg}")),
+                };
+                let Value::Ref(r) = &recv_value else {
+                    return trap(
+                        vm,
+                        format!(
+                            "type error in icall_type_args: expected ref(struct|enum), got {}",
+                            recv_value.kind()
+                        ),
+                    );
+                };
+
+                let Some(obj) = vm.heap.get(r.handle) else {
+                    return trap(vm, "icall_type_args: dangling reference".to_string());
+                };
+                let type_args = match obj {
+                    HeapValue::Struct { type_args, .. } | HeapValue::Enum { type_args, .. } => {
+                        type_args.clone()
+                    }
+                    HeapValue::Array(_) | HeapValue::Tuple(_) => {
+                        return trap(
+                            vm,
+                            format!(
+                                "type error in icall_type_args: expected struct|enum, got {}",
+                                recv_value.kind()
+                            ),
+                        );
+                    }
+                };
+
+                let Some(callee) = vm.module.function(id) else {
+                    return trap(vm, format!("invalid function id {}", id.0));
+                };
+
+                let mut arg_values = Vec::with_capacity(
+                    type_args.len() + method_type_args.len() + dict_args.len() + args.len() + 1,
+                );
+                for id in type_args {
+                    arg_values.push(Value::TypeRep(id));
+                }
+                for reg in method_type_args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => {
+                            return trap(vm, format!("icall_type_args method_type_args: {msg}"));
+                        }
+                    };
+                    arg_values.push(Value::TypeRep(id));
+                }
+                for reg in dict_args {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("icall_type_args dict_arg: {msg}")),
+                    };
+                    arg_values.push(v);
+                }
+                arg_values.push(recv_value);
+                for reg in args {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("icall_type_args arg: {msg}")),
+                    };
+                    arg_values.push(v);
+                }
+
+                if arg_values.len() != callee.param_count as usize {
+                    return trap(
+                        vm,
+                        format!(
+                            "icall_type_args arity mismatch: expected {} args but got {}",
+                            callee.param_count,
+                            arg_values.len()
+                        ),
+                    );
+                }
+
+                let mut regs: Vec<Option<Value>> = Vec::with_capacity(callee.reg_count as usize);
+                regs.resize(callee.reg_count as usize, None);
+                for (idx, value) in arg_values.into_iter().enumerate() {
+                    regs[idx] = Some(value);
+                }
+
+                vm.frames.push(Frame {
+                    func: id,
+                    pc: 0,
+                    regs,
+                    return_dst: *dst,
+                });
+            }
+
             rusk_bytecode::Instruction::VCall {
                 dst,
                 obj,
                 method,
                 method_type_args,
+                dict_args,
                 args,
             } => {
                 let recv = match read_value(frame, *obj) {
@@ -2064,8 +2179,9 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     return trap(vm, format!("invalid function id {}", fn_id.0));
                 };
 
-                let mut arg_values =
-                    Vec::with_capacity(type_args.len() + method_type_args.len() + args.len() + 1);
+                let mut arg_values = Vec::with_capacity(
+                    type_args.len() + method_type_args.len() + dict_args.len() + args.len() + 1,
+                );
                 for id in type_args {
                     arg_values.push(Value::TypeRep(id));
                 }
@@ -2075,6 +2191,13 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         Err(msg) => return trap(vm, format!("vcall method_type_args: {msg}")),
                     };
                     arg_values.push(Value::TypeRep(id));
+                }
+                for reg in dict_args {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("vcall dict_arg: {msg}")),
+                    };
+                    arg_values.push(v);
                 }
                 arg_values.push(recv);
                 for reg in args {

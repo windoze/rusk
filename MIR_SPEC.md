@@ -444,7 +444,7 @@ but avoid call/dispatch overhead.
   - Trap: operand is not a function reference.
 
 - `vcall` (virtual):
-  - Syntax: `%dst = vcall <op_obj> <method> <method_type_args...> (<op_args...>)`
+  - Syntax: `%dst = vcall <op_obj> <method> <method_type_args...> <dict_args...> (<op_args...>)`
   - Semantics:
     - Evaluate `<op_obj>` to a reference value and determine its dynamic type name.
     - Read the object’s stored instantiated type arguments (a list of runtime `typerep` values).
@@ -453,9 +453,23 @@ but avoid call/dispatch overhead.
     - Invoke `<fn_name>` with arguments:
       1. the receiver’s dynamic type arguments (as `typerep` values),
       2. `<method_type_args...>` (as `typerep` values),
-      3. the receiver value,
-      4. then `<op_args...>`.
+      3. `<dict_args...>` (trait dictionaries for generic bounds, encoded as `array` values),
+      4. the receiver value,
+      5. then `<op_args...>`.
   - Trap: missing method resolution.
+
+- `icall_type_args` (indirect method call with receiver type args):
+  - Syntax: `%dst = icall_type_args <op_fnptr> <op_recv> <method_type_args...> <dict_args...> (<op_args...>)`
+  - Semantics:
+    - Evaluate `<op_fnptr>` to a function reference.
+    - Evaluate `<op_recv>` to a reference value and read its stored instantiated type arguments.
+    - Invoke the callee with arguments:
+      1. the receiver’s dynamic type arguments (as `typerep` values),
+      2. `<method_type_args...>` (as `typerep` values),
+      3. `<dict_args...>` (trait dictionaries for generic bounds, encoded as `array` values),
+      4. the receiver value,
+      5. then `<op_args...>`.
+  - Trap: `<op_fnptr>` is not a function reference.
 
 For interface dynamic dispatch in v0.4, the compiler uses a canonical method-id string:
 
@@ -474,6 +488,9 @@ Notes for the Rusk front-end (source-level methods):
 - Default interface methods may be compiled by generating:
   - a private function for the default body, and
   - a per-`impl` wrapper used in the method-resolution table when the impl omits that method.
+- Trait-bound method calls may be compiled via “dictionary passing”: the caller supplies an `array`
+  of method function references (a *trait dictionary*), and calls are lowered via `icall_type_args`
+  after selecting a function pointer from the dictionary.
 
 ---
 

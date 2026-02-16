@@ -381,11 +381,35 @@ fn verify_instruction(
                 verify_reg(reg_count, *r, &format!("{}: arg", here()))?;
             }
         }
+        Instruction::ICallTypeArgs {
+            dst,
+            fnptr,
+            recv,
+            method_type_args,
+            dict_args,
+            args,
+        } => {
+            if let Some(dst) = dst {
+                verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
+            }
+            verify_reg(reg_count, *fnptr, &format!("{}: fnptr", here()))?;
+            verify_reg(reg_count, *recv, &format!("{}: recv", here()))?;
+            for r in method_type_args {
+                verify_reg(reg_count, *r, &format!("{}: method type arg", here()))?;
+            }
+            for r in dict_args {
+                verify_reg(reg_count, *r, &format!("{}: dict arg", here()))?;
+            }
+            for r in args {
+                verify_reg(reg_count, *r, &format!("{}: arg", here()))?;
+            }
+        }
         Instruction::VCall {
             dst,
             obj,
             method: _,
             method_type_args,
+            dict_args,
             args,
         } => {
             if let Some(dst) = dst {
@@ -394,6 +418,9 @@ fn verify_instruction(
             verify_reg(reg_count, *obj, &format!("{}: obj", here()))?;
             for r in method_type_args {
                 verify_reg(reg_count, *r, &format!("{}: method type arg", here()))?;
+            }
+            for r in dict_args {
+                verify_reg(reg_count, *r, &format!("{}: dict arg", here()))?;
             }
             for r in args {
                 verify_reg(reg_count, *r, &format!("{}: arg", here()))?;

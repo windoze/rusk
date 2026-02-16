@@ -404,11 +404,25 @@ pub enum Instruction {
         fnptr: Reg,
         args: Vec<Reg>,
     },
+    /// Indirect call to a method implementation function reference, with receiver type arguments
+    /// supplied from the receiver value at runtime.
+    ///
+    /// Runtime argument order passed to the callee is:
+    /// `recv_type_args..., method_type_args..., dict_args..., recv, args...`.
+    ICallTypeArgs {
+        dst: Option<Reg>,
+        fnptr: Reg,
+        recv: Reg,
+        method_type_args: Vec<Reg>,
+        dict_args: Vec<Reg>,
+        args: Vec<Reg>,
+    },
     VCall {
         dst: Option<Reg>,
         obj: Reg,
         method: String,
         method_type_args: Vec<Reg>,
+        dict_args: Vec<Reg>,
         args: Vec<Reg>,
     },
 

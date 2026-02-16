@@ -8,9 +8,10 @@ impl I for S {
     fn foo() -> int { 7 }
 }
 
-fn call_foo<T: I>(x: T) -> int { I::foo(x) }
+fn call_foo(x: I) -> int { x.foo() }
 
 fn main() -> int {
     let s = S {};
-    call_foo(s)
+    let i = s as I;
+    call_foo(i)
 }

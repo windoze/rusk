@@ -486,15 +486,25 @@ These ops trap if operands are uninitialized or of the wrong type:
 - `ICall { dst, fnptr, args }`
   - `fnptr` must contain a function reference value.
   - Otherwise identical to `Call` into bytecode.
-- `VCall { dst, obj, method, method_type_args, args }`
+- `ICallTypeArgs { dst, fnptr, recv, method_type_args, dict_args, args }`
+  - `fnptr` must contain a function reference value.
+  - `recv` must contain the receiver reference value.
+  - The callee is invoked with argument list:
+    1. receiver type args as leading `typerep` values (derived from `recv` at runtime),
+    2. `method_type_args` as additional leading `typerep` values,
+    3. `dict_args` as additional leading values (trait dictionaries for generic bounds),
+    4. the receiver value,
+    5. `args`.
+- `VCall { dst, obj, method, method_type_args, dict_args, args }`
   - Dynamic dispatch on the receiver’s runtime type name:
     - receiver must be a struct or enum reference
     - lookup uses `module.methods[(dyn_type_name, method)]`
   - The callee is invoked with argument list:
     1. receiver type args as leading `typerep` values,
     2. `method_type_args` as additional leading `typerep` values,
-    3. the receiver value,
-    4. `args`.
+    3. `dict_args` as additional leading values (trait dictionaries for generic bounds),
+    4. the receiver value,
+    5. `args`.
 
 ### 8.7 Effects and control flow
 
@@ -775,7 +785,7 @@ Intrinsics use `u16` tags `0..=48`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes `0..=45` match the `rusk_bytecode::Instruction` enum order:
+Instruction opcodes are assigned explicitly by the `.rbc` encoder/decoder. Current mapping:
 
 - `0`: `Const`
 - `1`: `Copy`
@@ -823,6 +833,8 @@ Instruction opcodes `0..=45` match the `rusk_bytecode::Instruction` enum order:
 - `43`: `Switch`
 - `44`: `Return`
 - `45`: `Trap`
+- `46`: `ResumeTail`
+- `47`: `ICallTypeArgs`
 
 Instruction payloads are encoded by writing each operand field in the order listed in the
 instruction definition, using the primitive encodings from §10.2 (e.g. `u32` for registers and PC

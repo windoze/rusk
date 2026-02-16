@@ -2143,11 +2143,70 @@ impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
                     interp.call_mir_function(module, frame_index, *dst, id, arg_values)
                 })?;
             }
+            Instruction::ICallTypeArgs {
+                dst,
+                fnptr,
+                recv,
+                method_type_args,
+                dict_args,
+                args,
+            } => {
+                self.metrics.icall_instructions = self.metrics.icall_instructions.saturating_add(1);
+                let fn_value = self.eval_operand(frame_index, fnptr)?;
+                let Value::Function(id) = fn_value else {
+                    return Err(RuntimeError::TypeError {
+                        op: "icall_type_args",
+                        expected: "fn reference",
+                        got: fn_value.kind(),
+                    });
+                };
+
+                let recv = self.eval_operand(frame_index, recv)?;
+                let Value::Ref(r) = &recv else {
+                    return Err(RuntimeError::TypeError {
+                        op: "icall_type_args",
+                        expected: "ref(struct|enum)",
+                        got: recv.kind(),
+                    });
+                };
+                let type_args = match self.heap_get(r.handle)? {
+                    HeapValue::Struct { type_args, .. } => type_args.clone(),
+                    HeapValue::Enum { type_args, .. } => type_args.clone(),
+                    _ => {
+                        return Err(RuntimeError::TypeError {
+                            op: "icall_type_args",
+                            expected: "ref(struct|enum)",
+                            got: ValueKind::Ref,
+                        });
+                    }
+                };
+
+                self.with_value_buffer(|interp, arg_values| {
+                    arg_values.clear();
+                    arg_values.reserve(
+                        type_args.len() + method_type_args.len() + dict_args.len() + args.len() + 1,
+                    );
+
+                    for id in type_args {
+                        arg_values.push(Value::TypeRep(id));
+                    }
+                    for op in method_type_args {
+                        let id = interp.eval_type_rep_operand(frame_index, op)?;
+                        arg_values.push(Value::TypeRep(id));
+                    }
+                    interp.eval_args_extend(frame_index, dict_args, arg_values)?;
+                    arg_values.push(recv);
+                    interp.eval_args_extend(frame_index, args, arg_values)?;
+
+                    interp.call_mir_function(module, frame_index, *dst, id, arg_values.as_slice())
+                })?;
+            }
             Instruction::VCall {
                 dst,
                 obj,
                 method,
                 method_type_args,
+                dict_args,
                 args,
             } => {
                 self.metrics.vcall_instructions = self.metrics.vcall_instructions.saturating_add(1);
@@ -2186,7 +2245,9 @@ impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
                 };
                 self.with_value_buffer(|interp, arg_values| {
                     arg_values.clear();
-                    arg_values.reserve(type_args.len() + method_type_args.len() + args.len() + 1);
+                    arg_values.reserve(
+                        type_args.len() + method_type_args.len() + dict_args.len() + args.len() + 1,
+                    );
 
                     for id in type_args {
                         arg_values.push(Value::TypeRep(id));
@@ -2195,6 +2256,7 @@ impl<GC: GcHeap<HeapValue>> InterpreterImpl<GC> {
                         let id = interp.eval_type_rep_operand(frame_index, op)?;
                         arg_values.push(Value::TypeRep(id));
                     }
+                    interp.eval_args_extend(frame_index, dict_args, arg_values)?;
                     arg_values.push(recv);
                     interp.eval_args_extend(frame_index, args, arg_values)?;
 

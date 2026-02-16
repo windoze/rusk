@@ -17,5 +17,7 @@ impl Add for Point {
 fn main() -> int {
     let p = Point { x: 1, y: 2 };
     p.x = 10;
-    p.sum() + Add::add(p, 5) + p.add(7)
+    let s = p.sum();
+    let i = p as Add;
+    s + Add::add(i, 5) + i.add(7)
 }

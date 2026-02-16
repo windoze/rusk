@@ -1,6 +1,6 @@
 // expect: ok int 7
 
-interface Show { fn show() -> string; }
+trait Show { fn show() -> string; }
 
 interface Pair<T> {
     fn pair<U: Show>(u: U) -> (T, U);

@@ -572,6 +572,27 @@ pub enum Instruction {
         /// Type arguments coming from the receiver's nominal type (impl/header generics) are
         /// derived from the receiver value at runtime.
         method_type_args: Vec<Operand>,
+        /// Trait dictionaries required by method-level generic bounds.
+        ///
+        /// These are passed as hidden parameters to the callee after all `TypeRep` arguments and
+        /// before the receiver / user arguments.
+        dict_args: Vec<Operand>,
+        args: Vec<Operand>,
+    },
+    /// Indirect call to a method implementation function reference, with receiver type arguments
+    /// supplied from the receiver value at runtime.
+    ///
+    /// This is like [`Instruction::VCall`] but avoids dynamic method lookup: the callee is an
+    /// explicit function pointer (typically loaded from a trait dictionary).
+    ///
+    /// Runtime argument order passed to the callee is:
+    /// `recv_type_args..., method_type_args..., dict_args..., recv, args...`.
+    ICallTypeArgs {
+        dst: Option<Local>,
+        fnptr: Operand,
+        recv: Operand,
+        method_type_args: Vec<Operand>,
+        dict_args: Vec<Operand>,
         args: Vec<Operand>,
     },
     ICall {

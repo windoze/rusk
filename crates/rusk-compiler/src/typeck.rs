@@ -1,7 +1,7 @@
 use crate::ast::{
     BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, FnItemKind, GenericParam,
     Ident, ImplHeader, ImplItem, InterfaceItem, Item, MatchArm, MatchPat, MethodReceiverKind,
-    PatLiteral, Pattern, PrimType, Program, StructItem, TypeExpr, UnaryOp, Visibility,
+    PatLiteral, Pattern, PrimType, Program, StructItem, TraitItem, TypeExpr, UnaryOp, Visibility,
 };
 use crate::host::{CompileOptions, HostVisibility};
 use crate::modules::{ModulePath, ModuleResolver};
@@ -50,6 +50,11 @@ pub(crate) enum Ty {
 
     /// Rigid reference to a generic parameter of arity 0.
     Gen(GenId),
+    /// The `Self` type inside a trait definition.
+    ///
+    /// This is only permitted in trait method signatures / default bodies, and is substituted
+    /// to a concrete nominal type within `impl Trait for Type` contexts.
+    SelfType,
     /// Inference type variable (kind `Type`).
     Var(TypeVarId),
 }
@@ -71,7 +76,13 @@ impl Ty {
     pub(crate) fn is_ref_like(&self) -> bool {
         matches!(
             self,
-            Ty::Array(_) | Ty::Tuple(_) | Ty::App(..) | Ty::Gen(_) | Ty::Var(_) | Ty::Readonly(_)
+            Ty::Array(_)
+                | Ty::Tuple(_)
+                | Ty::App(..)
+                | Ty::Gen(_)
+                | Ty::SelfType
+                | Ty::Var(_)
+                | Ty::Readonly(_)
         )
     }
 
@@ -134,6 +145,7 @@ impl fmt::Display for Ty {
                 Ok(())
             }
             Ty::Gen(id) => write!(f, "<gen#{id}>"),
+            Ty::SelfType => write!(f, "Self"),
             Ty::Var(id) => write!(f, "<t{id}>"),
         }
     }
@@ -153,12 +165,35 @@ impl fmt::Display for TyCon {
 pub(crate) struct GenericParamInfo {
     pub(crate) name: String,
     pub(crate) arity: usize,
-    /// Interface bounds (`T: I + J<K> + ...`), stored as instantiated interface types.
+    /// Trait bounds (`T: Trait + ...`), stored as instantiated trait references.
     ///
     /// In the initial generics-rework stage, bounds are only allowed on arity-0 type parameters
     /// for `fn`/method generics (not on `impl`/`struct`/`enum`/`interface` generics).
-    pub(crate) bounds: Vec<Ty>,
+    pub(crate) bounds: Vec<TraitRef>,
     pub(crate) span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TraitRef {
+    pub(crate) name: String,
+    pub(crate) args: Vec<Ty>,
+}
+
+impl fmt::Display for TraitRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        if !self.args.is_empty() {
+            write!(f, "<")?;
+            for (idx, arg) in self.args.iter().enumerate() {
+                if idx != 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{arg}")?;
+            }
+            write!(f, ">")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +246,30 @@ pub(crate) struct InterfaceDef {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct TraitMethodSig {
+    pub(crate) generics: Vec<GenericParamInfo>,
+    pub(crate) params: Vec<Ty>,
+    pub(crate) ret: Ty,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TraitMethodDecl {
+    pub(crate) receiver_readonly: bool,
+    pub(crate) has_default: bool,
+    pub(crate) sig: TraitMethodSig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TraitDef {
+    pub(crate) name: String,
+    pub(crate) generics: Vec<GenericParamInfo>,
+    pub(crate) methods: BTreeMap<String, TraitMethodDecl>,
+    /// Deterministic method order used for trait dictionaries.
+    pub(crate) method_order: Vec<String>,
+    pub(crate) span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct FnSig {
     pub(crate) name: String,
     pub(crate) vis: Visibility,
@@ -232,6 +291,7 @@ pub(crate) struct ProgramEnv {
     pub(crate) modules: ModuleResolver,
     pub(crate) structs: BTreeMap<String, StructDef>,
     pub(crate) enums: BTreeMap<String, EnumDef>,
+    pub(crate) traits: BTreeMap<String, TraitDef>,
     pub(crate) interfaces: BTreeMap<String, InterfaceDef>,
 
     /// All callable functions by resolved name.
@@ -260,6 +320,18 @@ pub(crate) struct ProgramEnv {
     /// Entries include transitive super-interfaces, so if `J: I` and `T` implements `J`, then
     /// `(T, I)` is also present.
     pub(crate) interface_impls: BTreeSet<(String, String)>,
+
+    /// Nominal trait implementation table:
+    ///
+    /// `(dynamic_type_name, trait_name)` is present iff the type implements the trait.
+    pub(crate) trait_impls: BTreeSet<(String, String)>,
+
+    /// Trait impl method table:
+    ///
+    /// `(type_name, trait_name, method_name) -> function_name`.
+    ///
+    /// `function_name` must exist in `functions`.
+    pub(crate) trait_methods: BTreeMap<(String, String, String), String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -287,6 +359,12 @@ pub(crate) struct TypeInfo {
     /// We record the instantiated interface arguments for the *canonical origin interface* at each
     /// effect call / pattern site so the compiler can reify them as runtime `TypeRep` operands.
     pub(crate) effect_interface_args: HashMap<(Span, String), Vec<Ty>>,
+    /// Resolved trait method call sites (`trait::method`) keyed by the call expression span.
+    ///
+    /// This includes both:
+    /// - method sugar calls: `recv.m(...)`
+    /// - fully-qualified calls: `Trait::m(recv, ...)`
+    pub(crate) trait_method_calls: HashMap<Span, String>,
 }
 
 pub(crate) fn build_env(
@@ -305,13 +383,14 @@ pub(crate) fn build_env(
     add_prelude(&mut env);
     add_host_modules(&mut env, options)?;
 
-    // First pass: declare nominal types.
+    // First pass: declare nominal types + traits (shared namespace).
     walk_module_items(
         &program.items,
         &ModulePath::root(),
         &mut |module, item| match item {
             Item::Struct(s) => declare_struct(&mut env, module, s),
             Item::Enum(e) => declare_enum(&mut env, module, e),
+            Item::Trait(t) => declare_trait(&mut env, module, t),
             Item::Interface(i) => declare_interface(&mut env, module, i),
             _ => Ok(()),
         },
@@ -337,6 +416,7 @@ pub(crate) fn build_env(
         &mut |module, item| match item {
             Item::Struct(s) => fill_struct(&mut env, module, s),
             Item::Enum(e) => fill_enum(&mut env, module, e),
+            Item::Trait(t) => fill_trait(&mut env, module, t),
             Item::Interface(i) => fill_interface(&mut env, module, i),
             _ => Ok(()),
         },
@@ -733,6 +813,7 @@ fn declare_struct(
     let name = module.qualify(&item.name.name);
     if env.structs.contains_key(&name)
         || env.enums.contains_key(&name)
+        || env.traits.contains_key(&name)
         || env.interfaces.contains_key(&name)
     {
         return Err(TypeError {
@@ -773,6 +854,7 @@ fn declare_enum(
     let name = module.qualify(&item.name.name);
     if env.structs.contains_key(&name)
         || env.enums.contains_key(&name)
+        || env.traits.contains_key(&name)
         || env.interfaces.contains_key(&name)
     {
         return Err(TypeError {
@@ -812,6 +894,7 @@ fn declare_interface(
     let name = module.qualify(&item.name.name);
     if env.structs.contains_key(&name)
         || env.enums.contains_key(&name)
+        || env.traits.contains_key(&name)
         || env.interfaces.contains_key(&name)
     {
         return Err(TypeError {
@@ -833,6 +916,48 @@ fn declare_interface(
     Ok(())
 }
 
+fn declare_trait(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &TraitItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&item.name.name);
+    if env.structs.contains_key(&name)
+        || env.enums.contains_key(&name)
+        || env.traits.contains_key(&name)
+        || env.interfaces.contains_key(&name)
+    {
+        return Err(TypeError {
+            message: format!("duplicate type name `{name}`"),
+            span: item.name.span,
+        });
+    }
+    if item.name.name == "Option" {
+        return Err(TypeError {
+            message: "cannot redefine built-in type `Option`".to_string(),
+            span: item.name.span,
+        });
+    }
+    let generics = lower_generic_params(env, module, &item.generics, false)?;
+    if generics.iter().any(|g| g.arity != 0) {
+        return Err(TypeError {
+            message: "higher-kinded generics on traits are not supported in v0.4".to_string(),
+            span: item.name.span,
+        });
+    }
+    env.traits.insert(
+        name.clone(),
+        TraitDef {
+            name,
+            generics,
+            methods: BTreeMap::new(),
+            method_order: Vec::new(),
+            span: item.span,
+        },
+    );
+    Ok(())
+}
+
 fn declare_function_sig(
     env: &mut ProgramEnv,
     module: &ModulePath,
@@ -848,17 +973,23 @@ fn declare_function_sig(
         });
     }
 
-    let method_generics =
-        lower_generic_params_in_scope(env, module, generic_prefix, &func.generics, true)?;
+    let method_generics = lower_generic_params_in_scope(
+        env,
+        module,
+        generic_prefix,
+        &func.generics,
+        true,
+        SelfTypeMode::Disallow,
+    )?;
     let mut generics: Vec<GenericParamInfo> = generic_prefix.to_vec();
     generics.extend(method_generics);
     let scope = GenericScope::new(&generics)?;
     let params = func
         .params
         .iter()
-        .map(|p| lower_type_expr(env, module, &scope, &p.ty))
+        .map(|p| lower_type_expr(env, module, &scope, &p.ty, SelfTypeMode::Disallow))
         .collect::<Result<Vec<_>, _>>()?;
-    let ret = lower_type_expr(env, module, &scope, &func.ret)?;
+    let ret = lower_type_expr(env, module, &scope, &func.ret, SelfTypeMode::Disallow)?;
 
     env.functions.insert(
         name.clone(),
@@ -875,13 +1006,14 @@ fn declare_function_sig(
     Ok(())
 }
 
-fn declare_method_sig_with_receiver(
+fn declare_method_sig_with_receiver_in_self_mode(
     env: &mut ProgramEnv,
     module: &ModulePath,
     generic_prefix: &[GenericParamInfo],
     method: &FnItem,
     name: String,
     receiver: Ty,
+    self_mode: SelfTypeMode<'_>,
 ) -> Result<(), TypeError> {
     if env.functions.contains_key(&name) {
         return Err(TypeError {
@@ -890,8 +1022,14 @@ fn declare_method_sig_with_receiver(
         });
     }
 
-    let method_generics =
-        lower_generic_params_in_scope(env, module, generic_prefix, &method.generics, true)?;
+    let method_generics = lower_generic_params_in_scope(
+        env,
+        module,
+        generic_prefix,
+        &method.generics,
+        true,
+        self_mode,
+    )?;
     let mut generics: Vec<GenericParamInfo> = generic_prefix.to_vec();
     generics.extend(method_generics);
     let scope = GenericScope::new(&generics)?;
@@ -902,10 +1040,10 @@ fn declare_method_sig_with_receiver(
         method
             .params
             .iter()
-            .map(|p| lower_type_expr(env, module, &scope, &p.ty))
+            .map(|p| lower_type_expr(env, module, &scope, &p.ty, self_mode))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    let ret = lower_type_expr(env, module, &scope, &method.ret)?;
+    let ret = lower_type_expr(env, module, &scope, &method.ret, self_mode)?;
 
     env.functions.insert(
         name.clone(),
@@ -920,6 +1058,25 @@ fn declare_method_sig_with_receiver(
         },
     );
     Ok(())
+}
+
+fn declare_method_sig_with_receiver(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    generic_prefix: &[GenericParamInfo],
+    method: &FnItem,
+    name: String,
+    receiver: Ty,
+) -> Result<(), TypeError> {
+    declare_method_sig_with_receiver_in_self_mode(
+        env,
+        module,
+        generic_prefix,
+        method,
+        name,
+        receiver,
+        SelfTypeMode::Disallow,
+    )
 }
 
 struct InterfaceDefaultWrapperSigDecl<'a> {
@@ -965,7 +1122,7 @@ fn declare_synthetic_interface_default_wrapper_sig(
             .bounds
             .iter()
             .cloned()
-            .map(|b| shift_method_generics(b, iface_arity, shift))
+            .map(|b| shift_method_generics_in_trait_ref(b, iface_arity, shift))
             .collect();
         generics.push(GenericParamInfo {
             name: g.name.clone(),
@@ -1032,13 +1189,13 @@ fn fill_struct(
                         span: field.name.span,
                     });
                 }
-                let ty = lower_type_expr(env, module, &scope, &field.ty)?;
+                let ty = lower_type_expr(env, module, &scope, &field.ty, SelfTypeMode::Disallow)?;
                 fields.push((field_name, ty));
             }
             false
         }
         crate::ast::StructBody::NewType { inner } => {
-            let ty = lower_type_expr(env, module, &scope, inner)?;
+            let ty = lower_type_expr(env, module, &scope, inner, SelfTypeMode::Disallow)?;
             fields.push((".0".to_string(), ty));
             true
         }
@@ -1077,7 +1234,7 @@ fn fill_enum(env: &mut ProgramEnv, module: &ModulePath, item: &EnumItem) -> Resu
         let fields = variant
             .fields
             .iter()
-            .map(|t| lower_type_expr(env, module, &scope, t))
+            .map(|t| lower_type_expr(env, module, &scope, t, SelfTypeMode::Disallow))
             .collect::<Result<Vec<_>, _>>()?;
         variants.insert(vname, fields);
     }
@@ -1113,7 +1270,7 @@ fn fill_interface(
     let mut seen = Vec::<Ty>::new();
     let iface_scope = GenericScope::new(&generics)?;
     for sup in &item.supers {
-        let sup_ty = lower_path_type(env, module, &iface_scope, sup)?;
+        let sup_ty = lower_path_type(env, module, &iface_scope, sup, SelfTypeMode::Disallow)?;
         let Ty::App(TyCon::Named(name), args) = &sup_ty else {
             return Err(TypeError {
                 message: format!("super-interface must be an interface type, got `{sup_ty}`"),
@@ -1147,8 +1304,14 @@ fn fill_interface(
 
     let mut methods = BTreeMap::new();
     for member in &item.members {
-        let method_generics =
-            lower_generic_params_in_scope(env, module, &generics, &member.generics, true)?;
+        let method_generics = lower_generic_params_in_scope(
+            env,
+            module,
+            &generics,
+            &member.generics,
+            true,
+            SelfTypeMode::Disallow,
+        )?;
         if method_generics.iter().any(|g| g.arity != 0) {
             return Err(TypeError {
                 message: "higher-kinded generics on interface methods are not supported"
@@ -1170,9 +1333,9 @@ fn fill_interface(
         let params = member
             .params
             .iter()
-            .map(|p| lower_type_expr(env, module, &scope, &p.ty))
+            .map(|p| lower_type_expr(env, module, &scope, &p.ty, SelfTypeMode::Disallow))
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = lower_type_expr(env, module, &scope, &member.ret)?;
+        let ret = lower_type_expr(env, module, &scope, &member.ret, SelfTypeMode::Disallow)?;
         methods.insert(
             mname.clone(),
             InterfaceMethodDecl {
@@ -1225,6 +1388,118 @@ fn fill_interface(
         .get_mut(&full_name)
         .expect("declared in first pass")
         .supers = supers;
+    Ok(())
+}
+
+fn fill_trait(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &TraitItem,
+) -> Result<(), TypeError> {
+    let full_name = module.qualify(&item.name.name);
+    let generics = env
+        .traits
+        .get(&full_name)
+        .expect("declared in first pass")
+        .generics
+        .clone();
+
+    if generics.iter().any(|g| g.arity != 0) {
+        return Err(TypeError {
+            message: "higher-kinded generics on traits are not supported".to_string(),
+            span: item.name.span,
+        });
+    }
+
+    let mut methods = BTreeMap::new();
+    let mut method_order = Vec::<String>::new();
+    for member in &item.members {
+        let method_generics = lower_generic_params_in_scope(
+            env,
+            module,
+            &generics,
+            &member.generics,
+            true,
+            SelfTypeMode::Abstract,
+        )?;
+        if method_generics.iter().any(|g| g.arity != 0) {
+            return Err(TypeError {
+                message: "higher-kinded generics on trait methods are not supported".to_string(),
+                span: member.name.span,
+            });
+        }
+
+        let mname = member.name.name.clone();
+        if methods.contains_key(&mname) {
+            return Err(TypeError {
+                message: format!("duplicate trait method `{mname}`"),
+                span: member.name.span,
+            });
+        }
+        let mut combined = generics.clone();
+        combined.extend(method_generics.clone());
+        let scope = GenericScope::new(&combined)?;
+        let params = member
+            .params
+            .iter()
+            .map(|p| lower_type_expr(env, module, &scope, &p.ty, SelfTypeMode::Abstract))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret = lower_type_expr(env, module, &scope, &member.ret, SelfTypeMode::Abstract)?;
+
+        method_order.push(mname.clone());
+        methods.insert(
+            mname.clone(),
+            TraitMethodDecl {
+                receiver_readonly: member.readonly,
+                has_default: member.body.is_some(),
+                sig: TraitMethodSig {
+                    generics: method_generics,
+                    params: params.clone(),
+                    ret: ret.clone(),
+                },
+            },
+        );
+
+        // If this method has a default body, declare an internal function for it.
+        //
+        // The compiler will lower trait default bodies via dictionary passing so they can call
+        // other trait methods and respect overrides.
+        if member.body.is_some() {
+            let default_fn_name = format!("$default::{full_name}::{mname}");
+            if env.functions.contains_key(&default_fn_name) {
+                return Err(TypeError {
+                    message: format!("duplicate function `{default_fn_name}`"),
+                    span: member.span,
+                });
+            }
+            let mut receiver_ty = Ty::SelfType;
+            if member.readonly {
+                receiver_ty = Ty::Readonly(Box::new(receiver_ty));
+            }
+            let mut fn_params = Vec::with_capacity(params.len() + 1);
+            fn_params.push(receiver_ty);
+            fn_params.extend(params);
+            env.functions.insert(
+                default_fn_name.clone(),
+                FnSig {
+                    name: default_fn_name,
+                    vis: Visibility::Private,
+                    defining_module: module.clone(),
+                    generics: combined,
+                    params: fn_params,
+                    ret,
+                    span: member.span,
+                },
+            );
+        }
+    }
+
+    let def = env
+        .traits
+        .get_mut(&full_name)
+        .expect("declared in first pass");
+    def.methods = methods;
+    def.method_order = method_order;
     Ok(())
 }
 
@@ -1394,7 +1669,12 @@ fn rewrite_interface_method_sig(
             .iter()
             .cloned()
             .map(|b| {
-                rewrite_ty_for_inherited_method(b, iface_subst, old_iface_arity, new_iface_arity)
+                rewrite_trait_ref_for_inherited_method(
+                    b,
+                    iface_subst,
+                    old_iface_arity,
+                    new_iface_arity,
+                )
             })
             .collect();
         rewritten_generics.push(GenericParamInfo {
@@ -1421,6 +1701,24 @@ fn rewrite_interface_method_sig(
             old_iface_arity,
             new_iface_arity,
         ),
+    }
+}
+
+fn rewrite_trait_ref_for_inherited_method(
+    bound: TraitRef,
+    iface_subst: &HashMap<GenId, Ty>,
+    old_iface_arity: usize,
+    new_iface_arity: usize,
+) -> TraitRef {
+    TraitRef {
+        name: bound.name,
+        args: bound
+            .args
+            .into_iter()
+            .map(|t| {
+                rewrite_ty_for_inherited_method(t, iface_subst, old_iface_arity, new_iface_arity)
+            })
+            .collect(),
     }
 }
 
@@ -1572,7 +1870,7 @@ fn process_impl_item(
 
     match &item.header {
         ImplHeader::Inherent { ty, span: _ } => {
-            let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            let ty = lower_path_type(env, module, &impl_scope, ty, SelfTypeMode::Disallow)?;
             let (type_name, type_args) = match ty {
                 Ty::App(TyCon::Named(name), args) => (name, args),
                 other => {
@@ -1644,368 +1942,878 @@ fn process_impl_item(
                 }
             }
         }
-        ImplHeader::InterfaceForType {
-            interface,
-            ty,
-            span: _,
-        } => {
-            let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
-            let (iface_name, iface_args) = match iface_ty {
-                Ty::App(TyCon::Named(name), args) => (name, args),
-                other => {
-                    return Err(TypeError {
-                        message: format!(
-                            "impl interface must be a nominal interface type, got `{other}`"
-                        ),
-                        span: item.span,
-                    });
-                }
-            };
-            let Some(iface_def) = env.interfaces.get(&iface_name) else {
-                return Err(TypeError {
-                    message: format!("unknown interface `{iface_name}`"),
-                    span: item.span,
-                });
-            };
-            let iface_arity = iface_def.generics.len();
-            if iface_args.len() != iface_arity {
-                return Err(TypeError {
-                    message: format!(
-                        "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
-                        iface_args.len()
-                    ),
-                    span: item.span,
-                });
-            }
-            for (idx, arg) in iface_args.iter().enumerate() {
-                if arg != &Ty::Gen(idx) {
-                    return Err(TypeError {
+        ImplHeader::ForType { target, ty, .. } => {
+            let target_segments: Vec<String> = target
+                .segments
+                .iter()
+                .map(|s| s.name.name.clone())
+                .collect();
+            let (kind, _fqn) = env
+                .modules
+                .resolve_type_fqn(module, &target_segments, target.span)
+                .map_err(|e| TypeError {
+                    message: e.message,
+                    span: e.span,
+                })?;
+
+            match kind {
+                crate::modules::DefKind::Interface => {
+                    let iface_ty =
+                        lower_path_type(env, module, &impl_scope, target, SelfTypeMode::Disallow)?;
+                    let (iface_name, iface_args) = match iface_ty {
+                        Ty::App(TyCon::Named(name), args) => (name, args),
+                        other => {
+                            return Err(TypeError {
+                                message: format!(
+                                    "impl interface must be a nominal interface type, got `{other}`"
+                                ),
+                                span: item.span,
+                            });
+                        }
+                    };
+                    let Some(iface_def) = env.interfaces.get(&iface_name) else {
+                        return Err(TypeError {
+                            message: format!("unknown interface `{iface_name}`"),
+                            span: item.span,
+                        });
+                    };
+                    let iface_arity = iface_def.generics.len();
+                    if iface_args.len() != iface_arity {
+                        return Err(TypeError {
+                            message: format!(
+                                "interface `{iface_name}` expects {iface_arity} type argument(s), got {}",
+                                iface_args.len()
+                            ),
+                            span: item.span,
+                        });
+                    }
+                    for (idx, arg) in iface_args.iter().enumerate() {
+                        if arg != &Ty::Gen(idx) {
+                            return Err(TypeError {
                         message: "impl interface type arguments must be the impl's type parameters (in order); specialization is not supported yet"
                             .to_string(),
-                        span: interface.span,
+                        span: target.span,
                     });
-                }
-            }
-            let iface_methods = iface_def.all_methods.clone();
-            let iface_def_name = iface_def.name.clone();
+                        }
+                    }
+                    let iface_methods = iface_def.all_methods.clone();
+                    let iface_def_name = iface_def.name.clone();
 
-            let ty = lower_path_type(env, module, &impl_scope, ty)?;
-            let (type_name, type_args) = match ty {
-                Ty::App(TyCon::Named(name), args) => (name, args),
-                other => {
-                    return Err(TypeError {
-                        message: format!("impl target must be a nominal type, got `{other}`"),
-                        span: item.span,
-                    });
-                }
-            };
-            if !env.structs.contains_key(&type_name) && !env.enums.contains_key(&type_name) {
-                return Err(TypeError {
-                    message: format!("unknown type `{type_name}` in impl"),
-                    span: item.span,
-                });
-            }
-            enforce_erased_impl_args(&impl_generics, &type_name, &type_args, item.span)?;
+                    let ty = lower_path_type(env, module, &impl_scope, ty, SelfTypeMode::Disallow)?;
+                    let (type_name, type_args) = match ty {
+                        Ty::App(TyCon::Named(name), args) => (name, args),
+                        other => {
+                            return Err(TypeError {
+                                message: format!(
+                                    "impl target must be a nominal type, got `{other}`"
+                                ),
+                                span: item.span,
+                            });
+                        }
+                    };
+                    if !env.structs.contains_key(&type_name) && !env.enums.contains_key(&type_name)
+                    {
+                        return Err(TypeError {
+                            message: format!("unknown type `{type_name}` in impl"),
+                            span: item.span,
+                        });
+                    }
+                    enforce_erased_impl_args(&impl_generics, &type_name, &type_args, item.span)?;
 
-            // Validate method set matches the interface definition.
-            let mut impl_methods_by_name: BTreeMap<String, &FnItem> = BTreeMap::new();
-            for method in &item.members {
-                let mname = method.name.name.clone();
-                if method
-                    .params
-                    .iter()
-                    .any(|p| pattern_binds_name(&p.pat, "self"))
-                {
-                    return Err(TypeError {
+                    // Validate method set matches the interface definition.
+                    let mut impl_methods_by_name: BTreeMap<String, &FnItem> = BTreeMap::new();
+                    for method in &item.members {
+                        let mname = method.name.name.clone();
+                        if method
+                            .params
+                            .iter()
+                            .any(|p| pattern_binds_name(&p.pat, "self"))
+                        {
+                            return Err(TypeError {
                         message: "explicit `self` parameters are not allowed in methods; use the implicit receiver"
                             .to_string(),
                         span: method.span,
                     });
-                }
-                if let FnItemKind::Method { receiver } = method.kind
-                    && matches!(receiver, MethodReceiverKind::Static)
-                {
-                    return Err(TypeError {
-                        message: "`static fn` is not allowed in interface impl blocks".to_string(),
-                        span: method.span,
-                    });
-                }
-                if impl_methods_by_name.insert(mname.clone(), method).is_some() {
-                    return Err(TypeError {
-                        message: format!("duplicate method `{mname}` in impl"),
-                        span: method.name.span,
-                    });
-                }
-            }
-            for (mname, info) in &iface_methods {
-                let method = impl_methods_by_name.get(mname).copied();
-
-                let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-
-                let expected_recv_base =
-                    Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
-                let receiver_ty = if info.receiver_readonly {
-                    Ty::Readonly(Box::new(expected_recv_base.clone()))
-                } else {
-                    expected_recv_base.clone()
-                };
-
-                let key = (type_name.clone(), info.origin.clone(), mname.clone());
-
-                let Some(method) = method else {
-                    if !info.has_default {
-                        return Err(TypeError {
-                            message: format!(
-                                "missing method `{mname}` required by interface `{}`",
-                                iface_def_name
-                            ),
-                            span: item.span,
-                        });
+                        }
+                        if let FnItemKind::Method { receiver } = method.kind
+                            && matches!(receiver, MethodReceiverKind::Static)
+                        {
+                            return Err(TypeError {
+                                message: "`static fn` is not allowed in interface impl blocks"
+                                    .to_string(),
+                                span: method.span,
+                            });
+                        }
+                        if impl_methods_by_name.insert(mname.clone(), method).is_some() {
+                            return Err(TypeError {
+                                message: format!("duplicate method `{mname}` in impl"),
+                                span: method.name.span,
+                            });
+                        }
                     }
+                    for (mname, info) in &iface_methods {
+                        let method = impl_methods_by_name.get(mname).copied();
 
-                    declare_synthetic_interface_default_wrapper_sig(
-                        env,
-                        module,
-                        &impl_generics,
-                        InterfaceDefaultWrapperSigDecl {
-                            iface_arity,
-                            receiver_ty,
-                            method_info: info,
-                            name: impl_fn_name.clone(),
-                            span: item.span,
-                        },
-                    )?;
+                        let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
 
-                    if env.interface_methods.contains_key(&key) {
-                        return Err(TypeError {
-                            message: format!(
-                                "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
-                                origin = info.origin
-                            ),
-                            span: item.span,
-                        });
-                    }
-                    env.interface_methods.insert(key, impl_fn_name);
-                    continue;
-                };
+                        let expected_recv_base =
+                            Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+                        let receiver_ty = if info.receiver_readonly {
+                            Ty::Readonly(Box::new(expected_recv_base.clone()))
+                        } else {
+                            expected_recv_base.clone()
+                        };
 
-                if method.generics.len() != info.sig.generics.len() {
-                    return Err(TypeError {
-                        message: format!(
-                            "method `{mname}` must declare {} generic parameter(s) to match the interface",
-                            info.sig.generics.len()
-                        ),
-                        span: method.name.span,
-                    });
-                }
-                let FnItemKind::Method { receiver } = method.kind else {
-                    return Err(TypeError {
-                        message: "internal error: expected method item in impl".to_string(),
-                        span: method.span,
-                    });
-                };
-                let MethodReceiverKind::Instance { readonly } = receiver else {
-                    return Err(TypeError {
+                        let key = (type_name.clone(), info.origin.clone(), mname.clone());
+
+                        let Some(method) = method else {
+                            if !info.has_default {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "missing method `{mname}` required by interface `{}`",
+                                        iface_def_name
+                                    ),
+                                    span: item.span,
+                                });
+                            }
+
+                            declare_synthetic_interface_default_wrapper_sig(
+                                env,
+                                module,
+                                &impl_generics,
+                                InterfaceDefaultWrapperSigDecl {
+                                    iface_arity,
+                                    receiver_ty,
+                                    method_info: info,
+                                    name: impl_fn_name.clone(),
+                                    span: item.span,
+                                },
+                            )?;
+
+                            if env.interface_methods.contains_key(&key) {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
+                                        origin = info.origin
+                                    ),
+                                    span: item.span,
+                                });
+                            }
+                            env.interface_methods.insert(key, impl_fn_name);
+                            continue;
+                        };
+
+                        if method.generics.len() != info.sig.generics.len() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "method `{mname}` must declare {} generic parameter(s) to match the interface",
+                                    info.sig.generics.len()
+                                ),
+                                span: method.name.span,
+                            });
+                        }
+                        let FnItemKind::Method { receiver } = method.kind else {
+                            return Err(TypeError {
+                                message: "internal error: expected method item in impl".to_string(),
+                                span: method.span,
+                            });
+                        };
+                        let MethodReceiverKind::Instance { readonly } = receiver else {
+                            return Err(TypeError {
                         message: "internal error: interface impl methods must be instance methods"
                             .to_string(),
                         span: method.span,
                     });
-                };
-                if readonly != info.receiver_readonly {
-                    return Err(TypeError {
-                        message: format!(
-                            "method `{mname}` receiver mutability does not match interface `{iface_def_name}`"
-                        ),
-                        span: method.name.span,
-                    });
-                }
+                        };
+                        if readonly != info.receiver_readonly {
+                            return Err(TypeError {
+                                message: format!(
+                                    "method `{mname}` receiver mutability does not match interface `{iface_def_name}`"
+                                ),
+                                span: method.name.span,
+                            });
+                        }
 
-                let expected_params = info.sig.params.len();
-                if method.params.len() != expected_params {
-                    return Err(TypeError {
-                        message: format!(
-                            "method `{}` must take {} parameter(s)",
-                            mname, expected_params
-                        ),
-                        span: method.name.span,
-                    });
-                }
+                        let expected_params = info.sig.params.len();
+                        if method.params.len() != expected_params {
+                            return Err(TypeError {
+                                message: format!(
+                                    "method `{}` must take {} parameter(s)",
+                                    mname, expected_params
+                                ),
+                                span: method.name.span,
+                            });
+                        }
 
-                // Declare the implementing function with a stable internal name.
-                declare_method_sig_with_receiver(
-                    env,
-                    module,
-                    &impl_generics,
-                    method,
-                    impl_fn_name.clone(),
-                    receiver_ty,
-                )?;
+                        // Declare the implementing function with a stable internal name.
+                        declare_method_sig_with_receiver(
+                            env,
+                            module,
+                            &impl_generics,
+                            method,
+                            impl_fn_name.clone(),
+                            receiver_ty,
+                        )?;
 
-                // Validate the declared signature matches the interface contract.
-                let impl_sig = env
-                    .functions
-                    .get(&impl_fn_name)
-                    .expect("declared just above")
-                    .clone();
-                let impl_arity = impl_generics.len();
-                let expected_iface_arity = iface_arity;
-                if impl_arity < expected_iface_arity {
-                    return Err(TypeError {
-                        message: "internal error: interface arity exceeds impl arity".to_string(),
-                        span: item.span,
-                    });
-                }
-                // Receiver type must match the impl target type.
-                if let Some(recv_ty) = impl_sig.params.first() {
-                    let expected_recv = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
-                    if strip_readonly(recv_ty) != strip_readonly(&expected_recv) {
-                        return Err(TypeError {
-                            message: format!(
-                                "method `{mname}` receiver type mismatch: expected `{expected_recv}`, got `{recv_ty}`"
-                            ),
-                            span: method.span,
-                        });
-                    }
-                }
-                // Non-receiver params + return must match the interface signature, with method
-                // generic indices shifted into the impl's generic environment.
-                let shift = impl_arity - expected_iface_arity;
+                        // Validate the declared signature matches the interface contract.
+                        let impl_sig = env
+                            .functions
+                            .get(&impl_fn_name)
+                            .expect("declared just above")
+                            .clone();
+                        let impl_arity = impl_generics.len();
+                        let expected_iface_arity = iface_arity;
+                        if impl_arity < expected_iface_arity {
+                            return Err(TypeError {
+                                message: "internal error: interface arity exceeds impl arity"
+                                    .to_string(),
+                                span: item.span,
+                            });
+                        }
+                        // Receiver type must match the impl target type.
+                        if let Some(recv_ty) = impl_sig.params.first() {
+                            let expected_recv =
+                                Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+                            if strip_readonly(recv_ty) != strip_readonly(&expected_recv) {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "method `{mname}` receiver type mismatch: expected `{expected_recv}`, got `{recv_ty}`"
+                                    ),
+                                    span: method.span,
+                                });
+                            }
+                        }
+                        // Non-receiver params + return must match the interface signature, with method
+                        // generic indices shifted into the impl's generic environment.
+                        let shift = impl_arity - expected_iface_arity;
 
-                // Method-generic parameters (arity + bounds) must match the interface contract.
-                let got_method_generics = impl_sig.generics.get(impl_arity..).unwrap_or(&[]);
-                if got_method_generics.len() != info.sig.generics.len() {
-                    return Err(TypeError {
-                        message: "internal error: impl method generic arity mismatch".to_string(),
-                        span: method.name.span,
-                    });
-                }
-                let fmt_bounds = |bounds: &[Ty]| {
-                    if bounds.is_empty() {
-                        "no bounds".to_string()
-                    } else {
-                        bounds
+                        // Method-generic parameters (arity + bounds) must match the interface contract.
+                        let got_method_generics =
+                            impl_sig.generics.get(impl_arity..).unwrap_or(&[]);
+                        if got_method_generics.len() != info.sig.generics.len() {
+                            return Err(TypeError {
+                                message: "internal error: impl method generic arity mismatch"
+                                    .to_string(),
+                                span: method.name.span,
+                            });
+                        }
+                        let fmt_bounds = |bounds: &[TraitRef]| {
+                            if bounds.is_empty() {
+                                "no bounds".to_string()
+                            } else {
+                                bounds
+                                    .iter()
+                                    .map(|b| b.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" + ")
+                            }
+                        };
+                        for (idx, (got, expected)) in got_method_generics
                             .iter()
-                            .map(|b| b.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" + ")
+                            .zip(info.sig.generics.iter())
+                            .enumerate()
+                        {
+                            if got.arity != expected.arity {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "method `{mname}` generic parameter {} arity does not match interface `{iface_def_name}`",
+                                        idx + 1
+                                    ),
+                                    span: method
+                                        .generics
+                                        .get(idx)
+                                        .map(|g| g.span)
+                                        .unwrap_or(method.name.span),
+                                });
+                            }
+
+                            let expected_bounds = expected
+                                .bounds
+                                .iter()
+                                .cloned()
+                                .map(|b| {
+                                    shift_method_generics_in_trait_ref(
+                                        b,
+                                        expected_iface_arity,
+                                        shift,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let bounds_match = expected_bounds.len() == got.bounds.len()
+                                && expected_bounds.iter().all(|b| got.bounds.contains(b));
+                            if !bounds_match {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "method `{mname}` generic parameter {} bounds do not match interface `{iface_def_name}`: expected {}, got {}",
+                                        idx + 1,
+                                        fmt_bounds(&expected_bounds),
+                                        fmt_bounds(&got.bounds)
+                                    ),
+                                    span: method
+                                        .generics
+                                        .get(idx)
+                                        .map(|g| g.span)
+                                        .unwrap_or(method.name.span),
+                                });
+                            }
+                        }
+
+                        let expected_params = info
+                            .sig
+                            .params
+                            .iter()
+                            .cloned()
+                            .map(|t| shift_method_generics(t, expected_iface_arity, shift))
+                            .collect::<Vec<_>>();
+                        let got_params =
+                            impl_sig.params.iter().skip(1).cloned().collect::<Vec<_>>();
+                        if expected_params != got_params {
+                            return Err(TypeError {
+                                message: format!(
+                                    "method `{mname}` parameter types do not match interface `{iface_def_name}`"
+                                ),
+                                span: method.name.span,
+                            });
+                        }
+                        let expected_ret = shift_method_generics(
+                            info.sig.ret.clone(),
+                            expected_iface_arity,
+                            shift,
+                        );
+                        if expected_ret != impl_sig.ret {
+                            return Err(TypeError {
+                                message: format!(
+                                    "method `{mname}` return type does not match interface `{iface_def_name}`"
+                                ),
+                                span: method.name.span,
+                            });
+                        }
+
+                        if env.interface_methods.contains_key(&key) {
+                            return Err(TypeError {
+                                message: format!(
+                                    "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
+                                    origin = info.origin
+                                ),
+                                span: item.span,
+                            });
+                        }
+                        env.interface_methods.insert(key, impl_fn_name);
                     }
-                };
-                for (idx, (got, expected)) in got_method_generics
-                    .iter()
-                    .zip(info.sig.generics.iter())
-                    .enumerate()
-                {
-                    if got.arity != expected.arity {
-                        return Err(TypeError {
-                            message: format!(
-                                "method `{mname}` generic parameter {} arity does not match interface `{iface_def_name}`",
-                                idx + 1
-                            ),
-                            span: method
-                                .generics
-                                .get(idx)
-                                .map(|g| g.span)
-                                .unwrap_or(method.name.span),
-                        });
+
+                    // Disallow extra methods (strictness).
+                    for extra in impl_methods_by_name.keys() {
+                        if !iface_methods.contains_key(extra) {
+                            return Err(TypeError {
+                                message: format!(
+                                    "extra method `{extra}` not declared in interface `{}`",
+                                    iface_def_name
+                                ),
+                                span: item.span,
+                            });
+                        }
                     }
 
-                    let expected_bounds = expected
-                        .bounds
-                        .iter()
-                        .cloned()
-                        .map(|b| shift_method_generics(b, expected_iface_arity, shift))
-                        .collect::<Vec<_>>();
-                    let bounds_match = expected_bounds.len() == got.bounds.len()
-                        && expected_bounds.iter().all(|b| got.bounds.contains(b));
-                    if !bounds_match {
-                        return Err(TypeError {
-                            message: format!(
-                                "method `{mname}` generic parameter {} bounds do not match interface `{iface_def_name}`: expected {}, got {}",
-                                idx + 1,
-                                fmt_bounds(&expected_bounds),
-                                fmt_bounds(&got.bounds)
-                            ),
-                            span: method
-                                .generics
-                                .get(idx)
-                                .map(|g| g.span)
-                                .unwrap_or(method.name.span),
-                        });
+                    // Record nominal interface implementations, including transitive supers.
+                    //
+                    // This is used for:
+                    // - checked casts (`as?`) / type tests (`is`) against interfaces, including marker
+                    //   interfaces with zero methods
+                    // - overlap detection for marker interfaces (no methods => no interface_methods keys)
+                    let mut all_ifaces = BTreeSet::<String>::new();
+                    collect_interface_and_supers(env, &iface_def_name, &mut all_ifaces);
+                    for iface in all_ifaces {
+                        let key = (type_name.clone(), iface.clone());
+                        if !env.interface_impls.insert(key) {
+                            return Err(TypeError {
+                                message: format!(
+                                    "overlapping impls for `{type_name}`: duplicate implementation of interface `{iface}`"
+                                ),
+                                span: item.span,
+                            });
+                        }
                     }
                 }
-
-                let expected_params = info
-                    .sig
-                    .params
-                    .iter()
-                    .cloned()
-                    .map(|t| shift_method_generics(t, expected_iface_arity, shift))
-                    .collect::<Vec<_>>();
-                let got_params = impl_sig.params.iter().skip(1).cloned().collect::<Vec<_>>();
-                if expected_params != got_params {
-                    return Err(TypeError {
-                        message: format!(
-                            "method `{mname}` parameter types do not match interface `{iface_def_name}`"
-                        ),
-                        span: method.name.span,
-                    });
+                crate::modules::DefKind::Trait => {
+                    process_trait_impl_item(
+                        env,
+                        module,
+                        item,
+                        &impl_generics,
+                        &impl_scope,
+                        target,
+                        ty,
+                    )?;
                 }
-                let expected_ret =
-                    shift_method_generics(info.sig.ret.clone(), expected_iface_arity, shift);
-                if expected_ret != impl_sig.ret {
+                _ => {
                     return Err(TypeError {
-                        message: format!(
-                            "method `{mname}` return type does not match interface `{iface_def_name}`"
-                        ),
-                        span: method.name.span,
-                    });
-                }
-
-                if env.interface_methods.contains_key(&key) {
-                    return Err(TypeError {
-                        message: format!(
-                            "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
-                            origin = info.origin
-                        ),
-                        span: item.span,
-                    });
-                }
-                env.interface_methods.insert(key, impl_fn_name);
-            }
-
-            // Disallow extra methods (strictness).
-            for extra in impl_methods_by_name.keys() {
-                if !iface_methods.contains_key(extra) {
-                    return Err(TypeError {
-                        message: format!(
-                            "extra method `{extra}` not declared in interface `{}`",
-                            iface_def_name
-                        ),
-                        span: item.span,
-                    });
-                }
-            }
-
-            // Record nominal interface implementations, including transitive supers.
-            //
-            // This is used for:
-            // - checked casts (`as?`) / type tests (`is`) against interfaces, including marker
-            //   interfaces with zero methods
-            // - overlap detection for marker interfaces (no methods => no interface_methods keys)
-            let mut all_ifaces = BTreeSet::<String>::new();
-            collect_interface_and_supers(env, &iface_def_name, &mut all_ifaces);
-            for iface in all_ifaces {
-                let key = (type_name.clone(), iface.clone());
-                if !env.interface_impls.insert(key) {
-                    return Err(TypeError {
-                        message: format!(
-                            "overlapping impls for `{type_name}`: duplicate implementation of interface `{iface}`"
-                        ),
+                        message: "impl target must be a `trait` or `interface`".to_string(),
                         span: item.span,
                     });
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+fn subst_self_type(ty: Ty, self_ty: &Ty) -> Ty {
+    match ty {
+        Ty::SelfType => self_ty.clone(),
+        Ty::Array(elem) => Ty::Array(Box::new(subst_self_type(*elem, self_ty))),
+        Ty::Tuple(items) => Ty::Tuple(
+            items
+                .into_iter()
+                .map(|t| subst_self_type(t, self_ty))
+                .collect(),
+        ),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params
+                .into_iter()
+                .map(|p| subst_self_type(p, self_ty))
+                .collect(),
+            ret: Box::new(subst_self_type(*ret, self_ty)),
+        },
+        Ty::Cont { param, ret } => Ty::Cont {
+            param: Box::new(subst_self_type(*param, self_ty)),
+            ret: Box::new(subst_self_type(*ret, self_ty)),
+        },
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(subst_self_type(*inner, self_ty))),
+        Ty::App(con, args) => Ty::App(
+            con,
+            args.into_iter()
+                .map(|a| subst_self_type(a, self_ty))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn subst_self_type_in_trait_ref(bound: TraitRef, self_ty: &Ty) -> TraitRef {
+    TraitRef {
+        name: bound.name,
+        args: bound
+            .args
+            .into_iter()
+            .map(|t| subst_self_type(t, self_ty))
+            .collect(),
+    }
+}
+
+fn declare_synthetic_trait_default_method_sig(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    impl_generics: &[GenericParamInfo],
+    trait_arity: usize,
+    receiver_ty: Ty,
+    method_sig: &TraitMethodSig,
+    name: String,
+    self_ty: &Ty,
+    span: Span,
+) -> Result<(), TypeError> {
+    if env.functions.contains_key(&name) {
+        return Err(TypeError {
+            message: format!("duplicate function `{name}`"),
+            span,
+        });
+    }
+
+    let impl_arity = impl_generics.len();
+    if impl_arity < trait_arity {
+        return Err(TypeError {
+            message: "internal error: trait arity exceeds impl arity".to_string(),
+            span,
+        });
+    }
+    let shift = impl_arity - trait_arity;
+
+    let mut generics: Vec<GenericParamInfo> = impl_generics.to_vec();
+    for g in &method_sig.generics {
+        let bounds = g
+            .bounds
+            .iter()
+            .cloned()
+            .map(|b| {
+                let b = shift_method_generics_in_trait_ref(b, trait_arity, shift);
+                subst_self_type_in_trait_ref(b, self_ty)
+            })
+            .collect();
+        generics.push(GenericParamInfo {
+            name: g.name.clone(),
+            arity: g.arity,
+            bounds,
+            span: g.span,
+        });
+    }
+
+    let mut params = Vec::with_capacity(method_sig.params.len() + 1);
+    params.push(receiver_ty);
+    params.extend(method_sig.params.iter().cloned().map(|t| {
+        let t = shift_method_generics(t, trait_arity, shift);
+        subst_self_type(t, self_ty)
+    }));
+    let ret = {
+        let t = shift_method_generics(method_sig.ret.clone(), trait_arity, shift);
+        subst_self_type(t, self_ty)
+    };
+
+    env.functions.insert(
+        name.clone(),
+        FnSig {
+            name,
+            vis: Visibility::Private,
+            defining_module: module.clone(),
+            generics,
+            params,
+            ret,
+            span,
+        },
+    );
+    Ok(())
+}
+
+fn process_trait_impl_item(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    item: &ImplItem,
+    impl_generics: &[GenericParamInfo],
+    impl_scope: &GenericScope,
+    trait_path: &crate::ast::PathType,
+    ty_path: &crate::ast::PathType,
+) -> Result<(), TypeError> {
+    let tref = lower_trait_ref(env, module, impl_scope, trait_path, SelfTypeMode::Disallow)?;
+    let trait_name = tref.name;
+    let trait_args = tref.args;
+    let Some(trait_def) = env.traits.get(&trait_name) else {
+        return Err(TypeError {
+            message: format!("unknown trait `{trait_name}`"),
+            span: item.span,
+        });
+    };
+    let trait_arity = trait_def.generics.len();
+    if trait_args.len() != trait_arity {
+        return Err(TypeError {
+            message: format!(
+                "trait `{trait_name}` expects {trait_arity} type argument(s), got {}",
+                trait_args.len()
+            ),
+            span: item.span,
+        });
+    }
+    for (idx, arg) in trait_args.iter().enumerate() {
+        if arg != &Ty::Gen(idx) {
+            return Err(TypeError {
+                message: "impl trait type arguments must be the impl's type parameters (in order); specialization is not supported yet"
+                    .to_string(),
+                span: trait_path.span,
+            });
+        }
+    }
+
+    let ty = lower_path_type(env, module, impl_scope, ty_path, SelfTypeMode::Disallow)?;
+    let (type_name, type_args) = match ty {
+        Ty::App(TyCon::Named(name), args) => (name, args),
+        other => {
+            return Err(TypeError {
+                message: format!("impl target must be a nominal type, got `{other}`"),
+                span: item.span,
+            });
+        }
+    };
+    if !env.structs.contains_key(&type_name) && !env.enums.contains_key(&type_name) {
+        return Err(TypeError {
+            message: format!("unknown type `{type_name}` in impl"),
+            span: item.span,
+        });
+    }
+    enforce_erased_impl_args(impl_generics, &type_name, &type_args, item.span)?;
+
+    // Validate method set matches the trait definition.
+    let mut impl_methods_by_name: BTreeMap<String, &FnItem> = BTreeMap::new();
+    for method in &item.members {
+        let mname = method.name.name.clone();
+        if method
+            .params
+            .iter()
+            .any(|p| pattern_binds_name(&p.pat, "self"))
+        {
+            return Err(TypeError {
+                message: "explicit `self` parameters are not allowed in methods; use the implicit receiver"
+                    .to_string(),
+                span: method.span,
+            });
+        }
+        if let FnItemKind::Method { receiver } = method.kind
+            && matches!(receiver, MethodReceiverKind::Static)
+        {
+            return Err(TypeError {
+                message: "`static fn` is not allowed in trait impl blocks".to_string(),
+                span: method.span,
+            });
+        }
+        if impl_methods_by_name.insert(mname.clone(), method).is_some() {
+            return Err(TypeError {
+                message: format!("duplicate method `{mname}` in impl"),
+                span: method.name.span,
+            });
+        }
+    }
+
+    let trait_methods = trait_def.methods.clone();
+    for (mname, info) in &trait_methods {
+        let method = impl_methods_by_name.get(mname).copied();
+        let impl_fn_name = format!("impl::{trait_name}::for::{type_name}::{mname}");
+
+        let expected_recv_base = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+        let receiver_ty = if info.receiver_readonly {
+            Ty::Readonly(Box::new(expected_recv_base.clone()))
+        } else {
+            expected_recv_base.clone()
+        };
+
+        let key = (type_name.clone(), trait_name.clone(), mname.clone());
+
+        let Some(method) = method else {
+            if !info.has_default {
+                return Err(TypeError {
+                    message: format!("missing method `{mname}` required by trait `{trait_name}`"),
+                    span: item.span,
+                });
+            }
+
+            declare_synthetic_trait_default_method_sig(
+                env,
+                module,
+                impl_generics,
+                trait_arity,
+                receiver_ty,
+                &info.sig,
+                impl_fn_name.clone(),
+                &expected_recv_base,
+                item.span,
+            )?;
+
+            if env.trait_methods.contains_key(&key) {
+                return Err(TypeError {
+                    message: format!(
+                        "overlapping impls for `{type_name}`: duplicate implementation of `{trait_name}::{mname}`"
+                    ),
+                    span: item.span,
+                });
+            }
+            env.trait_methods.insert(key, impl_fn_name);
+            continue;
+        };
+
+        if method.generics.len() != info.sig.generics.len() {
+            return Err(TypeError {
+                message: format!(
+                    "method `{mname}` must declare {} generic parameter(s) to match the trait",
+                    info.sig.generics.len()
+                ),
+                span: method.name.span,
+            });
+        }
+
+        let FnItemKind::Method { receiver } = method.kind else {
+            return Err(TypeError {
+                message: "internal error: expected method item in impl".to_string(),
+                span: method.span,
+            });
+        };
+        let MethodReceiverKind::Instance { readonly } = receiver else {
+            return Err(TypeError {
+                message: "internal error: trait impl methods must be instance methods".to_string(),
+                span: method.span,
+            });
+        };
+        if readonly != info.receiver_readonly {
+            return Err(TypeError {
+                message: format!(
+                    "method `{mname}` receiver mutability does not match trait `{trait_name}`"
+                ),
+                span: method.name.span,
+            });
+        }
+
+        let expected_params = info.sig.params.len();
+        if method.params.len() != expected_params {
+            return Err(TypeError {
+                message: format!(
+                    "method `{}` must take {} parameter(s)",
+                    mname, expected_params
+                ),
+                span: method.name.span,
+            });
+        }
+
+        // Declare the implementing function with a stable internal name.
+        declare_method_sig_with_receiver_in_self_mode(
+            env,
+            module,
+            impl_generics,
+            method,
+            impl_fn_name.clone(),
+            receiver_ty,
+            SelfTypeMode::Concrete(&expected_recv_base),
+        )?;
+
+        // Validate the declared signature matches the trait contract.
+        let impl_sig = env
+            .functions
+            .get(&impl_fn_name)
+            .expect("declared just above")
+            .clone();
+        let impl_arity = impl_generics.len();
+        if impl_arity < trait_arity {
+            return Err(TypeError {
+                message: "internal error: trait arity exceeds impl arity".to_string(),
+                span: item.span,
+            });
+        }
+        let shift = impl_arity - trait_arity;
+
+        if let Some(recv_ty) = impl_sig.params.first() {
+            let expected_recv = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
+            if strip_readonly(recv_ty) != strip_readonly(&expected_recv) {
+                return Err(TypeError {
+                    message: format!(
+                        "method `{mname}` receiver type mismatch: expected `{expected_recv}`, got `{recv_ty}`"
+                    ),
+                    span: method.span,
+                });
+            }
+        }
+
+        // Method-generic parameters (arity + bounds) must match the trait contract.
+        let got_method_generics = impl_sig.generics.get(impl_arity..).unwrap_or(&[]);
+        if got_method_generics.len() != info.sig.generics.len() {
+            return Err(TypeError {
+                message: "internal error: impl method generic arity mismatch".to_string(),
+                span: method.name.span,
+            });
+        }
+        let fmt_bounds = |bounds: &[TraitRef]| {
+            if bounds.is_empty() {
+                "no bounds".to_string()
+            } else {
+                bounds
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            }
+        };
+        for (idx, (got, expected)) in got_method_generics
+            .iter()
+            .zip(info.sig.generics.iter())
+            .enumerate()
+        {
+            if got.arity != expected.arity {
+                return Err(TypeError {
+                    message: format!(
+                        "method `{mname}` generic parameter {} arity does not match trait `{trait_name}`",
+                        idx + 1
+                    ),
+                    span: method
+                        .generics
+                        .get(idx)
+                        .map(|g| g.span)
+                        .unwrap_or(method.name.span),
+                });
+            }
+
+            let expected_bounds = expected
+                .bounds
+                .iter()
+                .cloned()
+                .map(|b| {
+                    let b = shift_method_generics_in_trait_ref(b, trait_arity, shift);
+                    subst_self_type_in_trait_ref(b, &expected_recv_base)
+                })
+                .collect::<Vec<_>>();
+            let bounds_match = expected_bounds.len() == got.bounds.len()
+                && expected_bounds.iter().all(|b| got.bounds.contains(b));
+            if !bounds_match {
+                return Err(TypeError {
+                    message: format!(
+                        "method `{mname}` generic parameter {} bounds do not match trait `{trait_name}`: expected {}, got {}",
+                        idx + 1,
+                        fmt_bounds(&expected_bounds),
+                        fmt_bounds(&got.bounds)
+                    ),
+                    span: method
+                        .generics
+                        .get(idx)
+                        .map(|g| g.span)
+                        .unwrap_or(method.name.span),
+                });
+            }
+        }
+
+        let expected_params = info
+            .sig
+            .params
+            .iter()
+            .cloned()
+            .map(|t| {
+                let t = shift_method_generics(t, trait_arity, shift);
+                subst_self_type(t, &expected_recv_base)
+            })
+            .collect::<Vec<_>>();
+        let got_params = impl_sig.params.iter().skip(1).cloned().collect::<Vec<_>>();
+        if expected_params != got_params {
+            return Err(TypeError {
+                message: format!(
+                    "method `{mname}` parameter types do not match trait `{trait_name}`"
+                ),
+                span: method.name.span,
+            });
+        }
+        let expected_ret = {
+            let t = shift_method_generics(info.sig.ret.clone(), trait_arity, shift);
+            subst_self_type(t, &expected_recv_base)
+        };
+        if expected_ret != impl_sig.ret {
+            return Err(TypeError {
+                message: format!(
+                    "method `{mname}` return type does not match trait `{trait_name}`"
+                ),
+                span: method.name.span,
+            });
+        }
+
+        if env.trait_methods.contains_key(&key) {
+            return Err(TypeError {
+                message: format!(
+                    "overlapping impls for `{type_name}`: duplicate implementation of `{trait_name}::{mname}`"
+                ),
+                span: item.span,
+            });
+        }
+        env.trait_methods.insert(key, impl_fn_name);
+    }
+
+    // Disallow extra methods (strictness).
+    for extra in impl_methods_by_name.keys() {
+        if !trait_methods.contains_key(extra) {
+            return Err(TypeError {
+                message: format!("extra method `{extra}` not declared in trait `{trait_name}`"),
+                span: item.span,
+            });
+        }
+    }
+
+    // Record nominal trait implementation.
+    let key = (type_name.clone(), trait_name.clone());
+    if !env.trait_impls.insert(key) {
+        return Err(TypeError {
+            message: format!(
+                "overlapping impls for `{type_name}`: duplicate implementation of trait `{trait_name}`"
+            ),
+            span: item.span,
+        });
     }
 
     Ok(())
@@ -2062,7 +2870,24 @@ fn lower_generic_params(
     params: &[GenericParam],
     allow_bounds: bool,
 ) -> Result<Vec<GenericParamInfo>, TypeError> {
-    lower_generic_params_in_scope(env, module, &[], params, allow_bounds)
+    lower_generic_params_in_scope(
+        env,
+        module,
+        &[],
+        params,
+        allow_bounds,
+        SelfTypeMode::Disallow,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfTypeMode<'a> {
+    /// `Self` is not allowed in this context.
+    Disallow,
+    /// `Self` is allowed and lowers to `Ty::SelfType`.
+    Abstract,
+    /// `Self` is allowed and is substituted to a concrete type.
+    Concrete(&'a Ty),
 }
 
 fn lower_generic_params_in_scope(
@@ -2071,6 +2896,7 @@ fn lower_generic_params_in_scope(
     prefix: &[GenericParamInfo],
     params: &[GenericParam],
     allow_bounds: bool,
+    self_mode: SelfTypeMode<'_>,
 ) -> Result<Vec<GenericParamInfo>, TypeError> {
     let mut combined: Vec<GenericParamInfo> = prefix.to_vec();
     let mut out = Vec::with_capacity(params.len());
@@ -2102,27 +2928,13 @@ fn lower_generic_params_in_scope(
             });
         }
 
-        let mut bounds = Vec::<Ty>::new();
+        let mut bounds = Vec::<TraitRef>::new();
         if allow_bounds {
             let scope = GenericScope::new(&combined)?;
             for bound in &p.bounds {
-                let bty = lower_path_type(env, module, &scope, bound)?;
-                let Ty::App(TyCon::Named(iface_name), _args) = &bty else {
-                    return Err(TypeError {
-                        message: format!("generic bound must be an interface type, got `{bty}`"),
-                        span: bound.span,
-                    });
-                };
-                if !env.interfaces.contains_key(iface_name) {
-                    return Err(TypeError {
-                        message: format!(
-                            "generic bound must be an interface type, got `{iface_name}`"
-                        ),
-                        span: bound.span,
-                    });
-                }
-                if !bounds.contains(&bty) {
-                    bounds.push(bty);
+                let tref = lower_trait_ref(env, module, &scope, bound, self_mode)?;
+                if !bounds.contains(&tref) {
+                    bounds.push(tref);
                 }
             }
         }
@@ -2173,11 +2985,21 @@ fn lower_type_expr(
     module: &ModulePath,
     scope: &GenericScope,
     ty: &TypeExpr,
+    self_mode: SelfTypeMode<'_>,
 ) -> Result<Ty, TypeError> {
     match ty {
         TypeExpr::Readonly { inner, .. } => Ok(Ty::Readonly(Box::new(lower_type_expr(
-            env, module, scope, inner,
+            env, module, scope, inner, self_mode,
         )?))),
+        TypeExpr::SelfType { span } => match self_mode {
+            SelfTypeMode::Disallow => Err(TypeError {
+                message: "`Self` is only allowed in `trait` definitions and `impl Trait for Type`"
+                    .to_string(),
+                span: *span,
+            }),
+            SelfTypeMode::Abstract => Ok(Ty::SelfType),
+            SelfTypeMode::Concrete(ty) => Ok(ty.clone()),
+        },
         TypeExpr::Prim { prim, .. } => Ok(match prim {
             PrimType::Unit => Ty::Unit,
             PrimType::Bool => Ty::Bool,
@@ -2187,12 +3009,12 @@ fn lower_type_expr(
             PrimType::Bytes => Ty::Bytes,
         }),
         TypeExpr::Array { elem, .. } => Ok(Ty::Array(Box::new(lower_type_expr(
-            env, module, scope, elem,
+            env, module, scope, elem, self_mode,
         )?))),
         TypeExpr::Tuple { items, .. } => {
             let items = items
                 .iter()
-                .map(|t| lower_type_expr(env, module, scope, t))
+                .map(|t| lower_type_expr(env, module, scope, t, self_mode))
                 .collect::<Result<Vec<_>, _>>()?;
             if items.is_empty() {
                 Ok(Ty::Unit)
@@ -2203,19 +3025,19 @@ fn lower_type_expr(
         TypeExpr::Fn { params, ret, .. } => {
             let params = params
                 .iter()
-                .map(|p| lower_type_expr(env, module, scope, p))
+                .map(|p| lower_type_expr(env, module, scope, p, self_mode))
                 .collect::<Result<Vec<_>, _>>()?;
-            let ret = lower_type_expr(env, module, scope, ret)?;
+            let ret = lower_type_expr(env, module, scope, ret, self_mode)?;
             Ok(Ty::Fn {
                 params,
                 ret: Box::new(ret),
             })
         }
         TypeExpr::Cont { param, ret, .. } => Ok(Ty::Cont {
-            param: Box::new(lower_type_expr(env, module, scope, param)?),
-            ret: Box::new(lower_type_expr(env, module, scope, ret)?),
+            param: Box::new(lower_type_expr(env, module, scope, param, self_mode)?),
+            ret: Box::new(lower_type_expr(env, module, scope, ret, self_mode)?),
         }),
-        TypeExpr::Path(path) => lower_path_type(env, module, scope, path),
+        TypeExpr::Path(path) => lower_path_type(env, module, scope, path, self_mode),
     }
 }
 
@@ -2224,6 +3046,7 @@ fn lower_path_type(
     module: &ModulePath,
     scope: &GenericScope,
     path: &crate::ast::PathType,
+    self_mode: SelfTypeMode<'_>,
 ) -> Result<Ty, TypeError> {
     if path.segments.is_empty() {
         return Err(TypeError {
@@ -2237,7 +3060,7 @@ fn lower_path_type(
     let mut args = Vec::with_capacity(arg_count);
     for seg in &path.segments {
         for a in &seg.args {
-            args.push(lower_type_expr(env, module, scope, a)?);
+            args.push(lower_type_expr(env, module, scope, a, self_mode)?);
         }
     }
 
@@ -2280,6 +3103,12 @@ fn lower_path_type(
     let arity = match kind {
         crate::modules::DefKind::Struct => env.structs.get(&name).expect("declared").generics.len(),
         crate::modules::DefKind::Enum => env.enums.get(&name).expect("declared").generics.len(),
+        crate::modules::DefKind::Trait => {
+            return Err(TypeError {
+                message: format!("trait `{name}` is not a type"),
+                span: path.span,
+            });
+        }
         crate::modules::DefKind::Interface => {
             env.interfaces.get(&name).expect("declared").generics.len()
         }
@@ -2296,6 +3125,68 @@ fn lower_path_type(
     }
 
     Ok(Ty::App(TyCon::Named(name), args))
+}
+
+fn lower_trait_ref(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    scope: &GenericScope,
+    path: &crate::ast::PathType,
+    self_mode: SelfTypeMode<'_>,
+) -> Result<TraitRef, TypeError> {
+    if path.segments.is_empty() {
+        return Err(TypeError {
+            message: "empty trait path".to_string(),
+            span: path.span,
+        });
+    }
+
+    let raw_segments: Vec<String> = path.segments.iter().map(|s| s.name.name.clone()).collect();
+    if raw_segments.len() == 1 && scope.lookup(&raw_segments[0]).is_some() {
+        return Err(TypeError {
+            message: format!(
+                "generic bound must be a trait, got type parameter `{}`",
+                raw_segments[0]
+            ),
+            span: path.span,
+        });
+    }
+
+    let arg_count: usize = path.segments.iter().map(|seg| seg.args.len()).sum();
+    let mut args = Vec::with_capacity(arg_count);
+    for seg in &path.segments {
+        for a in &seg.args {
+            args.push(lower_type_expr(env, module, scope, a, self_mode)?);
+        }
+    }
+
+    let (kind, name) = env
+        .modules
+        .resolve_type_fqn(module, &raw_segments, path.span)
+        .map_err(|e| TypeError {
+            message: e.message,
+            span: e.span,
+        })?;
+
+    if kind != crate::modules::DefKind::Trait {
+        return Err(TypeError {
+            message: format!("generic bound must be a trait, got `{name}`"),
+            span: path.span,
+        });
+    }
+
+    let arity = env.traits.get(&name).expect("declared").generics.len();
+    if args.len() != arity {
+        return Err(TypeError {
+            message: format!(
+                "trait `{name}` expects {arity} type argument(s), got {}",
+                args.len()
+            ),
+            span: path.span,
+        });
+    }
+
+    Ok(TraitRef { name, args })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2554,12 +3445,6 @@ fn instantiate_fn(sig: &FnSig, infer: &mut InferCtx) -> InstFn {
         if gp.arity == 0 {
             let ty = infer.fresh_type_var();
             let ty_for_args = ty.clone();
-            if let Ty::Var(var_id) = ty {
-                for bound in &gp.bounds {
-                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
-                    infer.add_constraint(var_id, bound);
-                }
-            }
             reified_type_args.push(ty_for_args.clone());
             ty_subst.insert(gen_id, ty_for_args);
         } else {
@@ -2601,16 +3486,7 @@ fn instantiate_interface_method_sig(
         if gp.arity == 0 {
             let ty = infer.fresh_type_var();
             let ty_for_args = ty.clone();
-            if let Ty::Var(var_id) = ty {
-                // Insert before processing bounds so bounds may mention earlier method generics.
-                ty_subst.insert(gen_id, ty_for_args.clone());
-                for bound in &gp.bounds {
-                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
-                    infer.add_constraint(var_id, bound);
-                }
-            } else {
-                ty_subst.insert(gen_id, ty_for_args.clone());
-            }
+            ty_subst.insert(gen_id, ty_for_args.clone());
             reified_type_args.push(ty_for_args);
         } else {
             let con = infer.fresh_con_var(gp.arity);
@@ -2626,6 +3502,60 @@ fn instantiate_interface_method_sig(
             .map(|t| subst_ty(t, &ty_subst, &con_subst))
             .collect(),
         ret: subst_ty(sig.ret.clone(), &ty_subst, &con_subst),
+        reified_type_args,
+    }
+}
+
+fn instantiate_trait_method_sig(
+    sig: &TraitMethodSig,
+    trait_args: &[Ty],
+    trait_arity: usize,
+    receiver_ty: Ty,
+    receiver_readonly: bool,
+    infer: &mut InferCtx,
+) -> InstFn {
+    let mut ty_subst: HashMap<GenId, Ty> = HashMap::new();
+    let mut con_subst: HashMap<GenId, TyCon> = HashMap::new();
+    let mut reified_type_args: Vec<Ty> = Vec::new();
+
+    for (idx, arg) in trait_args.iter().cloned().enumerate() {
+        ty_subst.insert(idx, arg);
+    }
+    debug_assert_eq!(trait_args.len(), trait_arity);
+
+    // Method generics are appended after the trait generics.
+    for (idx, gp) in sig.generics.iter().enumerate() {
+        let gen_id: GenId = trait_arity + idx;
+        if gp.arity == 0 {
+            let ty = infer.fresh_type_var();
+            let ty_for_args = ty.clone();
+            ty_subst.insert(gen_id, ty_for_args.clone());
+            reified_type_args.push(ty_for_args);
+        } else {
+            let con = infer.fresh_con_var(gp.arity);
+            con_subst.insert(gen_id, con);
+        }
+    }
+
+    let mut params = Vec::with_capacity(sig.params.len() + 1);
+    let recv_param = if receiver_readonly {
+        Ty::Readonly(Box::new(receiver_ty.clone()))
+    } else {
+        receiver_ty.clone()
+    };
+    params.push(recv_param);
+    params.extend(sig.params.iter().cloned().map(|t| {
+        let t = subst_ty(t, &ty_subst, &con_subst);
+        subst_self_type(t, &receiver_ty)
+    }));
+    let ret = {
+        let t = subst_ty(sig.ret.clone(), &ty_subst, &con_subst);
+        subst_self_type(t, &receiver_ty)
+    };
+
+    InstFn {
+        params,
+        ret,
         reified_type_args,
     }
 }
@@ -2694,6 +3624,7 @@ pub(crate) fn typecheck_program(
                 info.method_type_args.extend(fn_info.method_type_args);
                 info.effect_interface_args
                     .extend(fn_info.effect_interface_args);
+                info.trait_method_calls.extend(fn_info.trait_method_calls);
                 Ok(())
             }
             Item::Interface(iface) => {
@@ -2730,6 +3661,52 @@ pub(crate) fn typecheck_program(
                     info.method_type_args.extend(fn_info.method_type_args);
                     info.effect_interface_args
                         .extend(fn_info.effect_interface_args);
+                    info.trait_method_calls.extend(fn_info.trait_method_calls);
+                }
+                Ok(())
+            }
+            Item::Trait(tr) => {
+                let trait_name = module.qualify(&tr.name.name);
+                for member in &tr.members {
+                    let Some(body) = &member.body else {
+                        continue;
+                    };
+                    let default_fn_name = format!("$default::{trait_name}::{}", member.name.name);
+                    let sig = env.functions.get(&default_fn_name).ok_or(TypeError {
+                        message: format!(
+                            "internal error: missing signature for `{default_fn_name}`"
+                        ),
+                        span: member.span,
+                    })?;
+
+                    let synthetic = FnItem {
+                        vis: Visibility::Private,
+                        kind: FnItemKind::Method {
+                            receiver: MethodReceiverKind::Instance {
+                                readonly: member.readonly,
+                            },
+                        },
+                        name: member.name.clone(),
+                        generics: member.generics.clone(),
+                        params: member.params.clone(),
+                        ret: member.ret.clone(),
+                        body: body.clone(),
+                        span: member.span,
+                    };
+                    let fn_info = typecheck_function_body_with_self_ctx(
+                        env,
+                        module,
+                        sig,
+                        &synthetic,
+                        SelfTypeCtx::Abstract,
+                        Some(trait_name.clone()),
+                    )?;
+                    info.expr_types.extend(fn_info.expr_types);
+                    info.call_type_args.extend(fn_info.call_type_args);
+                    info.method_type_args.extend(fn_info.method_type_args);
+                    info.effect_interface_args
+                        .extend(fn_info.effect_interface_args);
+                    info.trait_method_calls.extend(fn_info.trait_method_calls);
                 }
                 Ok(())
             }
@@ -2740,6 +3717,7 @@ pub(crate) fn typecheck_program(
                 info.method_type_args.extend(fn_info.method_type_args);
                 info.effect_interface_args
                     .extend(fn_info.effect_interface_args);
+                info.trait_method_calls.extend(fn_info.trait_method_calls);
                 Ok(())
             }
             _ => Ok(()),
@@ -2758,7 +3736,7 @@ fn typecheck_impl_item(
     let impl_scope = GenericScope::new(&impl_generics)?;
     match &item.header {
         ImplHeader::Inherent { ty, .. } => {
-            let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            let ty = lower_path_type(env, module, &impl_scope, ty, SelfTypeMode::Disallow)?;
             let type_name = match ty {
                 Ty::App(TyCon::Named(name), _args) => name,
                 other => {
@@ -2776,30 +3754,39 @@ fn typecheck_impl_item(
                     message: format!("internal error: missing method signature for `{fn_name}`"),
                     span: method.name.span,
                 })?;
-                let fn_info = typecheck_function_body(env, module, sig, method)?;
+                let fn_info = typecheck_function_body_with_self_ctx(
+                    env,
+                    module,
+                    sig,
+                    method,
+                    SelfTypeCtx::Disallow,
+                    None,
+                )?;
                 info.expr_types.extend(fn_info.expr_types);
                 info.call_type_args.extend(fn_info.call_type_args);
                 info.method_type_args.extend(fn_info.method_type_args);
                 info.effect_interface_args
                     .extend(fn_info.effect_interface_args);
+                info.trait_method_calls.extend(fn_info.trait_method_calls);
             }
         }
-        ImplHeader::InterfaceForType { interface, ty, .. } => {
-            let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
-            let iface_name = match iface_ty {
-                Ty::App(TyCon::Named(name), _args) => name,
-                other => {
-                    return Err(TypeError {
-                        message: format!(
-                            "impl interface must be a nominal interface type, got `{other}`"
-                        ),
-                        span: item.span,
-                    });
-                }
-            };
-            let ty = lower_path_type(env, module, &impl_scope, ty)?;
-            let type_name = match ty {
-                Ty::App(TyCon::Named(name), _args) => name,
+        ImplHeader::ForType { target, ty, .. } => {
+            let target_segments: Vec<String> = target
+                .segments
+                .iter()
+                .map(|s| s.name.name.clone())
+                .collect();
+            let (kind, target_name) = env
+                .modules
+                .resolve_type_fqn(module, &target_segments, target.span)
+                .map_err(|e| TypeError {
+                    message: e.message,
+                    span: e.span,
+                })?;
+
+            let ty = lower_path_type(env, module, &impl_scope, ty, SelfTypeMode::Disallow)?;
+            let (type_name, type_args) = match ty {
+                Ty::App(TyCon::Named(name), args) => (name, args),
                 other => {
                     return Err(TypeError {
                         message: format!("impl target must be a nominal type, got `{other}`"),
@@ -2808,19 +3795,69 @@ fn typecheck_impl_item(
                 }
             };
 
-            for method in &item.members {
-                let mname = &method.name.name;
-                let fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                let sig = env.functions.get(&fn_name).ok_or(TypeError {
-                    message: format!("internal error: missing method signature for `{fn_name}`"),
-                    span: method.name.span,
-                })?;
-                let fn_info = typecheck_function_body(env, module, sig, method)?;
-                info.expr_types.extend(fn_info.expr_types);
-                info.call_type_args.extend(fn_info.call_type_args);
-                info.method_type_args.extend(fn_info.method_type_args);
-                info.effect_interface_args
-                    .extend(fn_info.effect_interface_args);
+            match kind {
+                crate::modules::DefKind::Interface => {
+                    // Typecheck provided interface impl method bodies.
+                    for method in &item.members {
+                        let mname = &method.name.name;
+                        let fn_name = format!("impl::{target_name}::for::{type_name}::{mname}");
+                        let sig = env.functions.get(&fn_name).ok_or(TypeError {
+                            message: format!(
+                                "internal error: missing method signature for `{fn_name}`"
+                            ),
+                            span: method.name.span,
+                        })?;
+                        let fn_info = typecheck_function_body_with_self_ctx(
+                            env,
+                            module,
+                            sig,
+                            method,
+                            SelfTypeCtx::Disallow,
+                            None,
+                        )?;
+                        info.expr_types.extend(fn_info.expr_types);
+                        info.call_type_args.extend(fn_info.call_type_args);
+                        info.method_type_args.extend(fn_info.method_type_args);
+                        info.effect_interface_args
+                            .extend(fn_info.effect_interface_args);
+                        info.trait_method_calls.extend(fn_info.trait_method_calls);
+                    }
+                }
+                crate::modules::DefKind::Trait => {
+                    // `Self` is permitted inside trait impl method bodies and resolves to the impl
+                    // target type (including its type args).
+                    let self_ty = Ty::App(TyCon::Named(type_name.clone()), type_args);
+                    for method in &item.members {
+                        let mname = &method.name.name;
+                        let fn_name = format!("impl::{target_name}::for::{type_name}::{mname}");
+                        let sig = env.functions.get(&fn_name).ok_or(TypeError {
+                            message: format!(
+                                "internal error: missing method signature for `{fn_name}`"
+                            ),
+                            span: method.name.span,
+                        })?;
+                        let fn_info = typecheck_function_body_with_self_ctx(
+                            env,
+                            module,
+                            sig,
+                            method,
+                            SelfTypeCtx::Concrete(self_ty.clone()),
+                            None,
+                        )?;
+                        info.expr_types.extend(fn_info.expr_types);
+                        info.call_type_args.extend(fn_info.call_type_args);
+                        info.method_type_args.extend(fn_info.method_type_args);
+                        info.effect_interface_args
+                            .extend(fn_info.effect_interface_args);
+                        info.trait_method_calls.extend(fn_info.trait_method_calls);
+                    }
+                }
+                _ => {
+                    return Err(TypeError {
+                        message: "impl target must be a `trait` or `interface`".to_string(),
+                        span: item.span,
+                    });
+                }
             }
         }
     }
@@ -2833,7 +3870,20 @@ fn typecheck_function_body(
     sig: &FnSig,
     func: &FnItem,
 ) -> Result<TypeInfo, TypeError> {
+    typecheck_function_body_with_self_ctx(env, module, sig, func, SelfTypeCtx::Disallow, None)
+}
+
+fn typecheck_function_body_with_self_ctx(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    sig: &FnSig,
+    func: &FnItem,
+    self_type_ctx: SelfTypeCtx,
+    current_trait: Option<String>,
+) -> Result<TypeInfo, TypeError> {
     let mut tc = FnTypechecker::new(env, module.clone(), sig);
+    tc.self_type_ctx = self_type_ctx;
+    tc.current_trait = current_trait;
 
     let has_implicit_receiver = matches!(
         func.kind,
@@ -2940,11 +3990,13 @@ fn typecheck_function_body(
             )
         })
         .collect();
+    let trait_method_calls = tc.trait_method_calls;
     Ok(TypeInfo {
         expr_types,
         call_type_args,
         method_type_args,
         effect_interface_args,
+        trait_method_calls,
     })
 }
 
@@ -2953,6 +4005,10 @@ struct FnTypechecker<'a> {
     module: ModulePath,
     sig: &'a FnSig,
     return_ty: Ty,
+    self_type_ctx: SelfTypeCtx,
+    /// When typechecking a trait default method body, records the enclosing trait's FQN so that
+    /// method sugar on `Self` can resolve through that trait.
+    current_trait: Option<String>,
     infer: InferCtx,
     scopes: Vec<HashMap<String, LocalInfo>>,
     all_bindings: Vec<(String, Span, Ty)>,
@@ -2960,9 +4016,17 @@ struct FnTypechecker<'a> {
     call_type_args: HashMap<(Span, String), Vec<Ty>>,
     method_type_args: HashMap<(Span, String), Vec<Ty>>,
     effect_interface_args: HashMap<(Span, String), Vec<Ty>>,
+    trait_method_calls: HashMap<Span, String>,
     stmt_exprs: HashSet<Span>,
     loop_depth: usize,
     reserved_names: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+enum SelfTypeCtx {
+    Disallow,
+    Abstract,
+    Concrete(Ty),
 }
 
 impl<'a> FnTypechecker<'a> {
@@ -2972,6 +4036,8 @@ impl<'a> FnTypechecker<'a> {
             module,
             sig,
             return_ty: sig.ret.clone(),
+            self_type_ctx: SelfTypeCtx::Disallow,
+            current_trait: None,
             infer: InferCtx::new(),
             scopes: vec![HashMap::new()],
             all_bindings: Vec::new(),
@@ -2979,9 +4045,18 @@ impl<'a> FnTypechecker<'a> {
             call_type_args: HashMap::new(),
             method_type_args: HashMap::new(),
             effect_interface_args: HashMap::new(),
+            trait_method_calls: HashMap::new(),
             stmt_exprs: HashSet::new(),
             loop_depth: 0,
             reserved_names: BTreeSet::from(["resume".to_string()]),
+        }
+    }
+
+    fn self_type_mode(&self) -> SelfTypeMode<'_> {
+        match &self.self_type_ctx {
+            SelfTypeCtx::Disallow => SelfTypeMode::Disallow,
+            SelfTypeCtx::Abstract => SelfTypeMode::Abstract,
+            SelfTypeCtx::Concrete(ty) => SelfTypeMode::Concrete(ty),
         }
     }
 
@@ -3160,7 +4235,13 @@ impl<'a> FnTypechecker<'a> {
 
                 let declared = if let Some(ty_expr) = ty {
                     let scope = GenericScope::new(&self.sig.generics)?;
-                    Some(lower_type_expr(self.env, &self.module, &scope, ty_expr)?)
+                    Some(lower_type_expr(
+                        self.env,
+                        &self.module,
+                        &scope,
+                        ty_expr,
+                        self.self_type_mode(),
+                    )?)
                 } else {
                     None
                 };
@@ -3636,7 +4717,13 @@ impl<'a> FnTypechecker<'a> {
             let mut iface_args = Vec::with_capacity(iface_args_count);
             for seg in &interface.segments {
                 for a in &seg.args {
-                    iface_args.push(lower_type_expr(self.env, &self.module, &scope, a)?);
+                    iface_args.push(lower_type_expr(
+                        self.env,
+                        &self.module,
+                        &scope,
+                        a,
+                        self.self_type_mode(),
+                    )?);
                 }
             }
             iface_args
@@ -3736,7 +4823,13 @@ impl<'a> FnTypechecker<'a> {
         self.push_scope();
         for p in params {
             let ty = if let Some(ty_expr) = &p.ty {
-                lower_type_expr(self.env, &self.module, &scope, ty_expr)?
+                lower_type_expr(
+                    self.env,
+                    &self.module,
+                    &scope,
+                    ty_expr,
+                    self.self_type_mode(),
+                )?
             } else {
                 self.infer.fresh_type_var()
             };
@@ -3889,6 +4982,7 @@ impl<'a> FnTypechecker<'a> {
                                     &self.module,
                                     &scope,
                                     a,
+                                    self.self_type_mode(),
                                 )?);
                             }
                         }
@@ -4931,6 +6025,15 @@ impl<'a> FnTypechecker<'a> {
                                 span,
                             );
                         }
+                        crate::modules::DefKind::Trait => {
+                            return self.typecheck_trait_method_call(
+                                &type_fqn,
+                                last_ident,
+                                explicit_type_args,
+                                args,
+                                span,
+                            );
+                        }
                         crate::modules::DefKind::Struct => {
                             let candidate = format!("{type_fqn}::{last}");
                             if self.env.functions.contains_key(&candidate) {
@@ -5061,7 +6164,13 @@ impl<'a> FnTypechecker<'a> {
 
         let scope = GenericScope::new(&self.sig.generics)?;
         for (idx, ty_expr) in explicit_type_args.iter().enumerate() {
-            let explicit_ty = lower_type_expr(self.env, &self.module, &scope, ty_expr)?;
+            let explicit_ty = lower_type_expr(
+                self.env,
+                &self.module,
+                &scope,
+                ty_expr,
+                self.self_type_mode(),
+            )?;
             self.infer
                 .unify(reified_type_args[idx].clone(), explicit_ty, ty_expr.span())?;
         }
@@ -5257,6 +6366,206 @@ impl<'a> FnTypechecker<'a> {
         Ok(inst.ret)
     }
 
+    fn typecheck_trait_method_call(
+        &mut self,
+        trait_name: &str,
+        method: &Ident,
+        explicit_type_args: &[TypeExpr],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Ty, TypeError> {
+        let method_name = method.name.as_str();
+        let Some(trait_def) = self.env.traits.get(trait_name) else {
+            return Err(TypeError {
+                message: format!("unknown trait `{trait_name}`"),
+                span,
+            });
+        };
+        if !trait_def.methods.contains_key(method_name) {
+            return Err(TypeError {
+                message: format!("unknown trait method `{trait_name}::{method_name}`"),
+                span,
+            });
+        }
+        let Some((recv, rest)) = args.split_first() else {
+            return Err(TypeError {
+                message: format!(
+                    "trait method call `{trait_name}::{method_name}` requires an explicit receiver argument"
+                ),
+                span,
+            });
+        };
+        self.typecheck_trait_method_call_with_receiver(
+            trait_name,
+            recv,
+            method,
+            explicit_type_args,
+            rest,
+            span,
+        )
+    }
+
+    fn typecheck_trait_method_call_with_receiver(
+        &mut self,
+        trait_name: &str,
+        receiver: &Expr,
+        method: &Ident,
+        explicit_type_args: &[TypeExpr],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Ty, TypeError> {
+        let method_name = method.name.as_str();
+        let Some(trait_def) = self.env.traits.get(trait_name) else {
+            return Err(TypeError {
+                message: format!("unknown trait `{trait_name}`"),
+                span,
+            });
+        };
+        let Some(method_decl) = trait_def.methods.get(method_name) else {
+            return Err(TypeError {
+                message: format!("unknown trait method `{trait_name}::{method_name}`"),
+                span: method.span,
+            });
+        };
+
+        let recv_ty = self.typecheck_expr(receiver, ExprUse::Value)?;
+        let recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        let receiver_is_readonly = matches!(recv_ty_resolved, Ty::Readonly(_));
+        if receiver_is_readonly && !method_decl.receiver_readonly {
+            return Err(TypeError {
+                message: format!(
+                    "cannot call mutable trait method `{trait_name}::{method_name}` on a readonly receiver"
+                ),
+                span: receiver.span(),
+            });
+        }
+
+        let recv_base = strip_readonly(&recv_ty_resolved).clone();
+        let trait_arity = trait_def.generics.len();
+        let trait_args: Vec<Ty> = match &recv_base {
+            Ty::Gen(id) => {
+                let Some(gp) = self.sig.generics.get(*id) else {
+                    return Err(TypeError {
+                        message: "internal error: unknown generic parameter id".to_string(),
+                        span: method.span,
+                    });
+                };
+                let Some(bound) = gp.bounds.iter().find(|b| b.name == trait_name).cloned() else {
+                    return Err(TypeError {
+                        message: format!(
+                            "type `{recv_ty_resolved}` does not implement `{trait_name}`"
+                        ),
+                        span: receiver.span(),
+                    });
+                };
+                bound.args
+            }
+            Ty::SelfType => {
+                // Only allowed when typechecking a trait default method body: `Self` is abstract,
+                // and `Self` implements the current trait.
+                let Some(current) = self.current_trait.as_deref() else {
+                    return Err(TypeError {
+                        message: "`Self` is only allowed in `trait` definitions and `impl Trait for Type`".to_string(),
+                        span: receiver.span(),
+                    });
+                };
+                if current != trait_name {
+                    return Err(TypeError {
+                        message: format!(
+                            "cannot call trait method `{trait_name}::{method_name}` on `Self`; `Self` only implements `{current}` here"
+                        ),
+                        span: receiver.span(),
+                    });
+                }
+                (0..trait_arity).map(Ty::Gen).collect()
+            }
+            Ty::App(TyCon::Named(type_name), type_args) => {
+                if !self
+                    .env
+                    .trait_impls
+                    .contains(&(type_name.clone(), trait_name.to_string()))
+                {
+                    return Err(TypeError {
+                        message: format!(
+                            "type `{recv_ty_resolved}` does not implement `{trait_name}`"
+                        ),
+                        span: receiver.span(),
+                    });
+                }
+                if type_args.len() < trait_arity {
+                    return Err(TypeError {
+                        message: "internal error: trait arity exceeds receiver type arity"
+                            .to_string(),
+                        span: receiver.span(),
+                    });
+                }
+                type_args[..trait_arity].to_vec()
+            }
+            other => {
+                return Err(TypeError {
+                    message: format!("trait method call receiver is not a nominal type: `{other}`"),
+                    span: receiver.span(),
+                });
+            }
+        };
+
+        let inst = instantiate_trait_method_sig(
+            &method_decl.sig,
+            &trait_args,
+            trait_arity,
+            recv_base.clone(),
+            method_decl.receiver_readonly,
+            &mut self.infer,
+        );
+        let method_id = format!("{trait_name}::{method_name}");
+        self.apply_explicit_type_args(
+            explicit_type_args,
+            &method_decl.sig.generics,
+            &inst.reified_type_args,
+            &method_id,
+            span,
+        )?;
+
+        if inst.params.is_empty() {
+            return Err(TypeError {
+                message: "internal error: trait method instantiation missing receiver param"
+                    .to_string(),
+                span,
+            });
+        }
+
+        if method_decl.receiver_readonly {
+            let expected = strip_readonly(&inst.params[0]).clone();
+            let got = strip_readonly(&recv_ty_resolved).clone();
+            self.infer.unify(expected, got, receiver.span())?;
+        } else {
+            let expected = inst.params[0].clone();
+            self.infer.unify(expected, recv_ty, receiver.span())?;
+        }
+
+        if args.len() != inst.params.len() - 1 {
+            return Err(TypeError {
+                message: format!(
+                    "arity mismatch for `{method_id}`: expected {}, got {}",
+                    inst.params.len() - 1,
+                    args.len()
+                ),
+                span,
+            });
+        }
+        for (arg, expected) in args.iter().zip(inst.params[1..].iter()) {
+            let got = self.typecheck_expr(arg, ExprUse::Value)?;
+            self.infer.unify(expected.clone(), got, arg.span())?;
+        }
+
+        if !inst.reified_type_args.is_empty() {
+            self.method_type_args
+                .insert((span, method_id.clone()), inst.reified_type_args.clone());
+        }
+        self.trait_method_calls.insert(span, method_id);
+        Ok(inst.ret)
+    }
+
     fn typecheck_method_call(
         &mut self,
         receiver: &Expr,
@@ -5350,106 +6659,6 @@ impl<'a> FnTypechecker<'a> {
             other => other,
         };
 
-        // Constrained generic receiver: resolve under bounds `T: B1 + ... + Bn`.
-        if let Ty::Gen(id) = recv_for_dispatch {
-            let Some(gp) = self.sig.generics.get(*id) else {
-                return Err(TypeError {
-                    message: "internal error: unknown generic parameter id".to_string(),
-                    span: method.span,
-                });
-            };
-
-            // Collect candidates named `method`, dedup by canonical origin interface id.
-            let mut candidates: BTreeMap<String, (String, Vec<Ty>, InterfaceMethodSig)> =
-                BTreeMap::new();
-            let mut saw_mutable_candidate = false;
-            for bound in &gp.bounds {
-                let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
-                    continue;
-                };
-                let Some(iface_def) = self.env.interfaces.get(bound_iface) else {
-                    continue;
-                };
-                let Some(info) = iface_def.all_methods.get(&method.name) else {
-                    continue;
-                };
-                if receiver_is_readonly && !info.receiver_readonly {
-                    saw_mutable_candidate = true;
-                    continue;
-                }
-                candidates
-                    .entry(info.origin.clone())
-                    .or_insert_with(|| (bound_iface.clone(), bound_args.clone(), info.sig.clone()));
-            }
-
-            if candidates.is_empty() {
-                if receiver_is_readonly && saw_mutable_candidate {
-                    return Err(TypeError {
-                        message: format!(
-                            "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
-                            method.name
-                        ),
-                        span: method.span,
-                    });
-                }
-                return Err(TypeError {
-                    message: format!("unknown method `{}` on `{recv_ty_resolved}`", method.name),
-                    span: method.span,
-                });
-            }
-            if candidates.len() != 1 {
-                let candidates: Vec<String> = candidates.into_keys().collect();
-                return Err(TypeError {
-                    message: format!(
-                        "ambiguous method `{}` on `{recv_ty_resolved}`; candidates: {}",
-                        method.name,
-                        candidates.join(", ")
-                    ),
-                    span: method.span,
-                });
-            }
-
-            let (origin, (iface_name, iface_args, sig_template)) =
-                candidates.into_iter().next().expect("len == 1");
-            let iface_def = self.env.interfaces.get(&iface_name).expect("exists");
-            let inst = instantiate_interface_method_sig(
-                &sig_template,
-                &iface_args,
-                iface_def.generics.len(),
-                &mut self.infer,
-            );
-            let target_name = format!("{origin}::{}", method.name);
-            self.apply_explicit_type_args(
-                explicit_type_args,
-                &sig_template.generics,
-                &inst.reified_type_args,
-                &target_name,
-                span,
-            )?;
-
-            if args.len() != inst.params.len() {
-                return Err(TypeError {
-                    message: format!(
-                        "arity mismatch for `{iface_name}::{}`: expected {}, got {}",
-                        method.name,
-                        inst.params.len(),
-                        args.len()
-                    ),
-                    span,
-                });
-            }
-            for (arg, expected) in args.iter().zip(inst.params.iter()) {
-                let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                self.infer.unify(expected.clone(), got, arg.span())?;
-            }
-            if !inst.reified_type_args.is_empty() {
-                let method_id = format!("{origin}::{}", method.name);
-                self.method_type_args
-                    .insert((span, method_id), inst.reified_type_args.clone());
-            }
-            return Ok(inst.ret);
-        }
-
         // Interface-typed receiver: resolve within that interface instantiation (including inherited methods).
         if let Ty::App(TyCon::Named(iface_name), iface_args) = recv_for_dispatch
             && let Some(iface_def) = self.env.interfaces.get(iface_name)
@@ -5506,70 +6715,148 @@ impl<'a> FnTypechecker<'a> {
             return Ok(inst.ret);
         }
 
-        // Concrete receiver: search interfaces implemented by the receiver, but treat
-        // diamond-inherited methods as a single canonical method id.
-        let Some(type_name) = nominal_type_name(&recv_ty_resolved) else {
-            return Err(TypeError {
-                message: format!(
-                    "method call receiver is not a nominal type: `{recv_ty_resolved}`"
-                ),
-                span: receiver.span(),
-            });
-        };
-
-        let mut origins: BTreeMap<String, (String, Vec<Ty>)> = BTreeMap::new();
+        // Trait method resolution (static):
+        // - concrete nominal receivers: search implemented traits
+        // - bounded generic receivers: search trait bounds
+        let mut candidates: BTreeMap<String, ()> = BTreeMap::new();
         let mut saw_mutable_candidate = false;
-        for (iface_name, iface) in &self.env.interfaces {
-            if let Some(def) = self.env.modules.def(iface_name)
-                && !def.vis.is_public()
-                && !self.module.is_descendant_of(&def.defining_module)
-            {
-                continue;
+
+        match recv_for_dispatch {
+            Ty::Gen(id) => {
+                let Some(gp) = self.sig.generics.get(*id) else {
+                    return Err(TypeError {
+                        message: "internal error: unknown generic parameter id".to_string(),
+                        span: method.span,
+                    });
+                };
+                for bound in &gp.bounds {
+                    let Some(trait_def) = self.env.traits.get(&bound.name) else {
+                        continue;
+                    };
+                    let Some(method_decl) = trait_def.methods.get(&method.name) else {
+                        continue;
+                    };
+                    if receiver_is_readonly && !method_decl.receiver_readonly {
+                        saw_mutable_candidate = true;
+                        continue;
+                    }
+                    candidates.insert(bound.name.clone(), ());
+                }
+
+                if candidates.is_empty() {
+                    if receiver_is_readonly && saw_mutable_candidate {
+                        return Err(TypeError {
+                            message: format!(
+                                "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                                method.name
+                            ),
+                            span: method.span,
+                        });
+                    }
+                    return Err(TypeError {
+                        message: format!(
+                            "unknown method `{}` on `{recv_ty_resolved}`",
+                            method.name
+                        ),
+                        span: method.span,
+                    });
+                }
             }
-            let Some(method_info) = iface.all_methods.get(&method.name) else {
-                continue;
-            };
-            if receiver_is_readonly && !method_info.receiver_readonly {
-                saw_mutable_candidate = true;
-                continue;
+            Ty::SelfType => {
+                let Some(trait_name) = self.current_trait.clone() else {
+                    return Err(TypeError {
+                        message:
+                            "`Self` is only allowed in `trait` definitions and `impl Trait for Type`"
+                                .to_string(),
+                        span: method.span,
+                    });
+                };
+                let Some(trait_def) = self.env.traits.get(&trait_name) else {
+                    return Err(TypeError {
+                        message: "internal error: missing current trait definition".to_string(),
+                        span: method.span,
+                    });
+                };
+                let Some(method_decl) = trait_def.methods.get(&method.name) else {
+                    return Err(TypeError {
+                        message: format!("unknown method `{}` on `Self`", method.name),
+                        span: method.span,
+                    });
+                };
+                if receiver_is_readonly && !method_decl.receiver_readonly {
+                    return Err(TypeError {
+                        message: format!(
+                            "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                            method.name
+                        ),
+                        span: method.span,
+                    });
+                }
+                candidates.insert(trait_name, ());
             }
-            if let Some(iface_args) =
-                self.infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
-            {
-                origins
-                    .entry(method_info.origin.clone())
-                    .or_insert_with(|| (iface_name.clone(), iface_args));
+            Ty::App(TyCon::Named(type_name), _type_args) => {
+                for ((impl_type, trait_name, mname), _impl_fn) in &self.env.trait_methods {
+                    if impl_type != type_name || mname != &method.name {
+                        continue;
+                    }
+                    if let Some(def) = self.env.modules.def(trait_name)
+                        && !def.vis.is_public()
+                        && !self.module.is_descendant_of(&def.defining_module)
+                    {
+                        continue;
+                    }
+                    let Some(trait_def) = self.env.traits.get(trait_name) else {
+                        continue;
+                    };
+                    let Some(method_decl) = trait_def.methods.get(&method.name) else {
+                        continue;
+                    };
+                    if receiver_is_readonly && !method_decl.receiver_readonly {
+                        saw_mutable_candidate = true;
+                        continue;
+                    }
+                    candidates.insert(trait_name.clone(), ());
+                }
+
+                if candidates.is_empty() {
+                    if let Some(static_name) = static_inherent {
+                        return Err(TypeError {
+                            message: format!(
+                                "static method `{static_name}` must be called as `{static_name}(...)`"
+                            ),
+                            span: method.span,
+                        });
+                    }
+                    if receiver_is_readonly && saw_mutable_candidate {
+                        return Err(TypeError {
+                            message: format!(
+                                "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                                method.name
+                            ),
+                            span: method.span,
+                        });
+                    }
+                    return Err(TypeError {
+                        message: format!("unknown method `{}` on `{type_name}`", method.name),
+                        span: method.span,
+                    });
+                }
+            }
+            _ => {
+                return Err(TypeError {
+                    message: format!(
+                        "method call receiver is not a nominal type: `{recv_ty_resolved}`"
+                    ),
+                    span: receiver.span(),
+                });
             }
         }
 
-        if origins.is_empty() {
-            if let Some(static_name) = static_inherent {
-                return Err(TypeError {
-                    message: format!(
-                        "static method `{static_name}` must be called as `{static_name}(...)`"
-                    ),
-                    span: method.span,
-                });
-            }
-            if receiver_is_readonly && saw_mutable_candidate {
-                return Err(TypeError {
-                    message: format!(
-                        "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
-                        method.name
-                    ),
-                    span: method.span,
-                });
-            }
-            return Err(TypeError {
-                message: format!("unknown method `{}` on `{type_name}`", method.name),
-                span: method.span,
-            });
-        }
-        if origins.len() != 1 {
-            let candidates: Vec<String> = origins.into_keys().collect();
+        if candidates.len() != 1 {
+            let candidates: Vec<String> = candidates.into_keys().collect();
             return Err(TypeError {
                 message: format!(
-                    "ambiguous method `{}` on `{type_name}`; candidates: {}",
+                    "ambiguous method `{}` on `{recv_ty_resolved}`; candidates: {}",
                     method.name,
                     candidates.join(", ")
                 ),
@@ -5577,47 +6864,15 @@ impl<'a> FnTypechecker<'a> {
             });
         }
 
-        let (iface, iface_args) = origins.into_values().next().expect("origins.len()==1");
-        let iface_def = self.env.interfaces.get(&iface).expect("exists");
-        let info = iface_def
-            .all_methods
-            .get(&method.name)
-            .expect("method exists for chosen interface");
-        let inst = instantiate_interface_method_sig(
-            &info.sig,
-            &iface_args,
-            iface_def.generics.len(),
-            &mut self.infer,
-        );
-        let target_name = format!("{}::{}", info.origin, method.name);
-        self.apply_explicit_type_args(
+        let trait_name = candidates.into_keys().next().expect("len == 1");
+        self.typecheck_trait_method_call_with_receiver(
+            &trait_name,
+            receiver,
+            method,
             explicit_type_args,
-            &info.sig.generics,
-            &inst.reified_type_args,
-            &target_name,
+            args,
             span,
-        )?;
-        if args.len() != inst.params.len() {
-            return Err(TypeError {
-                message: format!(
-                    "arity mismatch for `{iface}::{}`: expected {}, got {}",
-                    method.name,
-                    inst.params.len(),
-                    args.len()
-                ),
-                span,
-            });
-        }
-        for (arg, expected) in args.iter().zip(inst.params.iter()) {
-            let got = self.typecheck_expr(arg, ExprUse::Value)?;
-            self.infer.unify(expected.clone(), got, arg.span())?;
-        }
-        if !inst.reified_type_args.is_empty() {
-            let method_id = format!("{}::{}", info.origin, method.name);
-            self.method_type_args
-                .insert((span, method_id), inst.reified_type_args.clone());
-        }
-        Ok(inst.ret)
+        )
     }
 
     fn typecheck_field(
@@ -6047,7 +7302,7 @@ impl<'a> FnTypechecker<'a> {
         };
 
         let scope = GenericScope::new(&self.sig.generics)?;
-        let target_ty = lower_type_expr(self.env, &self.module, &scope, ty)?;
+        let target_ty = lower_type_expr(self.env, &self.module, &scope, ty, self.self_type_mode())?;
         let target_iface = match target_ty {
             Ty::App(TyCon::Named(name), args) => Ty::App(TyCon::Named(name), args),
             other => {
@@ -6120,7 +7375,7 @@ impl<'a> FnTypechecker<'a> {
         op: &str,
     ) -> Result<Ty, TypeError> {
         let scope = GenericScope::new(&self.sig.generics)?;
-        let target_ty = lower_type_expr(self.env, &self.module, &scope, ty)?;
+        let target_ty = lower_type_expr(self.env, &self.module, &scope, ty, self.self_type_mode())?;
 
         let target_ty = match target_ty {
             Ty::Readonly(inner) => {
@@ -6166,30 +7421,10 @@ impl<'a> FnTypechecker<'a> {
         let iface_arity = self.env.interfaces.get(iface)?.generics.len();
 
         match recv_ty {
-            // Bounded generic `T`: infer from the bounds list, possibly via subinterface mapping.
-            Ty::Gen(id) => {
-                let bounds = self.sig.generics.get(*id)?.bounds.clone();
-                let mut found: Option<Vec<Ty>> = None;
-                for bound in bounds {
-                    let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
-                        continue;
-                    };
-                    let Some(args) =
-                        infer_super_interface_args(self.env, &bound_iface, &bound_args, iface)
-                    else {
-                        continue;
-                    };
-                    if args.len() != iface_arity {
-                        continue;
-                    }
-                    match &found {
-                        None => found = Some(args),
-                        Some(prev) if prev == &args => {}
-                        Some(_) => return None,
-                    }
-                }
-                found
-            }
+            // Generic parameters no longer carry `interface` bounds (`T: I` is disallowed). To
+            // construct an interface value / call interface methods dynamically, callers must use
+            // an explicit interface-typed value (`x: I`) or an explicit cast (`x as I`).
+            Ty::Gen(_id) => None,
 
             // Interface-typed value `J<...>`: infer from inheritance.
             Ty::App(TyCon::Named(type_name), type_args)
@@ -6245,26 +7480,8 @@ impl<'a> FnTypechecker<'a> {
 
         let ty = strip_readonly(ty);
         match ty {
-            // Generic `T` implements `I<...>` iff one of its bounds implies it.
-            Ty::Gen(id) => {
-                let Some(gp) = self.sig.generics.get(*id) else {
-                    return false;
-                };
-                for bound in &gp.bounds {
-                    let Ty::App(TyCon::Named(bound_iface), bound_args) = bound else {
-                        continue;
-                    };
-                    let Some(args) =
-                        infer_super_interface_args(self.env, bound_iface, bound_args, iface_name)
-                    else {
-                        continue;
-                    };
-                    if args == *iface_args {
-                        return true;
-                    }
-                }
-                false
-            }
+            // Generic parameters no longer carry `interface` bounds (`T: I` is disallowed).
+            Ty::Gen(_id) => false,
 
             // Interface value `J<...>` implements `I<...>` iff `J<...>` implies that instantiation.
             Ty::App(TyCon::Named(type_name), type_args)
@@ -6390,6 +7607,24 @@ fn shift_method_generics(ty: Ty, iface_arity: usize, shift: usize) -> Ty {
                 .collect(),
         ),
         other => other,
+    }
+}
+
+fn shift_method_generics_in_trait_ref(
+    bound: TraitRef,
+    iface_arity: usize,
+    shift: usize,
+) -> TraitRef {
+    if shift == 0 {
+        return bound;
+    }
+    TraitRef {
+        name: bound.name,
+        args: bound
+            .args
+            .into_iter()
+            .map(|t| shift_method_generics(t, iface_arity, shift))
+            .collect(),
     }
 }
 

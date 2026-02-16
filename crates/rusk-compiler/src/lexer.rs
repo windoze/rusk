@@ -32,6 +32,7 @@ pub enum TokenKind {
     KwStatic,
     KwStruct,
     KwEnum,
+    KwTrait,
     KwInterface,
     KwImpl,
     KwIf,
@@ -44,6 +45,7 @@ pub enum TokenKind {
     KwIn,
     KwBreak,
     KwContinue,
+    KwSelf,
 
     // Delimiters.
     LParen,
@@ -367,6 +369,7 @@ impl<'a> Lexer<'a> {
             "static" => TokenKind::KwStatic,
             "struct" => TokenKind::KwStruct,
             "enum" => TokenKind::KwEnum,
+            "trait" => TokenKind::KwTrait,
             "interface" => TokenKind::KwInterface,
             "impl" => TokenKind::KwImpl,
             "if" => TokenKind::KwIf,
@@ -379,6 +382,7 @@ impl<'a> Lexer<'a> {
             "in" => TokenKind::KwIn,
             "break" => TokenKind::KwBreak,
             "continue" => TokenKind::KwContinue,
+            "Self" => TokenKind::KwSelf,
             _ => TokenKind::Ident(text.to_string()),
         };
         Token {

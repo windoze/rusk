@@ -1,0 +1,8 @@
+// expect: compile_error `Self` is only allowed in `trait` definitions and `impl Trait for Type`
+
+interface I {
+    fn clone() -> Self;
+}
+
+fn main() -> int { 0 }
+

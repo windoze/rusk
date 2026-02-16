@@ -830,11 +830,28 @@ impl Encoder {
                 self.write_u32(*fnptr);
                 self.write_vec_reg(args)?;
             }
+            Instruction::ICallTypeArgs {
+                dst,
+                fnptr,
+                recv,
+                method_type_args,
+                dict_args,
+                args,
+            } => {
+                self.write_u8(47);
+                self.write_option_reg(dst)?;
+                self.write_u32(*fnptr);
+                self.write_u32(*recv);
+                self.write_vec_reg(method_type_args)?;
+                self.write_vec_reg(dict_args)?;
+                self.write_vec_reg(args)?;
+            }
             Instruction::VCall {
                 dst,
                 obj,
                 method,
                 method_type_args,
+                dict_args,
                 args,
             } => {
                 self.write_u8(36);
@@ -842,6 +859,7 @@ impl Encoder {
                 self.write_u32(*obj);
                 self.write_string(method)?;
                 self.write_vec_reg(method_type_args)?;
+                self.write_vec_reg(dict_args)?;
                 self.write_vec_reg(args)?;
             }
             Instruction::PushHandler { clauses } => {
@@ -1676,11 +1694,20 @@ impl<'a> Decoder<'a> {
                 fnptr: self.read_u32()?,
                 args: self.read_vec_reg()?,
             }),
+            47 => Ok(Instruction::ICallTypeArgs {
+                dst: self.read_option_reg()?,
+                fnptr: self.read_u32()?,
+                recv: self.read_u32()?,
+                method_type_args: self.read_vec_reg()?,
+                dict_args: self.read_vec_reg()?,
+                args: self.read_vec_reg()?,
+            }),
             36 => Ok(Instruction::VCall {
                 dst: self.read_option_reg()?,
                 obj: self.read_u32()?,
                 method: self.read_string()?,
                 method_type_args: self.read_vec_reg()?,
+                dict_args: self.read_vec_reg()?,
                 args: self.read_vec_reg()?,
             }),
             37 => {

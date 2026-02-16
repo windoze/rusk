@@ -1,6 +1,6 @@
 // expect: compile_error ambiguous method
 
-interface A { fn foo() -> int; }
-interface B { fn foo() -> int; }
+trait A { fn foo() -> int; }
+trait B { fn foo() -> int; }
 
 fn call_foo<T: A + B>(x: T) -> int { x.foo() }

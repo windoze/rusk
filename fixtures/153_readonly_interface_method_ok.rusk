@@ -13,9 +13,9 @@ impl I for S {
 fn main() -> int {
     let s = S { x: 7 };
 
-    let a = s.get();
+    let a = I::get(s);
     readonly rs = s;
-    let b = rs.get();
+    let b = I::get(rs);
 
     let i = s as I;
     let c = i.get();
@@ -24,4 +24,3 @@ fn main() -> int {
 
     a + b * 10 + c * 100 + d * 1000
 }
-

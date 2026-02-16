@@ -80,6 +80,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwStruct => Ok(Item::Struct(self.parse_struct_item(vis)?)),
             TokenKind::KwEnum => Ok(Item::Enum(self.parse_enum_item(vis)?)),
+            TokenKind::KwTrait => Ok(Item::Trait(self.parse_trait_item(vis)?)),
             TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface_item(vis)?)),
             TokenKind::KwMod => Ok(Item::Mod(self.parse_mod_item(vis)?)),
             TokenKind::KwUse => Ok(Item::Use(self.parse_use_item(vis)?)),
@@ -321,6 +322,76 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_trait_item(&mut self, vis: Visibility) -> Result<TraitItem, ParseError> {
+        let start = self.expect(TokenKind::KwTrait)?.span.start;
+        let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut members = Vec::new();
+        while !matches!(self.lookahead.kind, TokenKind::RBrace) {
+            let m_start = self.lookahead.span.start;
+            let mut readonly = false;
+            match self.lookahead.kind {
+                TokenKind::KwReadonly => {
+                    readonly = true;
+                    self.bump()?;
+                }
+                TokenKind::KwStatic => {
+                    return Err(self.error_here("`static fn` is not allowed in traits"));
+                }
+                _ => {}
+            }
+            if readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
+                return Err(self.error_here("`static fn` is not allowed in traits"));
+            }
+            self.expect(TokenKind::KwFn)?;
+            let m_name = self.expect_ident()?;
+            let m_generics = self.parse_generic_params()?;
+            self.expect(TokenKind::LParen)?;
+            let params = if matches!(self.lookahead.kind, TokenKind::RParen) {
+                Vec::new()
+            } else {
+                self.parse_param_list()?
+            };
+            let rparen = self.expect(TokenKind::RParen)?;
+            let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
+                self.bump()?;
+                self.parse_type()?
+            } else {
+                // Default return type: `unit`.
+                TypeExpr::Prim {
+                    prim: PrimType::Unit,
+                    span: rparen.span,
+                }
+            };
+            let (body, m_end) = if matches!(self.lookahead.kind, TokenKind::Semi) {
+                let end = self.bump()?.span.end;
+                (None, end)
+            } else {
+                let body = self.parse_block()?;
+                let end = body.span.end;
+                (Some(body), end)
+            };
+            members.push(TraitMember {
+                readonly,
+                name: m_name,
+                generics: m_generics,
+                params,
+                ret,
+                body,
+                span: Span::new(m_start, m_end),
+            });
+        }
+        let end = self.expect(TokenKind::RBrace)?.span.end;
+        Ok(TraitItem {
+            vis,
+            name,
+            generics,
+            members,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_mod_item(&mut self, vis: Visibility) -> Result<ModItem, ParseError> {
         let start = self.expect(TokenKind::KwMod)?.span.start;
         let name = self.expect_ident()?;
@@ -377,8 +448,8 @@ impl<'a> Parser<'a> {
             self.bump()?; // for
             let ty = self.parse_path_type()?;
             let span = Span::new(first.span.start, ty.span.end);
-            ImplHeader::InterfaceForType {
-                interface: first,
+            ImplHeader::ForType {
+                target: first,
                 ty,
                 span,
             }
@@ -555,6 +626,10 @@ impl<'a> Parser<'a> {
         }
 
         match self.lookahead.kind {
+            TokenKind::KwSelf => {
+                let tok = self.bump()?;
+                Ok(TypeExpr::SelfType { span: tok.span })
+            }
             TokenKind::Ident(ref name) => {
                 let prim = match name.as_str() {
                     "unit" => Some(PrimType::Unit),

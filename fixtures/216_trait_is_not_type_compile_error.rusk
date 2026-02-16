@@ -1,0 +1,12 @@
+// expect: compile_error trait `Foo` is not a type
+
+trait Foo { fn foo() -> int; }
+
+struct S {}
+impl Foo for S { fn foo() -> int { 0 } }
+
+fn main() -> int {
+    let _x: Foo = S {};
+    0
+}
+

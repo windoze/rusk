@@ -42,6 +42,87 @@ fn parse_type_rep_capture_name(name: &str) -> Option<usize> {
         .ok()
 }
 
+// Internal capture key prefix used to smuggle trait dictionary values for in-scope generic bounds
+// into lambdas and extracted helpers.
+//
+// Encodes: `$dict::<gen_idx>::<trait_fqn>`.
+const CAPTURE_TRAIT_DICT_PREFIX: &str = "$dict::";
+
+fn parse_trait_dict_capture_name(name: &str) -> Option<(usize, String)> {
+    let rest = name.strip_prefix(CAPTURE_TRAIT_DICT_PREFIX)?;
+    let (idx, trait_name) = rest.split_once("::")?;
+    let idx = idx.parse::<usize>().ok()?;
+    Some((idx, trait_name.to_string()))
+}
+
+// Internal capture key prefix used to smuggle the "current trait dictionary" into lambdas when
+// compiling trait default method bodies.
+//
+// Encodes: `$selfdict::<trait_fqn>`.
+const CAPTURE_SELF_TRAIT_DICT_PREFIX: &str = "$selfdict::";
+
+fn parse_self_trait_dict_capture_name(name: &str) -> Option<String> {
+    name.strip_prefix(CAPTURE_SELF_TRAIT_DICT_PREFIX)
+        .map(|s| s.to_string())
+}
+
+fn dict_param_order(generics: &[typeck::GenericParamInfo]) -> Vec<(usize, typeck::TraitRef)> {
+    let mut out = Vec::new();
+    for (gen_id, gp) in generics.iter().enumerate() {
+        if gp.arity != 0 {
+            continue;
+        }
+        let mut bounds = gp.bounds.clone();
+        bounds.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        for bound in bounds {
+            out.push((gen_id, bound));
+        }
+    }
+    out
+}
+
+fn subst_gens_in_ty(ty: &Ty, ty_args_by_gen: &[Option<Ty>]) -> Ty {
+    match ty {
+        Ty::Unit => Ty::Unit,
+        Ty::Bool => Ty::Bool,
+        Ty::Int => Ty::Int,
+        Ty::Float => Ty::Float,
+        Ty::String => Ty::String,
+        Ty::Bytes => Ty::Bytes,
+        Ty::Array(elem) => Ty::Array(Box::new(subst_gens_in_ty(elem, ty_args_by_gen))),
+        Ty::Tuple(items) => Ty::Tuple(
+            items
+                .iter()
+                .map(|t| subst_gens_in_ty(t, ty_args_by_gen))
+                .collect(),
+        ),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params
+                .iter()
+                .map(|t| subst_gens_in_ty(t, ty_args_by_gen))
+                .collect(),
+            ret: Box::new(subst_gens_in_ty(ret, ty_args_by_gen)),
+        },
+        Ty::Cont { param, ret } => Ty::Cont {
+            param: Box::new(subst_gens_in_ty(param, ty_args_by_gen)),
+            ret: Box::new(subst_gens_in_ty(ret, ty_args_by_gen)),
+        },
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(subst_gens_in_ty(inner, ty_args_by_gen))),
+        Ty::App(con, args) => Ty::App(
+            con.clone(),
+            args.iter()
+                .map(|t| subst_gens_in_ty(t, ty_args_by_gen))
+                .collect(),
+        ),
+        Ty::Gen(id) => ty_args_by_gen
+            .get(*id)
+            .and_then(|t| t.clone())
+            .unwrap_or_else(|| Ty::Gen(*id)),
+        Ty::SelfType => Ty::SelfType,
+        Ty::Var(id) => Ty::Var(*id),
+    }
+}
+
 fn free_value_vars_in_pattern(pat: &AstPattern, bound: &mut BTreeSet<String>) {
     match pat {
         AstPattern::Wildcard { .. } | AstPattern::Literal { .. } => {}
@@ -1140,6 +1221,7 @@ impl Compiler {
                     Instruction::Call { .. }
                     | Instruction::CallId { .. }
                     | Instruction::ICall { .. }
+                    | Instruction::ICallTypeArgs { .. }
                     | Instruction::VCall { .. }
                     | Instruction::PushHandler { .. }
                     | Instruction::PopHandler
@@ -1375,6 +1457,7 @@ impl Compiler {
                 Instruction::Call { .. }
                 | Instruction::CallId { .. }
                 | Instruction::VCall { .. }
+                | Instruction::ICallTypeArgs { .. }
                 | Instruction::ICall { .. }
                 | Instruction::PushHandler { .. }
                 | Instruction::PopHandler
@@ -1740,6 +1823,23 @@ impl Compiler {
                     }
                     Ok(())
                 }
+                Instruction::ICallTypeArgs {
+                    fnptr,
+                    recv,
+                    method_type_args,
+                    args,
+                    ..
+                } => {
+                    resolve_operand(function_ids, fnptr)?;
+                    resolve_operand(function_ids, recv)?;
+                    for op in method_type_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
                 Instruction::ICall { fnptr, args, .. } => {
                     resolve_operand(function_ids, fnptr)?;
                     for op in args {
@@ -1892,6 +1992,30 @@ impl Compiler {
                         self.compile_real_function(module, &synthetic, Some(default_fn_name))?;
                     }
                 }
+                Item::Trait(_tr) => {
+                    let tr_name = module.qualify(&_tr.name.name);
+                    for member in &_tr.members {
+                        let Some(body) = &member.body else {
+                            continue;
+                        };
+                        let default_fn_name = format!("$default::{tr_name}::{}", member.name.name);
+                        let synthetic = FnItem {
+                            vis: crate::ast::Visibility::Private,
+                            kind: FnItemKind::Method {
+                                receiver: MethodReceiverKind::Instance {
+                                    readonly: member.readonly,
+                                },
+                            },
+                            name: member.name.clone(),
+                            generics: member.generics.clone(),
+                            params: member.params.clone(),
+                            ret: member.ret.clone(),
+                            body: body.clone(),
+                            span: member.span,
+                        };
+                        self.compile_real_function(module, &synthetic, Some(default_fn_name))?;
+                    }
+                }
                 Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {}
             }
         }
@@ -1917,16 +2041,16 @@ impl Compiler {
                     self.compile_real_function(module, method, Some(name_override))?;
                 }
             }
-            ImplHeader::InterfaceForType { interface, ty, .. } => {
-                let iface_segments: Vec<String> = interface
+            ImplHeader::ForType { target, ty, .. } => {
+                let target_segments: Vec<String> = target
                     .segments
                     .iter()
                     .map(|s| s.name.name.clone())
                     .collect();
-                let (_kind, iface_name) = self
+                let (kind, target_name) = self
                     .env
                     .modules
-                    .resolve_type_fqn(module, &iface_segments, interface.span)
+                    .resolve_type_fqn(module, &target_segments, target.span)
                     .map_err(|e| CompileError::new(e.message, e.span))?;
                 let type_segments: Vec<String> =
                     ty.segments.iter().map(|s| s.name.name.clone()).collect();
@@ -1935,51 +2059,295 @@ impl Compiler {
                     .modules
                     .resolve_type_fqn(module, &type_segments, ty.span)
                     .map_err(|e| CompileError::new(e.message, e.span))?;
-                for method in &imp.members {
-                    let mname = &method.name.name;
-                    let name_override = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                    self.compile_real_function(module, method, Some(name_override))?;
-                }
+                match kind {
+                    crate::modules::DefKind::Interface => {
+                        let iface_name = target_name;
+                        for method in &imp.members {
+                            let mname = &method.name.name;
+                            let name_override =
+                                format!("impl::{iface_name}::for::{type_name}::{mname}");
+                            self.compile_real_function(module, method, Some(name_override))?;
+                        }
 
-                // Synthesize wrappers for omitted default interface methods.
-                let Some(iface_def) = self.env.interfaces.get(&iface_name) else {
-                    return Err(CompileError::new(
-                        format!("internal error: unknown interface `{iface_name}`"),
-                        imp.span,
-                    ));
-                };
-                let implemented: std::collections::BTreeSet<&str> =
-                    imp.members.iter().map(|m| m.name.name.as_str()).collect();
-                let all_methods: Vec<(String, typeck::InterfaceMethod)> = iface_def
-                    .all_methods
-                    .iter()
-                    .map(|(name, info)| (name.clone(), info.clone()))
-                    .collect();
-                for (mname, info) in all_methods {
-                    if !info.has_default || implemented.contains(mname.as_str()) {
-                        continue;
+                        // Synthesize wrappers for omitted default interface methods.
+                        let Some(iface_def) = self.env.interfaces.get(&iface_name) else {
+                            return Err(CompileError::new(
+                                format!("internal error: unknown interface `{iface_name}`"),
+                                imp.span,
+                            ));
+                        };
+                        let implemented: std::collections::BTreeSet<&str> =
+                            imp.members.iter().map(|m| m.name.name.as_str()).collect();
+                        let all_methods: Vec<(String, typeck::InterfaceMethod)> = iface_def
+                            .all_methods
+                            .iter()
+                            .map(|(name, info)| (name.clone(), info.clone()))
+                            .collect();
+                        for (mname, info) in all_methods {
+                            if !info.has_default || implemented.contains(mname.as_str()) {
+                                continue;
+                            }
+                            let wrapper_name =
+                                format!("impl::{iface_name}::for::{type_name}::{mname}");
+                            if self.module.function_ids.contains_key(&wrapper_name) {
+                                continue;
+                            }
+                            let default_name = format!("$default::{}::{mname}", info.origin);
+                            let origin_arity = self
+                                .env
+                                .interfaces
+                                .get(&info.origin)
+                                .map(|d| d.generics.len())
+                                .unwrap_or(0);
+                            self.compile_default_method_wrapper(
+                                module,
+                                &wrapper_name,
+                                &default_name,
+                                origin_arity,
+                                info.sig.generics.len(),
+                            )?;
+                        }
                     }
-                    let wrapper_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                    if self.module.function_ids.contains_key(&wrapper_name) {
-                        continue;
+                    crate::modules::DefKind::Trait => {
+                        let trait_name = target_name;
+                        for method in &imp.members {
+                            let mname = &method.name.name;
+                            let name_override =
+                                format!("impl::{trait_name}::for::{type_name}::{mname}");
+                            self.compile_real_function(module, method, Some(name_override))?;
+                        }
+
+                        // Synthesize wrappers for omitted default trait methods. These wrappers
+                        // call the `$default::<TraitFqn>::<method>` body and pass a trait
+                        // dictionary for the current impl so default methods can call other trait
+                        // methods and respect overrides.
+                        let Some(trait_def) = self.env.traits.get(&trait_name) else {
+                            return Err(CompileError::new(
+                                format!("internal error: unknown trait `{trait_name}`"),
+                                imp.span,
+                            ));
+                        };
+                        let trait_arity = trait_def.generics.len();
+                        let implemented: std::collections::BTreeSet<&str> =
+                            imp.members.iter().map(|m| m.name.name.as_str()).collect();
+                        let all_methods: Vec<(String, typeck::TraitMethodDecl)> = trait_def
+                            .methods
+                            .iter()
+                            .map(|(name, info)| (name.clone(), info.clone()))
+                            .collect();
+                        for (mname, info) in all_methods {
+                            if !info.has_default || implemented.contains(mname.as_str()) {
+                                continue;
+                            }
+                            let wrapper_name =
+                                format!("impl::{trait_name}::for::{type_name}::{mname}");
+                            if self.module.function_ids.contains_key(&wrapper_name) {
+                                continue;
+                            }
+                            let default_name = format!("$default::{trait_name}::{mname}");
+                            self.compile_trait_default_method_wrapper(
+                                module,
+                                &wrapper_name,
+                                &default_name,
+                                &trait_name,
+                                trait_arity,
+                                info.sig.generics.len(),
+                            )?;
+                        }
                     }
-                    let default_name = format!("$default::{}::{mname}", info.origin);
-                    let origin_arity = self
-                        .env
-                        .interfaces
-                        .get(&info.origin)
-                        .map(|d| d.generics.len())
-                        .unwrap_or(0);
-                    self.compile_default_method_wrapper(
-                        module,
-                        &wrapper_name,
-                        &default_name,
-                        origin_arity,
-                        info.sig.generics.len(),
-                    )?;
+                    _ => {
+                        return Err(CompileError::new(
+                            "impl target must be a `trait` or `interface`",
+                            imp.span,
+                        ));
+                    }
                 }
             }
         }
+        Ok(())
+    }
+
+    fn compile_trait_default_method_wrapper(
+        &mut self,
+        module: &ModulePath,
+        wrapper_name: &str,
+        default_target: &str,
+        trait_name: &str,
+        trait_arity: usize,
+        method_generics_len: usize,
+    ) -> Result<(), CompileError> {
+        let sig = self.env.functions.get(wrapper_name).ok_or_else(|| {
+            CompileError::new(
+                format!("internal error: missing signature for `{wrapper_name}`"),
+                Span::new(0, 0),
+            )
+        })?;
+        let sig = sig.clone();
+
+        let default_sig = self.env.functions.get(default_target).ok_or_else(|| {
+            CompileError::new(
+                format!("internal error: missing default method `{default_target}`"),
+                Span::new(0, 0),
+            )
+        })?;
+        let default_sig = default_sig.clone();
+
+        let expected_default_arity = trait_arity + method_generics_len;
+        if default_sig.generics.len() != expected_default_arity {
+            return Err(CompileError::new(
+                "internal error: trait default method generics length mismatch",
+                Span::new(0, 0),
+            ));
+        }
+
+        let value_param_mutabilities: Vec<Mutability> = sig
+            .params
+            .iter()
+            .map(|ty| match ty {
+                Ty::Readonly(_) => Mutability::Readonly,
+                _ => Mutability::Mutable,
+            })
+            .collect();
+        let value_param_types: Vec<Option<Type>> = {
+            let env = &self.env;
+            sig.params
+                .iter()
+                .map(|ty| mir_type_from_ty(env, ty))
+                .collect()
+        };
+
+        let mut lowerer = FunctionLowerer::new(
+            self,
+            FnKind::Real,
+            module.clone(),
+            wrapper_name.to_string(),
+            sig.generics.clone(),
+        );
+        lowerer.bind_type_rep_params_for_signature();
+        lowerer.bind_trait_dict_params_for_signature();
+
+        let mut value_param_locals = Vec::with_capacity(sig.params.len());
+        for (mutability, ty) in value_param_mutabilities
+            .into_iter()
+            .zip(value_param_types.into_iter())
+        {
+            let local = lowerer.alloc_local();
+            lowerer.params.push(Param {
+                local,
+                mutability,
+                ty,
+            });
+            value_param_locals.push(local);
+        }
+
+        let impl_arity = sig
+            .generics
+            .len()
+            .checked_sub(method_generics_len)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "internal error: wrapper method generics length mismatch",
+                    Span::new(0, 0),
+                )
+            })?;
+        if impl_arity < trait_arity {
+            return Err(CompileError::new(
+                "internal error: trait arity exceeds impl arity",
+                Span::new(0, 0),
+            ));
+        }
+
+        let mut call_args = Vec::new();
+
+        // Forward runtime `TypeRep` values for the trait's own generics.
+        for gen_idx in 0..trait_arity {
+            let Some(local) = lowerer.generic_type_reps.get(gen_idx).and_then(|l| *l) else {
+                return Err(CompileError::new(
+                    "internal error: missing trait generic type rep in wrapper",
+                    Span::new(0, 0),
+                ));
+            };
+            call_args.push(Operand::Local(local));
+        }
+
+        // Forward runtime `TypeRep` values for method-level generics.
+        for i in 0..method_generics_len {
+            let gen_idx = impl_arity + i;
+            if sig.generics.get(gen_idx).is_some_and(|gp| gp.arity == 0) {
+                let Some(local) = lowerer.generic_type_reps.get(gen_idx).and_then(|l| *l) else {
+                    return Err(CompileError::new(
+                        "internal error: missing method generic type rep in wrapper",
+                        Span::new(0, 0),
+                    ));
+                };
+                call_args.push(Operand::Local(local));
+            }
+        }
+
+        // Forward trait dictionaries required by method generic bounds, using the callee's dict
+        // parameter order (trait generics + method generics).
+        for (gen_id, bound) in dict_param_order(default_sig.generics.as_slice()) {
+            let wrapper_gen_id = if gen_id < trait_arity {
+                gen_id
+            } else {
+                let method_gen_id = gen_id - trait_arity;
+                impl_arity + method_gen_id
+            };
+
+            let Some(&local) = lowerer
+                .generic_trait_dicts
+                .get(&(wrapper_gen_id, bound.name.clone()))
+            else {
+                return Err(CompileError::new(
+                    "internal error: missing trait dict param in wrapper",
+                    Span::new(0, 0),
+                ));
+            };
+            call_args.push(Operand::Local(local));
+        }
+
+        // Build the trait dictionary for the current impl so the default method body can dispatch
+        // on `Self` and respect overrides.
+        let receiver_ty = sig.params.first().ok_or_else(|| {
+            CompileError::new(
+                "internal error: wrapper missing receiver param",
+                Span::new(0, 0),
+            )
+        })?;
+        let self_dict = lowerer.lower_trait_dict_for_trait_and_ty(
+            trait_name,
+            receiver_ty,
+            None,
+            Span::new(0, 0),
+        )?;
+        call_args.push(self_dict);
+
+        let Some((&recv_local, arg_locals)) = value_param_locals.split_first() else {
+            return Err(CompileError::new(
+                "internal error: wrapper missing receiver param",
+                Span::new(0, 0),
+            ));
+        };
+        call_args.push(Operand::Local(recv_local));
+        for &local in arg_locals {
+            call_args.push(Operand::Local(local));
+        }
+
+        let dst = lowerer.alloc_local();
+        lowerer.emit(Instruction::Call {
+            dst: Some(dst),
+            func: default_target.to_string(),
+            args: call_args,
+        });
+        lowerer.set_terminator(Terminator::Return {
+            value: Operand::Local(dst),
+        })?;
+
+        let mut mir_fn = lowerer.finish()?;
+        mir_fn.ret_type = mir_type_from_ty(&self.env, &sig.ret);
+        self.module.add_function(mir_fn).map_err(|message| {
+            CompileError::new(format!("internal error: {message}"), Span::new(0, 0))
+        })?;
         Ok(())
     }
 
@@ -2030,6 +2398,7 @@ impl Compiler {
             sig.generics.clone(),
         );
         lowerer.bind_type_rep_params_for_signature();
+        lowerer.bind_trait_dict_params_for_signature();
 
         let mut value_param_locals = Vec::with_capacity(sig.params.len());
         for (mutability, ty) in value_param_mutabilities
@@ -2077,6 +2446,20 @@ impl Compiler {
                 };
                 call_args.push(Operand::Local(local));
             }
+        }
+
+        // Forward trait dictionaries required by method generic bounds.
+        for (gen_id, bound) in dict_param_order(sig.generics.as_slice()) {
+            let Some(&local) = lowerer
+                .generic_trait_dicts
+                .get(&(gen_id, bound.name.clone()))
+            else {
+                return Err(CompileError::new(
+                    "internal error: missing trait dict param in wrapper",
+                    Span::new(0, 0),
+                ));
+            };
+            call_args.push(Operand::Local(local));
         }
 
         let Some((&recv_local, arg_locals)) = value_param_locals.split_first() else {
@@ -2157,6 +2540,32 @@ impl Compiler {
             sig.generics.clone(),
         );
         lowerer.bind_type_rep_params_for_signature();
+        lowerer.bind_trait_dict_params_for_signature();
+
+        // Trait default method bodies (`$default::<TraitFqn>::method`) need an extra dictionary
+        // parameter so calls on `Self` can dispatch and respect overrides.
+        let is_trait_default = name.starts_with("$default::")
+            && sig.params.first().is_some_and(|ty| match ty {
+                Ty::SelfType => true,
+                Ty::Readonly(inner) => matches!(inner.as_ref(), Ty::SelfType),
+                _ => false,
+            });
+        if is_trait_default {
+            let rest = name.strip_prefix("$default::").expect("checked above");
+            let Some((trait_name, _method_name)) = rest.rsplit_once("::") else {
+                return Err(CompileError::new(
+                    "internal error: invalid trait default method name",
+                    func.span,
+                ));
+            };
+            let dict_local = lowerer.alloc_local();
+            lowerer.params.push(Param {
+                local: dict_local,
+                mutability: Mutability::Readonly,
+                ty: Some(Type::Array),
+            });
+            lowerer.self_trait_dict = Some((trait_name.to_string(), dict_local));
+        }
         lowerer.bind_params_from_fn_item(func, &param_mutabilities, &param_types)?;
         lowerer.compute_captured_vars_for_block(&func.body);
         let value = lowerer.lower_block_expr(&func.body)?;
@@ -2324,6 +2733,22 @@ impl Compiler {
                 *slot = Some(captured_val);
                 continue;
             }
+            if let Some((gen_id, trait_name)) = parse_trait_dict_capture_name(name) {
+                if gen_id >= lowerer.generics.len() {
+                    return Err(CompileError::new(
+                        "internal error: invalid generic trait dict capture id",
+                        lambda_expr_span,
+                    ));
+                }
+                lowerer
+                    .generic_trait_dicts
+                    .insert((gen_id, trait_name), captured_val);
+                continue;
+            }
+            if let Some(trait_name) = parse_self_trait_dict_capture_name(name) {
+                lowerer.self_trait_dict = Some((trait_name, captured_val));
+                continue;
+            }
 
             lowerer.bind_var(
                 name,
@@ -2399,6 +2824,22 @@ impl Compiler {
                     ));
                 };
                 *slot = Some(local);
+                continue;
+            }
+            if let Some((gen_id, trait_name)) = parse_trait_dict_capture_name(name) {
+                if gen_id >= lowerer.generics.len() {
+                    return Err(CompileError::new(
+                        "internal error: invalid generic trait dict capture id",
+                        match_span,
+                    ));
+                }
+                lowerer
+                    .generic_trait_dicts
+                    .insert((gen_id, trait_name), local);
+                continue;
+            }
+            if let Some(trait_name) = parse_self_trait_dict_capture_name(name) {
+                lowerer.self_trait_dict = Some((trait_name, local));
                 continue;
             }
             lowerer.bind_var(
@@ -2486,6 +2927,14 @@ struct FunctionLowerer<'a> {
     ///
     /// `generic_type_reps[i]` is `Some(local)` iff `generics[i].arity == 0`.
     generic_type_reps: Vec<Option<Local>>,
+    /// Runtime locals holding trait dictionaries for the in-scope generic bounds.
+    ///
+    /// Keyed by `(gen_id, trait_fqn)`.
+    generic_trait_dicts: BTreeMap<(usize, String), Local>,
+    /// When lowering a trait default method body, holds the trait dictionary for the current impl.
+    ///
+    /// This is used to dispatch `Self.m(...)` inside default bodies so calls respect overrides.
+    self_trait_dict: Option<(String, Local)>,
     params: Vec<Param>,
     blocks: Vec<BlockBuilder>,
     current: BlockId,
@@ -2511,6 +2960,8 @@ impl<'a> FunctionLowerer<'a> {
             name,
             generics,
             generic_type_reps: vec![None; generic_count],
+            generic_trait_dicts: BTreeMap::new(),
+            self_trait_dict: None,
             params: Vec::new(),
             blocks: vec![BlockBuilder {
                 label: "block0".to_string(),
@@ -2595,6 +3046,21 @@ impl<'a> FunctionLowerer<'a> {
                 ty: Some(Type::TypeRep),
             });
             self.generic_type_reps[idx] = Some(local);
+        }
+    }
+
+    fn bind_trait_dict_params_for_signature(&mut self) {
+        // Deterministic ABI: generic order, then bound order.
+        for (gen_id, bound) in dict_param_order(self.generics.as_slice()) {
+            let local = self.alloc_local();
+            self.params.push(Param {
+                local,
+                mutability: Mutability::Readonly,
+                ty: Some(Type::Array),
+            });
+            // Bounds are expected to be unique per trait name within a single generic parameter.
+            self.generic_trait_dicts
+                .insert((gen_id, bound.name.clone()), local);
         }
     }
 
@@ -3067,6 +3533,20 @@ impl<'a> FunctionLowerer<'a> {
             out.entry(format!("{CAPTURE_TYPE_REP_PREFIX}{idx}"))
                 .or_insert_with(|| VarInfo {
                     storage: VarStorage::Local(local),
+                    kind: BindingKind::Const,
+                });
+        }
+        for ((idx, trait_name), &local) in &self.generic_trait_dicts {
+            out.entry(format!("{CAPTURE_TRAIT_DICT_PREFIX}{idx}::{trait_name}"))
+                .or_insert_with(|| VarInfo {
+                    storage: VarStorage::Local(local),
+                    kind: BindingKind::Const,
+                });
+        }
+        if let Some((trait_name, local)) = &self.self_trait_dict {
+            out.entry(format!("{CAPTURE_SELF_TRAIT_DICT_PREFIX}{trait_name}"))
+                .or_insert_with(|| VarInfo {
+                    storage: VarStorage::Local(*local),
                     kind: BindingKind::Const,
                 });
         }
@@ -3738,6 +4218,12 @@ impl<'a> FunctionLowerer<'a> {
                 };
                 Operand::Local(*local)
             }
+            Ty::SelfType => {
+                return Err(CompileError::new(
+                    "cannot reify `Self` as a runtime `TypeRep` in this context",
+                    span,
+                ));
+            }
             Ty::Var(_) => {
                 return Err(CompileError::new(
                     "cannot infer type required for runtime type argument reification; add a type annotation",
@@ -3748,6 +4234,162 @@ impl<'a> FunctionLowerer<'a> {
         Ok(rep)
     }
 
+    fn map_type_args_to_generics(
+        &self,
+        generics: &[typeck::GenericParamInfo],
+        type_args: &[Ty],
+        span: Span,
+    ) -> Result<Vec<Option<Ty>>, CompileError> {
+        let mut out: Vec<Option<Ty>> = vec![None; generics.len()];
+        let mut pos = 0usize;
+        for (gen_id, gp) in generics.iter().enumerate() {
+            if gp.arity != 0 {
+                continue;
+            }
+            let Some(ty) = type_args.get(pos) else {
+                return Err(CompileError::new(
+                    "internal error: missing runtime type argument for generic parameter",
+                    span,
+                ));
+            };
+            out[gen_id] = Some(ty.clone());
+            pos += 1;
+        }
+        if pos != type_args.len() {
+            return Err(CompileError::new(
+                "internal error: extra runtime type arguments passed to call",
+                span,
+            ));
+        }
+        Ok(out)
+    }
+
+    fn lower_dict_args_for_generics(
+        &mut self,
+        generics: &[typeck::GenericParamInfo],
+        ty_args_by_gen: &[Option<Ty>],
+        span: Span,
+    ) -> Result<Vec<Operand>, CompileError> {
+        let mut out = Vec::new();
+        for (gen_id, bound) in dict_param_order(generics) {
+            let Some(Some(ty_arg)) = ty_args_by_gen.get(gen_id) else {
+                return Err(CompileError::new(
+                    "internal error: missing type argument for bounded generic parameter",
+                    span,
+                ));
+            };
+            let bound_args: Vec<Ty> = bound
+                .args
+                .iter()
+                .map(|a| subst_gens_in_ty(a, ty_args_by_gen))
+                .collect();
+            out.push(self.lower_trait_dict_for_trait_and_ty(
+                bound.name.as_str(),
+                ty_arg,
+                Some(bound_args.as_slice()),
+                span,
+            )?);
+        }
+        Ok(out)
+    }
+
+    fn lower_trait_dict_for_trait_and_ty(
+        &mut self,
+        trait_name: &str,
+        ty: &Ty,
+        expected_trait_args: Option<&[Ty]>,
+        span: Span,
+    ) -> Result<Operand, CompileError> {
+        let ty = match ty {
+            Ty::Readonly(inner) => inner.as_ref(),
+            other => other,
+        };
+        match ty {
+            Ty::Gen(gen_id) => {
+                let Some(&local) = self
+                    .generic_trait_dicts
+                    .get(&(*gen_id, trait_name.to_string()))
+                else {
+                    return Err(CompileError::new(
+                        format!(
+                            "missing dictionary for `{trait_name}` on generic parameter {gen_id}"
+                        ),
+                        span,
+                    ));
+                };
+                Ok(Operand::Local(local))
+            }
+            Ty::App(typeck::TyCon::Named(type_name), type_args) => {
+                if !self
+                    .compiler
+                    .env
+                    .trait_impls
+                    .contains(&(type_name.clone(), trait_name.to_string()))
+                {
+                    return Err(CompileError::new(
+                        format!("type `{ty}` does not implement `{trait_name}`"),
+                        span,
+                    ));
+                }
+                let Some(trait_def) = self.compiler.env.traits.get(trait_name) else {
+                    return Err(CompileError::new(
+                        format!("internal error: unknown trait `{trait_name}`"),
+                        span,
+                    ));
+                };
+                let trait_arity = trait_def.generics.len();
+                if trait_arity > type_args.len() {
+                    return Err(CompileError::new(
+                        "internal error: trait arity exceeds receiver type arity",
+                        span,
+                    ));
+                }
+                if let Some(expected) = expected_trait_args {
+                    let got = &type_args[..trait_arity];
+                    if got != expected {
+                        return Err(CompileError::new(
+                            format!(
+                                "type `{ty}` does not satisfy bound `{trait_name}<...>` (trait arguments mismatch)"
+                            ),
+                            span,
+                        ));
+                    }
+                }
+
+                let mut items = Vec::with_capacity(trait_def.method_order.len());
+                for method_name in &trait_def.method_order {
+                    let Some(impl_fn) = self.compiler.env.trait_methods.get(&(
+                        type_name.clone(),
+                        trait_name.to_string(),
+                        method_name.clone(),
+                    )) else {
+                        return Err(CompileError::new(
+                            format!(
+                                "internal error: missing impl for `{trait_name}::{method_name}` on `{type_name}`"
+                            ),
+                            span,
+                        ));
+                    };
+                    items.push(Operand::Literal(ConstValue::Function(impl_fn.clone())));
+                }
+                let dict_local = self.alloc_local();
+                self.emit(Instruction::MakeArray {
+                    dst: dict_local,
+                    items,
+                });
+                Ok(Operand::Local(dict_local))
+            }
+            Ty::SelfType => Err(CompileError::new(
+                "internal error: trait dictionary for `Self` is not implemented yet",
+                span,
+            )),
+            other => Err(CompileError::new(
+                format!("internal error: cannot build trait dictionary for `{other}`"),
+                span,
+            )),
+        }
+    }
+
     fn lower_type_rep_for_type_expr(
         &mut self,
         ty: &crate::ast::TypeExpr,
@@ -3755,6 +4397,10 @@ impl<'a> FunctionLowerer<'a> {
         use crate::ast::TypeExpr;
         match ty {
             TypeExpr::Readonly { inner, .. } => self.lower_type_rep_for_type_expr(inner),
+            TypeExpr::SelfType { span } => Err(CompileError::new(
+                "cannot reify `Self` as a runtime `TypeRep` in this context",
+                *span,
+            )),
             TypeExpr::Prim { prim, span: _ } => {
                 Ok(Operand::Literal(ConstValue::TypeRep(match prim {
                     crate::ast::PrimType::Unit => TypeRepLit::Unit,
@@ -3872,6 +4518,12 @@ impl<'a> FunctionLowerer<'a> {
             DefKind::Struct => TypeRepLit::Struct(fqn),
             DefKind::Enum => TypeRepLit::Enum(fqn),
             DefKind::Interface => TypeRepLit::Interface(fqn),
+            DefKind::Trait => {
+                return Err(CompileError::new(
+                    "trait is not a runtime type; cannot build `TypeRep`",
+                    path.span,
+                ));
+            }
         };
 
         let arg_count: usize = path.segments.iter().map(|seg| seg.args.len()).sum();
@@ -4271,7 +4923,11 @@ impl<'a> FunctionLowerer<'a> {
         let captures = visible
             .iter()
             .filter_map(|(name, info)| {
-                if parse_type_rep_capture_name(name).is_some() || free_vars.contains(name) {
+                if parse_type_rep_capture_name(name).is_some()
+                    || parse_trait_dict_capture_name(name).is_some()
+                    || parse_self_trait_dict_capture_name(name).is_some()
+                    || free_vars.contains(name)
+                {
                     Some((name.clone(), info.clone()))
                 } else {
                     None
@@ -5223,6 +5879,21 @@ impl<'a> FunctionLowerer<'a> {
                                 span,
                             );
                         }
+                        DefKind::Trait => {
+                            if args.is_empty() {
+                                return Err(CompileError::new(
+                                    "trait method call requires an explicit receiver argument",
+                                    span,
+                                ));
+                            }
+                            let method_id = format!("{type_fqn}::{}", last_ident.name);
+                            return self.lower_trait_method_call(
+                                &method_id,
+                                &args[0],
+                                &args[1..],
+                                span,
+                            );
+                        }
                         DefKind::Struct => {
                             let candidate = format!("{type_fqn}::{last}");
                             if self.compiler.env.functions.contains_key(&candidate) {
@@ -5250,10 +5921,27 @@ impl<'a> FunctionLowerer<'a> {
                 .get(&call_key)
                 .cloned()
                 .unwrap_or_default();
-            let mut call_args = Vec::with_capacity(type_args.len() + args.len());
+            let sig = self
+                .compiler
+                .env
+                .functions
+                .get(&func_name)
+                .ok_or_else(|| {
+                    CompileError::new(
+                        format!("internal error: missing signature for `{func_name}`"),
+                        span,
+                    )
+                })?
+                .clone();
+            let ty_args_by_gen = self.map_type_args_to_generics(&sig.generics, &type_args, span)?;
+            let dict_args =
+                self.lower_dict_args_for_generics(&sig.generics, &ty_args_by_gen, span)?;
+
+            let mut call_args = Vec::with_capacity(type_args.len() + dict_args.len() + args.len());
             for ty in &type_args {
                 call_args.push(self.lower_type_rep_for_ty(ty, span)?);
             }
+            call_args.extend(dict_args);
             for arg in args {
                 let v = self.lower_expr(arg)?;
                 call_args.push(Operand::Local(v));
@@ -5328,7 +6016,7 @@ impl<'a> FunctionLowerer<'a> {
             ));
         }
 
-        let (origin_iface, method_id, receiver_readonly) = {
+        let (origin_iface, method_id, receiver_readonly, method_generics) = {
             let Some(iface_def) = self.compiler.env.interfaces.get(&iface_name) else {
                 return Err(CompileError::new(
                     format!("internal error: unknown interface `{iface_name}`"),
@@ -5345,7 +6033,12 @@ impl<'a> FunctionLowerer<'a> {
             };
             let origin = method_info.origin.clone();
             let method_id = format!("{origin}::{method_name}");
-            (origin, method_id, method_info.receiver_readonly)
+            (
+                origin,
+                method_id,
+                method_info.receiver_readonly,
+                method_info.sig.generics.clone(),
+            )
         };
 
         let recv_ty = self
@@ -5386,14 +6079,21 @@ impl<'a> FunctionLowerer<'a> {
                 .get(&(span, method_id.clone()))
                 .cloned()
                 .unwrap_or_default();
-            let mut call_args =
-                Vec::with_capacity(recv_type_args.len() + method_type_args.len() + args.len());
+            let dict_args = {
+                let ty_args_by_gen =
+                    self.map_type_args_to_generics(&method_generics, &method_type_args, span)?;
+                self.lower_dict_args_for_generics(&method_generics, &ty_args_by_gen, span)?
+            };
+            let mut call_args = Vec::with_capacity(
+                recv_type_args.len() + method_type_args.len() + dict_args.len() + args.len(),
+            );
             for ty in recv_type_args {
                 call_args.push(self.lower_type_rep_for_ty(ty, span)?);
             }
             for ty in &method_type_args {
                 call_args.push(self.lower_type_rep_for_ty(ty, span)?);
             }
+            call_args.extend(dict_args);
             let recv_local = self.lower_expr(&args[0])?;
             let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
                 let ro = self.alloc_local();
@@ -5438,6 +6138,11 @@ impl<'a> FunctionLowerer<'a> {
             .get(&(span, method_id.clone()))
             .cloned()
             .unwrap_or_default();
+        let dict_args = {
+            let ty_args_by_gen =
+                self.map_type_args_to_generics(&method_generics, &method_type_args, span)?;
+            self.lower_dict_args_for_generics(&method_generics, &ty_args_by_gen, span)?
+        };
         let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
         for ty in &method_type_args {
             method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
@@ -5453,9 +6158,229 @@ impl<'a> FunctionLowerer<'a> {
             obj: Operand::Local(recv_local),
             method: method_id,
             method_type_args: method_type_arg_reps,
+            dict_args,
             args: vcall_args,
         });
         Ok(dst)
+    }
+
+    fn lower_trait_method_call(
+        &mut self,
+        method_id: &str,
+        receiver: &Expr,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Local, CompileError> {
+        let Some((trait_name, method_name)) = method_id.rsplit_once("::") else {
+            return Err(CompileError::new(
+                "internal error: invalid trait method id",
+                span,
+            ));
+        };
+        let (receiver_readonly, method_generics, method_order) = {
+            let Some(trait_def) = self.compiler.env.traits.get(trait_name) else {
+                return Err(CompileError::new(
+                    format!("internal error: unknown trait `{trait_name}`"),
+                    span,
+                ));
+            };
+            let Some(method_decl) = trait_def.methods.get(method_name) else {
+                return Err(CompileError::new(
+                    format!("internal error: unknown trait method `{method_id}`"),
+                    span,
+                ));
+            };
+            (
+                method_decl.receiver_readonly,
+                method_decl.sig.generics.clone(),
+                trait_def.method_order.clone(),
+            )
+        };
+
+        let recv_ty = self
+            .expr_ty(receiver)
+            .ok_or_else(|| {
+                CompileError::new(
+                    "internal error: missing type for trait method receiver",
+                    receiver.span(),
+                )
+            })?
+            .clone();
+
+        let recv_local = self.lower_expr(receiver)?;
+        let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+            let ro = self.alloc_local();
+            self.emit(Instruction::AsReadonly {
+                dst: ro,
+                src: recv_local,
+            });
+            ro
+        } else {
+            recv_local
+        };
+
+        let method_type_args = self
+            .compiler
+            .types
+            .method_type_args
+            .get(&(span, method_id.to_string()))
+            .cloned()
+            .unwrap_or_default();
+        let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
+        for ty in &method_type_args {
+            method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+        }
+
+        let dict_args = {
+            let ty_args_by_gen =
+                self.map_type_args_to_generics(&method_generics, &method_type_args, span)?;
+            self.lower_dict_args_for_generics(&method_generics, &ty_args_by_gen, span)?
+        };
+
+        let recv_for_dispatch = self.strip_readonly_ty(&recv_ty);
+        match recv_for_dispatch {
+            Ty::App(typeck::TyCon::Named(type_name), recv_type_args) => {
+                let impl_fn = self
+                    .compiler
+                    .env
+                    .trait_methods
+                    .get(&(
+                        type_name.clone(),
+                        trait_name.to_string(),
+                        method_name.to_string(),
+                    ))
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            format!("no impl found for `{method_id}` on `{type_name}`"),
+                            span,
+                        )
+                    })?;
+
+                let mut call_args = Vec::with_capacity(
+                    recv_type_args.len()
+                        + method_type_arg_reps.len()
+                        + dict_args.len()
+                        + args.len()
+                        + 1,
+                );
+                for ty in recv_type_args {
+                    call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+                }
+                call_args.extend(method_type_arg_reps.clone());
+                call_args.extend(dict_args.clone());
+                call_args.push(Operand::Local(recv_local));
+                for a in args {
+                    let v = self.lower_expr(a)?;
+                    call_args.push(Operand::Local(v));
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(dst),
+                    func: impl_fn,
+                    args: call_args,
+                });
+                Ok(dst)
+            }
+            Ty::SelfType => {
+                let (current_trait, dict_local) = self
+                    .self_trait_dict
+                    .as_ref()
+                    .map(|(trait_name, dict_local)| (trait_name.clone(), *dict_local))
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "internal error: missing trait dictionary for `Self` in default method body",
+                            span,
+                        )
+                    })?;
+                if current_trait != trait_name {
+                    return Err(CompileError::new(
+                        format!(
+                            "internal error: `Self` trait dictionary mismatch: expected `{trait_name}`, got `{current_trait}`"
+                        ),
+                        span,
+                    ));
+                }
+
+                let Some(method_index) = method_order.iter().position(|m| m == method_name) else {
+                    return Err(CompileError::new(
+                        "internal error: trait dictionary missing method",
+                        span,
+                    ));
+                };
+
+                let fnptr_local = self.alloc_local();
+                self.emit(Instruction::IndexGet {
+                    dst: fnptr_local,
+                    arr: Operand::Local(dict_local),
+                    idx: Operand::Literal(ConstValue::Int(method_index as i64)),
+                });
+
+                let mut icall_args = Vec::with_capacity(args.len());
+                for a in args {
+                    let v = self.lower_expr(a)?;
+                    icall_args.push(Operand::Local(v));
+                }
+
+                let dst = self.alloc_local();
+                self.emit(Instruction::ICallTypeArgs {
+                    dst: Some(dst),
+                    fnptr: Operand::Local(fnptr_local),
+                    recv: Operand::Local(recv_local),
+                    method_type_args: method_type_arg_reps.clone(),
+                    dict_args: dict_args.clone(),
+                    args: icall_args,
+                });
+                Ok(dst)
+            }
+            Ty::Gen(gen_id) => {
+                let Some(&dict_local) = self
+                    .generic_trait_dicts
+                    .get(&(*gen_id, trait_name.to_string()))
+                else {
+                    return Err(CompileError::new(
+                        format!(
+                            "missing dictionary for `{trait_name}` on generic parameter {gen_id}"
+                        ),
+                        span,
+                    ));
+                };
+                let Some(method_index) = method_order.iter().position(|m| m == method_name) else {
+                    return Err(CompileError::new(
+                        "internal error: trait dictionary missing method",
+                        span,
+                    ));
+                };
+
+                let fnptr_local = self.alloc_local();
+                self.emit(Instruction::IndexGet {
+                    dst: fnptr_local,
+                    arr: Operand::Local(dict_local),
+                    idx: Operand::Literal(ConstValue::Int(method_index as i64)),
+                });
+
+                let mut icall_args = Vec::with_capacity(args.len());
+                for a in args {
+                    let v = self.lower_expr(a)?;
+                    icall_args.push(Operand::Local(v));
+                }
+
+                let dst = self.alloc_local();
+                self.emit(Instruction::ICallTypeArgs {
+                    dst: Some(dst),
+                    fnptr: Operand::Local(fnptr_local),
+                    recv: Operand::Local(recv_local),
+                    method_type_args: method_type_arg_reps.clone(),
+                    dict_args: dict_args.clone(),
+                    args: icall_args,
+                });
+                Ok(dst)
+            }
+            other => Err(CompileError::new(
+                format!("trait method call receiver is not a nominal type: `{other}`"),
+                receiver.span(),
+            )),
+        }
     }
 
     fn lower_method_call(
@@ -5512,10 +6437,29 @@ impl<'a> FunctionLowerer<'a> {
                     .get(&call_key)
                     .cloned()
                     .unwrap_or_default();
-                let mut call_args = Vec::with_capacity(type_args.len() + args.len() + 1);
+                let sig = self
+                    .compiler
+                    .env
+                    .functions
+                    .get(&inherent_name)
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            format!("internal error: missing signature for `{inherent_name}`"),
+                            span,
+                        )
+                    })?
+                    .clone();
+                let ty_args_by_gen =
+                    self.map_type_args_to_generics(&sig.generics, &type_args, span)?;
+                let dict_args =
+                    self.lower_dict_args_for_generics(&sig.generics, &ty_args_by_gen, span)?;
+
+                let mut call_args =
+                    Vec::with_capacity(type_args.len() + dict_args.len() + args.len() + 1);
                 for ty in &type_args {
                     call_args.push(self.lower_type_rep_for_ty(ty, span)?);
                 }
+                call_args.extend(dict_args);
                 call_args.push(Operand::Local(recv_local));
                 for a in args {
                     let v = self.lower_expr(a)?;
@@ -5536,66 +6480,6 @@ impl<'a> FunctionLowerer<'a> {
             other => other,
         };
 
-        // Constrained generic receiver (`T: I`) => dynamic dispatch within `I`.
-        if let Ty::Gen(id) = recv_for_dispatch {
-            let Some(gp) = self.generics.get(*id) else {
-                return Err(CompileError::new(
-                    "internal error: unknown generic parameter in method call",
-                    span,
-                ));
-            };
-            let mut candidates: BTreeMap<String, String> = BTreeMap::new();
-            for bound in &gp.bounds {
-                let Ty::App(crate::typeck::TyCon::Named(iface_name), _args) = bound else {
-                    continue;
-                };
-                let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
-                    continue;
-                };
-                let Some(info) = iface_def.all_methods.get(&method.name) else {
-                    continue;
-                };
-                candidates
-                    .entry(info.origin.clone())
-                    .or_insert_with(|| iface_name.clone());
-            }
-            if candidates.len() != 1 {
-                return Err(CompileError::new(
-                    "internal error: ambiguous constrained generic method call",
-                    span,
-                ));
-            }
-            let origin = candidates.into_keys().next().expect("len == 1");
-            let method_id = format!("{origin}::{}", method.name);
-
-            let recv_local = self.lower_expr(receiver)?;
-            let method_type_args = self
-                .compiler
-                .types
-                .method_type_args
-                .get(&(span, method_id.clone()))
-                .cloned()
-                .unwrap_or_default();
-            let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
-            for ty in &method_type_args {
-                method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
-            }
-            let mut vcall_args = Vec::with_capacity(args.len());
-            for a in args {
-                let v = self.lower_expr(a)?;
-                vcall_args.push(Operand::Local(v));
-            }
-            let dst = self.alloc_local();
-            self.emit(Instruction::VCall {
-                dst: Some(dst),
-                obj: Operand::Local(recv_local),
-                method: method_id,
-                method_type_args: method_type_arg_reps,
-                args: vcall_args,
-            });
-            return Ok(dst);
-        }
-
         // Interface-typed receiver => dynamic dispatch within that interface.
         if let Ty::App(typeck::TyCon::Named(iface_name), _args) = recv_for_dispatch
             && self.compiler.env.interfaces.contains_key(iface_name)
@@ -5603,113 +6487,15 @@ impl<'a> FunctionLowerer<'a> {
             return self.lower_method_vcall(receiver, iface_name, &method.name, args, span);
         }
 
-        // Concrete receiver => static dispatch via the canonical interface method id.
-        let recv_nom = nominal_type_name(&recv_ty).ok_or_else(|| {
-            CompileError::new("method receiver must be a nominal type", receiver.span())
-        })?;
-
-        let mut origins: BTreeMap<String, String> = BTreeMap::new();
-        for (iface_name, iface) in &self.compiler.env.interfaces {
-            if let Some(def) = self.compiler.env.modules.def(iface_name)
-                && !def.vis.is_public()
-                && !self.module.is_descendant_of(&def.defining_module)
-            {
-                continue;
-            }
-            let Some(method_info) = iface.all_methods.get(&method.name) else {
-                continue;
-            };
-            if type_implements_interface(&self.compiler.env, recv_nom, iface_name) {
-                origins
-                    .entry(method_info.origin.clone())
-                    .or_insert_with(|| iface_name.clone());
-            }
-        }
-        if origins.is_empty() {
+        // Otherwise, this must have been resolved as a trait method call by the typechecker.
+        let Some(method_id) = self.compiler.types.trait_method_calls.get(&span).cloned() else {
+            let recv_name = nominal_type_name(&recv_ty).unwrap_or("<non-nominal>");
             return Err(CompileError::new(
-                format!("unknown method `{}` on `{recv_nom}`", method.name),
+                format!("unknown method `{}` on `{recv_name}`", method.name),
                 method.span,
             ));
-        }
-        if origins.len() != 1 {
-            let candidates: Vec<String> = origins.into_keys().collect();
-            return Err(CompileError::new(
-                format!(
-                    "ambiguous method `{}` on `{recv_nom}`; candidates: {}",
-                    method.name,
-                    candidates.join(", ")
-                ),
-                method.span,
-            ));
-        }
-
-        let origin_iface = origins.into_keys().next().expect("origins.len()==1");
-        let receiver_readonly = self
-            .compiler
-            .env
-            .interfaces
-            .get(&origin_iface)
-            .and_then(|d| d.all_methods.get(&method.name))
-            .is_some_and(|m| m.receiver_readonly);
-        let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
-            recv_nom.to_string(),
-            origin_iface.clone(),
-            method.name.clone(),
-        )) else {
-            return Err(CompileError::new(
-                format!(
-                    "internal error: missing impl entry for `{origin_iface}::{}`",
-                    method.name
-                ),
-                span,
-            ));
         };
-        let impl_fn = impl_fn.clone();
-
-        let recv_local = self.lower_expr(receiver)?;
-        let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
-            let ro = self.alloc_local();
-            self.emit(Instruction::AsReadonly {
-                dst: ro,
-                src: recv_local,
-            });
-            ro
-        } else {
-            recv_local
-        };
-        let recv_type_args = match self.strip_readonly_ty(&recv_ty) {
-            Ty::App(typeck::TyCon::Named(_), args) => args.clone(),
-            _ => Vec::new(),
-        };
-        let method_id = format!("{origin_iface}::{}", method.name);
-        let method_type_args = self
-            .compiler
-            .types
-            .method_type_args
-            .get(&(span, method_id.clone()))
-            .cloned()
-            .unwrap_or_default();
-
-        let mut call_args =
-            Vec::with_capacity(recv_type_args.len() + method_type_args.len() + args.len() + 1);
-        for ty in &recv_type_args {
-            call_args.push(self.lower_type_rep_for_ty(ty, span)?);
-        }
-        for ty in &method_type_args {
-            call_args.push(self.lower_type_rep_for_ty(ty, span)?);
-        }
-        call_args.push(Operand::Local(recv_local));
-        for a in args {
-            let v = self.lower_expr(a)?;
-            call_args.push(Operand::Local(v));
-        }
-        let dst = self.alloc_local();
-        self.emit(Instruction::Call {
-            dst: Some(dst),
-            func: impl_fn,
-            args: call_args,
-        });
-        Ok(dst)
+        self.lower_trait_method_call(&method_id, receiver, args, span)
     }
 
     fn lower_method_vcall(
@@ -5720,7 +6506,7 @@ impl<'a> FunctionLowerer<'a> {
         args: &[Expr],
         span: Span,
     ) -> Result<Local, CompileError> {
-        let (method_id, receiver_readonly) = {
+        let (method_id, receiver_readonly, method_generics) = {
             let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
                 return Err(CompileError::new(
                     format!("internal error: unknown interface `{iface_name}`"),
@@ -5736,6 +6522,7 @@ impl<'a> FunctionLowerer<'a> {
             (
                 format!("{}::{method_name}", info.origin),
                 info.receiver_readonly,
+                info.sig.generics.clone(),
             )
         };
 
@@ -5766,6 +6553,11 @@ impl<'a> FunctionLowerer<'a> {
             .get(&(span, method_id.clone()))
             .cloned()
             .unwrap_or_default();
+        let dict_args = {
+            let ty_args_by_gen =
+                self.map_type_args_to_generics(&method_generics, &method_type_args, span)?;
+            self.lower_dict_args_for_generics(&method_generics, &ty_args_by_gen, span)?
+        };
         let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
         for ty in &method_type_args {
             method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
@@ -5781,6 +6573,7 @@ impl<'a> FunctionLowerer<'a> {
             obj: Operand::Local(recv_local),
             method: method_id,
             method_type_args: method_type_arg_reps,
+            dict_args,
             args: vcall_args,
         });
         Ok(dst)
@@ -5818,7 +6611,11 @@ impl<'a> FunctionLowerer<'a> {
         let captured = visible
             .iter()
             .filter_map(|(name, info)| {
-                if parse_type_rep_capture_name(name).is_some() || free_vars.contains(name) {
+                if parse_type_rep_capture_name(name).is_some()
+                    || parse_trait_dict_capture_name(name).is_some()
+                    || parse_self_trait_dict_capture_name(name).is_some()
+                    || free_vars.contains(name)
+                {
                     Some((name.clone(), info.clone()))
                 } else {
                     None
@@ -6285,7 +7082,7 @@ fn mir_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Option<Type> {
                 Some(Type::Struct(name.clone()))
             }
         }
-        Ty::App(_, _) | Ty::Gen(_) | Ty::Var(_) => None,
+        Ty::App(_, _) | Ty::Gen(_) | Ty::SelfType | Ty::Var(_) => None,
     }
 }
 

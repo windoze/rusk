@@ -118,6 +118,7 @@ impl ModulePath {
 pub(crate) enum DefKind {
     Struct,
     Enum,
+    Trait,
     Interface,
 }
 
@@ -133,6 +134,7 @@ pub(crate) enum BindingTarget {
     Function(String),
     Struct(String),
     Enum(String),
+    Trait(String),
     Interface(String),
 }
 
@@ -241,6 +243,7 @@ impl ModuleResolver {
         let out = match item {
             ResolvedItem::Struct { fqn } => Some((DefKind::Struct, fqn)),
             ResolvedItem::Enum { fqn } => Some((DefKind::Enum, fqn)),
+            ResolvedItem::Trait { fqn } => Some((DefKind::Trait, fqn)),
             ResolvedItem::Interface { fqn } => Some((DefKind::Interface, fqn)),
             ResolvedItem::Function { .. } => None,
         };
@@ -353,6 +356,16 @@ impl ModuleResolver {
                         DefKind::Interface,
                     )?;
                 }
+                Item::Trait(t) => {
+                    self.collect_type_def(
+                        &mut scope,
+                        path,
+                        &t.name.name,
+                        t.vis,
+                        t.span,
+                        DefKind::Trait,
+                    )?;
+                }
                 Item::Impl(_) => {}
             }
         }
@@ -381,6 +394,7 @@ impl ModuleResolver {
         let target = match kind {
             DefKind::Struct => BindingTarget::Struct(full_name.clone()),
             DefKind::Enum => BindingTarget::Enum(full_name.clone()),
+            DefKind::Trait => BindingTarget::Trait(full_name.clone()),
             DefKind::Interface => BindingTarget::Interface(full_name.clone()),
         };
 
@@ -936,6 +950,7 @@ impl ModuleResolver {
         let target = match kind {
             DefKind::Struct => BindingTarget::Struct(fqn.to_string()),
             DefKind::Enum => BindingTarget::Enum(fqn.to_string()),
+            DefKind::Trait => BindingTarget::Trait(fqn.to_string()),
             DefKind::Interface => BindingTarget::Interface(fqn.to_string()),
         };
         scope.types.insert(
@@ -1188,6 +1203,7 @@ impl ModuleResolver {
         match target {
             ResolvedItem::Struct { fqn }
             | ResolvedItem::Enum { fqn }
+            | ResolvedItem::Trait { fqn }
             | ResolvedItem::Interface { fqn }
             | ResolvedItem::Function { fqn } => {
                 Ok(self.defs.get(fqn).is_some_and(|d| d.vis.is_public()))
@@ -1363,6 +1379,7 @@ enum Namespace {
 enum ResolvedItem {
     Struct { fqn: String },
     Enum { fqn: String },
+    Trait { fqn: String },
     Interface { fqn: String },
     Function { fqn: String },
 }
@@ -1372,6 +1389,7 @@ impl ResolvedItem {
         match target {
             BindingTarget::Struct(fqn) => Ok(Self::Struct { fqn: fqn.clone() }),
             BindingTarget::Enum(fqn) => Ok(Self::Enum { fqn: fqn.clone() }),
+            BindingTarget::Trait(fqn) => Ok(Self::Trait { fqn: fqn.clone() }),
             BindingTarget::Interface(fqn) => Ok(Self::Interface { fqn: fqn.clone() }),
             BindingTarget::Function(fqn) => Ok(Self::Function { fqn: fqn.clone() }),
             BindingTarget::Module(_) => Err(ResolveError {
@@ -1385,6 +1403,7 @@ impl ResolvedItem {
         match self {
             ResolvedItem::Struct { fqn } => BindingTarget::Struct(fqn),
             ResolvedItem::Enum { fqn } => BindingTarget::Enum(fqn),
+            ResolvedItem::Trait { fqn } => BindingTarget::Trait(fqn),
             ResolvedItem::Interface { fqn } => BindingTarget::Interface(fqn),
             ResolvedItem::Function { fqn } => BindingTarget::Function(fqn),
         }
@@ -1394,6 +1413,7 @@ impl ResolvedItem {
         match self {
             ResolvedItem::Struct { fqn }
             | ResolvedItem::Enum { fqn }
+            | ResolvedItem::Trait { fqn }
             | ResolvedItem::Interface { fqn }
             | ResolvedItem::Function { fqn } => fqn.as_str(),
         }
