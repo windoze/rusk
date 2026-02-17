@@ -284,7 +284,7 @@ TypeAtom       := PrimType
                | "(" Type "," TypeList? ")"        // tuple type (comma required)
                | PathType ;
 
-PrimType       := "unit" | "bool" | "int" | "float" | "string" | "bytes" ;
+PrimType       := "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes" ;
 
 PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
               | Ident GenericArgs? ("::" Ident GenericArgs?)* AssocBindings ;
@@ -642,7 +642,7 @@ Notes:
 
 Runtime values are:
 
-- `unit`, `bool`, `int`, `float`, `string`, `bytes`
+- `unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`
 - heap references: structs, enums, arrays, tuples (shared references)
 - function values (first-class, referring to a named function)
 - continuation tokens (captured by effects)
@@ -1135,7 +1135,7 @@ Local `let` bindings may omit types (inferred).
 
 Nominal types:
 
-- primitives: `unit`, `bool`, `int`, `float`, `string`, `bytes`
+- primitives: `unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`
 - arrays: `[T]`
 - tuples: `(T1, T2, ...)` (where `()` is `unit`)
 - structs: `Name<...>`
@@ -1326,6 +1326,8 @@ Unary negation:
 Other primitive equality:
 
 - `bool`: `core::intrinsics::bool_eq`, `core::intrinsics::bool_ne`
+- `byte`: lowers via `core::intrinsics::byte_to_int` + `core::intrinsics::int_eq` / `int_ne` (or an equivalent fast path)
+- `char`: lowers via `core::intrinsics::char_to_int` + `core::intrinsics::int_eq` / `int_ne` (or an equivalent fast path)
 - `string`: `core::intrinsics::string_eq`, `core::intrinsics::string_ne`
 - `bytes`: `core::intrinsics::bytes_eq`, `core::intrinsics::bytes_ne`
 - `unit`: `core::intrinsics::unit_eq`, `core::intrinsics::unit_ne`
@@ -1372,6 +1374,8 @@ Required baseline `ToString` impls (v0.4 surface):
 - `bool`
 - `int`
 - `float`
+- `byte`
+- `char`
 - `string`
 - `bytes`
 
@@ -1418,17 +1422,17 @@ Iterator constructors and `next` intrinsics:
   - must accept `readonly [T]` as well, producing an iterator over `readonly T`
 - `core::intrinsics::next<T>(core::intrinsics::ArrayIter<T>) -> Option<T>`
 - `core::intrinsics::string_into_iter(string) -> core::intrinsics::StringIter`
-- `core::intrinsics::string_next(core::intrinsics::StringIter) -> Option<int>`
-  - returns Unicode scalar values as `int`
+- `core::intrinsics::string_next(core::intrinsics::StringIter) -> Option<char>`
+  - returns Unicode scalar values as `char`
 - `core::intrinsics::bytes_into_iter(bytes) -> core::intrinsics::BytesIter`
-- `core::intrinsics::bytes_next(core::intrinsics::BytesIter) -> Option<int>`
-  - returns `int` values in `0..=255`
+- `core::intrinsics::bytes_next(core::intrinsics::BytesIter) -> Option<byte>`
+  - returns `byte` values in `0..=255`
 
 Required iterator interface impls:
 
 - `impl core::iter::Iterator for core::intrinsics::ArrayIter<T> { type Item = T; ... }`
-- `impl core::iter::Iterator for core::intrinsics::StringIter { type Item = int; ... }`
-- `impl core::iter::Iterator for core::intrinsics::BytesIter { type Item = int; ... }`
+- `impl core::iter::Iterator for core::intrinsics::StringIter { type Item = char; ... }`
+- `impl core::iter::Iterator for core::intrinsics::BytesIter { type Item = byte; ... }`
 
 - `enum Option<T> { Some(T), None }`
 
@@ -1482,6 +1486,87 @@ Error behavior:
 - `array_slice`/`array_slice_ro` trap if `start` or `end` is out of bounds (`start < 0`,
   `end < 0`, `end > len(xs)`) or if `start > end`.
 
+### 9.7 `byte` / `char` primitives and `bytes` / `string` slicing
+
+This implementation defines two additional primitive types:
+
+- `byte`: an unsigned 8-bit value (`0..=255`)
+- `char`: a Unicode scalar value (`0..=0x10FFFF`, excluding surrogate range `0xD800..=0xDFFF`)
+
+These are value types (not references) and are not part of the host ABI in v0.4 (see
+`BYTECODE_SPEC.md` §3).
+
+#### 9.7.1 Conversions (`int` ↔ `byte`/`char`)
+
+Conversions are explicit and are provided as primitive inherent methods:
+
+- `readonly fn int::to_byte() -> byte`
+  - truncating: keeps the low 8 bits (wrap mod 256)
+- `readonly fn int::try_byte() -> Option<byte>`
+  - checked: returns `Some(b)` iff `0 <= self <= 255`, else `None`
+- `readonly fn byte::to_int() -> int`
+
+- `readonly fn int::to_char() -> char`
+  - checked and trapping: traps unless `self` is a valid Unicode scalar value
+- `readonly fn int::try_char() -> Option<char>`
+  - checked: returns `Some(c)` iff `self` is a valid Unicode scalar value, else `None`
+- `readonly fn char::to_int() -> int`
+
+Lowering targets (canonical intrinsics):
+
+- `core::intrinsics::int_to_byte(x: int) -> byte`
+- `core::intrinsics::int_try_byte(x: int) -> Option<byte>`
+- `core::intrinsics::byte_to_int(x: byte) -> int`
+- `core::intrinsics::int_to_char(x: int) -> char`
+- `core::intrinsics::int_try_char(x: int) -> Option<char>`
+- `core::intrinsics::char_to_int(x: char) -> int`
+
+#### 9.7.2 `bytes` indexing and helpers
+
+Indexing is supported for `bytes` (O(1)) but intentionally **not** for `string`:
+
+- `bs[idx] : byte`
+  - traps if `idx < 0` or `idx >= len(bs)`
+
+Safe access:
+
+- `readonly fn bytes::get(idx: int) -> Option<byte>`
+  - returns `None` if `idx` is out of bounds (including negative indices)
+
+Zero-copy slicing:
+
+- `readonly fn bytes::slice(from: int, to: Option<int>) -> bytes`
+  - half-open `[from, to)`; `to = None` means “to the end”
+  - traps if `from < 0`, `to < 0` (when `to = Some(_)`), `from > to`, or `to > len`
+
+Array conversion (copying):
+
+- `readonly fn bytes::to_array() -> [byte]` copies into a fresh mutable array
+- `static fn bytes::from_array(xs: readonly [byte]) -> bytes` copies array contents into a fresh
+  `bytes`
+
+Lowering targets (canonical intrinsics):
+
+- `core::intrinsics::bytes_get(b: bytes, idx: int) -> Option<byte>`
+- `core::intrinsics::bytes_slice(b: bytes, from: int, to: Option<int>) -> bytes`
+- `core::intrinsics::bytes_to_array(b: bytes) -> [byte]`
+- `core::intrinsics::bytes_from_array(xs: readonly [byte]) -> bytes`
+
+#### 9.7.3 `string` slice views
+
+Zero-copy slicing is supported for `string` by **byte offsets**:
+
+- `readonly fn string::slice(from: int, to: Option<int>) -> string`
+  - half-open `[from, to)`; `to = None` means “to the end”
+  - `from` / `to` are **byte offsets** into UTF-8, not “character indices”
+  - traps if:
+    - `from < 0`, or `to < 0` (when `to = Some(_)`),
+    - `from > to` or `to > len_bytes(string)`,
+    - `from` or `to` is not a UTF-8 character boundary
+
+Lowering target (canonical intrinsic):
+
+- `core::intrinsics::string_slice(s: string, from: int, to: Option<int>) -> string`
 
 ## 10. Compilation Pipeline (Normative)
 

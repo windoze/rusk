@@ -134,6 +134,8 @@ MIR values are dynamically typed at runtime. v0.2 requires support for:
 - `bool`
 - `int` (signed 64-bit, two's complement)
 - `float` (IEEE-754 binary64)
+- `byte` (unsigned 8-bit)
+- `char` (Unicode scalar value)
 - `string` (UTF-8)
 - `bytes` (opaque byte vector)
 - `typerep` (an internal, interned runtime type representation used for generic calls, effect
@@ -185,7 +187,7 @@ MIR provides `as_readonly` to create a readonly view.
 
 MIR may carry types for optimization/debugging:
 
-- primitives: `int`, `float`, `bool`, `string`, `bytes`, `unit`
+- primitives: `int`, `float`, `bool`, `byte`, `char`, `string`, `bytes`, `unit`
 - composite: `struct`, `enum`, `array`, `tuple`
 - callable: `fn`
 - continuations: `cont(<param>) -> <ret>` (the value passed to `resume` and the value produced by `resume`)
@@ -369,7 +371,13 @@ Some instructions are statement-like and produce no value.
 
 - `index_get`:
   - Syntax: `%dst = index_get <op_arr> <op_idx>`
-  - Trap: non-array, non-int index, out-of-bounds.
+  - Semantics:
+    - If `<op_arr>` is an array reference, reads element `idx` (0-based).
+    - If `<op_arr>` is a `bytes` value, reads byte `idx` (0-based) and yields a `byte` value.
+  - Trap:
+    - non-array and non-bytes base,
+    - non-int index,
+    - out-of-bounds.
 
 - `index_set`:
   - Syntax: `index_set <op_arr> <op_idx> <op_val>`

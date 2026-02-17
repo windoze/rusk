@@ -60,13 +60,13 @@ fn for_loop_over_readonly_array_is_allowed() {
 #[test]
 fn for_loop_over_string_iterates_unicode_scalars() {
     let src = r#"
-        fn sum() -> int {
-            let total = 0;
-            for c in "é" {
-                total = total + c;
-            };
-            total
-        }
+	        fn sum() -> int {
+	            let total = 0;
+	            for c in "é" {
+	                total = total + c.to_int();
+	            };
+	            total
+	        }
 
         fn main() -> unit { () }
     "#;
@@ -87,14 +87,14 @@ fn for_loop_over_string_iterates_unicode_scalars() {
 #[test]
 fn for_loop_over_bytes_iterates_byte_values() {
     let src = r#"
-        fn sum() -> int {
-            let total = 0;
-            readonly bs = b"ABC";
-            for b in bs {
-                total = total + b;
-            };
-            total
-        }
+	        fn sum() -> int {
+	            let total = 0;
+	            readonly bs = b"ABC";
+	            for b in bs {
+	                total = total + b.to_int();
+	            };
+	            total
+	        }
 
         fn main() -> unit { () }
     "#;

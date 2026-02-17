@@ -69,6 +69,8 @@ fn lower_type_rep_lit(lit: &rusk_mir::TypeRepLit) -> TypeRepLit {
         rusk_mir::TypeRepLit::Bool => TypeRepLit::Bool,
         rusk_mir::TypeRepLit::Int => TypeRepLit::Int,
         rusk_mir::TypeRepLit::Float => TypeRepLit::Float,
+        rusk_mir::TypeRepLit::Byte => TypeRepLit::Byte,
+        rusk_mir::TypeRepLit::Char => TypeRepLit::Char,
         rusk_mir::TypeRepLit::String => TypeRepLit::String,
         rusk_mir::TypeRepLit::Bytes => TypeRepLit::Bytes,
         rusk_mir::TypeRepLit::Array => TypeRepLit::Array,
@@ -234,6 +236,21 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::array_concat_ro" => Intrinsic::ArrayConcatRo,
         "core::intrinsics::array_slice" => Intrinsic::ArraySlice,
         "core::intrinsics::array_slice_ro" => Intrinsic::ArraySliceRo,
+
+        "core::intrinsics::int_to_byte" => Intrinsic::IntToByte,
+        "core::intrinsics::int_try_byte" => Intrinsic::IntTryByte,
+        "core::intrinsics::byte_to_int" => Intrinsic::ByteToInt,
+
+        "core::intrinsics::int_to_char" => Intrinsic::IntToChar,
+        "core::intrinsics::int_try_char" => Intrinsic::IntTryChar,
+        "core::intrinsics::char_to_int" => Intrinsic::CharToInt,
+
+        "core::intrinsics::bytes_get" => Intrinsic::BytesGet,
+        "core::intrinsics::bytes_slice" => Intrinsic::BytesSlice,
+        "core::intrinsics::bytes_to_array" => Intrinsic::BytesToArray,
+        "core::intrinsics::bytes_from_array" => Intrinsic::BytesFromArray,
+
+        "core::intrinsics::string_slice" => Intrinsic::StringSlice,
 
         _ => return None,
     })

@@ -68,6 +68,8 @@ pub enum TypeRepLit {
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
     Array,
@@ -164,6 +166,23 @@ pub enum Intrinsic {
     ArrayConcatRo,
     ArraySlice,
     ArraySliceRo,
+
+    // `byte` / `char` primitives.
+    IntToByte,
+    IntTryByte,
+    ByteToInt,
+    IntToChar,
+    IntTryChar,
+    CharToInt,
+
+    // `bytes` operations.
+    BytesGet,
+    BytesSlice,
+    BytesToArray,
+    BytesFromArray,
+
+    // `string` operations.
+    StringSlice,
 }
 
 /// A bytecode call target (internal function vs host import).

@@ -710,6 +710,13 @@ impl ModuleResolver {
             "core::intrinsics::int_le",
             "core::intrinsics::int_gt",
             "core::intrinsics::int_ge",
+            // `byte` / `char` conversions.
+            "core::intrinsics::int_to_byte",
+            "core::intrinsics::int_try_byte",
+            "core::intrinsics::byte_to_int",
+            "core::intrinsics::int_to_char",
+            "core::intrinsics::int_try_char",
+            "core::intrinsics::char_to_int",
             // Float arithmetic & comparisons.
             "core::intrinsics::float_add",
             "core::intrinsics::float_sub",
@@ -736,6 +743,13 @@ impl ModuleResolver {
             "core::intrinsics::string_next",
             "core::intrinsics::bytes_into_iter",
             "core::intrinsics::bytes_next",
+            // `bytes` operations.
+            "core::intrinsics::bytes_get",
+            "core::intrinsics::bytes_slice",
+            "core::intrinsics::bytes_to_array",
+            "core::intrinsics::bytes_from_array",
+            // `string` operations.
+            "core::intrinsics::string_slice",
             // Array operations.
             "core::intrinsics::array_len",
             "core::intrinsics::array_len_ro",

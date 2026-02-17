@@ -287,6 +287,8 @@ pub enum PrimType {
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
 }
