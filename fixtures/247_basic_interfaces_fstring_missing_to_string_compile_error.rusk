@@ -1,0 +1,9 @@
+// expect: compile_error core::fmt::ToString
+
+struct User { id: int }
+
+fn main() -> string {
+    let u = User { id: 1 };
+    f"{u}"
+}
+

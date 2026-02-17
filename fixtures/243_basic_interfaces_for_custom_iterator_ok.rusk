@@ -1,0 +1,27 @@
+// expect: ok int 10
+
+use core::iter::Iterator;
+
+struct Range { cur: int, end: int }
+
+impl Iterator for Range {
+    type Item = int;
+    fn next() -> Option<int> {
+        if self.cur < self.end {
+            let out = self.cur;
+            self.cur = self.cur + 1;
+            Option::Some(out)
+        } else {
+            Option::None
+        }
+    }
+}
+
+fn main() -> int {
+    let total = 0;
+    let r = Range { cur: 0, end: 5 };
+    for x in r {
+        total = total + x;
+    };
+    total
+}

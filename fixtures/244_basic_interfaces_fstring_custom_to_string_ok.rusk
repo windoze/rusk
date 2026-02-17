@@ -1,0 +1,28 @@
+// expect: ok string "user = User(id=1, name=alice)"
+
+use core::fmt::ToString;
+
+struct User { id: int, name: string }
+
+impl ToString for User {
+    readonly fn to_string() -> string {
+        let id = core::fmt::ToString::to_string(self.id);
+        let name = core::fmt::ToString::to_string(self.name);
+        core::intrinsics::string_concat(
+            "User(id=",
+            core::intrinsics::string_concat(
+                id,
+                core::intrinsics::string_concat(
+                    ", name=",
+                    core::intrinsics::string_concat(name, ")")
+                )
+            )
+        )
+    }
+}
+
+fn main() -> string {
+    let u = User { id: 1, name: "alice" };
+    f"user = {u}"
+}
+

@@ -1,0 +1,17 @@
+// expect: ok int 431
+
+fn main() -> int {
+    let total = 0;
+
+    for c in "é" {
+        total = total + c;
+    };
+
+    readonly bs = b"ABC";
+    for b in bs {
+        total = total + b;
+    };
+
+    total
+}
+

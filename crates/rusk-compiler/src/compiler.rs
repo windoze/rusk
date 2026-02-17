@@ -960,6 +960,19 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         "core::intrinsics::next" => {
             Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
         }
+        "core::intrinsics::string_into_iter" => Some(sig(
+            vec![HostType::TypeRep, HostType::String],
+            HostType::Any,
+        )),
+        "core::intrinsics::string_next" => {
+            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
+        }
+        "core::intrinsics::bytes_into_iter" => {
+            Some(sig(vec![HostType::TypeRep, HostType::Bytes], HostType::Any))
+        }
+        "core::intrinsics::bytes_next" => {
+            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
+        }
 
         // Array operations.
         "core::intrinsics::array_len" | "core::intrinsics::array_len_ro" => Some(sig(
@@ -1080,6 +1093,7 @@ impl Compiler {
 
     fn compile_program(mut self, program: &Program) -> Result<Module, CompileError> {
         self.compile_module_items(&ModulePath::root(), &program.items)?;
+        self.synthesize_builtin_interface_impl_wrappers()?;
         self.populate_interface_dispatch_table()?;
         self.populate_interface_impl_table();
         self.populate_struct_layouts();
@@ -1089,6 +1103,200 @@ impl Compiler {
         self.resolve_function_constants()?;
 
         Ok(self.module)
+    }
+
+    fn synthesize_builtin_interface_impl_wrappers(&mut self) -> Result<(), CompileError> {
+        let span0 = Span::new(0, 0);
+
+        // `core::fmt::ToString` impls for primitives (used by `f"..."` desugaring).
+        for (prim, rep) in [
+            ("unit", TypeRepLit::Unit),
+            ("bool", TypeRepLit::Bool),
+            ("int", TypeRepLit::Int),
+            ("float", TypeRepLit::Float),
+            ("string", TypeRepLit::String),
+            ("bytes", TypeRepLit::Bytes),
+        ] {
+            let name = format!("impl::core::fmt::ToString::for::{prim}::to_string");
+            if self.module.function_ids.contains_key(&name) {
+                continue;
+            }
+
+            let mut lowerer = FunctionLowerer::new(
+                self,
+                FnKind::Real,
+                ModulePath::root(),
+                name.clone(),
+                Vec::new(),
+            );
+
+            // Receiver parameter.
+            let recv_local = lowerer.alloc_local();
+            lowerer.params.push(Param {
+                local: recv_local,
+                mutability: Mutability::Readonly,
+                ty: None,
+            });
+
+            let out = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(out),
+                func: "core::intrinsics::to_string".to_string(),
+                args: vec![
+                    Operand::Literal(ConstValue::TypeRep(rep)),
+                    Operand::Local(recv_local),
+                ],
+            });
+            lowerer.set_terminator(Terminator::Return {
+                value: Operand::Local(out),
+            })?;
+
+            let mir_fn = lowerer.finish()?;
+            self.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+        }
+
+        // `core::iter::Iterator` impls for built-in iterator state types.
+        //
+        // These are used by:
+        // - `for` lowering (`Iterator::next`)
+        // - dyn dispatch over `core::iter::Iterator` (dispatch table population)
+        // and must therefore exist as real MIR functions (not just VM intrinsics).
+
+        // ArrayIter<T>::next delegates to `core::intrinsics::next`.
+        {
+            let name = "impl::core::iter::Iterator::for::core::intrinsics::ArrayIter::next";
+            if !self.module.function_ids.contains_key(name) {
+                let generics = vec![typeck::GenericParamInfo {
+                    name: "T".to_string(),
+                    arity: 0,
+                    bounds: Vec::new(),
+                    span: span0,
+                }];
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    generics,
+                );
+                lowerer.bind_type_rep_params_for_signature();
+
+                let elem_rep = lowerer
+                    .generic_type_reps
+                    .get(0)
+                    .and_then(|v| *v)
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "internal error: missing ArrayIter<T> TypeRep param",
+                            span0,
+                        )
+                    })?;
+
+                let recv_local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv_local,
+                    mutability: Mutability::Mutable,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::intrinsics::next".to_string(),
+                    args: vec![Operand::Local(elem_rep), Operand::Local(recv_local)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
+        // StringIter::next delegates to `core::intrinsics::string_next` with `T := int`.
+        {
+            let name = "impl::core::iter::Iterator::for::core::intrinsics::StringIter::next";
+            if !self.module.function_ids.contains_key(name) {
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    Vec::new(),
+                );
+
+                let recv_local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv_local,
+                    mutability: Mutability::Mutable,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::intrinsics::string_next".to_string(),
+                    args: vec![
+                        Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
+                        Operand::Local(recv_local),
+                    ],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
+        // BytesIter::next delegates to `core::intrinsics::bytes_next` with `T := int`.
+        {
+            let name = "impl::core::iter::Iterator::for::core::intrinsics::BytesIter::next";
+            if !self.module.function_ids.contains_key(name) {
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    Vec::new(),
+                );
+
+                let recv_local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv_local,
+                    mutability: Mutability::Mutable,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::intrinsics::bytes_next".to_string(),
+                    args: vec![
+                        Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
+                        Operand::Local(recv_local),
+                    ],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
+        Ok(())
     }
 
     fn populate_struct_layouts(&mut self) {
@@ -4549,37 +4757,134 @@ impl<'a> FunctionLowerer<'a> {
         span: Span,
     ) -> Result<Local, CompileError> {
         // Desugar:
-        //   let it = core::intrinsics::into_iter(iter);
+        //   let __iterable = iter_expr;
+        //   let __it = /* either __iterable, or an intrinsic iterator constructor */;
         //   loop {
-        //     match core::intrinsics::next(it) {
+        //     match core::iter::Iterator::next(__it) {
         //       Option::Some(x) => { body; }
         //       Option::None => break;
         //     }
         //   }
-        let iter_val = self.lower_expr(iter)?;
-        let iter_ty = self.expr_ty(iter).ok_or_else(|| {
+        let iterable_local = self.lower_expr(iter)?;
+        let iterable_ty = self.expr_ty(iter).ok_or_else(|| {
             CompileError::new(
                 "internal error: missing type for `for` iterator expression",
                 iter.span(),
             )
         })?;
-        let elem_ty = match self.strip_readonly_ty(iter_ty) {
-            Ty::Array(elem) => elem.as_ref().clone(),
-            other => {
-                return Err(CompileError::new(
-                    format!("internal error: `for` expects an array iterator, got `{other}`"),
-                    iter.span(),
-                ));
-            }
-        };
-        let elem_rep = self.lower_type_rep_for_ty(&elem_ty, iter.span())?;
 
-        let it_local = self.alloc_local();
-        self.emit(Instruction::Call {
-            dst: Some(it_local),
-            func: "core::intrinsics::into_iter".to_string(),
-            args: vec![elem_rep.clone(), Operand::Local(iter_val)],
-        });
+        let (it_local, it_ty) = match iterable_ty.clone() {
+            Ty::Readonly(inner) => match *inner {
+                Ty::Array(elem) => {
+                    let elem_ty = elem.as_ref().as_readonly_view();
+                    let elem_rep = self.lower_type_rep_for_ty(&elem_ty, iter.span())?;
+
+                    let it_local = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(it_local),
+                        func: "core::intrinsics::into_iter".to_string(),
+                        args: vec![elem_rep, Operand::Local(iterable_local)],
+                    });
+                    (
+                        it_local,
+                        Ty::App(
+                            typeck::TyCon::Named("core::intrinsics::ArrayIter".to_string()),
+                            vec![elem_ty],
+                        ),
+                    )
+                }
+                Ty::String => {
+                    let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
+                    let it_local = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(it_local),
+                        func: "core::intrinsics::string_into_iter".to_string(),
+                        args: vec![elem_rep, Operand::Local(iterable_local)],
+                    });
+                    (
+                        it_local,
+                        Ty::App(
+                            typeck::TyCon::Named("core::intrinsics::StringIter".to_string()),
+                            vec![],
+                        ),
+                    )
+                }
+                Ty::Bytes => {
+                    let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
+                    let it_local = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(it_local),
+                        func: "core::intrinsics::bytes_into_iter".to_string(),
+                        args: vec![elem_rep, Operand::Local(iterable_local)],
+                    });
+                    (
+                        it_local,
+                        Ty::App(
+                            typeck::TyCon::Named("core::intrinsics::BytesIter".to_string()),
+                            vec![],
+                        ),
+                    )
+                }
+                _ => {
+                    return Err(CompileError::new(
+                        "internal error: cannot iterate over a readonly iterator value",
+                        iter.span(),
+                    ));
+                }
+            },
+            Ty::Array(elem) => {
+                let elem_ty = *elem;
+                let elem_rep = self.lower_type_rep_for_ty(&elem_ty, iter.span())?;
+
+                let it_local = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(it_local),
+                    func: "core::intrinsics::into_iter".to_string(),
+                    args: vec![elem_rep, Operand::Local(iterable_local)],
+                });
+                (
+                    it_local,
+                    Ty::App(
+                        typeck::TyCon::Named("core::intrinsics::ArrayIter".to_string()),
+                        vec![elem_ty],
+                    ),
+                )
+            }
+            Ty::String => {
+                let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
+                let it_local = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(it_local),
+                    func: "core::intrinsics::string_into_iter".to_string(),
+                    args: vec![elem_rep, Operand::Local(iterable_local)],
+                });
+                (
+                    it_local,
+                    Ty::App(
+                        typeck::TyCon::Named("core::intrinsics::StringIter".to_string()),
+                        vec![],
+                    ),
+                )
+            }
+            Ty::Bytes => {
+                let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
+                let it_local = self.alloc_local();
+                self.emit(Instruction::Call {
+                    dst: Some(it_local),
+                    func: "core::intrinsics::bytes_into_iter".to_string(),
+                    args: vec![elem_rep, Operand::Local(iterable_local)],
+                });
+                (
+                    it_local,
+                    Ty::App(
+                        typeck::TyCon::Named("core::intrinsics::BytesIter".to_string()),
+                        vec![],
+                    ),
+                )
+            }
+            // Otherwise: treat the value itself as the iterator.
+            other => (iterable_local, other),
+        };
 
         let loop_head = self.new_block("for_head");
         let loop_body = self.new_block("for_body");
@@ -4598,11 +4903,52 @@ impl<'a> FunctionLowerer<'a> {
 
         self.set_current(loop_head);
         let next_local = self.alloc_local();
-        self.emit(Instruction::Call {
-            dst: Some(next_local),
-            func: "core::intrinsics::next".to_string(),
-            args: vec![elem_rep, Operand::Local(it_local)],
-        });
+        let iter_next_method = "core::iter::Iterator::next".to_string();
+        let iter_iface = "core::iter::Iterator";
+
+        let recv_for_dispatch = self.strip_readonly_ty(&it_ty);
+        if let Ty::App(typeck::TyCon::Named(type_name), recv_type_args) = recv_for_dispatch
+            && !self.compiler.env.interfaces.contains_key(type_name)
+        {
+            let impl_fn = self
+                .compiler
+                .env
+                .interface_methods
+                .get(&(
+                    type_name.clone(),
+                    iter_iface.to_string(),
+                    "next".to_string(),
+                ))
+                .cloned()
+                .ok_or_else(|| {
+                    CompileError::new(
+                        format!(
+                            "internal error: missing impl for `{iter_next_method}` on `{type_name}`"
+                        ),
+                        span,
+                    )
+                })?;
+
+            let mut call_args = Vec::with_capacity(recv_type_args.len() + 1);
+            for ty in recv_type_args {
+                call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+            }
+            call_args.push(Operand::Local(it_local));
+
+            self.emit(Instruction::Call {
+                dst: Some(next_local),
+                func: impl_fn,
+                args: call_args,
+            });
+        } else {
+            self.emit(Instruction::VCall {
+                dst: Some(next_local),
+                obj: Operand::Local(it_local),
+                method: iter_next_method,
+                method_type_args: Vec::new(),
+                args: Vec::new(),
+            });
+        }
 
         // `Option::Some(x)` binds one value, `Option::None` binds none.
         let some_param = self.alloc_local();
@@ -4745,13 +5091,30 @@ impl<'a> FunctionLowerer<'a> {
     ) -> Result<Local, CompileError> {
         match op {
             UnaryOp::Not => {
-                let v = self.lower_expr(expr)?;
-                let dst = self.alloc_local();
-                self.emit(Instruction::BoolNot {
-                    dst,
-                    v: Operand::Local(v),
-                });
-                Ok(dst)
+                let ty = self
+                    .expr_ty(expr)
+                    .ok_or_else(|| {
+                        CompileError::new("internal error: missing type for unary expression", span)
+                    })?
+                    .clone();
+
+                if matches!(self.strip_readonly_ty(&ty), Ty::Bool) {
+                    let v = self.lower_expr(expr)?;
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::BoolNot {
+                        dst,
+                        v: Operand::Local(v),
+                    });
+                    return Ok(dst);
+                }
+
+                let args = vec![expr.clone()];
+                self.lower_interface_method_call(
+                    "core::ops::Not".to_string(),
+                    "not".to_string(),
+                    &args,
+                    span,
+                )
             }
             UnaryOp::Neg => {
                 let ty = self
@@ -4760,9 +5123,9 @@ impl<'a> FunctionLowerer<'a> {
                         CompileError::new("internal error: missing type for unary expression", span)
                     })?
                     .clone();
-                let v = self.lower_expr(expr)?;
-                match ty {
+                match self.strip_readonly_ty(&ty) {
                     Ty::Int => {
+                        let v = self.lower_expr(expr)?;
                         let zero = self.alloc_int(0);
                         let dst = self.alloc_local();
                         self.emit(Instruction::IntSub {
@@ -4773,6 +5136,7 @@ impl<'a> FunctionLowerer<'a> {
                         Ok(dst)
                     }
                     Ty::Float => {
+                        let v = self.lower_expr(expr)?;
                         let zero = self.alloc_local();
                         self.emit(Instruction::Const {
                             dst: zero,
@@ -4783,10 +5147,15 @@ impl<'a> FunctionLowerer<'a> {
                             vec![Operand::Local(zero), Operand::Local(v)],
                         )
                     }
-                    other => Err(CompileError::new(
-                        format!("internal error: unary - not supported for {other}"),
-                        span,
-                    )),
+                    _ => {
+                        let args = vec![expr.clone()];
+                        self.lower_interface_method_call(
+                            "core::ops::Neg".to_string(),
+                            "neg".to_string(),
+                            &args,
+                            span,
+                        )
+                    }
                 }
             }
         }
@@ -5005,15 +5374,87 @@ impl<'a> FunctionLowerer<'a> {
                         Ok(dst)
                     }
                     _ => {
-                        let func = select_binop_fn(op, operand_ty).ok_or_else(|| {
-                            CompileError::new(
+                        if let Some(func) = select_binop_fn(op, operand_ty) {
+                            return self.lower_named_call(
+                                func,
+                                vec![Operand::Local(l), Operand::Local(r)],
+                            );
+                        }
+
+                        let (iface_name, method_name) = match op {
+                            BinaryOp::Add => ("core::ops::Add", "add"),
+                            BinaryOp::Sub => ("core::ops::Sub", "sub"),
+                            BinaryOp::Mul => ("core::ops::Mul", "mul"),
+                            BinaryOp::Div => ("core::ops::Div", "div"),
+                            BinaryOp::Mod => ("core::ops::Rem", "rem"),
+                            BinaryOp::Eq => ("core::ops::Eq", "eq"),
+                            BinaryOp::Ne => ("core::ops::Ne", "ne"),
+                            BinaryOp::Lt => ("core::ops::Lt", "lt"),
+                            BinaryOp::Le => ("core::ops::Le", "le"),
+                            BinaryOp::Gt => ("core::ops::Gt", "gt"),
+                            BinaryOp::Ge => ("core::ops::Ge", "ge"),
+                            BinaryOp::And | BinaryOp::Or => {
+                                return Err(CompileError::new(
+                                    format!(
+                                        "internal error: unexpected short-circuit op in fallback `{op:?}`"
+                                    ),
+                                    span,
+                                ));
+                            }
+                        };
+
+                        let Ty::App(typeck::TyCon::Named(type_name), recv_type_args) = operand_ty
+                        else {
+                            return Err(CompileError::new(
                                 format!(
-                                    "internal error: unsupported binary op `{op:?}` for `{ty}`"
+                                    "internal error: operator `{op:?}` interface lowering requires a nominal receiver type, got `{operand_ty}`"
                                 ),
                                 span,
-                            )
-                        })?;
-                        self.lower_named_call(func, vec![Operand::Local(l), Operand::Local(r)])
+                            ));
+                        };
+                        let impl_fn = self
+                            .compiler
+                            .env
+                            .interface_methods
+                            .get(&(
+                                type_name.clone(),
+                                iface_name.to_string(),
+                                method_name.to_string(),
+                            ))
+                            .cloned()
+                            .ok_or_else(|| {
+                                CompileError::new(
+                                    format!(
+                                        "operator `{op:?}` requires an impl of `{iface_name}` for `{type_name}`"
+                                    ),
+                                    span,
+                                )
+                            })?;
+
+                        let mut call_args = Vec::with_capacity(recv_type_args.len() + 2);
+                        for ty in recv_type_args {
+                            call_args.push(self.lower_type_rep_for_ty(&ty, span)?);
+                        }
+
+                        // Operator methods are `readonly fn` in `core::ops`.
+                        let recv_local = if matches!(ty, Ty::Readonly(_)) {
+                            l
+                        } else {
+                            let ro = self.alloc_local();
+                            self.emit(Instruction::AsReadonly { dst: ro, src: l });
+                            ro
+                        };
+
+                        call_args.push(Operand::Local(recv_local));
+                        call_args.push(Operand::Local(r));
+
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::Call {
+                            dst: Some(dst),
+                            func: impl_fn,
+                            args: call_args,
+                        });
+                        Ok(dst)
                     }
                 }
             }
@@ -5462,9 +5903,25 @@ impl<'a> FunctionLowerer<'a> {
         };
 
         // Static dispatch is only valid when the static receiver type is a concrete nominal type.
-        if let Ty::App(typeck::TyCon::Named(type_name), recv_type_args) = recv_for_dispatch
-            && !self.compiler.env.interfaces.contains_key(type_name)
-        {
+        //
+        // Note: primitives can have built-in interface impls (e.g. `core::fmt::ToString`), but
+        // they are not `vcall`-dispatchable because `vcall` requires a `ref(struct|enum)` receiver.
+        let static_receiver: Option<(String, Vec<Ty>)> = match recv_for_dispatch {
+            Ty::App(typeck::TyCon::Named(type_name), recv_type_args)
+                if !self.compiler.env.interfaces.contains_key(type_name) =>
+            {
+                Some((type_name.clone(), recv_type_args.clone()))
+            }
+            Ty::Unit => Some(("unit".to_string(), Vec::new())),
+            Ty::Bool => Some(("bool".to_string(), Vec::new())),
+            Ty::Int => Some(("int".to_string(), Vec::new())),
+            Ty::Float => Some(("float".to_string(), Vec::new())),
+            Ty::String => Some(("string".to_string(), Vec::new())),
+            Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
+            _ => None,
+        };
+
+        if let Some((type_name, recv_type_args)) = static_receiver {
             let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
                 type_name.clone(),
                 origin_iface.clone(),
@@ -5486,7 +5943,7 @@ impl<'a> FunctionLowerer<'a> {
                 .unwrap_or_default();
             let mut call_args =
                 Vec::with_capacity(recv_type_args.len() + method_type_args.len() + args.len());
-            for ty in recv_type_args {
+            for ty in &recv_type_args {
                 call_args.push(self.lower_type_rep_for_ty(ty, span)?);
             }
             for ty in &method_type_args {

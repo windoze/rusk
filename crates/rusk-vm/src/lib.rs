@@ -2997,6 +2997,14 @@ const ARRAY_ITER_TYPE: &str = "core::intrinsics::ArrayIter";
 const ARRAY_ITER_FIELD_ARRAY: &str = "arr";
 const ARRAY_ITER_FIELD_INDEX: &str = "idx";
 
+const STRING_ITER_TYPE: &str = "core::intrinsics::StringIter";
+const STRING_ITER_FIELD_STRING: &str = "s";
+const STRING_ITER_FIELD_INDEX: &str = "idx";
+
+const BYTES_ITER_TYPE: &str = "core::intrinsics::BytesIter";
+const BYTES_ITER_FIELD_BYTES: &str = "b";
+const BYTES_ITER_FIELD_INDEX: &str = "idx";
+
 fn eval_core_intrinsic(
     module: &ExecutableModule,
     heap: &mut ImmixHeap<HeapValue>,
@@ -3699,6 +3707,262 @@ fn eval_core_intrinsic(
                 Ok(out)
             }
             _ => Err(bad_args("core::intrinsics::next")),
+        },
+
+        I::StringIntoIter => match args.as_slice() {
+            [Value::TypeRep(_), Value::String(s)] => {
+                let layout = module
+                    .struct_layouts
+                    .get(STRING_ITER_TYPE)
+                    .ok_or_else(|| format!("missing struct layout for `{STRING_ITER_TYPE}`"))?;
+                let mut fields = vec![Value::Unit; layout.len()];
+
+                let s_idx = struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_STRING)?;
+                let idx_idx =
+                    struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_INDEX)?;
+
+                fields[s_idx] = Value::String(s.clone());
+                fields[idx_idx] = Value::Int(0);
+
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Struct {
+                        type_name: STRING_ITER_TYPE.to_string(),
+                        type_args: Vec::new(),
+                        fields,
+                    },
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::string_into_iter")),
+        },
+        I::StringNext => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
+                if iter.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+
+                let s_idx = struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_STRING)?;
+                let idx_idx =
+                    struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_INDEX)?;
+
+                let (codepoint, next_idx) = {
+                    let Some(obj) = heap.get(iter.handle) else {
+                        return Err("core::intrinsics::string_next: dangling reference".to_string());
+                    };
+                    let HeapValue::Struct {
+                        type_name, fields, ..
+                    } = obj
+                    else {
+                        return Err(
+                            "core::intrinsics::string_next: expected iterator struct".to_string()
+                        );
+                    };
+                    if type_name != STRING_ITER_TYPE {
+                        return Err(format!(
+                            "core::intrinsics::string_next: expected `{STRING_ITER_TYPE}`, got `{type_name}`"
+                        ));
+                    }
+
+                    let Some(Value::String(s)) = fields.get(s_idx) else {
+                        return Err(
+                            "core::intrinsics::string_next: iterator missing `s` field".to_string()
+                        );
+                    };
+                    let Some(Value::Int(idx)) = fields.get(idx_idx) else {
+                        return Err(
+                            "core::intrinsics::string_next: iterator missing `idx` field"
+                                .to_string(),
+                        );
+                    };
+
+                    if *idx < 0 {
+                        return Err(
+                            "core::intrinsics::string_next: negative iterator index".to_string()
+                        );
+                    }
+                    let idx_usize: usize = (*idx) as usize;
+                    if idx_usize >= s.len() {
+                        (None, *idx)
+                    } else if !s.is_char_boundary(idx_usize) {
+                        return Err(
+                            "core::intrinsics::string_next: invalid UTF-8 boundary".to_string()
+                        );
+                    } else {
+                        let ch = s[idx_usize..].chars().next().ok_or_else(|| {
+                            "core::intrinsics::string_next: invalid UTF-8".to_string()
+                        })?;
+                        let code = ch as u32 as i64;
+                        let next_idx = idx_usize.checked_add(ch.len_utf8()).ok_or_else(|| {
+                            "core::intrinsics::string_next: index overflow".to_string()
+                        })?;
+                        (Some(code), next_idx as i64)
+                    }
+                };
+
+                let out = if let Some(codepoint) = codepoint {
+                    alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![Value::Int(codepoint)],
+                        },
+                    )
+                } else {
+                    alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    )
+                };
+
+                {
+                    let Some(obj) = heap.get_mut(iter.handle) else {
+                        return Err("core::intrinsics::string_next: dangling reference".to_string());
+                    };
+                    let HeapValue::Struct { fields, .. } = obj else {
+                        return Err(
+                            "core::intrinsics::string_next: expected iterator struct".to_string()
+                        );
+                    };
+                    let Some(slot) = fields.get_mut(idx_idx) else {
+                        return Err(
+                            "core::intrinsics::string_next: iterator missing `idx` field"
+                                .to_string(),
+                        );
+                    };
+                    *slot = Value::Int(next_idx);
+                }
+
+                Ok(out)
+            }
+            _ => Err(bad_args("core::intrinsics::string_next")),
+        },
+
+        I::BytesIntoIter => match args.as_slice() {
+            [Value::TypeRep(_), Value::Bytes(b)] => {
+                let layout = module
+                    .struct_layouts
+                    .get(BYTES_ITER_TYPE)
+                    .ok_or_else(|| format!("missing struct layout for `{BYTES_ITER_TYPE}`"))?;
+                let mut fields = vec![Value::Unit; layout.len()];
+
+                let b_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_BYTES)?;
+                let idx_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_INDEX)?;
+
+                fields[b_idx] = Value::Bytes(b.clone());
+                fields[idx_idx] = Value::Int(0);
+
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Struct {
+                        type_name: BYTES_ITER_TYPE.to_string(),
+                        type_args: Vec::new(),
+                        fields,
+                    },
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_into_iter")),
+        },
+        I::BytesNext => match args.as_slice() {
+            [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
+                if iter.is_readonly() {
+                    return Err("illegal write through readonly reference".to_string());
+                }
+
+                let b_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_BYTES)?;
+                let idx_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_INDEX)?;
+
+                let (byte, next_idx) = {
+                    let Some(obj) = heap.get(iter.handle) else {
+                        return Err("core::intrinsics::bytes_next: dangling reference".to_string());
+                    };
+                    let HeapValue::Struct {
+                        type_name, fields, ..
+                    } = obj
+                    else {
+                        return Err(
+                            "core::intrinsics::bytes_next: expected iterator struct".to_string()
+                        );
+                    };
+                    if type_name != BYTES_ITER_TYPE {
+                        return Err(format!(
+                            "core::intrinsics::bytes_next: expected `{BYTES_ITER_TYPE}`, got `{type_name}`"
+                        ));
+                    }
+
+                    let Some(Value::Bytes(b)) = fields.get(b_idx) else {
+                        return Err(
+                            "core::intrinsics::bytes_next: iterator missing `b` field".to_string()
+                        );
+                    };
+                    let Some(Value::Int(idx)) = fields.get(idx_idx) else {
+                        return Err("core::intrinsics::bytes_next: iterator missing `idx` field"
+                            .to_string());
+                    };
+
+                    if *idx < 0 {
+                        return Err(
+                            "core::intrinsics::bytes_next: negative iterator index".to_string()
+                        );
+                    }
+                    let idx_usize: usize = (*idx) as usize;
+                    let byte = b.get(idx_usize).copied();
+                    (byte, *idx + 1)
+                };
+
+                let out = if let Some(byte) = byte {
+                    alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "Some".to_string(),
+                            fields: vec![Value::Int(byte as i64)],
+                        },
+                    )
+                } else {
+                    alloc_ref(
+                        heap,
+                        gc_allocations_since_collect,
+                        HeapValue::Enum {
+                            enum_name: "Option".to_string(),
+                            type_args: vec![*elem_rep],
+                            variant: "None".to_string(),
+                            fields: Vec::new(),
+                        },
+                    )
+                };
+
+                {
+                    let Some(obj) = heap.get_mut(iter.handle) else {
+                        return Err("core::intrinsics::bytes_next: dangling reference".to_string());
+                    };
+                    let HeapValue::Struct { fields, .. } = obj else {
+                        return Err(
+                            "core::intrinsics::bytes_next: expected iterator struct".to_string()
+                        );
+                    };
+                    let Some(slot) = fields.get_mut(idx_idx) else {
+                        return Err("core::intrinsics::bytes_next: iterator missing `idx` field"
+                            .to_string());
+                    };
+                    *slot = Value::Int(next_idx);
+                }
+
+                Ok(out)
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_next")),
         },
     }
 }

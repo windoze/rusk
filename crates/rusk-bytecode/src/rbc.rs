@@ -493,6 +493,10 @@ impl Encoder {
             Intrinsic::ArrayConcatRo => 46,
             Intrinsic::ArraySlice => 47,
             Intrinsic::ArraySliceRo => 48,
+            Intrinsic::StringIntoIter => 49,
+            Intrinsic::StringNext => 50,
+            Intrinsic::BytesIntoIter => 51,
+            Intrinsic::BytesNext => 52,
         };
         self.write_u16(tag);
     }
@@ -1332,6 +1336,10 @@ impl<'a> Decoder<'a> {
             46 => Intrinsic::ArrayConcatRo,
             47 => Intrinsic::ArraySlice,
             48 => Intrinsic::ArraySliceRo,
+            49 => Intrinsic::StringIntoIter,
+            50 => Intrinsic::StringNext,
+            51 => Intrinsic::BytesIntoIter,
+            52 => Intrinsic::BytesNext,
             other => return Err(self.err(format!("invalid Intrinsic tag {other}"))),
         };
         Ok(intr)

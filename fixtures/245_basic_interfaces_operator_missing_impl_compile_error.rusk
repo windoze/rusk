@@ -1,0 +1,11 @@
+// expect: compile_error core::ops::Add
+
+struct Point { x: int }
+
+fn main() -> int {
+    let a = Point { x: 1 };
+    let b = Point { x: 2 };
+    let _c = a + b;
+    0
+}
+

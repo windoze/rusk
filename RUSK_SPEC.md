@@ -1255,13 +1255,47 @@ type-system capability and a definitional example.
 
 ## 9. Desugarings and Required Core Library Surface
 
-Rusk core syntax includes operators and `for`, but they desugar to ordinary calls
-to names in the built-in `core::intrinsics` module.
+Rusk core syntax includes operators, `for`, and formatted strings (`f"..."`).
+These constructs desugar to ordinary calls into a small compiler-recognized core
+library surface.
 
-The compiler **must** emit these calls, and the runtime **must** provide them as
-host functions.
+- For primitive types, the compiler may lower directly to dedicated bytecode
+  instructions and/or `core::intrinsics::*` calls (fast paths).
+- For non-primitive types, certain constructs lower to explicit interface calls
+  under:
+  - `core::ops` (operators)
+  - `core::iter::Iterator` (`for`)
+  - `core::fmt::ToString` (`f"..."`)
 
-### 9.1 Numeric Operators
+These names are not required to be auto-imported; desugarings use fully-qualified
+`core::...` paths.
+
+### 9.1 Operators (`core::ops`)
+
+`core::ops` defines compiler-recognized interfaces used for operator overloading
+on non-primitive types (methods are `readonly fn` so they are callable on both `T`
+and `readonly T` receivers):
+
+```rusk
+interface Add { readonly fn add(other: Self) -> Self; }
+interface Sub { readonly fn sub(other: Self) -> Self; }
+interface Mul { readonly fn mul(other: Self) -> Self; }
+interface Div { readonly fn div(other: Self) -> Self; }
+interface Rem { readonly fn rem(other: Self) -> Self; }
+
+interface Neg { readonly fn neg() -> Self; }
+interface Not { readonly fn not() -> Self; }
+
+interface Lt { readonly fn lt(other: Self) -> bool; }
+interface Gt { readonly fn gt(other: Self) -> bool; }
+interface Le { readonly fn le(other: Self) -> bool; }
+interface Ge { readonly fn ge(other: Self) -> bool; }
+
+interface Eq { readonly fn eq(other: Self) -> bool; }
+interface Ne { readonly fn ne(other: Self) -> bool; }
+```
+
+#### 9.1.1 Primitive operators (fast paths)
 
 For `int`:
 
@@ -1271,6 +1305,10 @@ For `int`:
 - `a / b` lowers to `core::intrinsics::int_div(a, b)`
 - `a % b` lowers to `core::intrinsics::int_mod(a, b)`
 
+Unary negation:
+
+- `-x` lowers to `core::intrinsics::int_sub(0, x)` (or an equivalent fast path)
+
 Comparisons:
 
 - `a < b` lowers to `core::intrinsics::int_lt(a, b)` (returns `bool`)
@@ -1279,6 +1317,10 @@ Comparisons:
 
 Similarly for `float` via `core::intrinsics::float_*`.
 
+Unary negation:
+
+- `-x` lowers to `core::intrinsics::float_sub(0.0, x)` (or an equivalent fast path)
+
 Other primitive equality:
 
 - `bool`: `core::intrinsics::bool_eq`, `core::intrinsics::bool_ne`
@@ -1286,39 +1328,106 @@ Other primitive equality:
 - `bytes`: `core::intrinsics::bytes_eq`, `core::intrinsics::bytes_ne`
 - `unit`: `core::intrinsics::unit_eq`, `core::intrinsics::unit_ne`
 
-### 9.2 Boolean Operators
+#### 9.1.2 Non-primitive operators (interface calls)
 
-- `!x` lowers to `core::intrinsics::bool_not(x)`
+For non-primitive types `T`, operator syntax lowers to explicit interface calls
+using fully-qualified `core::ops::*` names:
+
+| Syntax | Lowers to |
+| --- | --- |
+| `a + b` | `core::ops::Add::add(a, b)` |
+| `a - b` | `core::ops::Sub::sub(a, b)` |
+| `a * b` | `core::ops::Mul::mul(a, b)` |
+| `a / b` | `core::ops::Div::div(a, b)` |
+| `a % b` | `core::ops::Rem::rem(a, b)` |
+| `-x` | `core::ops::Neg::neg(x)` |
+| `!x` | `core::ops::Not::not(x)` |
+| `a < b` | `core::ops::Lt::lt(a, b)` |
+| `a > b` | `core::ops::Gt::gt(a, b)` |
+| `a <= b` | `core::ops::Le::le(a, b)` |
+| `a >= b` | `core::ops::Ge::ge(a, b)` |
+| `a == b` | `core::ops::Eq::eq(a, b)` |
+| `a != b` | `core::ops::Ne::ne(a, b)` |
+
+### 9.2 Short-circuiting Boolean Operators
+
+- For `bool`, `!x` lowers to `core::intrinsics::bool_not(x)`.
+- Otherwise, `!x` lowers to `core::ops::Not::not(x)`.
 - `a && b` lowers to short-circuiting `if a { b } else { false }`
 - `a || b` lowers to short-circuiting `if a { true } else { b }`
 
-### 9.3 Formatted Strings
+### 9.3 Formatted Strings (`core::fmt::ToString`)
 
 `f"prefix {e1} middle {e2} suffix"` lowers to:
 
 1. evaluate `e1`, `e2` left-to-right
-2. convert each to `string` via `core::intrinsics::to_string`
+2. convert each to `string` via `core::fmt::ToString::to_string`
 3. concatenate via `core::intrinsics::string_concat`
 
-### 9.4 `for` Desugaring (Iterator Protocol)
+Required baseline `ToString` impls (v0.4 surface):
+
+- `unit`
+- `bool`
+- `int`
+- `float`
+- `string`
+- `bytes`
+
+### 9.4 `for` Desugaring (`core::iter::Iterator`)
 
 `for x in iter { body }` desugars to:
 
 ```rust
-let it = core::intrinsics::into_iter(iter);
+let __iterable = iter;
+let __it = /* see below: obtaining an iterator */;
 loop {
-  match core::intrinsics::next(it) {
+  match core::iter::Iterator::next(__it) {
     Option::Some(x) => { body; }
     Option::None => break;
   }
 }
 ```
 
+Obtaining an iterator:
+
+- If `iter` has a type that implements `core::iter::Iterator`, use it directly:
+  - `let __it = __iterable;`
+  - Note: `__it` must not be `readonly` (because `Iterator::next` is mutable).
+- Otherwise, for the built-in iterable container types:
+  - arrays: `[T]` and `readonly [T]`
+  - strings: `string` and `readonly string`
+  - bytes: `bytes` and `readonly bytes`
+  the compiler constructs a dedicated iterator state object using a
+  `core::intrinsics::*_into_iter` intrinsic.
+
 Required core intrinsics functions and types:
 
-- `struct core::intrinsics::ArrayIter<T> { arr: [T], idx: int }` (iterator state object)
+- `interface core::iter::Iterator { type Item; fn next() -> Option<Self::Item>; }`
+
+Iterator state objects:
+
+- `struct core::intrinsics::ArrayIter<T> { arr: [T], idx: int }`
+- `struct core::intrinsics::StringIter { s: string, idx: int }`
+- `struct core::intrinsics::BytesIter { b: bytes, idx: int }`
+
+Iterator constructors and `next` intrinsics:
+
 - `core::intrinsics::into_iter<T>([T]) -> core::intrinsics::ArrayIter<T>`
+  - must accept `readonly [T]` as well, producing an iterator over `readonly T`
 - `core::intrinsics::next<T>(core::intrinsics::ArrayIter<T>) -> Option<T>`
+- `core::intrinsics::string_into_iter(string) -> core::intrinsics::StringIter`
+- `core::intrinsics::string_next(core::intrinsics::StringIter) -> Option<int>`
+  - returns Unicode scalar values as `int`
+- `core::intrinsics::bytes_into_iter(bytes) -> core::intrinsics::BytesIter`
+- `core::intrinsics::bytes_next(core::intrinsics::BytesIter) -> Option<int>`
+  - returns `int` values in `0..=255`
+
+Required iterator interface impls:
+
+- `impl core::iter::Iterator for core::intrinsics::ArrayIter<T> { type Item = T; ... }`
+- `impl core::iter::Iterator for core::intrinsics::StringIter { type Item = int; ... }`
+- `impl core::iter::Iterator for core::intrinsics::BytesIter { type Item = int; ... }`
+
 - `enum Option<T> { Some(T), None }`
 
 ### 9.5 Panic

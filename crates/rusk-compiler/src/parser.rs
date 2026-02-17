@@ -2490,7 +2490,7 @@ impl<'a> Parser<'a> {
                 FStringPart::Expr { src, base_offset } => {
                     let mut nested = Parser::with_base_offset_no_shebang(&src, base_offset)?;
                     let value_expr = nested.parse_expr_eof()?;
-                    let to_string = self.core_intrinsic_call1(span, "to_string", value_expr);
+                    let to_string = self.core_to_string_call(span, value_expr);
                     expr = Some(match expr {
                         None => to_string,
                         Some(acc) => {
@@ -2504,16 +2504,6 @@ impl<'a> Parser<'a> {
             value: String::new(),
             span,
         }))
-    }
-
-    fn core_intrinsic_call1(&self, span: Span, name: &str, arg: Expr) -> Expr {
-        let callee = self.core_intrinsic_path_expr(span, name);
-        Expr::Call {
-            callee: Box::new(callee),
-            type_args: Vec::new(),
-            args: vec![arg],
-            span,
-        }
     }
 
     fn core_intrinsic_call2(&self, span: Span, name: &str, a: Expr, b: Expr) -> Expr {
@@ -2542,6 +2532,42 @@ impl<'a> Parser<'a> {
         Expr::Path {
             path: Path {
                 segments: vec![core, intrinsics, func],
+                span,
+            },
+            span,
+        }
+    }
+
+    fn core_to_string_call(&self, span: Span, value: Expr) -> Expr {
+        let callee = self.core_fmt_to_string_path_expr(span);
+        Expr::Call {
+            callee: Box::new(callee),
+            type_args: Vec::new(),
+            args: vec![value],
+            span,
+        }
+    }
+
+    fn core_fmt_to_string_path_expr(&self, span: Span) -> Expr {
+        let core = Ident {
+            name: "core".to_string(),
+            span,
+        };
+        let fmt = Ident {
+            name: "fmt".to_string(),
+            span,
+        };
+        let to_string_iface = Ident {
+            name: "ToString".to_string(),
+            span,
+        };
+        let func = Ident {
+            name: "to_string".to_string(),
+            span,
+        };
+        Expr::Path {
+            path: Path {
+                segments: vec![core, fmt, to_string_iface, func],
                 span,
             },
             span,

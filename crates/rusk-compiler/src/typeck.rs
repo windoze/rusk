@@ -644,6 +644,168 @@ fn add_prelude(env: &mut ProgramEnv) {
         },
     );
 
+    // Built-in iterator state for string iteration.
+    env.structs.insert(
+        "core::intrinsics::StringIter".to_string(),
+        StructDef {
+            name: "core::intrinsics::StringIter".to_string(),
+            generics: Vec::new(),
+            fields: vec![("s".to_string(), Ty::String), ("idx".to_string(), Ty::Int)],
+            is_newtype: false,
+        },
+    );
+
+    // Built-in iterator state for bytes iteration.
+    env.structs.insert(
+        "core::intrinsics::BytesIter".to_string(),
+        StructDef {
+            name: "core::intrinsics::BytesIter".to_string(),
+            generics: Vec::new(),
+            fields: vec![("b".to_string(), Ty::Bytes), ("idx".to_string(), Ty::Int)],
+            is_newtype: false,
+        },
+    );
+
+    // Built-in language-recognized interfaces.
+    let span0 = Span::new(0, 0);
+
+    let mut insert_simple_iface =
+        |iface_name: &str, method_name: &str, receiver_readonly: bool, params: Vec<Ty>, ret: Ty| {
+            let sig = InterfaceMethodSig {
+                generics: Vec::new(),
+                params,
+                ret,
+            };
+            let decl = InterfaceMethodDecl {
+                receiver_readonly,
+                has_default: false,
+                default_template: None,
+                sig: sig.clone(),
+            };
+            let method = InterfaceMethod {
+                origin: iface_name.to_string(),
+                receiver_readonly,
+                has_default: false,
+                default_template: None,
+                sig,
+            };
+
+            env.interfaces.insert(
+                iface_name.to_string(),
+                InterfaceDef {
+                    name: iface_name.to_string(),
+                    generics: Vec::new(),
+                    supers: Vec::new(),
+                    assoc_types: BTreeMap::new(),
+                    all_assoc_types: BTreeMap::new(),
+                    methods: BTreeMap::from([(method_name.to_string(), decl)]),
+                    all_methods: BTreeMap::from([(method_name.to_string(), method)]),
+                    span: span0,
+                },
+            );
+        };
+
+    // `core::ops`: operator interfaces.
+    for (iface, method, receiver_readonly, params, ret) in [
+        (
+            "core::ops::Add",
+            "add",
+            true,
+            vec![Ty::SelfType],
+            Ty::SelfType,
+        ),
+        (
+            "core::ops::Sub",
+            "sub",
+            true,
+            vec![Ty::SelfType],
+            Ty::SelfType,
+        ),
+        (
+            "core::ops::Mul",
+            "mul",
+            true,
+            vec![Ty::SelfType],
+            Ty::SelfType,
+        ),
+        (
+            "core::ops::Div",
+            "div",
+            true,
+            vec![Ty::SelfType],
+            Ty::SelfType,
+        ),
+        (
+            "core::ops::Rem",
+            "rem",
+            true,
+            vec![Ty::SelfType],
+            Ty::SelfType,
+        ),
+        ("core::ops::Neg", "neg", true, vec![], Ty::SelfType),
+        ("core::ops::Not", "not", true, vec![], Ty::SelfType),
+        ("core::ops::Lt", "lt", true, vec![Ty::SelfType], Ty::Bool),
+        ("core::ops::Gt", "gt", true, vec![Ty::SelfType], Ty::Bool),
+        ("core::ops::Le", "le", true, vec![Ty::SelfType], Ty::Bool),
+        ("core::ops::Ge", "ge", true, vec![Ty::SelfType], Ty::Bool),
+        ("core::ops::Eq", "eq", true, vec![Ty::SelfType], Ty::Bool),
+        ("core::ops::Ne", "ne", true, vec![Ty::SelfType], Ty::Bool),
+    ] {
+        insert_simple_iface(iface, method, receiver_readonly, params, ret);
+    }
+
+    // `core::fmt::ToString`.
+    insert_simple_iface("core::fmt::ToString", "to_string", true, vec![], Ty::String);
+
+    // `core::iter::Iterator`.
+    let iter_iface = "core::iter::Iterator";
+    let item_proj = Ty::AssocProj {
+        iface: iter_iface.to_string(),
+        iface_args: Vec::new(),
+        assoc: "Item".to_string(),
+        self_ty: Box::new(Ty::SelfType),
+    };
+    let iter_next_sig = InterfaceMethodSig {
+        generics: Vec::new(),
+        params: Vec::new(),
+        ret: Ty::App(TyCon::Named("Option".to_string()), vec![item_proj]),
+    };
+    env.interfaces.insert(
+        iter_iface.to_string(),
+        InterfaceDef {
+            name: iter_iface.to_string(),
+            generics: Vec::new(),
+            supers: Vec::new(),
+            assoc_types: BTreeMap::from([("Item".to_string(), InterfaceAssocTypeDecl {})]),
+            all_assoc_types: BTreeMap::from([(
+                "Item".to_string(),
+                InterfaceAssocType {
+                    origin: iter_iface.to_string(),
+                },
+            )]),
+            methods: BTreeMap::from([(
+                "next".to_string(),
+                InterfaceMethodDecl {
+                    receiver_readonly: false,
+                    has_default: false,
+                    default_template: None,
+                    sig: iter_next_sig.clone(),
+                },
+            )]),
+            all_methods: BTreeMap::from([(
+                "next".to_string(),
+                InterfaceMethod {
+                    origin: iter_iface.to_string(),
+                    receiver_readonly: false,
+                    has_default: false,
+                    default_template: None,
+                    sig: iter_next_sig,
+                },
+            )]),
+            span: span0,
+        },
+    );
+
     let mut add_fn = |name: &str, generics: Vec<GenericParamInfo>, params: Vec<Ty>, ret: Ty| {
         env.functions.insert(
             name.to_string(),
@@ -783,6 +945,126 @@ fn add_prelude(env: &mut ProgramEnv) {
             vec![Ty::Gen(0)],
         )],
         Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
+    );
+
+    // Iterator protocol (strings + bytes).
+    add_fn(
+        "core::intrinsics::string_into_iter",
+        iter_generics.clone(),
+        vec![Ty::String],
+        Ty::App(
+            TyCon::Named("core::intrinsics::StringIter".to_string()),
+            vec![],
+        ),
+    );
+    add_fn(
+        "core::intrinsics::string_next",
+        iter_generics.clone(),
+        vec![Ty::App(
+            TyCon::Named("core::intrinsics::StringIter".to_string()),
+            vec![],
+        )],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
+    );
+    add_fn(
+        "core::intrinsics::bytes_into_iter",
+        iter_generics.clone(),
+        vec![Ty::Bytes],
+        Ty::App(
+            TyCon::Named("core::intrinsics::BytesIter".to_string()),
+            vec![],
+        ),
+    );
+    add_fn(
+        "core::intrinsics::bytes_next",
+        iter_generics.clone(),
+        vec![Ty::App(
+            TyCon::Named("core::intrinsics::BytesIter".to_string()),
+            vec![],
+        )],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
+    );
+
+    // Built-in interface impls (used by desugarings).
+    let to_string_iface = "core::fmt::ToString";
+    for prim in ["unit", "bool", "int", "float", "string", "bytes"] {
+        env.interface_impls
+            .insert((prim.to_string(), to_string_iface.to_string()));
+        env.interface_methods.insert(
+            (
+                prim.to_string(),
+                to_string_iface.to_string(),
+                "to_string".to_string(),
+            ),
+            format!("impl::{to_string_iface}::for::{prim}::to_string"),
+        );
+    }
+
+    let iter_iface = "core::iter::Iterator";
+    // core::intrinsics::ArrayIter<T>: Item = T
+    env.interface_impls.insert((
+        "core::intrinsics::ArrayIter".to_string(),
+        iter_iface.to_string(),
+    ));
+    env.interface_assoc_types.insert(
+        (
+            "core::intrinsics::ArrayIter".to_string(),
+            iter_iface.to_string(),
+            "Item".to_string(),
+        ),
+        Ty::Gen(0),
+    );
+    env.interface_methods.insert(
+        (
+            "core::intrinsics::ArrayIter".to_string(),
+            iter_iface.to_string(),
+            "next".to_string(),
+        ),
+        "impl::core::iter::Iterator::for::core::intrinsics::ArrayIter::next".to_string(),
+    );
+
+    // core::intrinsics::StringIter: Item = int
+    env.interface_impls.insert((
+        "core::intrinsics::StringIter".to_string(),
+        iter_iface.to_string(),
+    ));
+    env.interface_assoc_types.insert(
+        (
+            "core::intrinsics::StringIter".to_string(),
+            iter_iface.to_string(),
+            "Item".to_string(),
+        ),
+        Ty::Int,
+    );
+    env.interface_methods.insert(
+        (
+            "core::intrinsics::StringIter".to_string(),
+            iter_iface.to_string(),
+            "next".to_string(),
+        ),
+        "impl::core::iter::Iterator::for::core::intrinsics::StringIter::next".to_string(),
+    );
+
+    // core::intrinsics::BytesIter: Item = int
+    env.interface_impls.insert((
+        "core::intrinsics::BytesIter".to_string(),
+        iter_iface.to_string(),
+    ));
+    env.interface_assoc_types.insert(
+        (
+            "core::intrinsics::BytesIter".to_string(),
+            iter_iface.to_string(),
+            "Item".to_string(),
+        ),
+        Ty::Int,
+    );
+    env.interface_methods.insert(
+        (
+            "core::intrinsics::BytesIter".to_string(),
+            iter_iface.to_string(),
+            "next".to_string(),
+        ),
+        "impl::core::iter::Iterator::for::core::intrinsics::BytesIter::next".to_string(),
     );
 
     // Array operations.
@@ -6063,20 +6345,94 @@ impl<'a> FnTypechecker<'a> {
     ) -> Result<Ty, TypeError> {
         let iter_ty = self.typecheck_expr(iter, ExprUse::Value)?;
         let iter_ty = self.infer.resolve_ty(iter_ty);
-        let (is_readonly, inner) = match iter_ty {
-            Ty::Readonly(inner) => (true, *inner),
-            other => (false, other),
-        };
-        let Ty::Array(elem) = inner else {
-            return Err(TypeError {
-                message: format!("`for` expects an array iterable, got `{inner}`"),
-                span,
-            });
-        };
-        let elem_ty = if is_readonly {
-            elem.as_ref().as_readonly_view()
+
+        // Case 1: `iter` already implements `core::iter::Iterator`.
+        let iter_iface = "core::iter::Iterator";
+        let elem_ty = if let Some(iface_args) =
+            self.infer_interface_args_for_receiver(&iter_ty, iter_iface)
+        {
+            if matches!(iter_ty, Ty::Readonly(_)) {
+                return Err(TypeError {
+                    message:
+                        "cannot iterate over a readonly iterator (`Iterator::next` is mutable)"
+                            .to_string(),
+                    span,
+                });
+            }
+
+            let Some(iface_def) = self.env.interfaces.get(iter_iface) else {
+                return Err(TypeError {
+                    message: "internal error: missing built-in interface `core::iter::Iterator`"
+                        .to_string(),
+                    span,
+                });
+            };
+            let Some(method_info) = iface_def.all_methods.get("next") else {
+                return Err(TypeError {
+                    message: "internal error: missing method `core::iter::Iterator::next`"
+                        .to_string(),
+                    span,
+                });
+            };
+
+            // Infer `Item` by instantiating `Iterator::next` and extracting `Option<Item>`.
+            let recv_for_dispatch = strip_readonly(&iter_ty).clone();
+            let self_ty_for_inst: Option<&Ty> = match &recv_for_dispatch {
+                Ty::Iface { .. } => None,
+                Ty::App(TyCon::Named(name), _) if self.env.interfaces.contains_key(name) => None,
+                other => Some(other),
+            };
+            let mut inst = instantiate_interface_method_sig(
+                &method_info.sig,
+                &iface_args,
+                iface_def.generics.len(),
+                self_ty_for_inst,
+                &mut self.infer,
+            );
+            inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
+            if let Ty::Iface { assoc_bindings, .. } = &recv_for_dispatch {
+                inst.ret = self.subst_self_assoc_projs_from_bindings(inst.ret, assoc_bindings);
+                inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
+            }
+
+            match inst.ret {
+                Ty::App(TyCon::Named(name), mut args) if name == "Option" && args.len() == 1 => {
+                    args.pop().expect("len == 1")
+                }
+                other => {
+                    return Err(TypeError {
+                        message: format!(
+                            "internal error: `core::iter::Iterator::next` must return `Option<T>`, got `{other}`"
+                        ),
+                        span,
+                    });
+                }
+            }
         } else {
-            *elem
+            // Case 2: built-in iterables.
+            let (is_readonly, inner) = match iter_ty {
+                Ty::Readonly(inner) => (true, *inner),
+                other => (false, other),
+            };
+
+            match inner {
+                Ty::Array(elem) => {
+                    if is_readonly {
+                        elem.as_ref().as_readonly_view()
+                    } else {
+                        *elem
+                    }
+                }
+                Ty::String | Ty::Bytes => Ty::Int,
+                other => {
+                    return Err(TypeError {
+                        message: format!(
+                            "`for` expects an iterable (`Iterator`, `[T]`, `string`, or `bytes`), got `{other}`"
+                        ),
+                        span,
+                    });
+                }
+            }
         };
 
         self.push_scope();
@@ -7714,18 +8070,66 @@ impl<'a> FnTypechecker<'a> {
         let t = self.typecheck_expr(expr, ExprUse::Value)?;
         match op {
             UnaryOp::Not => {
-                self.infer.unify(t, Ty::Bool, span)?;
-                Ok(Ty::Bool)
+                let t_resolved = self.infer.resolve_ty(t.clone());
+                if strip_readonly(&t_resolved) == &Ty::Bool {
+                    self.infer.unify(t, Ty::Bool, span)?;
+                    return Ok(Ty::Bool);
+                }
+
+                let recv_for_dispatch = strip_readonly(&t_resolved);
+                let Ty::App(TyCon::Named(type_name), _type_args) = recv_for_dispatch else {
+                    return Err(TypeError {
+                        message: format!(
+                            "unary `!` requires `bool` or an impl of `core::ops::Not` for a concrete type, got `{t_resolved}`"
+                        ),
+                        span,
+                    });
+                };
+                if self.env.interfaces.contains_key(type_name) {
+                    return Err(TypeError {
+                        message: "unary `!` is not supported on interface-typed receivers in this stage (method is Self-only)"
+                            .to_string(),
+                        span,
+                    });
+                }
+
+                self.ensure_implements_interface_type(
+                    recv_for_dispatch,
+                    &Ty::App(TyCon::Named("core::ops::Not".to_string()), vec![]),
+                    span,
+                )?;
+                Ok(recv_for_dispatch.clone())
             }
             UnaryOp::Neg => {
-                let t = self.infer.resolve_ty(t);
-                match t {
+                let t_resolved = self.infer.resolve_ty(t);
+                match strip_readonly(&t_resolved) {
                     Ty::Int => Ok(Ty::Int),
                     Ty::Float => Ok(Ty::Float),
-                    other => Err(TypeError {
-                        message: format!("unary `-` requires `int` or `float`, got `{other}`"),
-                        span,
-                    }),
+                    _ => {
+                        let recv_for_dispatch = strip_readonly(&t_resolved);
+                        let Ty::App(TyCon::Named(type_name), _type_args) = recv_for_dispatch else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "unary `-` requires `int`, `float`, or an impl of `core::ops::Neg` for a concrete type, got `{t_resolved}`"
+                                ),
+                                span,
+                            });
+                        };
+                        if self.env.interfaces.contains_key(type_name) {
+                            return Err(TypeError {
+                                message: "unary `-` is not supported on interface-typed receivers in this stage (method is Self-only)"
+                                    .to_string(),
+                                span,
+                            });
+                        }
+
+                        self.ensure_implements_interface_type(
+                            recv_for_dispatch,
+                            &Ty::App(TyCon::Named("core::ops::Neg".to_string()), vec![]),
+                            span,
+                        )?;
+                        Ok(recv_for_dispatch.clone())
+                    }
                 }
             }
         }
@@ -7749,16 +8153,49 @@ impl<'a> FnTypechecker<'a> {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 let lt = self.typecheck_expr(left, ExprUse::Value)?;
                 let rt = self.typecheck_expr(right, ExprUse::Value)?;
-                let t = self.infer.unify(lt, rt, span)?;
-                let t = self.infer.resolve_ty(t);
-                match t {
-                    Ty::Int | Ty::Float => Ok(t),
-                    other => Err(TypeError {
-                        message: format!(
-                            "arithmetic operator requires `int` or `float`, got `{other}`"
-                        ),
-                        span,
-                    }),
+                let lt = self.infer.resolve_ty(lt);
+                let rt = self.infer.resolve_ty(rt);
+                let lt_base = strip_readonly(&lt).clone();
+                let rt_base = strip_readonly(&rt).clone();
+                let base = self.infer.unify(lt_base, rt_base, span)?;
+                let base = self.infer.resolve_ty(base);
+
+                match base {
+                    Ty::Int | Ty::Float => Ok(base),
+                    _ => {
+                        let iface = match op {
+                            BinaryOp::Add => "core::ops::Add",
+                            BinaryOp::Sub => "core::ops::Sub",
+                            BinaryOp::Mul => "core::ops::Mul",
+                            BinaryOp::Div => "core::ops::Div",
+                            BinaryOp::Mod => "core::ops::Rem",
+                            _ => unreachable!("covered by match arm"),
+                        };
+
+                        let Ty::App(TyCon::Named(type_name), _) = &base else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "operator `{op:?}` requires a concrete nominal type receiver in this stage, got `{base}`"
+                                ),
+                                span,
+                            });
+                        };
+                        if self.env.interfaces.contains_key(type_name) {
+                            return Err(TypeError {
+                                message: format!(
+                                    "operator `{op:?}` is not supported on interface-typed receivers in this stage (method is Self-only)"
+                                ),
+                                span,
+                            });
+                        }
+
+                        self.ensure_implements_interface_type(
+                            &base,
+                            &Ty::App(TyCon::Named(iface.to_string()), vec![]),
+                            span,
+                        )?;
+                        Ok(base)
+                    }
                 }
             }
             BinaryOp::Eq
@@ -7769,26 +8206,60 @@ impl<'a> FnTypechecker<'a> {
             | BinaryOp::Ge => {
                 let lt = self.typecheck_expr(left, ExprUse::Value)?;
                 let rt = self.typecheck_expr(right, ExprUse::Value)?;
-                let t = self.infer.unify(lt, rt, span)?;
-                let t = self.infer.resolve_ty(t);
-                match op {
-                    BinaryOp::Eq | BinaryOp::Ne => match t {
-                        Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {
-                            Ok(Ty::Bool)
-                        }
-                        other => Err(TypeError {
-                            message: format!("`==`/`!=` not supported for type `{other}`"),
-                            span,
-                        }),
-                    },
-                    _ => match t {
-                        Ty::Int | Ty::Float => Ok(Ty::Bool),
-                        other => Err(TypeError {
-                            message: format!("comparison not supported for type `{other}`"),
-                            span,
-                        }),
-                    },
+                let lt = self.infer.resolve_ty(lt);
+                let rt = self.infer.resolve_ty(rt);
+                let lt_base = strip_readonly(&lt).clone();
+                let rt_base = strip_readonly(&rt).clone();
+                let base = self.infer.unify(lt_base, rt_base, span)?;
+                let base = self.infer.resolve_ty(base);
+
+                let prim_ok = match op {
+                    BinaryOp::Eq | BinaryOp::Ne => matches!(
+                        base,
+                        Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes
+                    ),
+                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                        matches!(base, Ty::Int | Ty::Float)
+                    }
+                    _ => false,
+                };
+                if prim_ok {
+                    return Ok(Ty::Bool);
                 }
+
+                let iface = match op {
+                    BinaryOp::Eq => "core::ops::Eq",
+                    BinaryOp::Ne => "core::ops::Ne",
+                    BinaryOp::Lt => "core::ops::Lt",
+                    BinaryOp::Le => "core::ops::Le",
+                    BinaryOp::Gt => "core::ops::Gt",
+                    BinaryOp::Ge => "core::ops::Ge",
+                    _ => unreachable!("covered by match arm"),
+                };
+
+                let Ty::App(TyCon::Named(type_name), _) = &base else {
+                    return Err(TypeError {
+                        message: format!(
+                            "operator `{op:?}` requires a concrete nominal type receiver in this stage, got `{base}`"
+                        ),
+                        span,
+                    });
+                };
+                if self.env.interfaces.contains_key(type_name) {
+                    return Err(TypeError {
+                        message: format!(
+                            "operator `{op:?}` is not supported on interface-typed receivers in this stage (method is Self-only)"
+                        ),
+                        span,
+                    });
+                }
+
+                self.ensure_implements_interface_type(
+                    &base,
+                    &Ty::App(TyCon::Named(iface.to_string()), vec![]),
+                    span,
+                )?;
+                Ok(Ty::Bool)
             }
         }
     }
@@ -8304,6 +8775,30 @@ impl<'a> FnTypechecker<'a> {
                 Some(type_args[..iface_arity].to_vec())
             }
 
+            // Primitive types may have built-in impls for arity-0 interfaces.
+            Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {
+                if iface_arity != 0 {
+                    return None;
+                }
+                let type_name = match recv_ty {
+                    Ty::Unit => "unit",
+                    Ty::Bool => "bool",
+                    Ty::Int => "int",
+                    Ty::Float => "float",
+                    Ty::String => "string",
+                    Ty::Bytes => "bytes",
+                    _ => unreachable!("matched primitive types"),
+                };
+                if !self
+                    .env
+                    .interface_impls
+                    .contains(&(type_name.to_string(), iface.to_string()))
+                {
+                    return None;
+                }
+                Some(Vec::new())
+            }
+
             _ => None,
         }
     }
@@ -8388,6 +8883,25 @@ impl<'a> FnTypechecker<'a> {
                     return false;
                 }
                 type_args[..iface_args.len()] == *iface_args
+            }
+
+            // Primitive types may have built-in impls for arity-0 interfaces.
+            Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {
+                if !iface_args.is_empty() {
+                    return false;
+                }
+                let type_name = match ty {
+                    Ty::Unit => "unit",
+                    Ty::Bool => "bool",
+                    Ty::Int => "int",
+                    Ty::Float => "float",
+                    Ty::String => "string",
+                    Ty::Bytes => "bytes",
+                    _ => return false,
+                };
+                self.env
+                    .interface_impls
+                    .contains(&(type_name.to_string(), iface_name.to_string()))
             }
 
             _ => false,

@@ -547,9 +547,18 @@ impl ModuleResolver {
 
         let intrinsics_path = core_path.child("intrinsics");
         let prelude_path = core_path.child("prelude");
+        let ops_path = core_path.child("ops");
+        let iter_path = core_path.child("iter");
+        let fmt_path = core_path.child("fmt");
 
-        // Module defs for `core::intrinsics` and `core::prelude`.
-        for module_path in [&intrinsics_path, &prelude_path] {
+        // Module defs for `core::intrinsics`, `core::prelude`, and language-recognized interfaces.
+        for module_path in [
+            &intrinsics_path,
+            &prelude_path,
+            &ops_path,
+            &iter_path,
+            &fmt_path,
+        ] {
             self.defs.insert(
                 module_path.fqn(),
                 DefDecl {
@@ -586,6 +595,15 @@ impl ModuleResolver {
         core_scope
             .modules
             .insert("prelude".to_string(), core_child_binding(&prelude_path));
+        core_scope
+            .modules
+            .insert("ops".to_string(), core_child_binding(&ops_path));
+        core_scope
+            .modules
+            .insert("iter".to_string(), core_child_binding(&iter_path));
+        core_scope
+            .modules
+            .insert("fmt".to_string(), core_child_binding(&fmt_path));
 
         // Re-exports from `core::intrinsics` into `core` root.
         core_scope.types.insert(
@@ -597,6 +615,28 @@ impl ModuleResolver {
                 defining_module: core_path.clone(),
                 span: Span::new(0, 0),
                 target: BindingTarget::Struct("core::intrinsics::ArrayIter".to_string()),
+            },
+        );
+        core_scope.types.insert(
+            "StringIter".to_string(),
+            Binding {
+                vis: Visibility::Public {
+                    span: Span::new(0, 0),
+                },
+                defining_module: core_path.clone(),
+                span: Span::new(0, 0),
+                target: BindingTarget::Struct("core::intrinsics::StringIter".to_string()),
+            },
+        );
+        core_scope.types.insert(
+            "BytesIter".to_string(),
+            Binding {
+                vis: Visibility::Public {
+                    span: Span::new(0, 0),
+                },
+                defining_module: core_path.clone(),
+                span: Span::new(0, 0),
+                target: BindingTarget::Struct("core::intrinsics::BytesIter".to_string()),
             },
         );
         for (local, target) in [
@@ -632,6 +672,20 @@ impl ModuleResolver {
             "ArrayIter",
             DefKind::Struct,
             "core::intrinsics::ArrayIter",
+        )?;
+        self.inject_builtin_type(
+            &mut intrinsics_scope,
+            &intrinsics_path,
+            "StringIter",
+            DefKind::Struct,
+            "core::intrinsics::StringIter",
+        )?;
+        self.inject_builtin_type(
+            &mut intrinsics_scope,
+            &intrinsics_path,
+            "BytesIter",
+            DefKind::Struct,
+            "core::intrinsics::BytesIter",
         )?;
 
         for name in [
@@ -678,6 +732,10 @@ impl ModuleResolver {
             // Iterator protocol.
             "core::intrinsics::into_iter",
             "core::intrinsics::next",
+            "core::intrinsics::string_into_iter",
+            "core::intrinsics::string_next",
+            "core::intrinsics::bytes_into_iter",
+            "core::intrinsics::bytes_next",
             // Array operations.
             "core::intrinsics::array_len",
             "core::intrinsics::array_len_ro",
@@ -742,9 +800,76 @@ impl ModuleResolver {
             },
         );
 
+        // `core::ops` scope (operator interfaces).
+        let mut ops_scope = ModuleScope {
+            path: ops_path.clone(),
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            values: BTreeMap::new(),
+            pending_uses: Vec::new(),
+        };
+        for iface in [
+            ("Add", "core::ops::Add"),
+            ("Sub", "core::ops::Sub"),
+            ("Mul", "core::ops::Mul"),
+            ("Div", "core::ops::Div"),
+            ("Rem", "core::ops::Rem"),
+            ("Neg", "core::ops::Neg"),
+            ("Not", "core::ops::Not"),
+            ("Lt", "core::ops::Lt"),
+            ("Gt", "core::ops::Gt"),
+            ("Le", "core::ops::Le"),
+            ("Ge", "core::ops::Ge"),
+            ("Eq", "core::ops::Eq"),
+            ("Ne", "core::ops::Ne"),
+        ] {
+            self.inject_builtin_type(
+                &mut ops_scope,
+                &ops_path,
+                iface.0,
+                DefKind::Interface,
+                iface.1,
+            )?;
+        }
+
+        // `core::iter` scope (Iterator interface).
+        let mut iter_scope = ModuleScope {
+            path: iter_path.clone(),
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            values: BTreeMap::new(),
+            pending_uses: Vec::new(),
+        };
+        self.inject_builtin_type(
+            &mut iter_scope,
+            &iter_path,
+            "Iterator",
+            DefKind::Interface,
+            "core::iter::Iterator",
+        )?;
+
+        // `core::fmt` scope (ToString interface).
+        let mut fmt_scope = ModuleScope {
+            path: fmt_path.clone(),
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            values: BTreeMap::new(),
+            pending_uses: Vec::new(),
+        };
+        self.inject_builtin_type(
+            &mut fmt_scope,
+            &fmt_path,
+            "ToString",
+            DefKind::Interface,
+            "core::fmt::ToString",
+        )?;
+
         // Install built-in scopes.
         self.scopes.insert(intrinsics_path, intrinsics_scope);
         self.scopes.insert(prelude_path, prelude_scope);
+        self.scopes.insert(ops_path, ops_scope);
+        self.scopes.insert(iter_path, iter_scope);
+        self.scopes.insert(fmt_path, fmt_scope);
         self.scopes.insert(core_path, core_scope);
 
         // Auto-import `core::prelude` (currently: `panic`) into every module.

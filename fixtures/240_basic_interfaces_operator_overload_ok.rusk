@@ -1,0 +1,34 @@
+// expect: ok int 1
+
+use core::ops::Add;
+use core::ops::Eq;
+use core::ops::Ne;
+
+struct Point { x: int, y: int }
+
+impl Add for Point {
+    readonly fn add(other: Point) -> Point {
+        Point { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+impl Eq for Point {
+    readonly fn eq(other: Point) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+
+impl Ne for Point {
+    readonly fn ne(other: Point) -> bool {
+        !(self == other)
+    }
+}
+
+fn main() -> int {
+    readonly a = Point { x: 1, y: 2 };
+    let b = Point { x: 3, y: 4 };
+    let c = a + b;
+    let expected = Point { x: 4, y: 6 };
+    let zero = Point { x: 0, y: 0 };
+    if c == expected && c != zero { 1 } else { 0 }
+}

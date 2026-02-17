@@ -540,6 +540,66 @@ fn formatted_strings_desugar_via_core_intrinsics() {
 }
 
 #[test]
+fn formatted_strings_use_core_fmt_to_string_for_user_types() {
+    let src = r#"
+        use core::fmt::ToString;
+
+        struct User { id: int }
+
+        impl ToString for User {
+            readonly fn to_string() -> string {
+                core::intrinsics::string_concat(
+                    "User#",
+                    core::fmt::ToString::to_string(self.id)
+                )
+            }
+        }
+
+        fn test() -> string {
+            let u = User { id: 42 };
+            f"u={u}"
+        }
+    "#;
+
+    assert_eq!(
+        run0(src, "test").expect("run"),
+        AbiValue::String("u=User#42".to_string())
+    );
+}
+
+#[test]
+fn non_primitive_operators_are_resolved_via_core_ops_impls() {
+    let src = r#"
+        use core::ops::Add;
+        use core::ops::Eq;
+
+        struct Point { x: int, y: int }
+
+        impl Add for Point {
+            readonly fn add(other: Point) -> Point {
+                Point { x: self.x + other.x, y: self.y + other.y }
+            }
+        }
+
+        impl Eq for Point {
+            readonly fn eq(other: Point) -> bool {
+                self.x == other.x && self.y == other.y
+            }
+        }
+
+        fn test() -> int {
+            let a = Point { x: 1, y: 2 };
+            let b = Point { x: 3, y: 4 };
+            let c = a + b;
+            let expected = Point { x: 4, y: 6 };
+            if c == expected { 1 } else { 0 }
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(1));
+}
+
+#[test]
 fn enum_construction_via_call_and_matching() {
     let src = r#"
         fn some() -> int {

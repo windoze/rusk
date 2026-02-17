@@ -216,6 +216,10 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
 
         "core::intrinsics::into_iter" => Intrinsic::IntoIter,
         "core::intrinsics::next" => Intrinsic::Next,
+        "core::intrinsics::string_into_iter" => Intrinsic::StringIntoIter,
+        "core::intrinsics::string_next" => Intrinsic::StringNext,
+        "core::intrinsics::bytes_into_iter" => Intrinsic::BytesIntoIter,
+        "core::intrinsics::bytes_next" => Intrinsic::BytesNext,
 
         "core::intrinsics::array_len" => Intrinsic::ArrayLen,
         "core::intrinsics::array_len_ro" => Intrinsic::ArrayLenRo,
