@@ -2203,7 +2203,7 @@ fn process_impl_item(
             }
 
             // Validate associated type definitions are complete and contain no extras.
-            for (aname, _info) in &iface_assoc_types {
+            for aname in iface_assoc_types.keys() {
                 if !impl_assoc_by_name.contains_key(aname) {
                     return Err(TypeError {
                         message: format!(
@@ -4243,6 +4243,7 @@ fn typecheck_impl_item(
                 }
 
                 let mut type_expr_generics_override = sig.generics.clone();
+                #[allow(clippy::needless_range_loop)]
                 for idx in 0..impl_arity {
                     if idx < origin_iface_arity {
                         type_expr_generics_override[idx].name =
@@ -4312,10 +4313,8 @@ fn typecheck_function_body_with_options(
     if matches!(func.kind, FnItemKind::Method { .. }) {
         tc.reserved_names.insert("self".to_string());
     }
-    if has_implicit_receiver {
-        if let Some(recv_ty) = sig.params.first() {
-            tc.self_ty_subst = Some(strip_readonly(recv_ty).clone());
-        }
+    if has_implicit_receiver && let Some(recv_ty) = sig.params.first() {
+        tc.self_ty_subst = Some(strip_readonly(recv_ty).clone());
     }
 
     // Parameters are immutable bindings.
@@ -7024,72 +7023,71 @@ impl<'a> FnTypechecker<'a> {
             receiver,
             Expr::Path { path, .. } if path.segments.len() == 1 && path.segments[0].name == "self"
         );
-        if receiver_is_self {
-            if let Some(prefer_iface) = self.prefer_interface_methods_for_self.clone()
-                && let Some(iface_def) = self.env.interfaces.get(&prefer_iface)
-                && let Some(info) = iface_def.all_methods.get(&method.name)
-            {
-                if receiver_is_readonly && !info.receiver_readonly {
-                    return Err(TypeError {
-                        message: format!(
-                            "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
-                            method.name
-                        ),
-                        span: method.span,
-                    });
-                }
-                let iface_args = self
-                    .infer_interface_args_for_receiver(&recv_ty_resolved, &prefer_iface)
-                    .ok_or_else(|| TypeError {
-                        message: format!(
-                            "internal error: failed to infer interface args for `{prefer_iface}`"
-                        ),
-                        span: method.span,
-                    })?;
-                let mut inst = instantiate_interface_method_sig(
-                    &info.sig,
-                    &iface_args,
-                    iface_def.generics.len(),
-                    Some(strip_readonly(&recv_ty_resolved)),
-                    &mut self.infer,
-                );
-                inst.params = inst
-                    .params
-                    .into_iter()
-                    .map(|t| self.normalize_assoc_projs_in_ty(t))
-                    .collect();
-                inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
-                let target_name = format!("{}::{}", info.origin, method.name);
-                self.apply_explicit_type_args(
-                    explicit_type_args,
-                    &info.sig.generics,
-                    &inst.reified_type_args,
-                    &target_name,
-                    span,
-                )?;
-
-                if args.len() != inst.params.len() {
-                    return Err(TypeError {
-                        message: format!(
-                            "arity mismatch for `{prefer_iface}::{}`: expected {}, got {}",
-                            method.name,
-                            inst.params.len(),
-                            args.len()
-                        ),
-                        span,
-                    });
-                }
-                for (arg, expected) in args.iter().zip(inst.params.iter()) {
-                    let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                    self.infer.unify(expected.clone(), got, arg.span())?;
-                }
-                if !inst.reified_type_args.is_empty() {
-                    let method_id = format!("{}::{}", info.origin, method.name);
-                    self.method_type_args
-                        .insert((span, method_id), inst.reified_type_args.clone());
-                }
-                return Ok(inst.ret);
+        if receiver_is_self
+            && let Some(prefer_iface) = self.prefer_interface_methods_for_self.clone()
+            && let Some(iface_def) = self.env.interfaces.get(&prefer_iface)
+            && let Some(info) = iface_def.all_methods.get(&method.name)
+        {
+            if receiver_is_readonly && !info.receiver_readonly {
+                return Err(TypeError {
+                    message: format!(
+                        "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
+                        method.name
+                    ),
+                    span: method.span,
+                });
             }
+            let iface_args = self
+                .infer_interface_args_for_receiver(&recv_ty_resolved, &prefer_iface)
+                .ok_or_else(|| TypeError {
+                    message: format!(
+                        "internal error: failed to infer interface args for `{prefer_iface}`"
+                    ),
+                    span: method.span,
+                })?;
+            let mut inst = instantiate_interface_method_sig(
+                &info.sig,
+                &iface_args,
+                iface_def.generics.len(),
+                Some(strip_readonly(&recv_ty_resolved)),
+                &mut self.infer,
+            );
+            inst.params = inst
+                .params
+                .into_iter()
+                .map(|t| self.normalize_assoc_projs_in_ty(t))
+                .collect();
+            inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
+            let target_name = format!("{}::{}", info.origin, method.name);
+            self.apply_explicit_type_args(
+                explicit_type_args,
+                &info.sig.generics,
+                &inst.reified_type_args,
+                &target_name,
+                span,
+            )?;
+
+            if args.len() != inst.params.len() {
+                return Err(TypeError {
+                    message: format!(
+                        "arity mismatch for `{prefer_iface}::{}`: expected {}, got {}",
+                        method.name,
+                        inst.params.len(),
+                        args.len()
+                    ),
+                    span,
+                });
+            }
+            for (arg, expected) in args.iter().zip(inst.params.iter()) {
+                let got = self.typecheck_expr(arg, ExprUse::Value)?;
+                self.infer.unify(expected.clone(), got, arg.span())?;
+            }
+            if !inst.reified_type_args.is_empty() {
+                let method_id = format!("{}::{}", info.origin, method.name);
+                self.method_type_args
+                    .insert((span, method_id), inst.reified_type_args.clone());
+            }
+            return Ok(inst.ret);
         }
 
         // Inherent method wins whenever the receiver has a nominal name.
