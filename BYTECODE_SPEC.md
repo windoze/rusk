@@ -263,8 +263,16 @@ Each handler has a set of **clauses**. A clause includes:
 - an effect identity (`interface`, runtime `typerep` interface args, `method`),
 - argument patterns (for matching performed effect arguments),
 - a target PC within the current function,
-- `param_regs`: destination registers for pattern binds, plus one final register for the
-  continuation token.
+- `param_regs`: destination registers for pattern binds, optionally followed by one final register
+  for the continuation token.
+
+`param_regs` arity determines whether the clause is **abortive**:
+
+- If `param_regs.len() == bind_count`, the clause does **not** receive a continuation token. The
+  performed effect is handled **abortively**: the remainder of the computation after the `perform`
+  is abandoned (as if its continuation were captured and then dropped).
+- If `param_regs.len() == bind_count + 1`, the clause receives a continuation token in the final
+  register and may resume it via `resume`.
 
 ### 6.2 `perform` (in-language handling)
 
@@ -275,18 +283,29 @@ the first matching clause:
 - arity must match,
 - each argument pattern must match, collecting bind values.
 
-On a match, `perform`:
+On a match, `perform` transfers control to the handler clause. If the clause requests a
+continuation token (`param_regs.len() == bind_count + 1`), `perform` captures a delimited
+continuation; otherwise it may skip capturing and handle the effect abortively.
+
+If the clause is **abortive** (`param_regs.len() == bind_count`), `perform`:
+
+1. Unwinds the current stack/handler stack back to the handler owner frame.
+2. Writes pattern binds into `param_regs[0..bind_count]`.
+3. Sets the handler owner frame `pc` to the clause’s `target_pc`.
+
+If the clause is **resumptive** (`param_regs.len() == bind_count + 1`), `perform`:
 
 1. Captures a **delimited continuation** representing the remainder of execution from the handler
    owner frame up to the current top frame, including relevant nested handlers.
 2. Clears the `perform` destination register in the captured top frame (if `dst` is present),
    ensuring it is uninitialized in the continuation.
 3. Unwinds the current stack/handler stack back to the handler owner frame.
-4. Writes pattern binds into `param_regs[0..binds]` and writes the continuation token into the last
-   `param_reg`.
+4. Writes pattern binds into `param_regs[0..bind_count]` and writes the continuation token into the
+   last `param_reg`.
 5. Sets the handler owner frame `pc` to the clause’s `target_pc`.
 
-This makes the handler clause body run “in place”, with access to the continuation token.
+This makes the handler clause body run “in place”, with access to the continuation token when one
+is requested.
 
 ### 6.3 `resume` (in-language resumption)
 
@@ -354,6 +373,9 @@ Bind values are collected in a deterministic left-to-right traversal:
 - struct: fields in the order listed in the pattern
 
 The `param_regs` list in `SwitchCase` and `HandlerClause` corresponds to this bind order.
+
+For `HandlerClause`, if a continuation token is requested, it appears **after** all bind registers
+(`param_regs[bind_count]`).
 
 ### 7.2 Literal matching subset
 
@@ -504,6 +526,12 @@ Effects:
 - `PopHandler`
 - `Perform { dst, effect, args }`
 - `Resume { dst, k, value }`
+- `ResumeTail { k, value }`
+
+`ResumeTail` is a tail-call variant of `Resume`. It consumes and resumes the continuation like
+`Resume`, but instead of returning to the current frame it replaces the current frame with the
+captured continuation segment, preserving the current frame’s `return_dst`. This is equivalent to
+resuming in a `return` position (tail resume).
 
 Control flow:
 
@@ -761,7 +789,7 @@ Intrinsics use `u16` tags `0..=52`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes `0..=45` match the `rusk_bytecode::Instruction` enum order:
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.3):
 
 - `0`: `Const`
 - `1`: `Copy`
@@ -809,6 +837,7 @@ Instruction opcodes `0..=45` match the `rusk_bytecode::Instruction` enum order:
 - `43`: `Switch`
 - `44`: `Return`
 - `45`: `Trap`
+- `46`: `ResumeTail`
 
 Instruction payloads are encoded by writing each operand field in the order listed in the
 instruction definition, using the primitive encodings from §10.2 (e.g. `u32` for registers and PC

@@ -47,8 +47,8 @@ MIR uses the following identifier forms in its canonical textual format
 
 An implementation may intern these names.
 
-The in-tree compiler + interpreter implementation performs interning at the MIR level for hot-path
-execution:
+The in-tree compiler performs interning at the MIR level for hot-path lowering and downstream
+execution (the bytecode backend uses ID-based tables):
 
 - functions are assigned dense `FunctionId` indices
 - declared host imports are assigned dense `HostImportId` indices

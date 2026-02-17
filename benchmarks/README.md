@@ -7,21 +7,18 @@ This folder contains small, stable Rusk programs intended for local performance 
 Use the in-tree measurement runner:
 
 ```sh
-# Default backend is MIR:
-cargo run --release --bin rusk-measure -- --backend mir --json --warmup 2 --iters 10 <file.rusk>
+# Unoptimized baseline (bytecode opt level O0):
+cargo run --release --bin rusk-measure -- --opt-level o0 --json --warmup 2 --iters 10 <file.rusk>
 
-# To measure bytecode VM + peephole opts:
-cargo run --release --bin rusk-measure -- --backend bytecode --opt-level o2 --metrics --json --warmup 2 --iters 10 <file.rusk>
+# Optimized (bytecode opt level O2; also the default):
+cargo run --release --bin rusk-measure -- --opt-level o2 --metrics --json --warmup 2 --iters 10 <file.rusk>
 ```
 
 To compare against Python (using the repo's `.venv`):
 
 ```sh
 # Rusk vs Python suite (writes `benchmarks/results.md` + `benchmarks/results.json`):
-.venv/bin/python benchmarks/compare.py --validate --backend bytecode --opt-level o2
-
-# To benchmark the MIR interpreter backend instead:
-.venv/bin/python benchmarks/compare.py --validate --backend mir
+.venv/bin/python benchmarks/compare.py --validate --opt-level o2
 ```
 
 Defaults are tuned to finish quickly (`--warmup 1 --iters 3 --repeats 5`), and a few heavy cases

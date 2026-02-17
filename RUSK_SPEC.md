@@ -4,21 +4,23 @@
 
 Rusk 的目标是：在语法上接近 Rust（块表达式、`match`、显式可变性控制），在工程体验上接近 TypeScript（类型推断、泛型、接口驱动的抽象），并以 **代数效果（Algebraic Effects）** 作为一等机制统一异常/异步/生成器等控制流扩展。
 
-本仓库的实现是一个“脚本 → MIR → 解释执行”的参考实现：
+本仓库的实现是一个“源代码 → MIR → 字节码 → VM 执行”的参考实现：
 
 - `RUSK_SPEC.md` 定义源语言（本文件）。
-- `MIR_SPEC.md` 定义中间表示 MIR。
-- 解释器执行 MIR，并提供宿主函数（host functions）作为“标准库”实现。
+- `MIR_SPEC.md` 定义编译器内部 IR：MIR。
+- `BYTECODE_SPEC.md` 定义字节码指令集与 `.rbc` 序列化格式。
+- `crates/rusk-vm` 执行字节码，并通过宿主函数（host functions）提供平台 I/O 等能力。
 
-本规范以 **可实现** 为前提：规范中出现的语法与语义都必须能完整编译到当前版本的 MIR 并在解释器中运行（不允许“未来再实现”的占位条款）。
+本规范以 **可实现** 为前提：规范中出现的语法与语义都必须能完整编译到当前版本的 MIR，并进一步降级到当前版本的字节码，在参考 VM 中执行（不允许“未来再实现”的占位条款）。
 
 ---
 
 ## 0. Notation
 
 - `unit` means the unit value `()`.
-- “Trap” means a runtime error (MIR `trap`).
-- “Host function” means an externally provided function callable from MIR via `call`.
+- “Trap” means a runtime error (MIR `trap` / bytecode `Trap` / VM trap).
+- “Host function” means an externally provided function callable from compiled code (MIR
+  `CallTarget::Host` / bytecode `CallTarget::Host`).
 
 ---
 
@@ -68,7 +70,7 @@ Reserved identifiers:
 
 Delimiters:
 
-`(` `)` `{` `}` `[` `]` `,` `:` `;` `.` `::` `=>`
+`(` `)` `{` `}` `[` `]` `,` `:` `;` `.` `..` `::` `::<` `->` `=>` `|`
 
 Operators:
 
@@ -1009,7 +1011,7 @@ Effect signature restrictions (v0.4):
 
 Semantics:
 
-- At runtime, the interpreter searches the dynamic handler stack (installed by
+- At runtime, the VM searches the dynamic handler stack (installed by
   `match` effect arms; §7.2) for a matching handler clause.
 - If none is found, the program traps with an “unhandled effect” error.
 
@@ -1092,7 +1094,7 @@ unreachable, it is effectively abandoned and will never run.
 Rusk specifies that effect handlers created by `match` are *delimited* to the
 scrutinee evaluation.
 
-The MIR runtime captures a **delimited** continuation: resuming a continuation
+The runtime captures a **delimited** continuation: resuming a continuation
 returns when the selected handler’s *owning frame* returns (see `MIR_SPEC.md`).
 
 Therefore, the compiler must ensure that a `match` expression with effect arms
@@ -1481,11 +1483,16 @@ Error behavior:
   `end < 0`, `end > len(xs)`) or if `start > end`.
 
 
-## 10. Compilation to MIR (Normative)
+## 10. Compilation Pipeline (Normative)
 
-The compiler lowers Rusk to MIR as defined in `MIR_SPEC.md`.
+The reference compiler pipeline is:
 
-Key requirements:
+`Rusk source (.rusk)` → `MIR` → `Bytecode module (.rbc)` → `VM execution`.
+
+The compiler lowers Rusk to MIR as defined in `MIR_SPEC.md`, then lowers MIR to the bytecode layer
+as defined in `BYTECODE_SPEC.md`.
+
+Key requirements (Rusk → MIR):
 
 - Preserve left-to-right evaluation order.
 - Compile heap aggregates (arrays/structs/enums) to MIR heap allocations.
@@ -1493,6 +1500,15 @@ Key requirements:
 - Compile `match` value arms to MIR `switch` with patterns.
 - Compile effect arms to MIR `push_handler`/`perform`/`resume` following the delimitation
   rule in §7.4.
+
+Key requirements (MIR → bytecode):
+
+- Preserve evaluation order and trap behavior.
+- Linearize MIR CFG blocks/terminators into bytecode PCs (`Jump` / `JumpIf` / `Switch` / `Return` /
+  `Trap`).
+- Preserve handler/continuation semantics, including abortive handlers (handlers that do not use a
+  continuation) and behavior-preserving tail optimizations such as bytecode `ResumeTail` (when
+  applicable).
 
 ---
 
@@ -1518,5 +1534,9 @@ If `main` takes `argv`, the host passes command line arguments as a Rusk string 
 - All strings in `argv` must be well-formed UTF-8. The host must ensure this, using lossy
   conversion when needed.
 
-The CLI tool compiles the program to MIR, installs the required `core::intrinsics::*` host
-functions, runs `main`, and treats any trap as a non-zero process exit.
+The CLI tool (`rusk`) compiles `.rusk` to bytecode (or loads a `.rbc`), installs the required host
+imports (e.g. `std::print` / `std::println`), runs `main` on the bytecode VM, and treats any trap
+as a non-zero process exit.
+
+Note: `core::intrinsics::*` are VM-provided intrinsics in the bytecode backend; they do not need
+to be installed as host imports.

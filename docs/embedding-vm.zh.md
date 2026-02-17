@@ -479,8 +479,8 @@ loop {
   - 修复：通过 `register_host_module(...)` 在 `CompileOptions` 中注册函数的原型。
 
 - **"host import … is not ABI-safe for bytecode v0"**
-  - 症状：编译到 MIR 可以工作，但编译到字节码失败。
-  - 修复：对于打算在 `rusk-vm` 上运行的代码，将宿主函数签名限制为 ABI 安全的基本类型，或者在 MIR 解释器上运行程序。
+  - 症状：编译为字节码时失败。
+  - 修复：对于打算在 `rusk-vm` 上运行的代码，将宿主函数签名限制为 ABI 安全的基本类型，或扩展 VM/ABI 以支持你需要的类型。
 
 - **"external effect … has non-ABI-safe signature for bytecode v0"**
   - 症状：`register_external_effect(...)` 可以工作，但编译到字节码失败。

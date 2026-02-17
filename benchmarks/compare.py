@@ -218,7 +218,6 @@ def run_suite(
     warmup: int,
     iters: int,
     repeats: int,
-    backend: str,
     opt_level: str,
     validate: bool,
 ) -> dict[str, Any]:
@@ -253,11 +252,9 @@ def run_suite(
                 str(case_warmup),
                 "--iters",
                 str(case_iters),
-                "--backend",
-                backend,
+                "--opt-level",
+                opt_level,
             ]
-            if backend == "bytecode":
-                rusk_cmd += ["--opt-level", opt_level]
             rusk_cmd.append(str(case.rusk_path))
             rusk_json = _check_json(
                 rusk_cmd,
@@ -323,8 +320,7 @@ def run_suite(
             "warmup": warmup,
             "iters": iters,
             "repeats": repeats,
-            "backend": backend,
-            "opt_level": opt_level if backend == "bytecode" else None,
+            "opt_level": opt_level,
         },
         "benchmarks": benches,
     }
@@ -349,9 +345,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Parameters")
     lines.append("")
-    lines.append(f"- Rusk backend: `{params['backend']}`")
-    if params.get("backend") == "bytecode":
-        lines.append(f"- Bytecode opt level: `{params['opt_level']}`")
+    lines.append(f"- Bytecode opt level: `{params['opt_level']}`")
     lines.append(f"- Warmup: `{params['warmup']}`")
     lines.append(f"- Iters: `{params['iters']}`")
     lines.append(f"- Repeats: `{params['repeats']}` (outer repeats for median/stdev)")
@@ -391,12 +385,11 @@ def _render_markdown(report: dict[str, Any]) -> str:
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description="Run Rusk vs Python micro-benchmarks.")
-    p.add_argument("--backend", choices=["mir", "bytecode"], default="mir")
     p.add_argument(
         "--opt-level",
         choices=["o0", "o1", "o2"],
         default="o2",
-        help="Bytecode optimization level (only used with --backend bytecode).",
+        help="Bytecode optimization level (passed to `rusk-measure --opt-level`).",
     )
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--iters", type=int, default=3)
@@ -421,7 +414,6 @@ def main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     report = run_suite(
-        backend=args.backend,
         opt_level=args.opt_level,
         warmup=args.warmup,
         iters=args.iters,
