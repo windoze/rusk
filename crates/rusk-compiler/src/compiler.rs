@@ -1185,7 +1185,7 @@ impl Compiler {
 
                 let elem_rep = lowerer
                     .generic_type_reps
-                    .get(0)
+                    .first()
                     .and_then(|v| *v)
                     .ok_or_else(|| {
                         CompileError::new(
@@ -5433,7 +5433,7 @@ impl<'a> FunctionLowerer<'a> {
 
                         let mut call_args = Vec::with_capacity(recv_type_args.len() + 2);
                         for ty in recv_type_args {
-                            call_args.push(self.lower_type_rep_for_ty(&ty, span)?);
+                            call_args.push(self.lower_type_rep_for_ty(ty, span)?);
                         }
 
                         // Operator methods are `readonly fn` in `core::ops`.
