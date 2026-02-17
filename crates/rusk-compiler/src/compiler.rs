@@ -685,8 +685,7 @@ pub fn compile_to_mir_with_options_and_metrics(
         metrics.parse_time = parse_start.elapsed();
 
         let typecheck_start = Instant::now();
-        let env = typeck::build_env(&program, options)?;
-        let types = typeck::typecheck_program(&program, &env)?;
+        let (env, types) = typecheck_program_with_entry_validation(&program, options)?;
         metrics.typecheck_time = typecheck_start.elapsed();
 
         let lower_start = Instant::now();
@@ -850,8 +849,7 @@ pub fn compile_file_to_mir_with_options_and_metrics(
 
     let result: Result<Module, CompileError> = (|| {
         let typecheck_start = Instant::now();
-        let env = typeck::build_env(&program, options)?;
-        let types = typeck::typecheck_program(&program, &env)?;
+        let (env, types) = typecheck_program_with_entry_validation(&program, options)?;
         metrics.typecheck_time = typecheck_start.elapsed();
 
         let lower_start = Instant::now();
@@ -871,9 +869,47 @@ fn compile_program_to_mir(
     program: &Program,
     options: &CompileOptions,
 ) -> Result<Module, CompileError> {
+    let (env, types) = typecheck_program_with_entry_validation(program, options)?;
+    Compiler::new(env, types).compile_program(program)
+}
+
+fn typecheck_program_with_entry_validation(
+    program: &Program,
+    options: &CompileOptions,
+) -> Result<(ProgramEnv, TypeInfo), CompileError> {
     let env = typeck::build_env(program, options)?;
     let types = typeck::typecheck_program(program, &env)?;
-    Compiler::new(env, types).compile_program(program)
+    validate_entry_main_sig(&env)?;
+    Ok((env, types))
+}
+
+fn validate_entry_main_sig(env: &ProgramEnv) -> Result<(), CompileError> {
+    let Some(main) = env.functions.get("main") else {
+        return Err(CompileError::new(
+            "missing required entry function `main`",
+            Span::new(0, 0),
+        ));
+    };
+
+    if !main.generics.is_empty() {
+        return Err(CompileError::new(
+            "entry function `main` must not be generic",
+            main.span,
+        ));
+    }
+
+    match main.params.as_slice() {
+        [] => Ok(()),
+        [Ty::Array(elem)] if **elem == Ty::String => Ok(()),
+        [other] => Err(CompileError::new(
+            format!("entry function `main` parameter must be `[string]` (argv), got `{other}`"),
+            main.span,
+        )),
+        _ => Err(CompileError::new(
+            "entry function `main` must have 0 parameters or 1 parameter (argv: [string])",
+            main.span,
+        )),
+    }
 }
 
 struct Compiler {

@@ -625,12 +625,24 @@ pub struct Vm {
 
 impl Vm {
     pub fn new(module: ExecutableModule) -> Result<Self, VmError> {
+        Self::new_with_entry_argv(module, None)
+    }
+
+    pub fn new_with_argv(module: ExecutableModule, argv: Vec<String>) -> Result<Self, VmError> {
+        Self::new_with_entry_argv(module, Some(argv))
+    }
+
+    fn new_with_entry_argv(
+        module: ExecutableModule,
+        argv: Option<Vec<String>>,
+    ) -> Result<Self, VmError> {
         let entry = module.entry;
         let Some(entry_fn) = module.function(entry) else {
             return Err(VmError::InvalidState {
                 message: format!("invalid entry function id {}", entry.0),
             });
         };
+        let entry_param_count = entry_fn.param_count;
 
         let reg_count: usize =
             entry_fn
@@ -640,10 +652,19 @@ impl Vm {
                     message: "entry reg_count overflow".to_string(),
                 })?;
 
+        if (entry_param_count as usize) > reg_count {
+            return Err(VmError::InvalidState {
+                message: format!(
+                    "entry param_count {} exceeds reg_count {}",
+                    entry_param_count, reg_count
+                ),
+            });
+        }
+
         let mut regs = Vec::with_capacity(reg_count);
         regs.resize(reg_count, None);
 
-        Ok(Self {
+        let mut vm = Self {
             heap: ImmixHeap::new(),
             gc_allocations_since_collect: 0,
             host_fns: {
@@ -669,7 +690,60 @@ impl Vm {
             type_reps: TypeReps::default(),
             metrics: VmMetrics::default(),
             collect_metrics: false,
-        })
+        };
+
+        let entry_generic_params = vm.module.function_generic_param_count(entry).unwrap_or(0);
+        if entry_generic_params != 0 {
+            return Err(VmError::InvalidState {
+                message: "entry function cannot be generic".to_string(),
+            });
+        }
+
+        match argv {
+            None => {
+                if entry_param_count != 0 {
+                    return Err(VmError::InvalidState {
+                        message: format!(
+                            "entry function expects {entry_param_count} parameter(s); use Vm::new_with_argv"
+                        ),
+                    });
+                }
+            }
+            Some(argv) => {
+                if entry_param_count != 1 {
+                    return Err(VmError::InvalidState {
+                        message: format!(
+                            "entry function expects {entry_param_count} parameter(s); cannot pass argv"
+                        ),
+                    });
+                }
+
+                let mut argv = argv;
+                if argv.is_empty() {
+                    argv.push(String::new());
+                }
+
+                let argv = alloc_ref(
+                    &mut vm.heap,
+                    &mut vm.gc_allocations_since_collect,
+                    HeapValue::Array(argv.into_iter().map(Value::String).collect()),
+                );
+
+                let Some(entry_frame) = vm.frames.first_mut() else {
+                    return Err(VmError::InvalidState {
+                        message: "missing entry frame".to_string(),
+                    });
+                };
+                let Some(param0) = entry_frame.regs.first_mut() else {
+                    return Err(VmError::InvalidState {
+                        message: "entry param reg 0 out of range".to_string(),
+                    });
+                };
+                *param0 = Some(argv);
+            }
+        }
+
+        Ok(vm)
     }
 
     pub fn enable_metrics(&mut self, enabled: bool) {

@@ -4,27 +4,27 @@ use rusk_host::std_io;
 use rusk_vm::{StepResult, Vm, vm_step};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 fn main() {
-    let mut args = env::args().skip(1);
+    let mut args = env::args_os().skip(1);
     let Some(path) = args.next() else {
-        eprintln!("usage: rusk <file.rusk|file.rbc>");
+        eprintln!("usage: rusk <file.rusk|file.rbc> [args...]");
         process::exit(2);
     };
-    if args.next().is_some() {
-        eprintln!("error: expected exactly one input file");
-        process::exit(2);
-    }
+    let input_path = PathBuf::from(path);
+    let argv0 = absolute_path_string(&input_path);
+    let mut argv: Vec<String> = Vec::with_capacity(1);
+    argv.push(argv0);
+    argv.extend(args.map(|a| a.to_string_lossy().into_owned()));
 
-    let input_path = Path::new(&path);
     let extension = input_path.extension().and_then(|s| s.to_str());
 
     let module = match extension {
         Some("rbc") => {
             // 直接加载 .rbc 文件
-            let bytes = match fs::read(input_path) {
+            let bytes = match fs::read(&input_path) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("failed to read file: {e}");
@@ -43,7 +43,7 @@ fn main() {
             // 编译 .rusk 文件
             let mut options = CompileOptions::default();
             std_io::register_host_module(&mut options);
-            match compile_file_to_bytecode_with_options(input_path, &options) {
+            match compile_file_to_bytecode_with_options(&input_path, &options) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("compile error: {e}");
@@ -57,13 +57,24 @@ fn main() {
         }
     };
 
-    let mut vm = match Vm::new(module.clone()) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("vm init error: {e}");
-            process::exit(1);
-        }
+    let Some(entry_fn) = module.function(module.entry) else {
+        eprintln!(
+            "vm init error: invalid entry function id {}",
+            module.entry.0
+        );
+        process::exit(1);
     };
+    let mut vm = match entry_fn.param_count {
+        0 => Vm::new(module.clone()),
+        1 => Vm::new_with_argv(module.clone(), argv),
+        n => Err(rusk_vm::VmError::InvalidState {
+            message: format!("unsupported entry arity: expected 0 or 1 param, got {n}"),
+        }),
+    }
+    .unwrap_or_else(|e| {
+        eprintln!("vm init error: {e}");
+        process::exit(1);
+    });
     std_io::install_vm(&module, &mut vm);
 
     match vm_step(&mut vm, None) {
@@ -93,4 +104,15 @@ fn main() {
             process::exit(1);
         }
     }
+}
+
+fn absolute_path_string(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    abs.to_string_lossy().into_owned()
 }

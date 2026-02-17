@@ -5,7 +5,7 @@ use rusk_host::std_io;
 use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, Instant};
 
@@ -126,19 +126,33 @@ fn main() {
         }
     };
 
+    let argv0 = absolute_path_string(input_path);
+    let argv = vec![argv0];
+    let Some(entry_fn) = module.function(module.entry) else {
+        eprintln!(
+            "vm init error: invalid entry function id {}",
+            module.entry.0
+        );
+        process::exit(1);
+    };
+
     let total_runs = warmup.saturating_add(iters);
     let mut run_time_total = Duration::ZERO;
     let mut last_result: Option<AbiValue> = None;
     let mut agg_metrics = rusk_vm::VmMetrics::default();
 
     for run_index in 0..total_runs {
-        let mut vm = match Vm::new(module.clone()) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("vm init error: {e}");
-                process::exit(1);
-            }
-        };
+        let mut vm = match entry_fn.param_count {
+            0 => Vm::new(module.clone()),
+            1 => Vm::new_with_argv(module.clone(), argv.clone()),
+            n => Err(rusk_vm::VmError::InvalidState {
+                message: format!("unsupported entry arity: expected 0 or 1 param, got {n}"),
+            }),
+        }
+        .unwrap_or_else(|e| {
+            eprintln!("vm init error: {e}");
+            process::exit(1);
+        });
         std_io::install_vm(&module, &mut vm);
         if metrics {
             vm.enable_metrics(true);
@@ -266,4 +280,15 @@ fn main() {
     {
         println!("Result: {result:?}");
     }
+}
+
+fn absolute_path_string(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    abs.to_string_lossy().into_owned()
 }

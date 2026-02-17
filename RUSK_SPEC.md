@@ -1498,11 +1498,25 @@ Key requirements:
 
 ## 11. Program Entry
 
-A runnable program must define:
+A runnable program must define one of:
 
 ```rust
 fn main() -> unit { ... }
 ```
+
+or
+
+```rust
+fn main(argv: [string]) -> unit { ... }
+```
+
+If `main` takes `argv`, the host passes command line arguments as a Rusk string array:
+
+- `argv[0]` is the full path of the `.rusk` source file or `.rbc` bytecode file being executed, or
+  the empty string (`""`) if there is no corresponding file (for example, compilation from an
+  in-memory string).
+- All strings in `argv` must be well-formed UTF-8. The host must ensure this, using lossy
+  conversion when needed.
 
 The CLI tool compiles the program to MIR, installs the required `core::intrinsics::*` host
 functions, runs `main`, and treats any trap as a non-zero process exit.

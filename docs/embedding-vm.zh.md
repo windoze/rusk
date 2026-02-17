@@ -263,7 +263,22 @@ let mut vm = Vm::new(module.clone())?;
 注意事项：
 
 - `Vm::new` 从 `module.entry`（通常是 `main`）开始执行。
-- 虚拟机当前假定入口函数可以在没有宿主提供的参数的情况下被调用。
+- `Vm::new` 要求入口函数参数个数为 0（对应 `fn main()`）。
+
+如果你的程序定义了 `fn main(argv: [string])`，则需要在创建虚拟机时传入 argv：
+
+```rust
+use rusk_vm::Vm;
+
+// 由宿主提供的命令行参数。
+// 约定：argv[0] 是被执行文件的完整路径；如果没有对应文件则为 ""。
+let argv = vec![String::new(), "arg1".to_string(), "arg2".to_string()];
+
+let mut vm = Vm::new_with_argv(module.clone(), argv)?;
+```
+
+`argv` 中的所有字符串都必须是有效的 UTF-8。宿主在读取平台/操作系统参数时需要确保这一点，
+必要时应进行有损转换（lossy conversion）。
 
 ### 安装宿主导入
 

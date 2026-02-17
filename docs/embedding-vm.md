@@ -280,7 +280,22 @@ let mut vm = Vm::new(module.clone())?;
 Notes:
 
 - `Vm::new` starts execution at `module.entry` (normally `main`).
-- The VM currently assumes the entry function is callable without host-provided arguments.
+- `Vm::new` requires the entry function to take 0 parameters (for `fn main()`).
+
+If your program defines `fn main(argv: [string])`, pass argv at construction time:
+
+```rust
+use rusk_vm::Vm;
+
+// Host-provided command line arguments.
+// Convention: argv[0] is the full path of the executed file, or "" if there is no file.
+let argv = vec![String::new(), "arg1".to_string(), "arg2".to_string()];
+
+let mut vm = Vm::new_with_argv(module.clone(), argv)?;
+```
+
+All strings in `argv` must be valid UTF-8. Hosts should perform lossy conversion when reading
+platform/OS arguments if necessary.
 
 ### Install host imports
 
