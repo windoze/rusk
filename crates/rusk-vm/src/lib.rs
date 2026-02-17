@@ -299,6 +299,8 @@ enum TypeCtor {
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
     Array,
@@ -354,6 +356,8 @@ impl TypeReps {
             rusk_bytecode::TypeRepLit::Bool => TypeCtor::Bool,
             rusk_bytecode::TypeRepLit::Int => TypeCtor::Int,
             rusk_bytecode::TypeRepLit::Float => TypeCtor::Float,
+            rusk_bytecode::TypeRepLit::Byte => TypeCtor::Byte,
+            rusk_bytecode::TypeRepLit::Char => TypeCtor::Char,
             rusk_bytecode::TypeRepLit::String => TypeCtor::String,
             rusk_bytecode::TypeRepLit::Bytes => TypeCtor::Bytes,
             rusk_bytecode::TypeRepLit::Array => TypeCtor::Array,
@@ -417,14 +421,82 @@ struct ContinuationState {
     perform_dst: Option<rusk_bytecode::Reg>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BytesView {
+    buf: GcRef,
+    start: u32,
+    len: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StringView {
+    buf: GcRef,
+    start: u32,
+    len: u32,
+}
+
+impl BytesView {
+    fn as_slice<'a>(&self, heap: &'a ImmixHeap<HeapValue>) -> Result<&'a [u8], String> {
+        let Some(obj) = heap.get(self.buf) else {
+            return Err("bytes view: dangling buffer".to_string());
+        };
+        let HeapValue::BytesBuf { data } = obj else {
+            return Err("bytes view: expected bytes buffer".to_string());
+        };
+
+        let start: usize = self.start as usize;
+        let len: usize = self.len as usize;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| "bytes view: index overflow".to_string())?;
+        data.get(start..end)
+            .ok_or_else(|| "bytes view: out of bounds".to_string())
+    }
+
+    fn len_usize(&self) -> usize {
+        self.len as usize
+    }
+}
+
+impl StringView {
+    fn as_str<'a>(&self, heap: &'a ImmixHeap<HeapValue>) -> Result<&'a str, String> {
+        let Some(obj) = heap.get(self.buf) else {
+            return Err("string view: dangling buffer".to_string());
+        };
+        let HeapValue::StringBuf { data } = obj else {
+            return Err("string view: expected string buffer".to_string());
+        };
+
+        let start: usize = self.start as usize;
+        let len: usize = self.len as usize;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| "string view: index overflow".to_string())?;
+        let s: &str = data.as_ref();
+        if start > s.len() || end > s.len() || start > end {
+            return Err("string view: out of bounds".to_string());
+        }
+        if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
+            return Err("string view: invalid UTF-8 boundary".to_string());
+        }
+        Ok(&s[start..end])
+    }
+
+    fn len_usize(&self) -> usize {
+        self.len as usize
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Value {
     Unit,
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(String),
-    Bytes(Vec<u8>),
+    Byte(u8),
+    Char(char),
+    String(StringView),
+    Bytes(BytesView),
     TypeRep(TypeRepId),
     Ref(RefValue),
     Function(FunctionId),
@@ -438,6 +510,8 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
             Value::Float(_) => "float",
+            Value::Byte(_) => "byte",
+            Value::Char(_) => "char",
             Value::String(_) => "string",
             Value::Bytes(_) => "bytes",
             Value::TypeRep(_) => "typerep",
@@ -454,34 +528,49 @@ impl Value {
         }
     }
 
-    fn from_abi(v: &AbiValue) -> Self {
-        match v {
+    fn from_abi(
+        heap: &mut ImmixHeap<HeapValue>,
+        gc_allocations_since_collect: &mut usize,
+        v: &AbiValue,
+    ) -> Result<Self, String> {
+        Ok(match v {
             AbiValue::Unit => Value::Unit,
             AbiValue::Bool(b) => Value::Bool(*b),
             AbiValue::Int(n) => Value::Int(*n),
             AbiValue::Float(x) => Value::Float(*x),
-            AbiValue::String(s) => Value::String(s.clone()),
-            AbiValue::Bytes(b) => Value::Bytes(b.clone()),
-        }
+            AbiValue::String(s) => alloc_string(heap, gc_allocations_since_collect, s.clone())?,
+            AbiValue::Bytes(b) => alloc_bytes(heap, gc_allocations_since_collect, b.clone())?,
+        })
     }
 
-    fn to_abi(&self) -> Option<AbiValue> {
-        Some(match self {
+    fn try_to_abi(&self, heap: &ImmixHeap<HeapValue>) -> Result<Option<AbiValue>, String> {
+        Ok(Some(match self {
             Value::Unit => AbiValue::Unit,
             Value::Bool(b) => AbiValue::Bool(*b),
             Value::Int(n) => AbiValue::Int(*n),
             Value::Float(x) => AbiValue::Float(*x),
-            Value::String(s) => AbiValue::String(s.clone()),
-            Value::Bytes(b) => AbiValue::Bytes(b.clone()),
-            Value::TypeRep(_) | Value::Ref(_) | Value::Function(_) | Value::Continuation(_) => {
-                return None;
+            Value::String(s) => AbiValue::String(s.as_str(heap)?.to_string()),
+            Value::Bytes(b) => AbiValue::Bytes(b.as_slice(heap)?.to_vec()),
+            Value::Byte(_)
+            | Value::Char(_)
+            | Value::TypeRep(_)
+            | Value::Ref(_)
+            | Value::Function(_)
+            | Value::Continuation(_) => {
+                return Ok(None);
             }
-        })
+        }))
     }
 }
 
 #[derive(Clone, Debug)]
 enum HeapValue {
+    BytesBuf {
+        data: Box<[u8]>,
+    },
+    StringBuf {
+        data: Box<str>,
+    },
     Struct {
         type_name: String,
         type_args: Vec<TypeRepId>,
@@ -501,13 +590,15 @@ impl Trace for Value {
     fn trace(&self, tracer: &mut dyn Tracer) {
         match self {
             Value::Ref(r) => tracer.mark(r.handle),
+            Value::String(s) => tracer.mark(s.buf),
+            Value::Bytes(b) => tracer.mark(b.buf),
             Value::Continuation(k) => k.trace(tracer),
             Value::Unit
             | Value::Bool(_)
             | Value::Int(_)
             | Value::Float(_)
-            | Value::String(_)
-            | Value::Bytes(_)
+            | Value::Byte(_)
+            | Value::Char(_)
             | Value::TypeRep(_)
             | Value::Function(_) => {}
         }
@@ -517,6 +608,7 @@ impl Trace for Value {
 impl Trace for HeapValue {
     fn trace(&self, tracer: &mut dyn Tracer) {
         match self {
+            HeapValue::BytesBuf { .. } | HeapValue::StringBuf { .. } => {}
             HeapValue::Struct { fields, .. } => {
                 for v in fields {
                     v.trace(tracer);
@@ -723,10 +815,16 @@ impl Vm {
                     argv.push(String::new());
                 }
 
+                let mut items = Vec::with_capacity(argv.len());
+                for s in argv {
+                    let v = alloc_string(&mut vm.heap, &mut vm.gc_allocations_since_collect, s)
+                        .map_err(|message| VmError::InvalidState { message })?;
+                    items.push(v);
+                }
                 let argv = alloc_ref(
                     &mut vm.heap,
                     &mut vm.gc_allocations_since_collect,
-                    HeapValue::Array(argv.into_iter().map(Value::String).collect()),
+                    HeapValue::Array(items),
                 );
 
                 let Some(entry_frame) = vm.frames.first_mut() else {
@@ -967,8 +1065,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 continue;
             }
 
-            let Some(ret) = ret.to_abi() else {
-                return trap(vm, "non-ABI-safe return value".to_string());
+            let ret = match ret.try_to_abi(&vm.heap) {
+                Ok(Some(ret)) => ret,
+                Ok(None) => return trap(vm, "non-ABI-safe return value".to_string()),
+                Err(msg) => return trap(vm, msg),
             };
             vm.state = VmState::Done { value: ret.clone() };
             return StepResult::Done { value: ret };
@@ -1000,8 +1100,26 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     rusk_bytecode::ConstValue::Bool(b) => Value::Bool(*b),
                     rusk_bytecode::ConstValue::Int(n) => Value::Int(*n),
                     rusk_bytecode::ConstValue::Float(x) => Value::Float(*x),
-                    rusk_bytecode::ConstValue::String(s) => Value::String(s.clone()),
-                    rusk_bytecode::ConstValue::Bytes(b) => Value::Bytes(b.clone()),
+                    rusk_bytecode::ConstValue::String(s) => {
+                        match alloc_string(
+                            &mut vm.heap,
+                            &mut vm.gc_allocations_since_collect,
+                            s.clone(),
+                        ) {
+                            Ok(v) => v,
+                            Err(msg) => return trap(vm, msg),
+                        }
+                    }
+                    rusk_bytecode::ConstValue::Bytes(b) => {
+                        match alloc_bytes(
+                            &mut vm.heap,
+                            &mut vm.gc_allocations_since_collect,
+                            b.clone(),
+                        ) {
+                            Ok(v) => v,
+                            Err(msg) => return trap(vm, msg),
+                        }
+                    }
                     rusk_bytecode::ConstValue::TypeRep(lit) => {
                         let id = vm.type_reps.intern(TypeRepNode {
                             ctor: TypeReps::ctor_from_lit(lit),
@@ -1583,15 +1701,6 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("index_get arr: {msg}")),
                 };
-                let Value::Ref(r) = arr_v else {
-                    return trap(
-                        vm,
-                        format!(
-                            "type error in index_get: expected ref(array), got {}",
-                            arr_v.kind()
-                        ),
-                    );
-                };
                 let i = match read_int(frame, *idx) {
                     Ok(i) => i,
                     Err(msg) => {
@@ -1602,36 +1711,75 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     }
                 };
 
-                let Some(obj) = vm.heap.get(r.handle) else {
-                    return trap(vm, "index_get: dangling reference".to_string());
-                };
-                let element = match obj {
-                    HeapValue::Array(items) => {
+                let element = match arr_v {
+                    Value::Ref(r) => {
+                        let Some(obj) = vm.heap.get(r.handle) else {
+                            return trap(vm, "index_get: dangling reference".to_string());
+                        };
+                        match obj {
+                            HeapValue::Array(items) => {
+                                let idx_usize: usize = match i.try_into() {
+                                    Ok(u) => u,
+                                    Err(_) => {
+                                        return trap(
+                                            vm,
+                                            format!(
+                                                "index out of bounds: index={i}, len={}",
+                                                items.len()
+                                            ),
+                                        );
+                                    }
+                                };
+                                let Some(v) = items.get(idx_usize) else {
+                                    return trap(
+                                        vm,
+                                        format!(
+                                            "index out of bounds: index={i}, len={}",
+                                            items.len()
+                                        ),
+                                    );
+                                };
+                                if r.readonly {
+                                    v.clone().into_readonly_view()
+                                } else {
+                                    v.clone()
+                                }
+                            }
+                            _ => {
+                                return trap(
+                                    vm,
+                                    "type error in index_get: expected array, got ref".to_string(),
+                                );
+                            }
+                        }
+                    }
+                    Value::Bytes(b) => {
+                        let len = b.len_usize();
                         let idx_usize: usize = match i.try_into() {
                             Ok(u) => u,
                             Err(_) => {
                                 return trap(
                                     vm,
-                                    format!("index out of bounds: index={i}, len={}", items.len()),
+                                    format!("index out of bounds: index={i}, len={len}"),
                                 );
                             }
                         };
-                        let Some(v) = items.get(idx_usize) else {
-                            return trap(
-                                vm,
-                                format!("index out of bounds: index={i}, len={}", items.len()),
-                            );
+                        let byte = match b.as_slice(&vm.heap) {
+                            Ok(bytes) => bytes.get(idx_usize).copied(),
+                            Err(msg) => return trap(vm, format!("index_get bytes: {msg}")),
                         };
-                        if r.readonly {
-                            v.clone().into_readonly_view()
-                        } else {
-                            v.clone()
-                        }
+                        let Some(byte) = byte else {
+                            return trap(vm, format!("index out of bounds: index={i}, len={len}"));
+                        };
+                        Value::Byte(byte)
                     }
-                    _ => {
+                    other => {
                         return trap(
                             vm,
-                            "type error in index_get: expected array, got ref".to_string(),
+                            format!(
+                                "type error in index_get: expected array or bytes, got {}",
+                                other.kind()
+                            ),
                         );
                     }
                 };
@@ -1964,6 +2112,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                             if let Some(hid) = vm.generic_specializations.get(&key).copied() {
                                 if let Err(msg) = call_host_import(
                                     &vm.module,
+                                    &mut vm.heap,
+                                    &mut vm.gc_allocations_since_collect,
                                     &mut vm.host_fns,
                                     &mut vm.in_host_call,
                                     frame,
@@ -2003,6 +2153,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 rusk_bytecode::CallTarget::Host(hid) => {
                     if let Err(msg) = call_host_import(
                         &vm.module,
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
                         &mut vm.host_fns,
                         &mut vm.in_host_call,
                         frame,
@@ -2016,6 +2168,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 rusk_bytecode::CallTarget::Intrinsic(intr) => {
                     let out = match eval_core_intrinsic(
                         &vm.module,
+                        &mut vm.type_reps,
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
                         frame,
@@ -2115,7 +2268,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         type_args,
                         ..
                     } => (enum_name.clone(), type_args.clone()),
-                    HeapValue::Array(_) | HeapValue::Tuple(_) => {
+                    HeapValue::Array(_)
+                    | HeapValue::Tuple(_)
+                    | HeapValue::BytesBuf { .. }
+                    | HeapValue::StringBuf { .. } => {
                         return trap(
                             vm,
                             format!(
@@ -2501,17 +2657,21 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 let mut abi_args = Vec::with_capacity(arg_values.len());
                 for (v, expected) in arg_values.iter().zip(effect.sig.params.iter()) {
-                    let Some(abi) = v.to_abi() else {
-                        return trap(
-                            vm,
-                            format!(
-                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
-                                effect.interface,
-                                effect.method,
-                                expected,
-                                v.kind()
-                            ),
-                        );
+                    let abi = match v.try_to_abi(&vm.heap) {
+                        Ok(Some(abi)) => abi,
+                        Ok(None) => {
+                            return trap(
+                                vm,
+                                format!(
+                                    "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
+                                    effect.interface,
+                                    effect.method,
+                                    expected,
+                                    v.kind()
+                                ),
+                            );
+                        }
+                        Err(msg) => return trap(vm, msg),
                     };
                     if abi.ty() != *expected {
                         return trap(
@@ -2755,8 +2915,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     continue;
                 }
 
-                let Some(ret) = v.to_abi() else {
-                    return trap(vm, "non-ABI-safe return value".to_string());
+                let ret = match v.try_to_abi(&vm.heap) {
+                    Ok(Some(ret)) => ret,
+                    Ok(None) => return trap(vm, "non-ABI-safe return value".to_string()),
+                    Err(msg) => return trap(vm, msg),
                 };
                 vm.state = VmState::Done { value: ret.clone() };
                 return StepResult::Done { value: ret };
@@ -2927,6 +3089,36 @@ fn alloc_ref(
     Value::Ref(RefValue::new(heap.alloc(obj)))
 }
 
+fn alloc_bytes(
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
+    bytes: Vec<u8>,
+) -> Result<Value, String> {
+    let data = bytes.into_boxed_slice();
+    let len: u32 = data
+        .len()
+        .try_into()
+        .map_err(|_| "bytes length overflow".to_string())?;
+    *gc_allocations_since_collect = gc_allocations_since_collect.saturating_add(1);
+    let buf = heap.alloc(HeapValue::BytesBuf { data });
+    Ok(Value::Bytes(BytesView { buf, start: 0, len }))
+}
+
+fn alloc_string(
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
+    s: String,
+) -> Result<Value, String> {
+    let data = s.into_boxed_str();
+    let len: u32 = data
+        .len()
+        .try_into()
+        .map_err(|_| "string length overflow".to_string())?;
+    *gc_allocations_since_collect = gc_allocations_since_collect.saturating_add(1);
+    let buf = heap.alloc(HeapValue::StringBuf { data });
+    Ok(Value::String(StringView { buf, start: 0, len }))
+}
+
 fn read_value(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<Value, String> {
     let idx: usize = reg.try_into().unwrap_or(usize::MAX);
     let Some(v) = frame.regs.get(idx).and_then(|v| v.as_ref()).cloned() else {
@@ -2982,6 +3174,8 @@ fn type_test(
         TypeCtor::Bool => matches!(value, Value::Bool(_)),
         TypeCtor::Int => matches!(value, Value::Int(_)),
         TypeCtor::Float => matches!(value, Value::Float(_)),
+        TypeCtor::Byte => matches!(value, Value::Byte(_)),
+        TypeCtor::Char => matches!(value, Value::Char(_)),
         TypeCtor::String => matches!(value, Value::String(_)),
         TypeCtor::Bytes => matches!(value, Value::Bytes(_)),
         TypeCtor::Array => match value {
@@ -3081,6 +3275,7 @@ const BYTES_ITER_FIELD_INDEX: &str = "idx";
 
 fn eval_core_intrinsic(
     module: &ExecutableModule,
+    type_reps: &mut TypeReps,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
     frame: &Frame,
@@ -3096,31 +3291,111 @@ fn eval_core_intrinsic(
 
     let bad_args = |name: &str| -> String { format!("{name}: bad args: {args:?}") };
 
+    fn alloc_option(
+        heap: &mut ImmixHeap<HeapValue>,
+        gc_allocations_since_collect: &mut usize,
+        type_arg: TypeRepId,
+        variant: &str,
+        fields: Vec<Value>,
+    ) -> Value {
+        alloc_ref(
+            heap,
+            gc_allocations_since_collect,
+            HeapValue::Enum {
+                enum_name: "Option".to_string(),
+                type_args: vec![type_arg],
+                variant: variant.to_string(),
+                fields,
+            },
+        )
+    }
+
+    fn read_option_int(heap: &ImmixHeap<HeapValue>, v: &Value) -> Result<Option<i64>, String> {
+        let Value::Ref(r) = v else {
+            return Err("expected `Option<int>` value".to_string());
+        };
+        let Some(obj) = heap.get(r.handle) else {
+            return Err("dangling reference in `Option<int>` value".to_string());
+        };
+        let HeapValue::Enum {
+            enum_name,
+            variant,
+            fields,
+            ..
+        } = obj
+        else {
+            return Err("expected `Option<int>` enum value".to_string());
+        };
+        if enum_name != "Option" {
+            return Err(format!("expected `Option`, got `{enum_name}`"));
+        }
+        match variant.as_str() {
+            "None" => Ok(None),
+            "Some" => match fields.as_slice() {
+                [Value::Int(n)] => Ok(Some(*n)),
+                _ => Err("malformed `Option::Some(int)` value".to_string()),
+            },
+            other => Err(format!("invalid `Option` variant `{other}`")),
+        }
+    }
+
     match intr {
         I::StringConcat => match args.as_slice() {
-            [Value::String(a), Value::String(b)] => Ok(Value::String(format!("{a}{b}"))),
+            [Value::String(a), Value::String(b)] => {
+                let out = {
+                    let a_str = a.as_str(heap)?;
+                    let b_str = b.as_str(heap)?;
+                    let mut out = String::with_capacity(a_str.len().saturating_add(b_str.len()));
+                    out.push_str(a_str);
+                    out.push_str(b_str);
+                    out
+                };
+                alloc_string(heap, gc_allocations_since_collect, out)
+            }
             _ => Err(bad_args("core::intrinsics::string_concat")),
         },
         I::ToString => match args.as_slice() {
-            [Value::TypeRep(_), Value::Unit] => Ok(Value::String("()".to_string())),
-            [Value::TypeRep(_), Value::Bool(v)] => Ok(Value::String(v.to_string())),
-            [Value::TypeRep(_), Value::Int(v)] => Ok(Value::String(v.to_string())),
-            [Value::TypeRep(_), Value::Float(v)] => Ok(Value::String(v.to_string())),
-            [Value::TypeRep(_), Value::String(v)] => Ok(Value::String(v.clone())),
-            [Value::TypeRep(_), Value::Bytes(v)] => {
-                Ok(Value::String(format!("bytes(len={})", v.len())))
+            [Value::TypeRep(_), Value::Unit] => {
+                alloc_string(heap, gc_allocations_since_collect, "()".to_string())
             }
-            [Value::TypeRep(_), Value::Ref(r)] => {
-                Ok(Value::String(format!("{:?}", Value::Ref(r.clone()))))
+            [Value::TypeRep(_), Value::Bool(v)] => {
+                alloc_string(heap, gc_allocations_since_collect, v.to_string())
             }
-            [Value::TypeRep(_), Value::Function(id)] => Ok(Value::String(format!("fn#{}", id.0))),
-            [Value::TypeRep(_), Value::TypeRep(id)] => {
-                Ok(Value::String(format!("typerep({})", id.0)))
+            [Value::TypeRep(_), Value::Int(v)] => {
+                alloc_string(heap, gc_allocations_since_collect, v.to_string())
             }
+            [Value::TypeRep(_), Value::Float(v)] => {
+                alloc_string(heap, gc_allocations_since_collect, v.to_string())
+            }
+            [Value::TypeRep(_), Value::Byte(v)] => {
+                alloc_string(heap, gc_allocations_since_collect, v.to_string())
+            }
+            [Value::TypeRep(_), Value::Char(v)] => {
+                alloc_string(heap, gc_allocations_since_collect, v.to_string())
+            }
+            [Value::TypeRep(_), Value::String(v)] => Ok(Value::String(*v)),
+            [Value::TypeRep(_), Value::Bytes(v)] => alloc_string(
+                heap,
+                gc_allocations_since_collect,
+                format!("bytes(len={})", v.len_usize()),
+            ),
+            [Value::TypeRep(_), Value::Ref(r)] => alloc_string(
+                heap,
+                gc_allocations_since_collect,
+                format!("{:?}", Value::Ref(r.clone())),
+            ),
+            [Value::TypeRep(_), Value::Function(id)] => {
+                alloc_string(heap, gc_allocations_since_collect, format!("fn#{}", id.0))
+            }
+            [Value::TypeRep(_), Value::TypeRep(id)] => alloc_string(
+                heap,
+                gc_allocations_since_collect,
+                format!("typerep({})", id.0),
+            ),
             _ => Err(bad_args("core::intrinsics::to_string")),
         },
         I::Panic => match args.as_slice() {
-            [Value::TypeRep(_), Value::String(msg)] => Err(format!("panic: {msg}")),
+            [Value::TypeRep(_), Value::String(msg)] => Err(format!("panic: {}", msg.as_str(heap)?)),
             _ => Err(bad_args("core::intrinsics::panic")),
         },
 
@@ -3234,19 +3509,27 @@ fn eval_core_intrinsic(
         },
 
         I::StringEq => match args.as_slice() {
-            [Value::String(a), Value::String(b)] => Ok(Value::Bool(a == b)),
+            [Value::String(a), Value::String(b)] => {
+                Ok(Value::Bool(a.as_str(heap)? == b.as_str(heap)?))
+            }
             _ => Err(bad_args("core::intrinsics::string_eq")),
         },
         I::StringNe => match args.as_slice() {
-            [Value::String(a), Value::String(b)] => Ok(Value::Bool(a != b)),
+            [Value::String(a), Value::String(b)] => {
+                Ok(Value::Bool(a.as_str(heap)? != b.as_str(heap)?))
+            }
             _ => Err(bad_args("core::intrinsics::string_ne")),
         },
         I::BytesEq => match args.as_slice() {
-            [Value::Bytes(a), Value::Bytes(b)] => Ok(Value::Bool(a == b)),
+            [Value::Bytes(a), Value::Bytes(b)] => {
+                Ok(Value::Bool(a.as_slice(heap)? == b.as_slice(heap)?))
+            }
             _ => Err(bad_args("core::intrinsics::bytes_eq")),
         },
         I::BytesNe => match args.as_slice() {
-            [Value::Bytes(a), Value::Bytes(b)] => Ok(Value::Bool(a != b)),
+            [Value::Bytes(a), Value::Bytes(b)] => {
+                Ok(Value::Bool(a.as_slice(heap)? != b.as_slice(heap)?))
+            }
             _ => Err(bad_args("core::intrinsics::bytes_ne")),
         },
         I::UnitEq => match args.as_slice() {
@@ -3256,6 +3539,266 @@ fn eval_core_intrinsic(
         I::UnitNe => match args.as_slice() {
             [Value::Unit, Value::Unit] => Ok(Value::Bool(false)),
             _ => Err(bad_args("core::intrinsics::unit_ne")),
+        },
+
+        I::IntToByte => match args.as_slice() {
+            [Value::Int(v)] => Ok(Value::Byte(*v as u8)),
+            _ => Err(bad_args("core::intrinsics::int_to_byte")),
+        },
+        I::IntTryByte => match args.as_slice() {
+            [Value::Int(v)] => {
+                let byte_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Byte,
+                    args: Vec::new(),
+                });
+                let out = if (0..=255).contains(v) {
+                    alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        byte_rep,
+                        "Some",
+                        vec![Value::Byte(*v as u8)],
+                    )
+                } else {
+                    alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        byte_rep,
+                        "None",
+                        Vec::new(),
+                    )
+                };
+                Ok(out)
+            }
+            _ => Err(bad_args("core::intrinsics::int_try_byte")),
+        },
+        I::ByteToInt => match args.as_slice() {
+            [Value::Byte(v)] => Ok(Value::Int((*v).into())),
+            _ => Err(bad_args("core::intrinsics::byte_to_int")),
+        },
+
+        I::IntToChar => match args.as_slice() {
+            [Value::Int(v)] => {
+                let Some(u) = u32::try_from(*v).ok() else {
+                    return Err("core::intrinsics::int_to_char: value out of range".to_string());
+                };
+                if (0xD800..=0xDFFF).contains(&u) {
+                    return Err("core::intrinsics::int_to_char: surrogate code point".to_string());
+                }
+                let Some(ch) = char::from_u32(u) else {
+                    return Err("core::intrinsics::int_to_char: invalid scalar value".to_string());
+                };
+                Ok(Value::Char(ch))
+            }
+            _ => Err(bad_args("core::intrinsics::int_to_char")),
+        },
+        I::IntTryChar => match args.as_slice() {
+            [Value::Int(v)] => {
+                let char_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Char,
+                    args: Vec::new(),
+                });
+                let out = if let Ok(u) = u32::try_from(*v)
+                    && !(0xD800..=0xDFFF).contains(&u)
+                    && let Some(ch) = char::from_u32(u)
+                {
+                    alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        char_rep,
+                        "Some",
+                        vec![Value::Char(ch)],
+                    )
+                } else {
+                    alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        char_rep,
+                        "None",
+                        Vec::new(),
+                    )
+                };
+                Ok(out)
+            }
+            _ => Err(bad_args("core::intrinsics::int_try_char")),
+        },
+        I::CharToInt => match args.as_slice() {
+            [Value::Char(v)] => Ok(Value::Int(*v as u32 as i64)),
+            _ => Err(bad_args("core::intrinsics::char_to_int")),
+        },
+
+        I::BytesGet => match args.as_slice() {
+            [Value::Bytes(b), Value::Int(idx)] => {
+                let byte_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Byte,
+                    args: Vec::new(),
+                });
+                let Some(i) = usize::try_from(*idx).ok() else {
+                    return Ok(alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        byte_rep,
+                        "None",
+                        Vec::new(),
+                    ));
+                };
+                let byte = {
+                    let bytes = b.as_slice(heap)?;
+                    bytes.get(i).copied()
+                };
+                match byte {
+                    Some(v) => Ok(alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        byte_rep,
+                        "Some",
+                        vec![Value::Byte(v)],
+                    )),
+                    None => Ok(alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        byte_rep,
+                        "None",
+                        Vec::new(),
+                    )),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_get")),
+        },
+        I::BytesSlice => match args.as_slice() {
+            [Value::Bytes(b), Value::Int(from), to] => {
+                let len_i64: i64 = b
+                    .len_usize()
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::bytes_slice: len overflow".to_string())?;
+                let to = read_option_int(heap, to)?.unwrap_or(len_i64);
+
+                if *from < 0 {
+                    return Err("core::intrinsics::bytes_slice: from must be >= 0".to_string());
+                }
+                if to < 0 {
+                    return Err("core::intrinsics::bytes_slice: to must be >= 0".to_string());
+                }
+                if *from > to {
+                    return Err("core::intrinsics::bytes_slice: from > to".to_string());
+                }
+                if to > len_i64 {
+                    return Err("core::intrinsics::bytes_slice: to out of bounds".to_string());
+                }
+
+                let from_u32: u32 = (*from)
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::bytes_slice: from overflow".to_string())?;
+                let to_u32: u32 = to
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::bytes_slice: to overflow".to_string())?;
+                let len_u32 = to_u32
+                    .checked_sub(from_u32)
+                    .ok_or_else(|| "core::intrinsics::bytes_slice: from > to".to_string())?;
+                let start = b.start.checked_add(from_u32).ok_or_else(|| {
+                    "core::intrinsics::bytes_slice: bytes view index overflow".to_string()
+                })?;
+                Ok(Value::Bytes(BytesView {
+                    buf: b.buf,
+                    start,
+                    len: len_u32,
+                }))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_slice")),
+        },
+        I::BytesToArray => match args.as_slice() {
+            [Value::Bytes(b)] => {
+                let items = {
+                    let bytes = b.as_slice(heap)?;
+                    bytes.iter().copied().map(Value::Byte).collect()
+                };
+                Ok(alloc_ref(
+                    heap,
+                    gc_allocations_since_collect,
+                    HeapValue::Array(items),
+                ))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_to_array")),
+        },
+        I::BytesFromArray => match args.as_slice() {
+            [Value::Ref(arr)] => {
+                let Some(obj) = heap.get(arr.handle) else {
+                    return Err(
+                        "core::intrinsics::bytes_from_array: dangling reference".to_string()
+                    );
+                };
+                let HeapValue::Array(items) = obj else {
+                    return Err("core::intrinsics::bytes_from_array: expected an array".to_string());
+                };
+                let out = {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        let Value::Byte(b) = item else {
+                            return Err(
+                                "core::intrinsics::bytes_from_array: expected `[byte]`".to_string()
+                            );
+                        };
+                        out.push(*b);
+                    }
+                    out
+                };
+                alloc_bytes(heap, gc_allocations_since_collect, out)
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_from_array")),
+        },
+
+        I::StringSlice => match args.as_slice() {
+            [Value::String(s), Value::Int(from), to] => {
+                let len_i64: i64 = s
+                    .len_usize()
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_slice: len overflow".to_string())?;
+                let to = read_option_int(heap, to)?.unwrap_or(len_i64);
+                let s_str = s.as_str(heap)?;
+
+                if *from < 0 {
+                    return Err("core::intrinsics::string_slice: from must be >= 0".to_string());
+                }
+                if to < 0 {
+                    return Err("core::intrinsics::string_slice: to must be >= 0".to_string());
+                }
+                if *from > to {
+                    return Err("core::intrinsics::string_slice: from > to".to_string());
+                }
+                if to > len_i64 {
+                    return Err("core::intrinsics::string_slice: to out of bounds".to_string());
+                }
+
+                let from_usize: usize = (*from)
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_slice: from overflow".to_string())?;
+                let to_usize: usize = to
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_slice: to overflow".to_string())?;
+                if !s_str.is_char_boundary(from_usize) || !s_str.is_char_boundary(to_usize) {
+                    return Err(
+                        "core::intrinsics::string_slice: invalid UTF-8 boundary".to_string()
+                    );
+                }
+                let from_u32: u32 = (*from)
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_slice: from overflow".to_string())?;
+                let to_u32: u32 = to
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_slice: to overflow".to_string())?;
+                let len_u32 = to_u32
+                    .checked_sub(from_u32)
+                    .ok_or_else(|| "core::intrinsics::string_slice: from > to".to_string())?;
+                let start = s.start.checked_add(from_u32).ok_or_else(|| {
+                    "core::intrinsics::string_slice: string view index overflow".to_string()
+                })?;
+                Ok(Value::String(StringView {
+                    buf: s.buf,
+                    start,
+                    len: len_u32,
+                }))
+            }
+            _ => Err(bad_args("core::intrinsics::string_slice")),
         },
 
         I::ArrayLen => match args.as_slice() {
@@ -3784,7 +4327,7 @@ fn eval_core_intrinsic(
         },
 
         I::StringIntoIter => match args.as_slice() {
-            [Value::TypeRep(_), Value::String(s)] => {
+            [Value::String(s)] => {
                 let layout = module
                     .struct_layouts
                     .get(STRING_ITER_TYPE)
@@ -3795,7 +4338,7 @@ fn eval_core_intrinsic(
                 let idx_idx =
                     struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_INDEX)?;
 
-                fields[s_idx] = Value::String(s.clone());
+                fields[s_idx] = Value::String(*s);
                 fields[idx_idx] = Value::Int(0);
 
                 Ok(alloc_ref(
@@ -3811,7 +4354,7 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::string_into_iter")),
         },
         I::StringNext => match args.as_slice() {
-            [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
+            [Value::Ref(iter)] => {
                 if iter.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
@@ -3820,7 +4363,7 @@ fn eval_core_intrinsic(
                 let idx_idx =
                     struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_INDEX)?;
 
-                let (codepoint, next_idx) = {
+                let (ch, next_idx) = {
                     let Some(obj) = heap.get(iter.handle) else {
                         return Err("core::intrinsics::string_next: dangling reference".to_string());
                     };
@@ -3856,33 +4399,37 @@ fn eval_core_intrinsic(
                         );
                     }
                     let idx_usize: usize = (*idx) as usize;
-                    if idx_usize >= s.len() {
+                    let s_str = s.as_str(heap)?;
+                    if idx_usize >= s_str.len() {
                         (None, *idx)
-                    } else if !s.is_char_boundary(idx_usize) {
+                    } else if !s_str.is_char_boundary(idx_usize) {
                         return Err(
                             "core::intrinsics::string_next: invalid UTF-8 boundary".to_string()
                         );
                     } else {
-                        let ch = s[idx_usize..].chars().next().ok_or_else(|| {
+                        let ch = s_str[idx_usize..].chars().next().ok_or_else(|| {
                             "core::intrinsics::string_next: invalid UTF-8".to_string()
                         })?;
-                        let code = ch as u32 as i64;
                         let next_idx = idx_usize.checked_add(ch.len_utf8()).ok_or_else(|| {
                             "core::intrinsics::string_next: index overflow".to_string()
                         })?;
-                        (Some(code), next_idx as i64)
+                        (Some(ch), next_idx as i64)
                     }
                 };
 
-                let out = if let Some(codepoint) = codepoint {
+                let char_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Char,
+                    args: Vec::new(),
+                });
+                let out = if let Some(ch) = ch {
                     alloc_ref(
                         heap,
                         gc_allocations_since_collect,
                         HeapValue::Enum {
                             enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
+                            type_args: vec![char_rep],
                             variant: "Some".to_string(),
-                            fields: vec![Value::Int(codepoint)],
+                            fields: vec![Value::Char(ch)],
                         },
                     )
                 } else {
@@ -3891,7 +4438,7 @@ fn eval_core_intrinsic(
                         gc_allocations_since_collect,
                         HeapValue::Enum {
                             enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
+                            type_args: vec![char_rep],
                             variant: "None".to_string(),
                             fields: Vec::new(),
                         },
@@ -3922,7 +4469,7 @@ fn eval_core_intrinsic(
         },
 
         I::BytesIntoIter => match args.as_slice() {
-            [Value::TypeRep(_), Value::Bytes(b)] => {
+            [Value::Bytes(b)] => {
                 let layout = module
                     .struct_layouts
                     .get(BYTES_ITER_TYPE)
@@ -3932,7 +4479,7 @@ fn eval_core_intrinsic(
                 let b_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_BYTES)?;
                 let idx_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_INDEX)?;
 
-                fields[b_idx] = Value::Bytes(b.clone());
+                fields[b_idx] = Value::Bytes(*b);
                 fields[idx_idx] = Value::Int(0);
 
                 Ok(alloc_ref(
@@ -3948,7 +4495,7 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::bytes_into_iter")),
         },
         I::BytesNext => match args.as_slice() {
-            [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
+            [Value::Ref(iter)] => {
                 if iter.is_readonly() {
                     return Err("illegal write through readonly reference".to_string());
                 }
@@ -3990,7 +4537,10 @@ fn eval_core_intrinsic(
                         );
                     }
                     let idx_usize: usize = (*idx) as usize;
-                    let byte = b.get(idx_usize).copied();
+                    let byte = {
+                        let bytes = b.as_slice(heap)?;
+                        bytes.get(idx_usize).copied()
+                    };
                     (byte, *idx + 1)
                 };
 
@@ -4000,9 +4550,12 @@ fn eval_core_intrinsic(
                         gc_allocations_since_collect,
                         HeapValue::Enum {
                             enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
+                            type_args: vec![type_reps.intern(TypeRepNode {
+                                ctor: TypeCtor::Byte,
+                                args: Vec::new(),
+                            })],
                             variant: "Some".to_string(),
-                            fields: vec![Value::Int(byte as i64)],
+                            fields: vec![Value::Byte(byte)],
                         },
                     )
                 } else {
@@ -4011,7 +4564,10 @@ fn eval_core_intrinsic(
                         gc_allocations_since_collect,
                         HeapValue::Enum {
                             enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
+                            type_args: vec![type_reps.intern(TypeRepNode {
+                                ctor: TypeCtor::Byte,
+                                args: Vec::new(),
+                            })],
                             variant: "None".to_string(),
                             fields: Vec::new(),
                         },
@@ -4063,8 +4619,8 @@ fn match_pattern(
             (ConstValue::Bool(a), Value::Bool(b)) => a == b,
             (ConstValue::Int(a), Value::Int(b)) => a == b,
             (ConstValue::Float(a), Value::Float(b)) => a == b,
-            (ConstValue::String(a), Value::String(b)) => a == b,
-            (ConstValue::Bytes(a), Value::Bytes(b)) => a == b,
+            (ConstValue::String(a), Value::String(b)) => a == b.as_str(heap)?,
+            (ConstValue::Bytes(a), Value::Bytes(b)) => a.as_slice() == b.as_slice(heap)?,
             (ConstValue::TypeRep(lit), Value::TypeRep(id)) => type_reps
                 .node(*id)
                 .is_some_and(|n| n.ctor == TypeReps::ctor_from_lit(lit) && n.args.is_empty()),
@@ -4372,8 +4928,11 @@ fn write_value(frame: &mut Frame, reg: rusk_bytecode::Reg, value: Value) -> Resu
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn call_host_import(
     module: &ExecutableModule,
+    heap: &mut ImmixHeap<HeapValue>,
+    gc_allocations_since_collect: &mut usize,
     host_fns: &mut Vec<Option<Box<dyn HostFn>>>,
     in_host_call: &mut bool,
     frame: &mut Frame,
@@ -4411,7 +4970,10 @@ fn call_host_import(
                 import.name
             ));
         };
-        let Some(abi) = v.to_abi() else {
+        let Some(abi) = v
+            .try_to_abi(heap)
+            .map_err(|msg| format!("host call `{}` arg conversion: {msg}", import.name))?
+        else {
             return Err(format!(
                 "host call `{}` arg type mismatch: expected {:?}, got {}",
                 import.name,
@@ -4451,7 +5013,9 @@ fn call_host_import(
     }
 
     if let Some(dst) = dst {
-        write_value(frame, dst, Value::from_abi(&abi_ret))
+        let ret = Value::from_abi(heap, gc_allocations_since_collect, &abi_ret)
+            .map_err(|msg| format!("host call `{}` return conversion: {msg}", import.name))?;
+        write_value(frame, dst, ret)
             .map_err(|msg| format!("host call `{}` dst: {msg}", import.name))?;
     }
 
@@ -4485,10 +5049,12 @@ pub fn vm_resume(vm: &mut Vm, k: ContinuationHandle, value: AbiValue) -> Result<
                         message: "resume with empty stack".to_string(),
                     });
                 };
-                write_value(frame, dst, Value::from_abi(&value)).map_err(|message| {
-                    VmError::InvalidState {
-                        message: format!("resume dst write failed: {message}"),
-                    }
+                let v = Value::from_abi(&mut vm.heap, &mut vm.gc_allocations_since_collect, &value)
+                    .map_err(|message| VmError::InvalidState {
+                        message: format!("resume value conversion failed: {message}"),
+                    })?;
+                write_value(frame, dst, v).map_err(|message| VmError::InvalidState {
+                    message: format!("resume dst write failed: {message}"),
                 })?;
             }
 

@@ -996,19 +996,36 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         "core::intrinsics::next" => {
             Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
         }
-        "core::intrinsics::string_into_iter" => Some(sig(
-            vec![HostType::TypeRep, HostType::String],
-            HostType::Any,
+        "core::intrinsics::string_into_iter" => Some(sig(vec![HostType::String], HostType::Any)),
+        "core::intrinsics::string_next" => Some(sig(vec![HostType::Any], HostType::Any)),
+        "core::intrinsics::bytes_into_iter" => Some(sig(vec![HostType::Bytes], HostType::Any)),
+        "core::intrinsics::bytes_next" => Some(sig(vec![HostType::Any], HostType::Any)),
+
+        // `byte` / `char` conversions.
+        "core::intrinsics::int_to_byte" => Some(sig(vec![HostType::Int], HostType::Any)),
+        "core::intrinsics::int_try_byte" => Some(sig(vec![HostType::Int], HostType::Any)),
+        "core::intrinsics::byte_to_int" => Some(sig(vec![HostType::Any], HostType::Int)),
+
+        "core::intrinsics::int_to_char" => Some(sig(vec![HostType::Int], HostType::Any)),
+        "core::intrinsics::int_try_char" => Some(sig(vec![HostType::Int], HostType::Any)),
+        "core::intrinsics::char_to_int" => Some(sig(vec![HostType::Any], HostType::Int)),
+
+        // `bytes`.
+        "core::intrinsics::bytes_get" => {
+            Some(sig(vec![HostType::Bytes, HostType::Int], HostType::Any))
+        }
+        "core::intrinsics::bytes_slice" => Some(sig(
+            vec![HostType::Bytes, HostType::Int, HostType::Any],
+            HostType::Bytes,
         )),
-        "core::intrinsics::string_next" => {
-            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
-        }
-        "core::intrinsics::bytes_into_iter" => {
-            Some(sig(vec![HostType::TypeRep, HostType::Bytes], HostType::Any))
-        }
-        "core::intrinsics::bytes_next" => {
-            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
-        }
+        "core::intrinsics::bytes_to_array" => Some(sig(vec![HostType::Bytes], HostType::Any)),
+        "core::intrinsics::bytes_from_array" => Some(sig(vec![HostType::Any], HostType::Bytes)),
+
+        // `string`.
+        "core::intrinsics::string_slice" => Some(sig(
+            vec![HostType::String, HostType::Int, HostType::Any],
+            HostType::String,
+        )),
 
         // Array operations.
         "core::intrinsics::array_len" | "core::intrinsics::array_len_ro" => Some(sig(
@@ -1150,6 +1167,8 @@ impl Compiler {
             ("bool", TypeRepLit::Bool),
             ("int", TypeRepLit::Int),
             ("float", TypeRepLit::Float),
+            ("byte", TypeRepLit::Byte),
+            ("char", TypeRepLit::Char),
             ("string", TypeRepLit::String),
             ("bytes", TypeRepLit::Bytes),
         ] {
@@ -1192,6 +1211,138 @@ impl Compiler {
                 CompileError::new(format!("internal error: {message}"), span0)
             })?;
         }
+
+        // Built-in inherent methods on primitive types.
+        //
+        // These are real MIR functions (not VM intrinsics) so they can be:
+        // - called via method-call sugar (`x.m(...)`)
+        // - referenced via UFCS (`T::m(...)`) where supported
+        // and they delegate to canonical `core::intrinsics::*` lowering targets.
+        let synthesize_prim_wrapper = |compiler: &mut Self,
+                                       name: &str,
+                                       param_mutabilities: &[Mutability],
+                                       intrinsic: &str|
+         -> Result<(), CompileError> {
+            if compiler.module.function_ids.contains_key(name) {
+                return Ok(());
+            }
+
+            let mut lowerer = FunctionLowerer::new(
+                compiler,
+                FnKind::Real,
+                ModulePath::root(),
+                name.to_string(),
+                Vec::new(),
+            );
+
+            let mut locals = Vec::with_capacity(param_mutabilities.len());
+            for mutability in param_mutabilities {
+                let local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local,
+                    mutability: *mutability,
+                    ty: None,
+                });
+                locals.push(local);
+            }
+
+            let out = lowerer.alloc_local();
+            let args = locals.into_iter().map(Operand::Local).collect();
+            lowerer.emit(Instruction::Call {
+                dst: Some(out),
+                func: intrinsic.to_string(),
+                args,
+            });
+            lowerer.set_terminator(Terminator::Return {
+                value: Operand::Local(out),
+            })?;
+
+            let mir_fn = lowerer.finish()?;
+            compiler.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+            Ok(())
+        };
+
+        // `int` ↔ `byte` / `char`.
+        synthesize_prim_wrapper(
+            self,
+            "int::to_byte",
+            &[Mutability::Readonly],
+            "core::intrinsics::int_to_byte",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "int::try_byte",
+            &[Mutability::Readonly],
+            "core::intrinsics::int_try_byte",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "byte::to_int",
+            &[Mutability::Readonly],
+            "core::intrinsics::byte_to_int",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "int::to_char",
+            &[Mutability::Readonly],
+            "core::intrinsics::int_to_char",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "int::try_char",
+            &[Mutability::Readonly],
+            "core::intrinsics::int_try_char",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "char::to_int",
+            &[Mutability::Readonly],
+            "core::intrinsics::char_to_int",
+        )?;
+
+        // `bytes`.
+        synthesize_prim_wrapper(
+            self,
+            "bytes::get",
+            &[Mutability::Readonly, Mutability::Readonly],
+            "core::intrinsics::bytes_get",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "bytes::slice",
+            &[
+                Mutability::Readonly,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::bytes_slice",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "bytes::to_array",
+            &[Mutability::Readonly],
+            "core::intrinsics::bytes_to_array",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "bytes::from_array",
+            &[Mutability::Readonly],
+            "core::intrinsics::bytes_from_array",
+        )?;
+
+        // `string`.
+        synthesize_prim_wrapper(
+            self,
+            "string::slice",
+            &[
+                Mutability::Readonly,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::string_slice",
+        )?;
 
         // `core::iter::Iterator` impls for built-in iterator state types.
         //
@@ -1254,7 +1405,7 @@ impl Compiler {
             }
         }
 
-        // StringIter::next delegates to `core::intrinsics::string_next` with `T := int`.
+        // StringIter::next delegates to `core::intrinsics::string_next` (returns `Option<char>`).
         {
             let name = "impl::core::iter::Iterator::for::core::intrinsics::StringIter::next";
             if !self.module.function_ids.contains_key(name) {
@@ -1277,10 +1428,7 @@ impl Compiler {
                 lowerer.emit(Instruction::Call {
                     dst: Some(out),
                     func: "core::intrinsics::string_next".to_string(),
-                    args: vec![
-                        Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
-                        Operand::Local(recv_local),
-                    ],
+                    args: vec![Operand::Local(recv_local)],
                 });
                 lowerer.set_terminator(Terminator::Return {
                     value: Operand::Local(out),
@@ -1293,7 +1441,7 @@ impl Compiler {
             }
         }
 
-        // BytesIter::next delegates to `core::intrinsics::bytes_next` with `T := int`.
+        // BytesIter::next delegates to `core::intrinsics::bytes_next` (returns `Option<byte>`).
         {
             let name = "impl::core::iter::Iterator::for::core::intrinsics::BytesIter::next";
             if !self.module.function_ids.contains_key(name) {
@@ -1316,10 +1464,7 @@ impl Compiler {
                 lowerer.emit(Instruction::Call {
                     dst: Some(out),
                     func: "core::intrinsics::bytes_next".to_string(),
-                    args: vec![
-                        Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
-                        Operand::Local(recv_local),
-                    ],
+                    args: vec![Operand::Local(recv_local)],
                 });
                 lowerer.set_terminator(Terminator::Return {
                     value: Operand::Local(out),
@@ -3940,6 +4085,8 @@ impl<'a> FunctionLowerer<'a> {
             Ty::Bool => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Bool)),
             Ty::Int => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
             Ty::Float => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Float)),
+            Ty::Byte => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Byte)),
+            Ty::Char => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Char)),
             Ty::String => Operand::Literal(ConstValue::TypeRep(TypeRepLit::String)),
             Ty::Bytes => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Bytes)),
             Ty::Array(elem) => {
@@ -4091,6 +4238,8 @@ impl<'a> FunctionLowerer<'a> {
                     crate::ast::PrimType::Bool => TypeRepLit::Bool,
                     crate::ast::PrimType::Int => TypeRepLit::Int,
                     crate::ast::PrimType::Float => TypeRepLit::Float,
+                    crate::ast::PrimType::Byte => TypeRepLit::Byte,
+                    crate::ast::PrimType::Char => TypeRepLit::Char,
                     crate::ast::PrimType::String => TypeRepLit::String,
                     crate::ast::PrimType::Bytes => TypeRepLit::Bytes,
                 })))
@@ -4887,12 +5036,11 @@ impl<'a> FunctionLowerer<'a> {
                     )
                 }
                 Ty::String => {
-                    let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
                     let it_local = self.alloc_local();
                     self.emit(Instruction::Call {
                         dst: Some(it_local),
                         func: "core::intrinsics::string_into_iter".to_string(),
-                        args: vec![elem_rep, Operand::Local(iterable_local)],
+                        args: vec![Operand::Local(iterable_local)],
                     });
                     (
                         it_local,
@@ -4903,12 +5051,11 @@ impl<'a> FunctionLowerer<'a> {
                     )
                 }
                 Ty::Bytes => {
-                    let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
                     let it_local = self.alloc_local();
                     self.emit(Instruction::Call {
                         dst: Some(it_local),
                         func: "core::intrinsics::bytes_into_iter".to_string(),
-                        args: vec![elem_rep, Operand::Local(iterable_local)],
+                        args: vec![Operand::Local(iterable_local)],
                     });
                     (
                         it_local,
@@ -4944,12 +5091,11 @@ impl<'a> FunctionLowerer<'a> {
                 )
             }
             Ty::String => {
-                let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
                 let it_local = self.alloc_local();
                 self.emit(Instruction::Call {
                     dst: Some(it_local),
                     func: "core::intrinsics::string_into_iter".to_string(),
-                    args: vec![elem_rep, Operand::Local(iterable_local)],
+                    args: vec![Operand::Local(iterable_local)],
                 });
                 (
                     it_local,
@@ -4960,12 +5106,11 @@ impl<'a> FunctionLowerer<'a> {
                 )
             }
             Ty::Bytes => {
-                let elem_rep = self.lower_type_rep_for_ty(&Ty::Int, iter.span())?;
                 let it_local = self.alloc_local();
                 self.emit(Instruction::Call {
                     dst: Some(it_local),
                     func: "core::intrinsics::bytes_into_iter".to_string(),
-                    args: vec![elem_rep, Operand::Local(iterable_local)],
+                    args: vec![Operand::Local(iterable_local)],
                 });
                 (
                     it_local,
@@ -5466,6 +5611,56 @@ impl<'a> FunctionLowerer<'a> {
                         });
                         Ok(dst)
                     }
+                    (BinaryOp::Eq, Ty::Byte) | (BinaryOp::Ne, Ty::Byte) => {
+                        let l_int = self.lower_named_call(
+                            "core::intrinsics::byte_to_int",
+                            vec![Operand::Local(l)],
+                        )?;
+                        let r_int = self.lower_named_call(
+                            "core::intrinsics::byte_to_int",
+                            vec![Operand::Local(r)],
+                        )?;
+                        let dst = self.alloc_local();
+                        match op {
+                            BinaryOp::Eq => self.emit(Instruction::IntEq {
+                                dst,
+                                a: Operand::Local(l_int),
+                                b: Operand::Local(r_int),
+                            }),
+                            BinaryOp::Ne => self.emit(Instruction::IntNe {
+                                dst,
+                                a: Operand::Local(l_int),
+                                b: Operand::Local(r_int),
+                            }),
+                            _ => unreachable!("covered by match arm"),
+                        }
+                        Ok(dst)
+                    }
+                    (BinaryOp::Eq, Ty::Char) | (BinaryOp::Ne, Ty::Char) => {
+                        let l_int = self.lower_named_call(
+                            "core::intrinsics::char_to_int",
+                            vec![Operand::Local(l)],
+                        )?;
+                        let r_int = self.lower_named_call(
+                            "core::intrinsics::char_to_int",
+                            vec![Operand::Local(r)],
+                        )?;
+                        let dst = self.alloc_local();
+                        match op {
+                            BinaryOp::Eq => self.emit(Instruction::IntEq {
+                                dst,
+                                a: Operand::Local(l_int),
+                                b: Operand::Local(r_int),
+                            }),
+                            BinaryOp::Ne => self.emit(Instruction::IntNe {
+                                dst,
+                                a: Operand::Local(l_int),
+                                b: Operand::Local(r_int),
+                            }),
+                            _ => unreachable!("covered by match arm"),
+                        }
+                        Ok(dst)
+                    }
                     _ => {
                         if let Some(func) = select_binop_fn(op, operand_ty) {
                             return self.lower_named_call(
@@ -5865,6 +6060,23 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
 
+            // Primitive UFCS: `int::to_byte(...)`, `bytes::from_array(...)`, etc.
+            //
+            // Primitives are not nominal types in the module resolver, so we resolve them directly.
+            if func_name.is_none() && segments.len() == 2 {
+                let prim = segments[0].as_str();
+                let last = segments[1].as_str();
+                if matches!(
+                    prim,
+                    "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes"
+                ) {
+                    let candidate = format!("{prim}::{last}");
+                    if self.compiler.env.functions.contains_key(&candidate) {
+                        func_name = Some(candidate);
+                    }
+                }
+            }
+
             let func_name = match func_name {
                 Some(name) => name,
                 None => self
@@ -6009,6 +6221,8 @@ impl<'a> FunctionLowerer<'a> {
             Ty::Bool => Some(("bool".to_string(), Vec::new())),
             Ty::Int => Some(("int".to_string(), Vec::new())),
             Ty::Float => Some(("float".to_string(), Vec::new())),
+            Ty::Byte => Some(("byte".to_string(), Vec::new())),
+            Ty::Char => Some(("char".to_string(), Vec::new())),
             Ty::String => Some(("string".to_string(), Vec::new())),
             Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
             _ => None,
@@ -6928,6 +7142,14 @@ impl<'a> FunctionLowerer<'a> {
 fn nominal_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Readonly(inner) => nominal_type_name(inner),
+        Ty::Unit => Some("unit"),
+        Ty::Bool => Some("bool"),
+        Ty::Int => Some("int"),
+        Ty::Float => Some("float"),
+        Ty::Byte => Some("byte"),
+        Ty::Char => Some("char"),
+        Ty::String => Some("string"),
+        Ty::Bytes => Some("bytes"),
         Ty::App(crate::typeck::TyCon::Named(name), _) => Some(name.as_str()),
         Ty::Iface { iface, .. } => Some(iface.as_str()),
         _ => None,
@@ -6945,6 +7167,8 @@ fn mir_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Option<Type> {
         Ty::Bool => Some(Type::Bool),
         Ty::Int => Some(Type::Int),
         Ty::Float => Some(Type::Float),
+        Ty::Byte => Some(Type::Byte),
+        Ty::Char => Some(Type::Char),
         Ty::String => Some(Type::String),
         Ty::Bytes => Some(Type::Bytes),
         Ty::Array(_) => Some(Type::Array),

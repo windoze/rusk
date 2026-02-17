@@ -66,8 +66,10 @@ The reference VM supports these runtime value categories:
   - `bool`
   - `int` (signed 64-bit)
   - `float` (IEEE-754 `f64`)
-  - `string` (UTF-8)
-  - `bytes` (`Vec<u8>`)
+  - `byte` (unsigned 8-bit)
+  - `char` (Unicode scalar value)
+  - `string` (UTF-8, immutable)
+  - `bytes` (immutable byte sequence)
 - **Type representations**: `typerep` (an interned runtime type representation)
 - **References** (heap objects with identity):
   - `struct` instances
@@ -468,10 +470,13 @@ Index-based ops:
 Array ops:
 
 - `IndexGet { dst, arr, idx }`
-  - `arr` must be an array reference; `idx` must be an `int`.
-  - Traps on out-of-bounds or negative indices.
+  - `idx` must be an `int`.
+  - If `arr` is an array reference, reads element `idx` (0-based).
+  - If `arr` is a `bytes` value, reads byte `idx` (0-based) and writes a `byte` to `dst`.
+  - Traps on out-of-bounds or negative indices, or if `arr` is neither an array reference nor a
+    `bytes` value.
 - `IndexSet { arr, idx, value }`
-  - Like `IndexGet`, but mutates the array.
+  - Like `IndexGet`, but mutates the array (not supported for `bytes`).
   - Traps if `arr` is readonly.
 - `Len { dst, arr }`
   - Writes the array length as an `int`.
@@ -571,7 +576,12 @@ The current intrinsic set includes:
 - float ops: `FloatAdd`, `FloatSub`, `FloatMul`, `FloatDiv`, `FloatMod`, `FloatEq`, `FloatNe`,
   `FloatLt`, `FloatLe`, `FloatGt`, `FloatGe`
 - primitive equality helpers: `StringEq`, `StringNe`, `BytesEq`, `BytesNe`, `UnitEq`, `UnitNe`
-- iterator protocol: `IntoIter`, `Next`
+- primitive conversions: `IntToByte`, `IntTryByte`, `ByteToInt`, `IntToChar`, `IntTryChar`,
+  `CharToInt`
+- `bytes` helpers: `BytesGet`, `BytesSlice`, `BytesToArray`, `BytesFromArray`
+- `string` helpers: `StringSlice`
+- iterator protocol: `IntoIter`, `Next`, `StringIntoIter`, `StringNext`, `BytesIntoIter`,
+  `BytesNext`
 - array ops: `ArrayLen`, `ArrayLenRo`, `ArrayPush`, `ArrayPop`, `ArrayClear`, `ArrayResize`,
   `ArrayInsert`, `ArrayRemove`, `ArrayExtend`, `ArrayConcat`, `ArrayConcatRo`, `ArraySlice`,
   `ArraySliceRo`
@@ -703,6 +713,8 @@ This format uses tag bytes/words for enums. The tags are normative.
 | 10 | `Interface(name)` | `string` |
 | 11 | `Fn` | — |
 | 12 | `Cont` | — |
+| 13 | `Byte` | — |
+| 14 | `Char` | — |
 
 #### Patterns (`u8`)
 
@@ -723,7 +735,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### Intrinsics (`u16`)
 
-Intrinsics use `u16` tags `0..=52`:
+Intrinsics use `u16` tags `0..=63`:
 
 - `0`: `StringConcat`
 - `1`: `ToString`
@@ -778,6 +790,17 @@ Intrinsics use `u16` tags `0..=52`:
 - `50`: `StringNext`
 - `51`: `BytesIntoIter`
 - `52`: `BytesNext`
+- `53`: `IntToByte`
+- `54`: `IntTryByte`
+- `55`: `ByteToInt`
+- `56`: `IntToChar`
+- `57`: `IntTryChar`
+- `58`: `CharToInt`
+- `59`: `BytesGet`
+- `60`: `BytesSlice`
+- `61`: `BytesToArray`
+- `62`: `BytesFromArray`
+- `63`: `StringSlice`
 
 #### Call targets (`u8`)
 

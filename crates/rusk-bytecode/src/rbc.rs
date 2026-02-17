@@ -335,6 +335,8 @@ impl Encoder {
             }
             TypeRepLit::Fn => self.write_u8(11),
             TypeRepLit::Cont => self.write_u8(12),
+            TypeRepLit::Byte => self.write_u8(13),
+            TypeRepLit::Char => self.write_u8(14),
         }
         Ok(())
     }
@@ -497,6 +499,17 @@ impl Encoder {
             Intrinsic::StringNext => 50,
             Intrinsic::BytesIntoIter => 51,
             Intrinsic::BytesNext => 52,
+            Intrinsic::IntToByte => 53,
+            Intrinsic::IntTryByte => 54,
+            Intrinsic::ByteToInt => 55,
+            Intrinsic::IntToChar => 56,
+            Intrinsic::IntTryChar => 57,
+            Intrinsic::CharToInt => 58,
+            Intrinsic::BytesGet => 59,
+            Intrinsic::BytesSlice => 60,
+            Intrinsic::BytesToArray => 61,
+            Intrinsic::BytesFromArray => 62,
+            Intrinsic::StringSlice => 63,
         };
         self.write_u16(tag);
     }
@@ -1163,6 +1176,8 @@ impl<'a> Decoder<'a> {
             10 => Ok(TypeRepLit::Interface(self.read_string()?)),
             11 => Ok(TypeRepLit::Fn),
             12 => Ok(TypeRepLit::Cont),
+            13 => Ok(TypeRepLit::Byte),
+            14 => Ok(TypeRepLit::Char),
             other => Err(self.err(format!("invalid TypeRepLit tag {other}"))),
         }
     }
@@ -1340,6 +1355,17 @@ impl<'a> Decoder<'a> {
             50 => Intrinsic::StringNext,
             51 => Intrinsic::BytesIntoIter,
             52 => Intrinsic::BytesNext,
+            53 => Intrinsic::IntToByte,
+            54 => Intrinsic::IntTryByte,
+            55 => Intrinsic::ByteToInt,
+            56 => Intrinsic::IntToChar,
+            57 => Intrinsic::IntTryChar,
+            58 => Intrinsic::CharToInt,
+            59 => Intrinsic::BytesGet,
+            60 => Intrinsic::BytesSlice,
+            61 => Intrinsic::BytesToArray,
+            62 => Intrinsic::BytesFromArray,
+            63 => Intrinsic::StringSlice,
             other => return Err(self.err(format!("invalid Intrinsic tag {other}"))),
         };
         Ok(intr)

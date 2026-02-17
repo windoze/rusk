@@ -34,6 +34,8 @@ pub(crate) enum Ty {
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
     Array(Box<Ty>),
@@ -124,6 +126,8 @@ impl fmt::Display for Ty {
             Ty::Bool => write!(f, "bool"),
             Ty::Int => write!(f, "int"),
             Ty::Float => write!(f, "float"),
+            Ty::Byte => write!(f, "byte"),
+            Ty::Char => write!(f, "char"),
             Ty::String => write!(f, "string"),
             Ty::Bytes => write!(f, "bytes"),
             Ty::Array(elem) => write!(f, "[{elem}]"),
@@ -921,6 +925,87 @@ fn add_prelude(env: &mut ProgramEnv) {
         add_fn(name, Vec::new(), vec![ty.clone(), ty.clone()], Ty::Bool);
     }
 
+    // Primitive conversions: `int` ↔ `byte` / `char`.
+    add_fn(
+        "core::intrinsics::int_to_byte",
+        Vec::new(),
+        vec![Ty::Int],
+        Ty::Byte,
+    );
+    add_fn(
+        "core::intrinsics::int_try_byte",
+        Vec::new(),
+        vec![Ty::Int],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
+    );
+    add_fn(
+        "core::intrinsics::byte_to_int",
+        Vec::new(),
+        vec![Ty::Byte],
+        Ty::Int,
+    );
+
+    add_fn(
+        "core::intrinsics::int_to_char",
+        Vec::new(),
+        vec![Ty::Int],
+        Ty::Char,
+    );
+    add_fn(
+        "core::intrinsics::int_try_char",
+        Vec::new(),
+        vec![Ty::Int],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Char]),
+    );
+    add_fn(
+        "core::intrinsics::char_to_int",
+        Vec::new(),
+        vec![Ty::Char],
+        Ty::Int,
+    );
+
+    // `bytes`.
+    add_fn(
+        "core::intrinsics::bytes_get",
+        Vec::new(),
+        vec![Ty::Bytes, Ty::Int],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
+    );
+    add_fn(
+        "core::intrinsics::bytes_slice",
+        Vec::new(),
+        vec![
+            Ty::Bytes,
+            Ty::Int,
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
+        ],
+        Ty::Bytes,
+    );
+    add_fn(
+        "core::intrinsics::bytes_to_array",
+        Vec::new(),
+        vec![Ty::Bytes],
+        Ty::Array(Box::new(Ty::Byte)),
+    );
+    add_fn(
+        "core::intrinsics::bytes_from_array",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Array(Box::new(Ty::Byte))))],
+        Ty::Bytes,
+    );
+
+    // `string`.
+    add_fn(
+        "core::intrinsics::string_slice",
+        Vec::new(),
+        vec![
+            Ty::String,
+            Ty::Int,
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
+        ],
+        Ty::String,
+    );
+
     // Iterator protocol (currently for dynamic arrays only).
     let iter_generics = vec![GenericParamInfo {
         name: "T".to_string(),
@@ -950,7 +1035,7 @@ fn add_prelude(env: &mut ProgramEnv) {
     // Iterator protocol (strings + bytes).
     add_fn(
         "core::intrinsics::string_into_iter",
-        iter_generics.clone(),
+        Vec::new(),
         vec![Ty::String],
         Ty::App(
             TyCon::Named("core::intrinsics::StringIter".to_string()),
@@ -959,16 +1044,16 @@ fn add_prelude(env: &mut ProgramEnv) {
     );
     add_fn(
         "core::intrinsics::string_next",
-        iter_generics.clone(),
+        Vec::new(),
         vec![Ty::App(
             TyCon::Named("core::intrinsics::StringIter".to_string()),
             vec![],
         )],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Char]),
     );
     add_fn(
         "core::intrinsics::bytes_into_iter",
-        iter_generics.clone(),
+        Vec::new(),
         vec![Ty::Bytes],
         Ty::App(
             TyCon::Named("core::intrinsics::BytesIter".to_string()),
@@ -977,17 +1062,153 @@ fn add_prelude(env: &mut ProgramEnv) {
     );
     add_fn(
         "core::intrinsics::bytes_next",
-        iter_generics.clone(),
+        Vec::new(),
         vec![Ty::App(
             TyCon::Named("core::intrinsics::BytesIter".to_string()),
             vec![],
         )],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
+    );
+
+    // Built-in inherent methods on primitive types (method-call sugar support).
+    //
+    // These are thin wrappers around `core::intrinsics::*` and are intentionally explicit
+    // (no implicit conversions between `int` and `byte`/`char`).
+    // `int` ↔ `byte` / `char`.
+    add_fn(
+        "int::to_byte",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Int))],
+        Ty::Byte,
+    );
+    env.inherent_method_kinds.insert(
+        "int::to_byte".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "int::try_byte",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Int))],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
+    );
+    env.inherent_method_kinds.insert(
+        "int::try_byte".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "int::to_char",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Int))],
+        Ty::Char,
+    );
+    env.inherent_method_kinds.insert(
+        "int::to_char".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "int::try_char",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Int))],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Char]),
+    );
+    env.inherent_method_kinds.insert(
+        "int::try_char".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "byte::to_int",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Byte))],
+        Ty::Int,
+    );
+    env.inherent_method_kinds.insert(
+        "byte::to_int".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "char::to_int",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Char))],
+        Ty::Int,
+    );
+    env.inherent_method_kinds.insert(
+        "char::to_int".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    // `bytes`.
+    add_fn(
+        "bytes::get",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Bytes)), Ty::Int],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
+    );
+    env.inherent_method_kinds.insert(
+        "bytes::get".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "bytes::slice",
+        Vec::new(),
+        vec![
+            Ty::Readonly(Box::new(Ty::Bytes)),
+            Ty::Int,
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
+        ],
+        Ty::Bytes,
+    );
+    env.inherent_method_kinds.insert(
+        "bytes::slice".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "bytes::to_array",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Bytes))],
+        Ty::Array(Box::new(Ty::Byte)),
+    );
+    env.inherent_method_kinds.insert(
+        "bytes::to_array".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "bytes::from_array",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Array(Box::new(Ty::Byte))))],
+        Ty::Bytes,
+    );
+    env.inherent_method_kinds
+        .insert("bytes::from_array".to_string(), InherentMethodKind::Static);
+
+    // `string`.
+    add_fn(
+        "string::slice",
+        Vec::new(),
+        vec![
+            Ty::Readonly(Box::new(Ty::String)),
+            Ty::Int,
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
+        ],
+        Ty::String,
+    );
+    env.inherent_method_kinds.insert(
+        "string::slice".to_string(),
+        InherentMethodKind::Instance { readonly: true },
     );
 
     // Built-in interface impls (used by desugarings).
     let to_string_iface = "core::fmt::ToString";
-    for prim in ["unit", "bool", "int", "float", "string", "bytes"] {
+    for prim in [
+        "unit", "bool", "int", "float", "byte", "char", "string", "bytes",
+    ] {
         env.interface_impls
             .insert((prim.to_string(), to_string_iface.to_string()));
         env.interface_methods.insert(
@@ -1023,7 +1244,7 @@ fn add_prelude(env: &mut ProgramEnv) {
         "impl::core::iter::Iterator::for::core::intrinsics::ArrayIter::next".to_string(),
     );
 
-    // core::intrinsics::StringIter: Item = int
+    // core::intrinsics::StringIter: Item = char
     env.interface_impls.insert((
         "core::intrinsics::StringIter".to_string(),
         iter_iface.to_string(),
@@ -1034,7 +1255,7 @@ fn add_prelude(env: &mut ProgramEnv) {
             iter_iface.to_string(),
             "Item".to_string(),
         ),
-        Ty::Int,
+        Ty::Char,
     );
     env.interface_methods.insert(
         (
@@ -1045,7 +1266,7 @@ fn add_prelude(env: &mut ProgramEnv) {
         "impl::core::iter::Iterator::for::core::intrinsics::StringIter::next".to_string(),
     );
 
-    // core::intrinsics::BytesIter: Item = int
+    // core::intrinsics::BytesIter: Item = byte
     env.interface_impls.insert((
         "core::intrinsics::BytesIter".to_string(),
         iter_iface.to_string(),
@@ -1056,7 +1277,7 @@ fn add_prelude(env: &mut ProgramEnv) {
             iter_iface.to_string(),
             "Item".to_string(),
         ),
-        Ty::Int,
+        Ty::Byte,
     );
     env.interface_methods.insert(
         (
@@ -3086,6 +3307,8 @@ fn lower_type_expr_with_self_iface(
             PrimType::Bool => Ty::Bool,
             PrimType::Int => Ty::Int,
             PrimType::Float => Ty::Float,
+            PrimType::Byte => Ty::Byte,
+            PrimType::Char => Ty::Char,
             PrimType::String => Ty::String,
             PrimType::Bytes => Ty::Bytes,
         }),
@@ -3496,6 +3719,8 @@ fn validate_value_ty(env: &ProgramEnv, ty: &Ty, span: Span) -> Result<(), TypeEr
         | Ty::Bool
         | Ty::Int
         | Ty::Float
+        | Ty::Byte
+        | Ty::Char
         | Ty::String
         | Ty::Bytes
         | Ty::SelfType
@@ -3628,6 +3853,8 @@ fn validate_assoc_projs_in_ty(env: &ProgramEnv, ty: &Ty, span: Span) -> Result<(
         | Ty::Bool
         | Ty::Int
         | Ty::Float
+        | Ty::Byte
+        | Ty::Char
         | Ty::String
         | Ty::Bytes
         | Ty::SelfType
@@ -3781,6 +4008,8 @@ fn validate_assoc_projs_well_formed_in_ty(
         | Ty::Bool
         | Ty::Int
         | Ty::Float
+        | Ty::Byte
+        | Ty::Char
         | Ty::String
         | Ty::Bytes
         | Ty::SelfType
@@ -5348,6 +5577,24 @@ impl<'a> FnTypechecker<'a> {
             }
         }
 
+        // Allow UFCS-style primitive inherent method calls: `int::to_byte(...)`, `bytes::from_array(...)`, etc.
+        //
+        // Primitives do not exist as nominal types in the module resolver, so we resolve these
+        // directly against the built-in function table.
+        if func_name.is_none() && segments.len() == 2 {
+            let prim = segments[0].as_str();
+            let last = segments[1].as_str();
+            if matches!(
+                prim,
+                "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes"
+            ) {
+                let candidate = format!("{prim}::{last}");
+                if self.env.functions.contains_key(&candidate) {
+                    func_name = Some(candidate);
+                }
+            }
+        }
+
         let func_name = match func_name {
             Some(name) => name,
             None => self
@@ -6423,7 +6670,8 @@ impl<'a> FnTypechecker<'a> {
                         *elem
                     }
                 }
-                Ty::String | Ty::Bytes => Ty::Int,
+                Ty::String => Ty::Char,
+                Ty::Bytes => Ty::Byte,
                 other => {
                     return Err(TypeError {
                         message: format!(
@@ -7002,6 +7250,25 @@ impl<'a> FnTypechecker<'a> {
                                 func_name = Some(candidate);
                             }
                         }
+                    }
+                }
+            }
+
+            // Allow UFCS-style primitive inherent method calls: `int::to_byte(...)`,
+            // `bytes::from_array(...)`, etc.
+            //
+            // Primitives do not exist as nominal types in the module resolver, so we resolve
+            // these directly against the built-in function table.
+            if func_name.is_none() && segments.len() == 2 {
+                let prim = segments[0].as_str();
+                let last = segments[1].as_str();
+                if matches!(
+                    prim,
+                    "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes"
+                ) {
+                    let candidate = format!("{prim}::{last}");
+                    if self.env.functions.contains_key(&candidate) {
+                        func_name = Some(candidate);
                     }
                 }
             }
@@ -8052,18 +8319,21 @@ impl<'a> FnTypechecker<'a> {
             Ty::Readonly(inner) => (true, *inner),
             other => (false, other),
         };
-        let Ty::Array(elem) = inner else {
-            return Err(TypeError {
-                message: format!("indexing requires an array, got `{inner}`"),
+        match inner {
+            Ty::Array(elem) => {
+                let elem_ty = if is_readonly {
+                    elem.as_readonly_view()
+                } else {
+                    *elem
+                };
+                Ok(elem_ty)
+            }
+            Ty::Bytes => Ok(Ty::Byte),
+            other => Err(TypeError {
+                message: format!("indexing requires an array or `bytes`, got `{other}`"),
                 span,
-            });
-        };
-        let elem_ty = if is_readonly {
-            elem.as_readonly_view()
-        } else {
-            *elem
-        };
-        Ok(elem_ty)
+            }),
+        }
     }
 
     fn typecheck_unary(&mut self, op: UnaryOp, expr: &Expr, span: Span) -> Result<Ty, TypeError> {
@@ -8216,7 +8486,14 @@ impl<'a> FnTypechecker<'a> {
                 let prim_ok = match op {
                     BinaryOp::Eq | BinaryOp::Ne => matches!(
                         base,
-                        Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes
+                        Ty::Unit
+                            | Ty::Bool
+                            | Ty::Int
+                            | Ty::Float
+                            | Ty::Byte
+                            | Ty::Char
+                            | Ty::String
+                            | Ty::Bytes
                     ),
                     BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                         matches!(base, Ty::Int | Ty::Float)
@@ -8776,7 +9053,14 @@ impl<'a> FnTypechecker<'a> {
             }
 
             // Primitive types may have built-in impls for arity-0 interfaces.
-            Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Byte
+            | Ty::Char
+            | Ty::String
+            | Ty::Bytes => {
                 if iface_arity != 0 {
                     return None;
                 }
@@ -8785,6 +9069,8 @@ impl<'a> FnTypechecker<'a> {
                     Ty::Bool => "bool",
                     Ty::Int => "int",
                     Ty::Float => "float",
+                    Ty::Byte => "byte",
+                    Ty::Char => "char",
                     Ty::String => "string",
                     Ty::Bytes => "bytes",
                     _ => unreachable!("matched primitive types"),
@@ -8886,7 +9172,14 @@ impl<'a> FnTypechecker<'a> {
             }
 
             // Primitive types may have built-in impls for arity-0 interfaces.
-            Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Byte
+            | Ty::Char
+            | Ty::String
+            | Ty::Bytes => {
                 if !iface_args.is_empty() {
                     return false;
                 }
@@ -8895,6 +9188,8 @@ impl<'a> FnTypechecker<'a> {
                     Ty::Bool => "bool",
                     Ty::Int => "int",
                     Ty::Float => "float",
+                    Ty::Byte => "byte",
+                    Ty::Char => "char",
                     Ty::String => "string",
                     Ty::Bytes => "bytes",
                     _ => return false,
@@ -8959,6 +9254,8 @@ pub(crate) fn contains_self_type(ty: &Ty) -> bool {
         | Ty::Bool
         | Ty::Int
         | Ty::Float
+        | Ty::Byte
+        | Ty::Char
         | Ty::String
         | Ty::Bytes => false,
     }
@@ -9001,6 +9298,8 @@ fn contains_naked_self_type(ty: &Ty) -> bool {
         | Ty::Bool
         | Ty::Int
         | Ty::Float
+        | Ty::Byte
+        | Ty::Char
         | Ty::String
         | Ty::Bytes => false,
     }
@@ -9030,6 +9329,8 @@ fn contains_assoc_proj(ty: &Ty) -> bool {
         | Ty::Bool
         | Ty::Int
         | Ty::Float
+        | Ty::Byte
+        | Ty::Char
         | Ty::String
         | Ty::Bytes => false,
     }
@@ -9219,6 +9520,14 @@ fn interface_method_sig_mentions_self_or_assoc(sig: &InterfaceMethodSig) -> bool
 fn nominal_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Readonly(inner) => nominal_type_name(inner),
+        Ty::Unit => Some("unit"),
+        Ty::Bool => Some("bool"),
+        Ty::Int => Some("int"),
+        Ty::Float => Some("float"),
+        Ty::Byte => Some("byte"),
+        Ty::Char => Some("char"),
+        Ty::String => Some("string"),
+        Ty::Bytes => Some("bytes"),
         Ty::App(TyCon::Named(name), _) => Some(name.as_str()),
         _ => None,
     }
