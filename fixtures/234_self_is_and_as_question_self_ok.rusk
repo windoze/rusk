@@ -1,0 +1,43 @@
+// expect: ok int 1010
+
+interface Animal {
+    fn is_same_dyn(other: Animal) -> int {
+        if other is Self { 1 } else { 0 }
+    }
+
+    fn as_same_dyn(other: Animal) -> int;
+}
+
+struct Dog {}
+struct Cat {}
+
+impl Animal for Dog {
+    fn as_same_dyn(other: Animal) -> int {
+        match other as? Self {
+            Option::Some(_) => 1,
+            Option::None => 0,
+        }
+    }
+}
+
+impl Animal for Cat {
+    fn as_same_dyn(other: Animal) -> int {
+        match other as? Self {
+            Option::Some(_) => 1,
+            Option::None => 0,
+        }
+    }
+}
+
+fn main() -> int {
+    let d: Animal = (Dog {} as Animal);
+    let c: Animal = (Cat {} as Animal);
+
+    let a = d.is_same_dyn(d);
+    let b = d.is_same_dyn(c);
+    let x = d.as_same_dyn(d);
+    let y = d.as_same_dyn(c);
+
+    a * 1000 + b * 100 + x * 10 + y
+}
+

@@ -4131,6 +4131,63 @@ impl<'a> FunctionLowerer<'a> {
             ));
         }
 
+        // `Self` placeholder in interface / instance-method contexts.
+        //
+        // The typechecker resolves `Self` in most type positions, but `is` / `as?` lowering needs
+        // a runtime `TypeRep` and currently lowers it from the *syntax* type. Support `Self` here
+        // so `other is Self` / `other as? Self` work inside methods (including default interface
+        // method bodies specialized per-impl, and nested lambdas/match helpers typechecked under a
+        // method).
+        if path.segments.len() == 1 && path.segments[0].name.name == "Self" {
+            if !path.assoc_bindings.is_empty() {
+                return Err(CompileError::new(
+                    "`Self` type must not have associated type bindings",
+                    path.span,
+                ));
+            }
+            if !path.segments[0].args.is_empty() {
+                return Err(CompileError::new(
+                    "`Self` does not take type arguments",
+                    path.span,
+                ));
+            }
+
+            let self_ctx = self.type_info_name.as_str();
+            let self_is_inherent_instance_method = self
+                .compiler
+                .env
+                .inherent_method_kinds
+                .get(self_ctx)
+                .is_some_and(|k| matches!(k, typeck::InherentMethodKind::Instance { .. }));
+            let self_is_interface_method = self_ctx.starts_with("impl::");
+            if !self_is_inherent_instance_method && !self_is_interface_method {
+                return Err(CompileError::new(
+                    "`Self` can only be used in interface or instance-method contexts",
+                    path.span,
+                ));
+            }
+
+            let sig = self.compiler.env.functions.get(self_ctx).ok_or_else(|| {
+                CompileError::new(
+                    "internal error: missing signature for `Self` context",
+                    path.span,
+                )
+            })?;
+            let Some(recv_ty) = sig.params.first().cloned() else {
+                return Err(CompileError::new(
+                    "internal error: expected receiver parameter for `Self` context",
+                    path.span,
+                ));
+            };
+            // `Self` denotes the receiver's nominal type, not a `readonly` view.
+            let recv_ty = match recv_ty {
+                Ty::Readonly(inner) => *inner,
+                other => other,
+            };
+
+            return self.lower_type_rep_for_ty(&recv_ty, path.span);
+        }
+
         // Generic type parameter `T` in a type position: reify via the hidden runtime `TypeRep` value.
         if path.segments.len() == 1 && path.segments[0].args.is_empty() {
             let name = path.segments[0].name.name.as_str();
