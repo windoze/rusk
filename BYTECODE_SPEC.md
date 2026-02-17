@@ -695,7 +695,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### Intrinsics (`u16`)
 
-Intrinsics use `u16` tags `0..=48`:
+Intrinsics use `u16` tags `0..=52`:
 
 - `0`: `StringConcat`
 - `1`: `ToString`
@@ -746,6 +746,10 @@ Intrinsics use `u16` tags `0..=48`:
 - `46`: `ArrayConcatRo`
 - `47`: `ArraySlice`
 - `48`: `ArraySliceRo`
+- `49`: `StringIntoIter`
+- `50`: `StringNext`
+- `51`: `BytesIntoIter`
+- `52`: `BytesNext`
 
 #### Call targets (`u8`)
 

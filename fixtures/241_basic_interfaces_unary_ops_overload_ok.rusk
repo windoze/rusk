@@ -1,0 +1,31 @@
+// expect: ok int 1
+
+use core::ops::Neg;
+use core::ops::Not;
+
+struct Num { v: int }
+
+impl Neg for Num {
+    readonly fn neg() -> Num {
+        Num { v: -self.v }
+    }
+}
+
+struct Bit { v: bool }
+
+impl Not for Bit {
+    readonly fn not() -> Bit {
+        Bit { v: !self.v }
+    }
+}
+
+fn main() -> int {
+    readonly n = Num { v: 5 };
+    let m = -n;
+
+    let b = Bit { v: false };
+    let c = !b;
+
+    if m.v == -5 && c.v == true { 1 } else { 0 }
+}
+

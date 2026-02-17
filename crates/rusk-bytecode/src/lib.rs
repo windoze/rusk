@@ -145,6 +145,10 @@ pub enum Intrinsic {
     // Iterator protocol.
     IntoIter,
     Next,
+    StringIntoIter,
+    StringNext,
+    BytesIntoIter,
+    BytesNext,
 
     // Array operations.
     ArrayLen,
