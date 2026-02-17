@@ -1,0 +1,26 @@
+// expect: ok int 1
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+struct Seven {}
+
+impl Iterator for Seven {
+    type Item = int;
+
+    fn next() -> Option<int> { Option::Some(7) }
+}
+
+fn first<T: Iterator>(it: T) -> Option<Iterator::Item<T>> {
+    it.next()
+}
+
+fn main() -> int {
+    match first(Seven {}) {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    }
+}
+

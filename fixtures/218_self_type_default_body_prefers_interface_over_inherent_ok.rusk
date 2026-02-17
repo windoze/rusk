@@ -1,0 +1,25 @@
+// expect: ok string "iface"
+
+interface I {
+    fn debug() -> string;
+
+    fn show() -> string {
+        self.debug()
+    }
+}
+
+struct S {}
+
+impl S {
+    fn debug() -> string { "inherent" }
+}
+
+impl I for S {
+    fn debug() -> string { "iface" }
+}
+
+fn main() -> string {
+    let s = S {};
+    (s as I).show()
+}
+

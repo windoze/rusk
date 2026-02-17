@@ -1,0 +1,15 @@
+// expect: compile_error missing associated type `Item`
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+struct S {}
+
+impl Iterator for S {
+    fn next() -> Option<int> { Option::None }
+}
+
+fn main() -> int { 0 }
+

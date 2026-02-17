@@ -1,0 +1,18 @@
+// expect: compile_error duplicate associated type definition `Item`
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+struct S {}
+
+impl Iterator for S {
+    type Item = int;
+    type Item = int;
+
+    fn next() -> Option<int> { Option::None }
+}
+
+fn main() -> int { 0 }
+

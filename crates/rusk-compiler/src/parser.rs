@@ -114,7 +114,10 @@ impl<'a> Parser<'a> {
         let rparen = self.expect(TokenKind::RParen)?;
         let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
             self.bump()?;
-            self.parse_type()?
+            // In `fn ... -> T { ... }`, the `{ ... }` is the function body, not assoc bindings
+            // on `T`. We only treat `T{...}` as type-level assoc bindings if it is followed by
+            // another `{` starting the actual body.
+            self.parse_type_in_fn_ret_position()?
         } else {
             // Default return type: `unit`.
             TypeExpr::Prim {
@@ -245,10 +248,13 @@ impl<'a> Parser<'a> {
         let supers = if matches!(self.lookahead.kind, TokenKind::Colon) {
             self.bump()?;
             let mut supers = Vec::new();
-            supers.push(self.parse_path_type()?);
+            // Super-interfaces are names / instantiations, not interface value types.
+            // Assoc bindings are not allowed here, and they would conflict with the `{ ... }`
+            // interface body delimiter.
+            supers.push(self.parse_path_type_no_assoc_bindings()?);
             while matches!(self.lookahead.kind, TokenKind::Plus) {
                 self.bump()?;
-                supers.push(self.parse_path_type()?);
+                supers.push(self.parse_path_type_no_assoc_bindings()?);
             }
             supers
         } else {
@@ -258,6 +264,17 @@ impl<'a> Parser<'a> {
         let mut members = Vec::new();
         while !matches!(self.lookahead.kind, TokenKind::RBrace) {
             let m_start = self.lookahead.span.start;
+            if matches!(self.lookahead.kind, TokenKind::KwType) {
+                self.bump()?; // type
+                let assoc_name = self.expect_ident()?;
+                let end = self.expect(TokenKind::Semi)?.span.end;
+                members.push(InterfaceMember::AssocType(AssocTypeDecl {
+                    name: assoc_name,
+                    span: Span::new(m_start, end),
+                }));
+                continue;
+            }
+
             let mut readonly = false;
             match self.lookahead.kind {
                 TokenKind::KwReadonly => {
@@ -267,10 +284,16 @@ impl<'a> Parser<'a> {
                 TokenKind::KwStatic => {
                     return Err(self.error_here("`static fn` is not allowed in interfaces"));
                 }
+                TokenKind::KwType => {
+                    return Err(self.error_here("unexpected `type` in interface"));
+                }
                 _ => {}
             }
             if readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
                 return Err(self.error_here("`static fn` is not allowed in interfaces"));
+            }
+            if readonly && matches!(self.lookahead.kind, TokenKind::KwType) {
+                return Err(self.error_here("`readonly type` is not allowed in interfaces"));
             }
             self.expect(TokenKind::KwFn)?;
             let m_name = self.expect_ident()?;
@@ -284,7 +307,12 @@ impl<'a> Parser<'a> {
             let rparen = self.expect(TokenKind::RParen)?;
             let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
                 self.bump()?;
-                self.parse_type()?
+                // Same ambiguity as `fn` items: `-> T { ... }` can be either:
+                // - return type `T` and a body block, or
+                // - return type `T{...}` (assoc bindings) and then a body/semi.
+                //
+                // We parse assoc bindings on a `PathType` only if the following token is `;` or `{`.
+                self.parse_type_in_iface_method_ret_position()?
             } else {
                 // Default return type: `unit`.
                 TypeExpr::Prim {
@@ -300,7 +328,7 @@ impl<'a> Parser<'a> {
                 let end = body.span.end;
                 (Some(body), end)
             };
-            members.push(InterfaceMember {
+            members.push(InterfaceMember::Method(InterfaceMethodMember {
                 readonly,
                 name: m_name,
                 generics: m_generics,
@@ -308,7 +336,7 @@ impl<'a> Parser<'a> {
                 ret,
                 body,
                 span: Span::new(m_start, m_end),
-            });
+            }));
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(InterfaceItem {
@@ -372,10 +400,12 @@ impl<'a> Parser<'a> {
     fn parse_impl_item(&mut self) -> Result<ImplItem, ParseError> {
         let start = self.expect(TokenKind::KwImpl)?.span.start;
         let generics = self.parse_generic_params()?;
-        let first = self.parse_path_type()?;
+        // Assoc bindings (`I{Item = ...}`) are not allowed in `impl` headers and would also
+        // conflict with the `{ ... }` body delimiter.
+        let first = self.parse_path_type_no_assoc_bindings()?;
         let header = if matches!(self.lookahead.kind, TokenKind::KwFor) {
             self.bump()?; // for
-            let ty = self.parse_path_type()?;
+            let ty = self.parse_path_type_no_assoc_bindings()?;
             let span = Span::new(first.span.start, ty.span.end);
             ImplHeader::InterfaceForType {
                 interface: first,
@@ -393,6 +423,30 @@ impl<'a> Parser<'a> {
         while !matches!(self.lookahead.kind, TokenKind::RBrace) {
             let vis = self.parse_visibility()?;
             let method_start = self.lookahead.span.start;
+            if matches!(self.lookahead.kind, TokenKind::KwType) {
+                if vis.is_public() {
+                    return Err(self.error_here("`pub type` is not allowed in `impl` blocks"));
+                }
+                match &header {
+                    ImplHeader::Inherent { .. } => {
+                        return Err(self
+                            .error_here("associated types are only allowed in interface `impl`"));
+                    }
+                    ImplHeader::InterfaceForType { .. } => {}
+                }
+                self.bump()?; // type
+                let name = self.expect_ident()?;
+                self.expect(TokenKind::Assign)?;
+                let ty = self.parse_type()?;
+                let end = self.expect(TokenKind::Semi)?.span.end;
+                members.push(ImplMember::AssocType(AssocTypeDef {
+                    name,
+                    ty,
+                    span: Span::new(method_start, end),
+                }));
+                continue;
+            }
+
             let mut saw_readonly = false;
             let mut saw_static = false;
             match self.lookahead.kind {
@@ -404,6 +458,9 @@ impl<'a> Parser<'a> {
                     saw_static = true;
                     self.bump()?;
                 }
+                TokenKind::KwType => {
+                    return Err(self.error_here("unexpected `type` in `impl` body"));
+                }
                 _ => {}
             }
             if saw_readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
@@ -412,8 +469,11 @@ impl<'a> Parser<'a> {
             if saw_static && matches!(self.lookahead.kind, TokenKind::KwReadonly) {
                 return Err(self.error_here("`static readonly fn` is not allowed"));
             }
+            if (saw_readonly || saw_static) && matches!(self.lookahead.kind, TokenKind::KwType) {
+                return Err(self.error_here("qualifiers are not allowed on `type` items"));
+            }
             if !matches!(self.lookahead.kind, TokenKind::KwFn) {
-                return Err(self.error_here("expected `fn` in `impl` body"));
+                return Err(self.error_here("expected `fn` or `type` in `impl` body"));
             }
             let mut func = self.parse_fn_item(vis)?;
             func.kind = FnItemKind::Method {
@@ -427,7 +487,7 @@ impl<'a> Parser<'a> {
             };
             // Expand the span to include the qualifier token if present.
             func.span = Span::new(method_start, func.span.end);
-            members.push(func);
+            members.push(ImplMember::Method(func));
         }
         let end = self.expect(TokenKind::RBrace)?.span.end;
         Ok(ImplItem {
@@ -583,6 +643,120 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn assoc_bindings_commit_if_next_is_lbrace(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::LBrace)
+    }
+
+    fn assoc_bindings_commit_if_next_is_semi_or_lbrace(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Semi | TokenKind::LBrace)
+    }
+
+    fn parse_path_type_with_guarded_assoc_bindings(
+        &mut self,
+        commit_if_next: fn(&TokenKind) -> bool,
+    ) -> Result<PathType, ParseError> {
+        let saved_lexer = self.lexer.clone();
+        let saved_lookahead = self.lookahead.clone();
+
+        match self.parse_path_type_with_options(true) {
+            Ok(parsed) if commit_if_next(&self.lookahead.kind) => Ok(parsed),
+            Ok(_) | Err(_) => {
+                // The `{ ... }` was not assoc bindings in this context (likely a block).
+                self.lexer = saved_lexer;
+                self.lookahead = saved_lookahead;
+                self.parse_path_type_with_options(false)
+            }
+        }
+    }
+
+    fn parse_type_in_fn_ret_position(&mut self) -> Result<TypeExpr, ParseError> {
+        if matches!(self.lookahead.kind, TokenKind::KwReadonly) {
+            let start = self.bump()?.span.start;
+            let inner = self.parse_type_in_fn_ret_position()?;
+            let end = inner.span().end;
+            return Ok(TypeExpr::Readonly {
+                inner: Box::new(inner),
+                span: Span::new(start, end),
+            });
+        }
+
+        match self.lookahead.kind {
+            TokenKind::Ident(ref name) => {
+                let prim = match name.as_str() {
+                    "unit" => Some(PrimType::Unit),
+                    "bool" => Some(PrimType::Bool),
+                    "int" => Some(PrimType::Int),
+                    "float" => Some(PrimType::Float),
+                    "string" => Some(PrimType::String),
+                    "bytes" => Some(PrimType::Bytes),
+                    _ => None,
+                };
+                if let Some(prim) = prim {
+                    let tok = self.bump()?;
+                    return Ok(TypeExpr::Prim {
+                        prim,
+                        span: tok.span,
+                    });
+                }
+                Ok(TypeExpr::Path(
+                    self.parse_path_type_with_guarded_assoc_bindings(
+                        Self::assoc_bindings_commit_if_next_is_lbrace,
+                    )?,
+                ))
+            }
+            TokenKind::KwFn => self.parse_fn_type(),
+            TokenKind::KwCont => self.parse_cont_type(),
+            TokenKind::LBracket => self.parse_array_type(),
+            TokenKind::LParen => self.parse_paren_type(),
+            TokenKind::KwReadonly => unreachable!("handled above"),
+            _ => Err(self.error_here("expected type")),
+        }
+    }
+
+    fn parse_type_in_iface_method_ret_position(&mut self) -> Result<TypeExpr, ParseError> {
+        if matches!(self.lookahead.kind, TokenKind::KwReadonly) {
+            let start = self.bump()?.span.start;
+            let inner = self.parse_type_in_iface_method_ret_position()?;
+            let end = inner.span().end;
+            return Ok(TypeExpr::Readonly {
+                inner: Box::new(inner),
+                span: Span::new(start, end),
+            });
+        }
+
+        match self.lookahead.kind {
+            TokenKind::Ident(ref name) => {
+                let prim = match name.as_str() {
+                    "unit" => Some(PrimType::Unit),
+                    "bool" => Some(PrimType::Bool),
+                    "int" => Some(PrimType::Int),
+                    "float" => Some(PrimType::Float),
+                    "string" => Some(PrimType::String),
+                    "bytes" => Some(PrimType::Bytes),
+                    _ => None,
+                };
+                if let Some(prim) = prim {
+                    let tok = self.bump()?;
+                    return Ok(TypeExpr::Prim {
+                        prim,
+                        span: tok.span,
+                    });
+                }
+                Ok(TypeExpr::Path(
+                    self.parse_path_type_with_guarded_assoc_bindings(
+                        Self::assoc_bindings_commit_if_next_is_semi_or_lbrace,
+                    )?,
+                ))
+            }
+            TokenKind::KwFn => self.parse_fn_type(),
+            TokenKind::KwCont => self.parse_cont_type(),
+            TokenKind::LBracket => self.parse_array_type(),
+            TokenKind::LParen => self.parse_paren_type(),
+            TokenKind::KwReadonly => unreachable!("handled above"),
+            _ => Err(self.error_here("expected type")),
+        }
+    }
+
     fn parse_array_type(&mut self) -> Result<TypeExpr, ParseError> {
         let start = self.expect(TokenKind::LBracket)?.span.start;
         let elem = self.parse_type()?;
@@ -685,6 +859,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_path_type(&mut self) -> Result<PathType, ParseError> {
+        self.parse_path_type_with_options(true)
+    }
+
+    fn parse_path_type_no_assoc_bindings(&mut self) -> Result<PathType, ParseError> {
+        self.parse_path_type_with_options(false)
+    }
+
+    fn parse_path_type_with_options(
+        &mut self,
+        allow_assoc_bindings: bool,
+    ) -> Result<PathType, ParseError> {
         let start = self.lookahead.span.start;
         let mut segments = Vec::new();
         let first = self.expect_ident()?;
@@ -718,8 +903,55 @@ impl<'a> Parser<'a> {
             });
         }
 
+        let mut assoc_bindings = Vec::new();
+        if allow_assoc_bindings && matches!(self.lookahead.kind, TokenKind::LBrace) {
+            // Assoc bindings are optional. When a `PathType` appears right before an expression
+            // block delimiter (e.g. `match x as? T { ... }`), the `{ ... }` belongs to the outer
+            // grammar, not the type. We speculatively parse bindings and backtrack on failure.
+            let saved_lexer = self.lexer.clone();
+            let saved_lookahead = self.lookahead.clone();
+
+            let mut attempted_bindings = Vec::new();
+            let attempt_end: Result<usize, ParseError> = (|| {
+                self.bump()?; // {
+                while !matches!(self.lookahead.kind, TokenKind::RBrace) {
+                    let b_start = self.lookahead.span.start;
+                    let name = self.expect_ident()?;
+                    self.expect(TokenKind::Assign)?;
+                    let ty = self.parse_type()?;
+                    let b_end = ty.span().end;
+                    attempted_bindings.push(AssocTypeBinding {
+                        name,
+                        ty,
+                        span: Span::new(b_start, b_end),
+                    });
+                    if matches!(self.lookahead.kind, TokenKind::Comma) {
+                        self.bump()?;
+                        if matches!(self.lookahead.kind, TokenKind::RBrace) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                Ok(self.expect(TokenKind::RBrace)?.span.end)
+            })();
+
+            match attempt_end {
+                Ok(new_end) => {
+                    assoc_bindings = attempted_bindings;
+                    end = new_end;
+                }
+                Err(_) => {
+                    self.lexer = saved_lexer;
+                    self.lookahead = saved_lookahead;
+                }
+            }
+        }
+
         Ok(PathType {
             segments,
+            assoc_bindings,
             span: Span::new(start, end),
         })
     }

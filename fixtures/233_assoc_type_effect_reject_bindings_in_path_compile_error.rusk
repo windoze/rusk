@@ -1,0 +1,11 @@
+// expect: compile_error associated type bindings are not supported in effect calls yet
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+fn main() -> unit {
+    let _ = @Iterator{Item = int}.next();
+}
+

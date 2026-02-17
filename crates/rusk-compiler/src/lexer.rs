@@ -34,6 +34,7 @@ pub enum TokenKind {
     KwEnum,
     KwInterface,
     KwImpl,
+    KwType,
     KwIf,
     KwElse,
     KwMatch,
@@ -108,6 +109,7 @@ impl fmt::Display for LexError {
 
 impl std::error::Error for LexError {}
 
+#[derive(Clone)]
 pub struct Lexer<'a> {
     src: &'a str,
     pos: usize,
@@ -369,6 +371,7 @@ impl<'a> Lexer<'a> {
             "enum" => TokenKind::KwEnum,
             "interface" => TokenKind::KwInterface,
             "impl" => TokenKind::KwImpl,
+            "type" => TokenKind::KwType,
             "if" => TokenKind::KwIf,
             "else" => TokenKind::KwElse,
             "match" => TokenKind::KwMatch,

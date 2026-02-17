@@ -1,0 +1,20 @@
+// expect: compile_error implementation defines `Item` as `int`
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+struct S {}
+
+impl Iterator for S {
+    type Item = int;
+    fn next() -> Option<int> { Option::None }
+}
+
+fn main() -> int {
+    let s = S {};
+    let _it: Iterator{Item = string} = s as Iterator{Item = string};
+    0
+}
+

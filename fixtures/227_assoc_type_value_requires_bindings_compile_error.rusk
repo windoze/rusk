@@ -1,0 +1,11 @@
+// expect: compile_error must be used with bindings
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+fn f(_x: Iterator) -> int { 0 }
+
+fn main() -> int { 0 }
+

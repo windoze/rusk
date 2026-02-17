@@ -1,0 +1,30 @@
+// expect: ok int 42
+
+interface I {
+    type A;
+    fn a() -> Self::A;
+}
+
+interface J: I {
+    type B;
+    fn b() -> Self::B;
+}
+
+struct S {}
+
+impl J for S {
+    type A = int;
+    type B = string;
+
+    fn a() -> int { 42 }
+    fn b() -> string { "ok" }
+}
+
+fn main() -> int {
+    let s = S {};
+    let j: J{A = int, B = string} = s as J{A = int, B = string};
+    let a = j.a();
+    let b = j.b();
+    if b == "ok" { a } else { 0 }
+}
+

@@ -1,0 +1,33 @@
+// expect: ok int 111
+
+interface I {
+    fn clone() -> Self;
+    fn eq(other: Self) -> bool;
+
+    fn clone_eq() -> bool {
+        self.clone().eq(self.clone())
+    }
+}
+
+interface J: I {
+    fn clone_eq2() -> bool {
+        self.clone_eq() && self.clone_eq()
+    }
+}
+
+struct S { x: int }
+
+impl J for S {
+    fn clone() -> Self { S { x: self.x } }
+    fn eq(other: Self) -> bool { self.x == other.x }
+}
+
+fn main() -> int {
+    let s = S { x: 1 };
+    let a = (s as I).clone_eq();
+    let b = (s as J).clone_eq();
+    let c = (s as J).clone_eq2();
+
+    (if a { 1 } else { 0 }) + (if b { 10 } else { 0 }) + (if c { 100 } else { 0 })
+}
+

@@ -1,0 +1,20 @@
+// expect: compile_error does not support interface types with associated type bindings yet
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+struct S {}
+
+impl Iterator for S {
+    type Item = int;
+    fn next() -> Option<int> { Option::None }
+}
+
+fn main() -> int {
+    let s = S {};
+    let _ = s as? Iterator{Item = int};
+    0
+}
+

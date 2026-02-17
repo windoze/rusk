@@ -1,0 +1,21 @@
+// expect: compile_error not dynamically dispatchable
+
+interface Clone {
+    fn clone() -> Self;
+}
+
+struct S {}
+
+impl Clone for S {
+    fn clone() -> Self { S {} }
+}
+
+fn call_clone<T: Clone>(x: T) -> int {
+    let _ = x.clone();
+    0
+}
+
+fn main() -> int {
+    call_clone(S {})
+}
+

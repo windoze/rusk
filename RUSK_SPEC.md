@@ -52,7 +52,7 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `impl`
+`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `impl`, `type`
 
 Control flow:
 
@@ -165,7 +165,10 @@ Interfaces define:
 InterfaceItem  := "interface" Ident GenericParams?
                  ( ":" PathType ( "+" PathType )* )?
                  "{" InterfaceMember* "}" ;
-InterfaceMember:= ("readonly")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
+InterfaceMember:= AssocTypeDecl | InterfaceMethodMember ;
+AssocTypeDecl   := "type" Ident ";" ;
+InterfaceMethodMember
+               := ("readonly")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
                   ( ";" | Block ) ;
 ```
 
@@ -186,7 +189,10 @@ ImplItem       := "impl" ImplHeader "{" ImplMember* "}" ;
 ImplHeader     := Ident GenericArgs?                    // inherent impl: impl Type { ... }
                | Ident GenericArgs? "for" Ident GenericArgs? ; // interface impl: impl Interface for Type { ... }
 
-ImplMember     := ("readonly" | "static")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? Block ;
+ImplMember     := ImplAssocTypeDef | ImplMethod ;
+ImplAssocTypeDef
+               := "type" Ident "=" Type ";" ;           // only in `impl Interface for Type { ... }`
+ImplMethod     := ("readonly" | "static")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType? Block ;
 ```
 
 Notes:
@@ -279,6 +285,12 @@ TypeAtom       := PrimType
 PrimType       := "unit" | "bool" | "int" | "float" | "string" | "bytes" ;
 
 PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
+              | Ident GenericArgs? ("::" Ident GenericArgs?)* AssocBindings ;
+
+AssocBindings  := "{" AssocBindingList? "}" ;
+AssocBindingList
+              := AssocBinding ("," AssocBinding)* (",")? ;
+AssocBinding   := Ident "=" Type ;
 ```
 
 Notes:
@@ -736,6 +748,10 @@ Methods have an **implicit receiver**:
 - A non-`readonly` (mutable) method cannot be called on a `readonly T` receiver; a `readonly fn` method can be called on both `T` and `readonly T` receivers.
 - `static fn m(...)` declares a receiver-less method, callable only as `Type::m(...)`. Static methods are allowed only in inherent `impl Type { ... }` blocks.
 - Interface members may provide a body (`{ ... }`) as a **default method**. An `impl` may omit methods that have defaults.
+- `Self` is a special type placeholder:
+  - In interface definitions, `Self` denotes the implementing type.
+  - In instance-method contexts, `Self` denotes the receiver’s nominal type.
+  - `Self` is not allowed in free functions or struct/enum definitions.
 
 ### 6.1 Interface Methods (non-effect calls)
 
@@ -760,6 +776,16 @@ resolved by the compiler based on the selected `impl`.
 
 If the static receiver type is an `interface` type (or an interface-constrained generic), the call
 is dynamically dispatched at runtime based on the receiver’s dynamic type.
+
+Dyn dispatch eligibility (“object safety”) is a **signature property**:
+
+- A method is **dynamically dispatchable** iff its signature does **not** mention the **bare** `Self`
+  type outside the receiver position.
+- A method that mentions the **bare** `Self` in parameter/return position is **Self-only**:
+  - it can be called only with a concrete nominal receiver type (static dispatch),
+  - it is rejected on interface-typed receivers and interface-constrained generics, since those
+    call sites require dynamic dispatch.
+  Associated type projections like `Self::Item` do not make a method Self-only.
 
 Method-call sugar is allowed:
 
@@ -794,6 +820,11 @@ Resolution rules:
 1. Inherent methods on the receiver’s nominal type
 2. Interface methods (if unambiguous)
 3. Otherwise: error
+
+Inside an interface default method body, method-call sugar on the reserved receiver `self`
+resolves within the current interface method set before considering inherent methods on the
+implementing type. This prevents default bodies from accidentally calling an inherent method with
+the same name.
 
 ### 6.3 Overloading
 
@@ -837,8 +868,84 @@ Rules:
   inherited methods with the same origin are treated as a single method.
 - In v0.4, multiple inheritance is rejected if two unrelated origins introduce the same method name.
 - `impl X for T { ... }` must implement every method in `X`’s full method set (including inherited ones), **except** methods that have a default body in the origin interface.
+- Default method bodies are specialized per `impl` (conceptually: “as if the user wrote the method
+  in the impl”). Therefore a dyn-dispatchable default method may call Self-only methods internally,
+  and its dyn-dispatchability still depends only on its signature.
 - `expr as I` performs an explicit upcast to an interface type. Upcasts are the primary mechanism for
   producing interface-typed values without introducing implicit subtyping into inference.
+
+### 6.5 Associated Types
+
+Interfaces may declare **associated types**:
+
+```rust
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+```
+
+An interface impl must define every associated type in the interface’s *full* associated-type set
+(including inherited ones):
+
+```rust
+impl Iterator for Range {
+    type Item = int;
+    fn next() -> Option<int> { ... }
+}
+```
+
+Rules (v0.4):
+
+- `type` is a keyword and cannot be used as an identifier.
+- `Self` is reserved and cannot be used as an associated type name.
+- `impl I for T { ... }` must define each required associated type exactly once:
+  - missing definitions are rejected
+  - unknown/extra associated types are rejected
+  - duplicates are rejected
+- In this stage, an associated type definition must not reference other associated type projections
+  (no normalization/cycle handling yet).
+
+#### 6.5.1 Associated Type Projections
+
+Within an interface definition and its impls, `Self::Assoc` denotes the associated type `Assoc` of
+the implementing type for that interface.
+
+Outside those contexts, `Self::Assoc` is not available; use a **qualified projection**:
+
+```rust
+Iterator::Item<T>
+```
+
+This denotes the `Item` associated type of the `Iterator` impl for `T`.
+
+Well-formedness:
+
+- `I::Assoc<T>` requires that `T` implements `I` (either via a visible nominal `impl` or a bound
+  `T: I` / `T: I{...}` in scope).
+
+#### 6.5.2 Interface Value Types with Associated Type Bindings
+
+If an interface declares at least one associated type, using it as a **value type** requires
+binding all associated types:
+
+```rust
+let it: Iterator{Item = int} = Range {} as Iterator{Item = int};
+```
+
+Notes:
+
+- `Iterator` (without `{...}`) is still allowed in bounds (`T: Iterator`), but it is not a valid
+  interface value type in v0.4 when the interface declares associated types.
+- For interfaces with no associated types, `{...}` bindings are rejected.
+
+Calls:
+
+- If `x: I{Assoc = T}`, then in method signatures, occurrences of `Self::Assoc` are substituted with
+  `T` at the call site.
+- Upcasts `expr as I{...}` are allowed only when the source type’s associated type definitions (or
+  the bound’s bindings) match the requested bindings.
+- Runtime checks `is` / `as?` do **not** support `I{...}` targets in v0.4.
 
 Initial-stage coherence restriction (“no specialization yet”):
 
@@ -873,6 +980,12 @@ may be omitted:
 @Yield.yield(1) // infers `Yield<int>`
 ```
 
+Associated type bindings are not supported in effect call paths in v0.4:
+
+```rust
+@Iterator{Item = int}.next() // rejected
+```
+
 Effect identity is based on:
 
 - the **origin interface** of the method,
@@ -884,6 +997,15 @@ For inherited interface methods, the origin interface is used for identity. For 
 `@I<int>.foo(...)` (origin canonicalization + the same instantiated arguments).
 
 Method-generic effect operations such as `@I.foo<U>(...)` are deferred in the initial stage.
+
+Effect signature restrictions (v0.4):
+
+- Effect operations are declared using interface methods, but not every interface method is a valid
+  effect operation in this stage.
+- In particular, the parameter and return types of an effect operation must be runtime-reifiable
+  value types and must **not** mention:
+  - the bare `Self` type, or
+  - any associated type projection (`Self::Assoc` or `I::Assoc<T>`).
 
 Semantics:
 

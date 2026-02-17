@@ -164,7 +164,19 @@ pub struct UseItem {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct InterfaceMember {
+pub enum InterfaceMember {
+    AssocType(AssocTypeDecl),
+    Method(InterfaceMethodMember),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssocTypeDecl {
+    pub name: Ident,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InterfaceMethodMember {
     pub readonly: bool,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
@@ -179,7 +191,20 @@ pub struct InterfaceMember {
 pub struct ImplItem {
     pub generics: Vec<GenericParam>,
     pub header: ImplHeader,
-    pub members: Vec<FnItem>,
+    pub members: Vec<ImplMember>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImplMember {
+    AssocType(AssocTypeDef),
+    Method(FnItem),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssocTypeDef {
+    pub name: Ident,
+    pub ty: TypeExpr,
     pub span: Span,
 }
 
@@ -269,6 +294,10 @@ pub enum PrimType {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathType {
     pub segments: Vec<PathTypeSegment>,
+    /// Optional associated type bindings (interface types only).
+    ///
+    /// Syntax: `I{Item = int, ...}` or `I<T>{Item = int, ...}`.
+    pub assoc_bindings: Vec<AssocTypeBinding>,
     pub span: Span,
 }
 
@@ -276,6 +305,13 @@ pub struct PathType {
 pub struct PathTypeSegment {
     pub name: Ident,
     pub args: Vec<TypeExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssocTypeBinding {
+    pub name: Ident,
+    pub ty: TypeExpr,
     pub span: Span,
 }
 

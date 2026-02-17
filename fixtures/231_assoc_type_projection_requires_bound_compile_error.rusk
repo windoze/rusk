@@ -1,0 +1,11 @@
+// expect: compile_error requires a bound `T`
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+fn bad<T>(_x: T) -> Iterator::Item<T> { 0 }
+
+fn main() -> int { 0 }
+

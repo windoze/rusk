@@ -1,0 +1,23 @@
+// expect: ok bool true
+
+interface CloneEq {
+    fn clone() -> Self;
+    fn eq(other: Self) -> bool;
+
+    fn clone_eq() -> bool {
+        self.clone().eq(self.clone())
+    }
+}
+
+struct S { x: int }
+
+impl CloneEq for S {
+    fn clone() -> Self { S { x: self.x } }
+    fn eq(other: Self) -> bool { self.x == other.x }
+}
+
+fn main() -> bool {
+    let s = S { x: 7 };
+    (s as CloneEq).clone_eq()
+}
+

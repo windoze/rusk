@@ -1,0 +1,18 @@
+// expect: compile_error unknown associated type `Foo`
+
+interface Iterator {
+    type Item;
+    fn next() -> Option<Self::Item>;
+}
+
+struct S {}
+
+impl Iterator for S {
+    type Item = int;
+    type Foo = int;
+
+    fn next() -> Option<int> { Option::None }
+}
+
+fn main() -> int { 0 }
+

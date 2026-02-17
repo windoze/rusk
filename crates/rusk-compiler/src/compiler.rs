@@ -1,6 +1,7 @@
 use crate::ast::{
-    BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, ImplHeader, ImplItem, Item, MatchArm,
-    MatchPat, MethodReceiverKind, PatLiteral, Pattern as AstPattern, Program, Stmt, UnaryOp,
+    BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, ImplHeader, ImplItem, ImplMember, Item,
+    MatchArm, MatchPat, MethodReceiverKind, PatLiteral, Pattern as AstPattern, Program, Stmt,
+    UnaryOp,
 };
 use crate::host::CompileOptions;
 use crate::modules::{DefKind, ModuleLoader, ModulePath};
@@ -1162,6 +1163,20 @@ impl Compiler {
 
     fn populate_interface_dispatch_table(&mut self) -> Result<(), CompileError> {
         for ((type_name, origin_iface, method_name), impl_fn) in &self.env.interface_methods {
+            // Only dyn-dispatchable interface methods participate in the runtime dispatch table.
+            //
+            // Methods that mention `Self` in non-receiver positions are compile-time-only
+            // (statically dispatched on concrete receiver types).
+            let dyn_dispatchable = self
+                .env
+                .interfaces
+                .get(origin_iface)
+                .and_then(|iface| iface.all_methods.get(method_name))
+                .is_some_and(|m| typeck::interface_method_sig_is_dyn_dispatchable(&m.sig));
+            if !dyn_dispatchable {
+                continue;
+            }
+
             let method_id = format!("{origin_iface}::{method_name}");
             let key = (type_name.clone(), method_id);
             let Some(impl_id) = self.module.function_id(impl_fn.as_str()) else {
@@ -1978,31 +1993,7 @@ impl Compiler {
                         }
                     }
                 }
-                Item::Interface(iface) => {
-                    let iface_name = module.qualify(&iface.name.name);
-                    for member in &iface.members {
-                        let Some(body) = &member.body else {
-                            continue;
-                        };
-                        let default_fn_name =
-                            format!("$default::{iface_name}::{}", member.name.name);
-                        let synthetic = FnItem {
-                            vis: crate::ast::Visibility::Private,
-                            kind: FnItemKind::Method {
-                                receiver: MethodReceiverKind::Instance {
-                                    readonly: member.readonly,
-                                },
-                            },
-                            name: member.name.clone(),
-                            generics: member.generics.clone(),
-                            params: member.params.clone(),
-                            ret: member.ret.clone(),
-                            body: body.clone(),
-                            span: member.span,
-                        };
-                        self.compile_real_function(module, &synthetic, Some(default_fn_name))?;
-                    }
-                }
+                Item::Interface(_) => {}
                 Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {}
             }
         }
@@ -2023,7 +2014,10 @@ impl Compiler {
                     .modules
                     .resolve_type_fqn(module, &segments, ty.span)
                     .map_err(|e| CompileError::new(e.message, e.span))?;
-                for method in &imp.members {
+                for member in &imp.members {
+                    let ImplMember::Method(method) = member else {
+                        continue;
+                    };
                     let name_override = format!("{type_name}::{}", method.name.name);
                     self.compile_real_function(module, method, Some(name_override))?;
                 }
@@ -2046,21 +2040,30 @@ impl Compiler {
                     .modules
                     .resolve_type_fqn(module, &type_segments, ty.span)
                     .map_err(|e| CompileError::new(e.message, e.span))?;
-                for method in &imp.members {
+                for member in &imp.members {
+                    let ImplMember::Method(method) = member else {
+                        continue;
+                    };
                     let mname = &method.name.name;
                     let name_override = format!("impl::{iface_name}::for::{type_name}::{mname}");
                     self.compile_real_function(module, method, Some(name_override))?;
                 }
 
-                // Synthesize wrappers for omitted default interface methods.
+                // Synthesize real implementations for omitted default interface methods.
                 let Some(iface_def) = self.env.interfaces.get(&iface_name) else {
                     return Err(CompileError::new(
                         format!("internal error: unknown interface `{iface_name}`"),
                         imp.span,
                     ));
                 };
-                let implemented: std::collections::BTreeSet<&str> =
-                    imp.members.iter().map(|m| m.name.name.as_str()).collect();
+                let implemented: std::collections::BTreeSet<&str> = imp
+                    .members
+                    .iter()
+                    .filter_map(|m| match m {
+                        ImplMember::Method(method) => Some(method.name.name.as_str()),
+                        ImplMember::AssocType(_) => None,
+                    })
+                    .collect();
                 let all_methods: Vec<(String, typeck::InterfaceMethod)> = iface_def
                     .all_methods
                     .iter()
@@ -2070,152 +2073,44 @@ impl Compiler {
                     if !info.has_default || implemented.contains(mname.as_str()) {
                         continue;
                     }
-                    let wrapper_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-                    if self.module.function_ids.contains_key(&wrapper_name) {
+                    let impl_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
+                    if self.module.function_ids.contains_key(&impl_name) {
                         continue;
                     }
-                    let default_name = format!("$default::{}::{mname}", info.origin);
-                    let origin_arity = self
+                    let Some(template) = info.default_template.as_ref() else {
+                        return Err(CompileError::new(
+                            format!(
+                                "internal error: missing default template for `{}`",
+                                info.origin
+                            ),
+                            imp.span,
+                        ));
+                    };
+                    let origin_module = self
                         .env
-                        .interfaces
-                        .get(&info.origin)
-                        .map(|d| d.generics.len())
-                        .unwrap_or(0);
-                    self.compile_default_method_wrapper(
-                        module,
-                        &wrapper_name,
-                        &default_name,
-                        origin_arity,
-                        info.sig.generics.len(),
+                        .modules
+                        .def(&info.origin)
+                        .map(|d| d.defining_module.clone())
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                format!(
+                                    "internal error: missing module for interface `{}`",
+                                    info.origin
+                                ),
+                                imp.span,
+                            )
+                        })?;
+                    let synthesized =
+                        typeck::synthesize_default_method_fn_item(info.receiver_readonly, template);
+                    self.compile_real_function_with_options(
+                        &origin_module,
+                        &synthesized,
+                        Some(impl_name),
+                        Some(info.origin),
                     )?;
                 }
             }
         }
-        Ok(())
-    }
-
-    fn compile_default_method_wrapper(
-        &mut self,
-        module: &ModulePath,
-        wrapper_name: &str,
-        default_target: &str,
-        origin_iface_arity: usize,
-        method_generics_len: usize,
-    ) -> Result<(), CompileError> {
-        let sig = self.env.functions.get(wrapper_name).ok_or_else(|| {
-            CompileError::new(
-                format!("internal error: missing signature for `{wrapper_name}`"),
-                Span::new(0, 0),
-            )
-        })?;
-        let sig = sig.clone();
-
-        if !self.env.functions.contains_key(default_target) {
-            return Err(CompileError::new(
-                format!("internal error: missing default method `{default_target}`"),
-                Span::new(0, 0),
-            ));
-        }
-
-        let value_param_mutabilities: Vec<Mutability> = sig
-            .params
-            .iter()
-            .map(|ty| match ty {
-                Ty::Readonly(_) => Mutability::Readonly,
-                _ => Mutability::Mutable,
-            })
-            .collect();
-        let value_param_types: Vec<Option<Type>> = {
-            let env = &self.env;
-            sig.params
-                .iter()
-                .map(|ty| mir_type_from_ty(env, ty))
-                .collect()
-        };
-
-        let mut lowerer = FunctionLowerer::new(
-            self,
-            FnKind::Real,
-            module.clone(),
-            wrapper_name.to_string(),
-            sig.generics.clone(),
-        );
-        lowerer.bind_type_rep_params_for_signature();
-
-        let mut value_param_locals = Vec::with_capacity(sig.params.len());
-        for (mutability, ty) in value_param_mutabilities
-            .into_iter()
-            .zip(value_param_types.into_iter())
-        {
-            let local = lowerer.alloc_local();
-            lowerer.params.push(Param {
-                local,
-                mutability,
-                ty,
-            });
-            value_param_locals.push(local);
-        }
-
-        let impl_arity = sig
-            .generics
-            .len()
-            .checked_sub(method_generics_len)
-            .ok_or_else(|| {
-                CompileError::new(
-                    "internal error: wrapper method generics length mismatch",
-                    Span::new(0, 0),
-                )
-            })?;
-
-        let mut call_args = Vec::new();
-        for gen_idx in 0..origin_iface_arity {
-            let Some(local) = lowerer.generic_type_reps.get(gen_idx).and_then(|l| *l) else {
-                return Err(CompileError::new(
-                    "internal error: missing interface generic type rep in wrapper",
-                    Span::new(0, 0),
-                ));
-            };
-            call_args.push(Operand::Local(local));
-        }
-        for i in 0..method_generics_len {
-            let gen_idx = impl_arity + i;
-            if sig.generics.get(gen_idx).is_some_and(|gp| gp.arity == 0) {
-                let Some(local) = lowerer.generic_type_reps.get(gen_idx).and_then(|l| *l) else {
-                    return Err(CompileError::new(
-                        "internal error: missing method generic type rep in wrapper",
-                        Span::new(0, 0),
-                    ));
-                };
-                call_args.push(Operand::Local(local));
-            }
-        }
-
-        let Some((&recv_local, arg_locals)) = value_param_locals.split_first() else {
-            return Err(CompileError::new(
-                "internal error: wrapper missing receiver param",
-                Span::new(0, 0),
-            ));
-        };
-        call_args.push(Operand::Local(recv_local));
-        for &local in arg_locals {
-            call_args.push(Operand::Local(local));
-        }
-
-        let dst = lowerer.alloc_local();
-        lowerer.emit(Instruction::Call {
-            dst: Some(dst),
-            func: default_target.to_string(),
-            args: call_args,
-        });
-        lowerer.set_terminator(Terminator::Return {
-            value: Operand::Local(dst),
-        })?;
-
-        let mut mir_fn = lowerer.finish()?;
-        mir_fn.ret_type = mir_type_from_ty(&self.env, &sig.ret);
-        self.module.add_function(mir_fn).map_err(|message| {
-            CompileError::new(format!("internal error: {message}"), Span::new(0, 0))
-        })?;
         Ok(())
     }
 
@@ -2224,6 +2119,16 @@ impl Compiler {
         module: &ModulePath,
         func: &FnItem,
         name_override: Option<String>,
+    ) -> Result<(), CompileError> {
+        self.compile_real_function_with_options(module, func, name_override, None)
+    }
+
+    fn compile_real_function_with_options(
+        &mut self,
+        module: &ModulePath,
+        func: &FnItem,
+        name_override: Option<String>,
+        prefer_interface_methods_for_self: Option<String>,
     ) -> Result<(), CompileError> {
         let name = name_override.unwrap_or_else(|| module.qualify(&func.name.name));
         if self.module.function_ids.contains_key(&name) {
@@ -2267,6 +2172,7 @@ impl Compiler {
             name.clone(),
             sig.generics.clone(),
         );
+        lowerer.prefer_interface_methods_for_self = prefer_interface_methods_for_self;
         lowerer.bind_type_rep_params_for_signature();
         lowerer.bind_params_from_fn_item(func, &param_mutabilities, &param_types)?;
         lowerer.compute_captured_vars_for_block(&func.body);
@@ -2362,30 +2268,28 @@ impl Compiler {
         &mut self,
         module: &ModulePath,
         entry_name: String,
+        type_info_name: String,
+        prefer_interface_methods_for_self: Option<String>,
         generics: Vec<typeck::GenericParamInfo>,
         captures: &BTreeMap<String, VarInfo>,
         lambda_params: &[crate::ast::LambdaParam],
+        lambda_param_tys: Vec<Ty>,
         body: &Block,
         lambda_expr_span: Span,
     ) -> Result<(), CompileError> {
-        // Signature of the lambda expression (includes inferred readonly on params).
-        let param_tys = match self.types.expr_types.get(&lambda_expr_span) {
-            Some(Ty::Fn { params, .. }) => params.clone(),
-            other => {
-                return Err(CompileError::new(
-                    format!("internal error: expected fn type for lambda, got {other:?}"),
-                    lambda_expr_span,
-                ));
-            }
-        };
-
-        let mut lowerer = FunctionLowerer::new(
+        // Keep `name` as the MIR function name (`entry_name`), but read types using the parent
+        // function that contained the lambda expression.
+        //
+        // Lambda bodies are typechecked as part of the parent function.
+        let mut lowerer = FunctionLowerer::new_with_type_info(
             self,
             FnKind::Real,
             module.clone(),
             entry_name.clone(),
+            type_info_name,
             generics,
         );
+        lowerer.prefer_interface_methods_for_self = prefer_interface_methods_for_self;
 
         // First param: env array.
         let env_local = lowerer.alloc_local();
@@ -2396,7 +2300,7 @@ impl Compiler {
         });
 
         // Lambda params.
-        if lambda_params.len() != param_tys.len() {
+        if lambda_params.len() != lambda_param_tys.len() {
             return Err(CompileError::new(
                 "internal error: lambda param arity mismatch",
                 lambda_expr_span,
@@ -2405,7 +2309,7 @@ impl Compiler {
 
         for (idx, _p) in lambda_params.iter().enumerate() {
             let local = lowerer.alloc_local();
-            let mutability = match &param_tys[idx] {
+            let mutability = match &lambda_param_tys[idx] {
                 Ty::Readonly(_) => Mutability::Readonly,
                 _ => Mutability::Mutable,
             };
@@ -2480,19 +2384,23 @@ impl Compiler {
         &mut self,
         module: &ModulePath,
         helper_name: String,
+        type_info_name: String,
+        prefer_interface_methods_for_self: Option<String>,
         generics: Vec<typeck::GenericParamInfo>,
         captured: &BTreeMap<String, VarInfo>,
         scrutinee: &Expr,
         arms: &[MatchArm],
         match_span: Span,
     ) -> Result<(), CompileError> {
-        let mut lowerer = FunctionLowerer::new(
+        let mut lowerer = FunctionLowerer::new_with_type_info(
             self,
             FnKind::ExprHelper,
             module.clone(),
             helper_name.clone(),
+            type_info_name,
             generics,
         );
+        lowerer.prefer_interface_methods_for_self = prefer_interface_methods_for_self;
 
         // Captured environment params (in deterministic name order).
         for (name, info) in captured.iter() {
@@ -2587,6 +2495,18 @@ struct FunctionLowerer<'a> {
     kind: FnKind,
     module: ModulePath,
     name: String,
+    /// Which function's `TypeInfo` should be used to interpret AST spans while lowering.
+    ///
+    /// For "real" functions this is the same as `name`. For compiler-synthesized helper
+    /// functions (lambdas, match helpers) we lower an AST subtree that was typechecked as part of
+    /// a parent function, so we must query types using the parent's name.
+    type_info_name: String,
+    /// If set, method-call sugar on the reserved receiver `self` should resolve within this
+    /// interface method set before considering inherent methods on the concrete type.
+    ///
+    /// This mirrors the typechecker behavior for specialized interface default method bodies
+    /// (proposal §4.5).
+    prefer_interface_methods_for_self: Option<String>,
     /// Generic parameters in scope for interpreting `Ty::Gen(n)` during lowering.
     ///
     /// This must match the typechecker's notion of "current generics environment" for the AST
@@ -2614,12 +2534,26 @@ impl<'a> FunctionLowerer<'a> {
         name: String,
         generics: Vec<typeck::GenericParamInfo>,
     ) -> Self {
+        let type_info_name = name.clone();
+        Self::new_with_type_info(compiler, kind, module, name, type_info_name, generics)
+    }
+
+    fn new_with_type_info(
+        compiler: &'a mut Compiler,
+        kind: FnKind,
+        module: ModulePath,
+        name: String,
+        type_info_name: String,
+        generics: Vec<typeck::GenericParamInfo>,
+    ) -> Self {
         let generic_count = generics.len();
         Self {
             compiler,
             kind,
             module,
             name,
+            type_info_name,
+            prefer_interface_methods_for_self: None,
             generics,
             generic_type_reps: vec![None; generic_count],
             params: Vec::new(),
@@ -3717,7 +3651,14 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn expr_ty(&self, expr: &Expr) -> Option<&Ty> {
-        self.compiler.types.expr_types.get(&expr.span())
+        self.ty_of_span(expr.span())
+    }
+
+    fn ty_of_span(&self, span: Span) -> Option<&Ty> {
+        self.compiler
+            .types
+            .for_fn(self.type_info_name.as_str())
+            .and_then(|info| info.expr_types.get(&span))
     }
 
     fn expr_is_readonly(&self, expr: &Expr) -> bool {
@@ -3745,6 +3686,12 @@ impl<'a> FunctionLowerer<'a> {
     fn lower_type_rep_for_ty(&mut self, ty: &Ty, span: Span) -> Result<Operand, CompileError> {
         let rep = match ty {
             Ty::Readonly(inner) => return self.lower_type_rep_for_ty(inner, span),
+            Ty::SelfType => {
+                return Err(CompileError::new(
+                    "internal error: unresolved `Self` type during lowering",
+                    span,
+                ));
+            }
             Ty::Unit => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Unit)),
             Ty::Bool => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Bool)),
             Ty::Int => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
@@ -3833,6 +3780,34 @@ impl<'a> FunctionLowerer<'a> {
                     });
                     Operand::Local(dst)
                 }
+            }
+            Ty::Iface {
+                iface,
+                args,
+                assoc_bindings: _,
+            } => {
+                let base = TypeRepLit::Interface(iface.clone());
+                if args.is_empty() {
+                    Operand::Literal(ConstValue::TypeRep(base))
+                } else {
+                    let mut arg_reps = Vec::with_capacity(args.len());
+                    for a in args {
+                        arg_reps.push(self.lower_type_rep_for_ty(a, span)?);
+                    }
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::MakeTypeRep {
+                        dst,
+                        base,
+                        args: arg_reps,
+                    });
+                    Operand::Local(dst)
+                }
+            }
+            Ty::AssocProj { .. } => {
+                return Err(CompileError::new(
+                    "cannot reify associated type projections as `TypeRep` in this stage",
+                    span,
+                ));
             }
             Ty::App(typeck::TyCon::Gen(_) | typeck::TyCon::Var(_), _) => {
                 return Err(CompileError::new(
@@ -4159,8 +4134,8 @@ impl<'a> FunctionLowerer<'a> {
                 let interface_arg_tys = self
                     .compiler
                     .types
-                    .effect_interface_args
-                    .get(&(*call_span, effect_id.clone()))
+                    .for_fn(self.type_info_name.as_str())
+                    .and_then(|info| info.effect_interface_args.get(&(*call_span, effect_id.clone())))
                     .cloned()
                     .ok_or_else(|| {
                         CompileError::new(
@@ -4290,7 +4265,7 @@ impl<'a> FunctionLowerer<'a> {
                     .is_some_and(|variant_fields| variant_fields.is_empty())
             {
                 let dst = self.alloc_local();
-                let type_args = match self.compiler.types.expr_types.get(&span) {
+                let type_args = match self.ty_of_span(span) {
                     Some(ty) => match self.strip_readonly_ty(ty) {
                         Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
                         _ => Vec::new(),
@@ -4390,15 +4365,27 @@ impl<'a> FunctionLowerer<'a> {
             })
             .collect::<BTreeMap<_, _>>();
         let entry_name = self.compiler.fresh_internal_name("lambda");
+        let lambda_param_tys = match self.ty_of_span(span) {
+            Some(Ty::Fn { params, .. }) => params.clone(),
+            other => {
+                return Err(CompileError::new(
+                    format!("internal error: expected fn type for lambda, got {other:?}"),
+                    span,
+                ));
+            }
+        };
 
         {
             let compiler = &mut *self.compiler;
             compiler.compile_lambda_entry(
                 &self.module,
                 entry_name.clone(),
+                self.type_info_name.clone(),
+                self.prefer_interface_methods_for_self.clone(),
                 self.generics.clone(),
                 &captures,
                 params,
+                lambda_param_tys,
                 body,
                 span,
             )?;
@@ -5253,7 +5240,7 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 let inner = self.lower_expr(&args[0])?;
 
-                let type_args = match self.compiler.types.expr_types.get(&span) {
+                let type_args = match self.ty_of_span(span) {
                     Some(ty) => match self.strip_readonly_ty(ty) {
                         Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
                         _ => Vec::new(),
@@ -5299,7 +5286,7 @@ impl<'a> FunctionLowerer<'a> {
                                     ops.push(Operand::Local(v));
                                 }
                                 let dst = self.alloc_local();
-                                let type_args = match self.compiler.types.expr_types.get(&span) {
+                                let type_args = match self.ty_of_span(span) {
                                     Some(ty) => match self.strip_readonly_ty(ty) {
                                         Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
                                         _ => Vec::new(),
@@ -5357,8 +5344,8 @@ impl<'a> FunctionLowerer<'a> {
             let type_args = self
                 .compiler
                 .types
-                .call_type_args
-                .get(&call_key)
+                .for_fn(self.type_info_name.as_str())
+                .and_then(|info| info.call_type_args.get(&call_key))
                 .cloned()
                 .unwrap_or_default();
             let mut call_args = Vec::with_capacity(type_args.len() + args.len());
@@ -5493,8 +5480,8 @@ impl<'a> FunctionLowerer<'a> {
             let method_type_args = self
                 .compiler
                 .types
-                .method_type_args
-                .get(&(span, method_id.clone()))
+                .for_fn(self.type_info_name.as_str())
+                .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
                 .cloned()
                 .unwrap_or_default();
             let mut call_args =
@@ -5545,8 +5532,8 @@ impl<'a> FunctionLowerer<'a> {
         let method_type_args = self
             .compiler
             .types
-            .method_type_args
-            .get(&(span, method_id.clone()))
+            .for_fn(self.type_info_name.as_str())
+            .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
             .cloned()
             .unwrap_or_default();
         let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
@@ -5586,6 +5573,28 @@ impl<'a> FunctionLowerer<'a> {
             })?
             .clone();
 
+        // In specialized interface default method bodies, `self.m(...)` must resolve within the
+        // origin interface method set before considering inherent methods. (Proposal §4.5.)
+        let receiver_is_self = matches!(
+            receiver,
+            Expr::Path { path, .. } if path.segments.len() == 1 && path.segments[0].name == "self"
+        );
+        if receiver_is_self
+            && let Some(prefer_iface) = self.prefer_interface_methods_for_self.as_deref()
+            && let Some(iface_def) = self.compiler.env.interfaces.get(prefer_iface)
+            && iface_def.all_methods.contains_key(&method.name)
+        {
+            let mut full_args = Vec::with_capacity(args.len() + 1);
+            full_args.push(receiver.clone());
+            full_args.extend(args.iter().cloned());
+            return self.lower_interface_method_call(
+                prefer_iface.to_string(),
+                method.name.clone(),
+                &full_args,
+                span,
+            );
+        }
+
         // Inherent methods first (if the receiver has a nominal type name).
         if let Some(recv_nom) = nominal_type_name(&recv_ty) {
             let inherent_name = format!("{recv_nom}::{}", method.name);
@@ -5619,8 +5628,8 @@ impl<'a> FunctionLowerer<'a> {
                 let type_args = self
                     .compiler
                     .types
-                    .call_type_args
-                    .get(&call_key)
+                    .for_fn(self.type_info_name.as_str())
+                    .and_then(|info| info.call_type_args.get(&call_key))
                     .cloned()
                     .unwrap_or_default();
                 let mut call_args = Vec::with_capacity(type_args.len() + args.len() + 1);
@@ -5657,8 +5666,10 @@ impl<'a> FunctionLowerer<'a> {
             };
             let mut candidates: BTreeMap<String, String> = BTreeMap::new();
             for bound in &gp.bounds {
-                let Ty::App(crate::typeck::TyCon::Named(iface_name), _args) = bound else {
-                    continue;
+                let iface_name = match bound {
+                    Ty::App(crate::typeck::TyCon::Named(iface_name), _args) => iface_name,
+                    Ty::Iface { iface, .. } => iface,
+                    _ => continue,
                 };
                 let Some(iface_def) = self.compiler.env.interfaces.get(iface_name) else {
                     continue;
@@ -5683,8 +5694,8 @@ impl<'a> FunctionLowerer<'a> {
             let method_type_args = self
                 .compiler
                 .types
-                .method_type_args
-                .get(&(span, method_id.clone()))
+                .for_fn(self.type_info_name.as_str())
+                .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
                 .cloned()
                 .unwrap_or_default();
             let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
@@ -5709,6 +5720,13 @@ impl<'a> FunctionLowerer<'a> {
 
         // Interface-typed receiver => dynamic dispatch within that interface.
         if let Ty::App(typeck::TyCon::Named(iface_name), _args) = recv_for_dispatch
+            && self.compiler.env.interfaces.contains_key(iface_name)
+        {
+            return self.lower_method_vcall(receiver, iface_name, &method.name, args, span);
+        }
+        if let Ty::Iface {
+            iface: iface_name, ..
+        } = recv_for_dispatch
             && self.compiler.env.interfaces.contains_key(iface_name)
         {
             return self.lower_method_vcall(receiver, iface_name, &method.name, args, span);
@@ -5796,8 +5814,8 @@ impl<'a> FunctionLowerer<'a> {
         let method_type_args = self
             .compiler
             .types
-            .method_type_args
-            .get(&(span, method_id.clone()))
+            .for_fn(self.type_info_name.as_str())
+            .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
             .cloned()
             .unwrap_or_default();
 
@@ -5873,8 +5891,8 @@ impl<'a> FunctionLowerer<'a> {
         let method_type_args = self
             .compiler
             .types
-            .method_type_args
-            .get(&(span, method_id.clone()))
+            .for_fn(self.type_info_name.as_str())
+            .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
             .cloned()
             .unwrap_or_default();
         let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
@@ -5942,6 +5960,8 @@ impl<'a> FunctionLowerer<'a> {
             compiler.compile_match_helper(
                 &self.module,
                 helper_name.clone(),
+                self.type_info_name.clone(),
+                self.prefer_interface_methods_for_self.clone(),
                 self.generics.clone(),
                 &captured,
                 scrutinee,
@@ -6102,8 +6122,8 @@ impl<'a> FunctionLowerer<'a> {
             let interface_arg_tys = self
                 .compiler
                 .types
-                .effect_interface_args
-                .get(&(effect_pat.span, effect_id.clone()))
+                .for_fn(self.type_info_name.as_str())
+                .and_then(|info| info.effect_interface_args.get(&(effect_pat.span, effect_id.clone())))
                 .cloned()
                 .ok_or_else(|| {
                     CompileError::new(
@@ -6359,6 +6379,7 @@ fn nominal_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Readonly(inner) => nominal_type_name(inner),
         Ty::App(crate::typeck::TyCon::Named(name), _) => Some(name.as_str()),
+        Ty::Iface { iface, .. } => Some(iface.as_str()),
         _ => None,
     }
 }
@@ -6396,7 +6417,9 @@ fn mir_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Option<Type> {
                 Some(Type::Struct(name.clone()))
             }
         }
-        Ty::App(_, _) | Ty::Gen(_) | Ty::Var(_) => None,
+        Ty::Iface { iface, .. } => Some(Type::Interface(iface.clone())),
+        Ty::AssocProj { .. } => None,
+        Ty::App(_, _) | Ty::Gen(_) | Ty::Var(_) | Ty::SelfType => None,
     }
 }
 
