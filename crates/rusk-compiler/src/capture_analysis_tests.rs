@@ -12,7 +12,7 @@ fn count_index_gets(func: &rusk_mir::Function) -> usize {
 #[test]
 fn lambda_does_not_capture_unused_bindings() {
     let src = r#"
-        fn test() -> int {
+        fn main() -> int {
             const a = 1;
             const b = 2;
             let f = |x: int| { x };
@@ -37,7 +37,7 @@ fn lambda_does_not_capture_unused_bindings() {
 #[test]
 fn lambda_captures_only_used_free_vars() {
     let src = r#"
-        fn test() -> int {
+        fn main() -> int {
             const a = 40;
             const b = 999;
             let f = |x: int| { a + x };
@@ -64,7 +64,7 @@ fn match_helpers_do_not_capture_unused_bindings() {
     let src = r#"
         interface E { fn boom() -> int; }
 
-        fn test() -> int {
+        fn main() -> int {
             const a = 1;
             const b = 2;
             match @E.boom() {

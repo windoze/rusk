@@ -27,6 +27,7 @@
 
 - `cargo check`: Fast compile/type-check during development.
 - `cargo build`: Build the crate (debug by default).
+- `cargo test --all`: Run full test suite across all workspace crates.
 - `cargo test`: Run unit + integration tests.
 - `cargo test <name>`: Run a single test (substring match).
 - `cargo test -p <crate>`: Run tests for a specific workspace crate.
