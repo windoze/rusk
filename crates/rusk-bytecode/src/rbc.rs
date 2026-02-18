@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 4;
+const VERSION_MINOR: u16 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -511,6 +511,17 @@ impl Encoder {
             Intrinsic::BytesToArray => 61,
             Intrinsic::BytesFromArray => 62,
             Intrinsic::StringSlice => 63,
+            Intrinsic::StringFromChars => 65,
+            Intrinsic::StringFromUtf8 => 66,
+            Intrinsic::StringFromUtf8Strict => 67,
+            Intrinsic::StringFromUtf16Le => 68,
+            Intrinsic::StringFromUtf16LeStrict => 69,
+            Intrinsic::StringFromUtf16Be => 70,
+            Intrinsic::StringFromUtf16BeStrict => 71,
+            Intrinsic::HashInt => 72,
+            Intrinsic::HashString => 73,
+            Intrinsic::HashBytes => 74,
+            Intrinsic::HashCombine => 75,
         };
         self.write_u16(tag);
     }
@@ -1378,6 +1389,17 @@ impl<'a> Decoder<'a> {
             61 => Intrinsic::BytesToArray,
             62 => Intrinsic::BytesFromArray,
             63 => Intrinsic::StringSlice,
+            65 => Intrinsic::StringFromChars,
+            66 => Intrinsic::StringFromUtf8,
+            67 => Intrinsic::StringFromUtf8Strict,
+            68 => Intrinsic::StringFromUtf16Le,
+            69 => Intrinsic::StringFromUtf16LeStrict,
+            70 => Intrinsic::StringFromUtf16Be,
+            71 => Intrinsic::StringFromUtf16BeStrict,
+            72 => Intrinsic::HashInt,
+            73 => Intrinsic::HashString,
+            74 => Intrinsic::HashBytes,
+            75 => Intrinsic::HashCombine,
             other => return Err(self.err(format!("invalid Intrinsic tag {other}"))),
         };
         Ok(intr)

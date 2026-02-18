@@ -83,6 +83,19 @@ pub intrinsic fn bytes_from_array(b: readonly [byte]) -> bytes;
 
 // `string` operations.
 pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
+pub intrinsic fn string_from_chars(chars: readonly [char]) -> string;
+pub intrinsic fn string_from_utf8(data: bytes) -> string;
+pub intrinsic fn string_from_utf8_strict(data: bytes) -> Option<string>;
+pub intrinsic fn string_from_utf16_le(data: readonly [int]) -> string;
+pub intrinsic fn string_from_utf16_le_strict(data: readonly [int]) -> Option<string>;
+pub intrinsic fn string_from_utf16_be(data: readonly [int]) -> string;
+pub intrinsic fn string_from_utf16_be_strict(data: readonly [int]) -> Option<string>;
+
+// Hashing.
+pub intrinsic fn hash_int(v: int) -> int;
+pub intrinsic fn hash_string(s: string) -> int;
+pub intrinsic fn hash_bytes(b: bytes) -> int;
+pub intrinsic fn hash_combine(a: int, b: int) -> int;
 
 // Array operations.
 pub intrinsic fn array_len<T>(a: [T]) -> int;

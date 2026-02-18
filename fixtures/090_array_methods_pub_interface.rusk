@@ -1,0 +1,25 @@
+// expect: ok int 97785
+
+fn main() -> int {
+    let xs = [1, 2];
+    xs.push(3);
+    let p = match xs.pop() {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
+
+    xs.insert(1, 9); // [1, 9, 2]
+    let r = xs.remove(2); // => 2, xs = [1, 9]
+
+    xs.resize(5, 7); // [1, 9, 7, 7, 7]
+    let ys = xs.slice(1, 4); // [9, 7, 7]
+    let zs = ys.copy(); // [9, 7, 7]
+    let ws = zs.concat([8]); // [9, 7, 7, 8]
+
+    readonly ro = ws;
+    readonly other = [0];
+    let rs = ro.concat_ro(other); // [9, 7, 7, 8, 0]
+
+    rs[0] * 10000 + rs[1] * 1000 + rs[2] * 100 + rs[3] * 10 + rs[4] + p + r
+}
+

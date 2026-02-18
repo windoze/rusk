@@ -142,7 +142,7 @@
 					<key>comment</key>
 					<string>Primitive types</string>
 					<key>match</key>
-					<string>\b(unit|bool|int|float|string|bytes)\b</string>
+					<string>\b(unit|bool|int|float|byte|char|string|bytes)\b</string>
 					<key>name</key>
 					<string>storage.type.primitive.rusk</string>
 				</dict>

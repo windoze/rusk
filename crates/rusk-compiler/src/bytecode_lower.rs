@@ -252,6 +252,18 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::bytes_from_array" => Intrinsic::BytesFromArray,
 
         "core::intrinsics::string_slice" => Intrinsic::StringSlice,
+        "core::intrinsics::string_from_chars" => Intrinsic::StringFromChars,
+        "core::intrinsics::string_from_utf8" => Intrinsic::StringFromUtf8,
+        "core::intrinsics::string_from_utf8_strict" => Intrinsic::StringFromUtf8Strict,
+        "core::intrinsics::string_from_utf16_le" => Intrinsic::StringFromUtf16Le,
+        "core::intrinsics::string_from_utf16_le_strict" => Intrinsic::StringFromUtf16LeStrict,
+        "core::intrinsics::string_from_utf16_be" => Intrinsic::StringFromUtf16Be,
+        "core::intrinsics::string_from_utf16_be_strict" => Intrinsic::StringFromUtf16BeStrict,
+
+        "core::intrinsics::hash_int" => Intrinsic::HashInt,
+        "core::intrinsics::hash_string" => Intrinsic::HashString,
+        "core::intrinsics::hash_bytes" => Intrinsic::HashBytes,
+        "core::intrinsics::hash_combine" => Intrinsic::HashCombine,
 
         _ => return None,
     })

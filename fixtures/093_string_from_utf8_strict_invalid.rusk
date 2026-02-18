@@ -1,0 +1,11 @@
+// expect: ok int 0
+
+fn main() -> int {
+    readonly arr = [240.to_byte(), 40.to_byte(), 140.to_byte(), 40.to_byte()];
+    let b = bytes::from_array(arr);
+    match string::from_utf8_strict(b) {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    }
+}
+

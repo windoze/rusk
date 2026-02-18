@@ -184,6 +184,19 @@ pub enum Intrinsic {
 
     // `string` operations.
     StringSlice,
+    StringFromChars,
+    StringFromUtf8,
+    StringFromUtf8Strict,
+    StringFromUtf16Le,
+    StringFromUtf16LeStrict,
+    StringFromUtf16Be,
+    StringFromUtf16BeStrict,
+
+    // Hashing.
+    HashInt,
+    HashString,
+    HashBytes,
+    HashCombine,
 }
 
 /// A bytecode call target (internal function vs host import).

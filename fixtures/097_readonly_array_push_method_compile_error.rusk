@@ -1,0 +1,8 @@
+// expect: compile_error cannot call mutable method `array::push`
+
+fn main() -> unit {
+    readonly xs = [1, 2, 3];
+    xs.push(4);
+    ()
+}
+

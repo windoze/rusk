@@ -1,0 +1,8 @@
+// expect: ok string "abhé"
+
+fn main() -> string {
+    let chars = [104.to_char(), 233.to_char()];
+    readonly ro = chars;
+    "ab" + string::from_chars(ro)
+}
+

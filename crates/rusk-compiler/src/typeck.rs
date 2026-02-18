@@ -803,6 +803,153 @@ fn add_prelude(env: &mut ProgramEnv) {
         InherentMethodKind::Instance { readonly: true },
     );
 
+    // `string` construction/decoding helpers (static methods).
+    add_fn(
+        "string::from_chars",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Array(Box::new(Ty::Char))))],
+        Ty::String,
+    );
+    env.inherent_method_kinds
+        .insert("string::from_chars".to_string(), InherentMethodKind::Static);
+
+    add_fn("string::from_utf8", Vec::new(), vec![Ty::Bytes], Ty::String);
+    env.inherent_method_kinds
+        .insert("string::from_utf8".to_string(), InherentMethodKind::Static);
+
+    add_fn(
+        "string::from_utf8_strict",
+        Vec::new(),
+        vec![Ty::Bytes],
+        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::String]),
+    );
+    env.inherent_method_kinds.insert(
+        "string::from_utf8_strict".to_string(),
+        InherentMethodKind::Static,
+    );
+
+    for (name, ret) in [
+        ("string::from_utf16_le", Ty::String),
+        (
+            "string::from_utf16_le_strict",
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::String]),
+        ),
+        ("string::from_utf16_be", Ty::String),
+        (
+            "string::from_utf16_be_strict",
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::String]),
+        ),
+    ] {
+        add_fn(
+            name,
+            Vec::new(),
+            vec![Ty::Readonly(Box::new(Ty::Array(Box::new(Ty::Int))))],
+            ret,
+        );
+        env.inherent_method_kinds
+            .insert(name.to_string(), InherentMethodKind::Static);
+    }
+
+    // Array methods: ergonomic wrappers over `core::intrinsics::array_*`.
+    let array_generics = || {
+        vec![GenericParamInfo {
+            name: "T".to_string(),
+            arity: 0,
+            bounds: Vec::new(),
+            span: span0,
+        }]
+    };
+    let array = |t: Ty| Ty::Array(Box::new(t));
+    let ro = |t: Ty| Ty::Readonly(Box::new(t));
+    let option = |t: Ty| Ty::App(TyCon::Named("Option".to_string()), vec![t]);
+
+    for (name, params, ret, readonly_receiver) in [
+        // Mutating operations.
+        (
+            "array::push",
+            vec![array(Ty::Gen(0)), Ty::Gen(0)],
+            Ty::Unit,
+            false,
+        ),
+        (
+            "array::pop",
+            vec![array(Ty::Gen(0))],
+            option(Ty::Gen(0)),
+            false,
+        ),
+        ("array::clear", vec![array(Ty::Gen(0))], Ty::Unit, false),
+        (
+            "array::insert",
+            vec![array(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
+            Ty::Unit,
+            false,
+        ),
+        (
+            "array::remove",
+            vec![array(Ty::Gen(0)), Ty::Int],
+            Ty::Gen(0),
+            false,
+        ),
+        (
+            "array::resize",
+            vec![array(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
+            Ty::Unit,
+            false,
+        ),
+        (
+            "array::extend",
+            vec![array(Ty::Gen(0)), array(Ty::Gen(0))],
+            Ty::Unit,
+            false,
+        ),
+        // Non-mutating operations.
+        (
+            "array::slice",
+            vec![array(Ty::Gen(0)), Ty::Int, Ty::Int],
+            array(Ty::Gen(0)),
+            false,
+        ),
+        (
+            "array::slice_ro",
+            vec![ro(array(Ty::Gen(0))), Ty::Int, Ty::Int],
+            array(ro(Ty::Gen(0))),
+            true,
+        ),
+        (
+            "array::concat",
+            vec![array(Ty::Gen(0)), array(Ty::Gen(0))],
+            array(Ty::Gen(0)),
+            false,
+        ),
+        (
+            "array::concat_ro",
+            vec![ro(array(Ty::Gen(0))), ro(array(Ty::Gen(0)))],
+            array(ro(Ty::Gen(0))),
+            true,
+        ),
+        // Copying helpers.
+        (
+            "array::copy",
+            vec![array(Ty::Gen(0))],
+            array(Ty::Gen(0)),
+            false,
+        ),
+        (
+            "array::copy_ro",
+            vec![ro(array(Ty::Gen(0)))],
+            array(ro(Ty::Gen(0))),
+            true,
+        ),
+    ] {
+        add_fn(name, array_generics(), params, ret);
+        env.inherent_method_kinds.insert(
+            name.to_string(),
+            InherentMethodKind::Instance {
+                readonly: readonly_receiver,
+            },
+        );
+    }
+
     // Built-in interface impls (used by desugarings).
     let to_string_iface = "core::fmt::ToString";
     for prim in [
@@ -842,6 +989,8 @@ fn add_prelude(env: &mut ProgramEnv) {
         add_ops_impl(env, prim, "core::ops::Rem", "rem");
         add_ops_impl(env, prim, "core::ops::Neg", "neg");
     }
+    // String concatenation.
+    add_ops_impl(env, "string", "core::ops::Add", "add");
 
     // Boolean ops.
     add_ops_impl(env, "bool", "core::ops::Not", "not");
@@ -874,6 +1023,17 @@ fn add_prelude(env: &mut ProgramEnv) {
                 "len".to_string(),
             ),
             format!("impl::{len_iface}::for::{type_name}::len"),
+        );
+    }
+
+    // `core::hash::Hash` for built-in primitive types.
+    let hash_iface = "core::hash::Hash";
+    for prim in ["unit", "bool", "int", "byte", "char", "string", "bytes"] {
+        env.interface_impls
+            .insert((prim.to_string(), hash_iface.to_string()));
+        env.interface_methods.insert(
+            (prim.to_string(), hash_iface.to_string(), "hash".to_string()),
+            format!("impl::{hash_iface}::for::{prim}::hash"),
         );
     }
 }
@@ -1233,6 +1393,56 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
             generic_count: 0,
             params: vec![Ty::String, Ty::Int, option(Ty::Int)],
             ret: Ty::String,
+        },
+        "core::intrinsics::string_from_chars" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![ro(array(Ty::Char))],
+            ret: Ty::String,
+        },
+        "core::intrinsics::string_from_utf8" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes],
+            ret: Ty::String,
+        },
+        "core::intrinsics::string_from_utf8_strict" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes],
+            ret: option(Ty::String),
+        },
+        "core::intrinsics::string_from_utf16_le" | "core::intrinsics::string_from_utf16_be" => {
+            ExpectedIntrinsicSig {
+                generic_count: 0,
+                params: vec![ro(array(Ty::Int))],
+                ret: Ty::String,
+            }
+        }
+        "core::intrinsics::string_from_utf16_le_strict"
+        | "core::intrinsics::string_from_utf16_be_strict" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![ro(array(Ty::Int))],
+            ret: option(Ty::String),
+        },
+
+        // Hashing.
+        "core::intrinsics::hash_int" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::hash_string" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::hash_bytes" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::hash_combine" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int, Ty::Int],
+            ret: Ty::Int,
         },
 
         // Iterator protocol.
@@ -8311,7 +8521,7 @@ impl<'a> FnTypechecker<'a> {
                             _ => unreachable!("covered by match arm"),
                         };
 
-                        let Ty::App(TyCon::Named(type_name), _) = &base else {
+                        let Some(type_name) = nominal_type_name(&base) else {
                             return Err(TypeError {
                                 message: format!(
                                     "operator `{op:?}` requires a concrete nominal type receiver in this stage, got `{base}`"

@@ -59,7 +59,7 @@ contexts:
 
   types:
     # Primitive types
-    - match: '\b(unit|bool|int|float|string|bytes)\b'
+    - match: '\b(unit|bool|int|float|byte|char|string|bytes)\b'
       scope: storage.type.primitive.rusk
 
     # Type names (capitalized identifiers)

@@ -747,7 +747,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### Intrinsics (`u16`)
 
-Intrinsics use `u16` tags `0..=64`:
+Intrinsics use `u16` tags `0..=75`:
 
 - `0`: `StringConcat`
 - `1`: `ToString`
@@ -813,6 +813,18 @@ Intrinsics use `u16` tags `0..=64`:
 - `61`: `BytesToArray`
 - `62`: `BytesFromArray`
 - `63`: `StringSlice`
+- `64`: `BytesLen`
+- `65`: `StringFromChars`
+- `66`: `StringFromUtf8`
+- `67`: `StringFromUtf8Strict`
+- `68`: `StringFromUtf16Le`
+- `69`: `StringFromUtf16LeStrict`
+- `70`: `StringFromUtf16Be`
+- `71`: `StringFromUtf16BeStrict`
+- `72`: `HashInt`
+- `73`: `HashString`
+- `74`: `HashBytes`
+- `75`: `HashCombine`
 - `64`: `BytesLen`
 
 #### Call targets (`u8`)

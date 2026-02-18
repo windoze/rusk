@@ -1,0 +1,15 @@
+// expect: ok bool true
+
+struct Point { x: int, y: int }
+
+impl core::hash::Hash for Point {
+    readonly fn hash() -> int {
+        core::hash::combine(self.x.hash(), self.y.hash())
+    }
+}
+
+fn main() -> bool {
+    let p = Point { x: 1, y: 2 };
+    p.hash() == core::hash::combine(1.hash(), 2.hash())
+}
+

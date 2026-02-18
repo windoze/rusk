@@ -1370,6 +1370,36 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             vec![HostType::String, HostType::Int, HostType::Any],
             HostType::String,
         )),
+        "core::intrinsics::string_from_chars" => Some(sig(
+            vec![HostType::Array(Box::new(HostType::Any))],
+            HostType::String,
+        )),
+        "core::intrinsics::string_from_utf8" => Some(sig(vec![HostType::Bytes], HostType::String)),
+        "core::intrinsics::string_from_utf8_strict" => Some(sig(
+            vec![HostType::Bytes],
+            // `Option<string>`
+            HostType::Any,
+        )),
+        "core::intrinsics::string_from_utf16_le" | "core::intrinsics::string_from_utf16_be" => {
+            Some(sig(
+                vec![HostType::Array(Box::new(HostType::Any))],
+                HostType::String,
+            ))
+        }
+        "core::intrinsics::string_from_utf16_le_strict"
+        | "core::intrinsics::string_from_utf16_be_strict" => Some(sig(
+            vec![HostType::Array(Box::new(HostType::Any))],
+            // `Option<string>`
+            HostType::Any,
+        )),
+
+        // Hashing.
+        "core::intrinsics::hash_int" => Some(sig(vec![HostType::Int], HostType::Int)),
+        "core::intrinsics::hash_string" => Some(sig(vec![HostType::String], HostType::Int)),
+        "core::intrinsics::hash_bytes" => Some(sig(vec![HostType::Bytes], HostType::Int)),
+        "core::intrinsics::hash_combine" => {
+            Some(sig(vec![HostType::Int, HostType::Int], HostType::Int))
+        }
 
         // Array operations.
         "core::intrinsics::array_len" | "core::intrinsics::array_len_ro" => Some(sig(
@@ -1704,6 +1734,12 @@ impl Compiler {
                 )?;
             }
         }
+        let _ = synthesize_ops_wrapper(
+            self,
+            "impl::core::ops::Add::for::string::add",
+            &[Mutability::Readonly, Mutability::Readonly],
+            "core::intrinsics::string_concat",
+        )?;
 
         // Negation: int/float.
         for (prim, prefix, zero) in [
@@ -1856,6 +1892,394 @@ impl Compiler {
             }
         }
 
+        // `core::hash::Hash` impls for built-in primitive types.
+        let _ = synthesize_ops_wrapper(
+            self,
+            "impl::core::hash::Hash::for::int::hash",
+            &[Mutability::Readonly],
+            "core::intrinsics::hash_int",
+        )?;
+        let _ = synthesize_ops_wrapper(
+            self,
+            "impl::core::hash::Hash::for::string::hash",
+            &[Mutability::Readonly],
+            "core::intrinsics::hash_string",
+        )?;
+        let _ = synthesize_ops_wrapper(
+            self,
+            "impl::core::hash::Hash::for::bytes::hash",
+            &[Mutability::Readonly],
+            "core::intrinsics::hash_bytes",
+        )?;
+
+        // `byte`/`char` hash via conversion to `int` and `hash_int`.
+        for (prim, conv_intr) in [
+            ("byte", "core::intrinsics::byte_to_int"),
+            ("char", "core::intrinsics::char_to_int"),
+        ] {
+            let name = format!("impl::core::hash::Hash::for::{prim}::hash");
+            if self.module.function_ids.contains_key(name.as_str()) {
+                continue;
+            }
+
+            let mut lowerer =
+                FunctionLowerer::new(self, FnKind::Real, ModulePath::root(), name, Vec::new());
+            let recv = lowerer.alloc_local();
+            lowerer.params.push(Param {
+                local: recv,
+                mutability: Mutability::Readonly,
+                ty: None,
+            });
+
+            let as_int = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(as_int),
+                func: conv_intr.to_string(),
+                args: vec![Operand::Local(recv)],
+            });
+
+            let out = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(out),
+                func: "core::intrinsics::hash_int".to_string(),
+                args: vec![Operand::Local(as_int)],
+            });
+            lowerer.set_terminator(Terminator::Return {
+                value: Operand::Local(out),
+            })?;
+
+            let mir_fn = lowerer.finish()?;
+            self.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+        }
+
+        // `bool` hash via `hash_int(0/1)`.
+        {
+            let name = "impl::core::hash::Hash::for::bool::hash";
+            if !self.module.function_ids.contains_key(name) {
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    Vec::new(),
+                );
+                let recv = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let then_block = lowerer.new_block("bool_hash_true");
+                let else_block = lowerer.new_block("bool_hash_false");
+                let join_block = lowerer.new_block("bool_hash_join");
+                let join_param = lowerer.alloc_local();
+                lowerer.blocks[join_block.0].params = vec![join_param];
+
+                lowerer.set_terminator(Terminator::CondBr {
+                    cond: Operand::Local(recv),
+                    then_target: then_block,
+                    then_args: Vec::new(),
+                    else_target: else_block,
+                    else_args: Vec::new(),
+                })?;
+
+                lowerer.set_current(then_block);
+                let one = lowerer.alloc_int(1);
+                lowerer.set_terminator(Terminator::Br {
+                    target: join_block,
+                    args: vec![Operand::Local(one)],
+                })?;
+
+                lowerer.set_current(else_block);
+                let zero = lowerer.alloc_int(0);
+                lowerer.set_terminator(Terminator::Br {
+                    target: join_block,
+                    args: vec![Operand::Local(zero)],
+                })?;
+
+                lowerer.set_current(join_block);
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::intrinsics::hash_int".to_string(),
+                    args: vec![Operand::Local(join_param)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
+        // `unit` hash: constant.
+        {
+            let name = "impl::core::hash::Hash::for::unit::hash";
+            if !self.module.function_ids.contains_key(name) {
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    Vec::new(),
+                );
+                let recv = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+                let zero = lowerer.alloc_int(0);
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(zero),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
+        // Built-in inherent methods on arrays (`[T]`).
+        let synthesize_array_intrinsic_wrapper = |compiler: &mut Self,
+                                                  name: &str,
+                                                  param_mutabilities: &[Mutability],
+                                                  intrinsic: &str|
+         -> Result<(), CompileError> {
+            if compiler.module.function_ids.contains_key(name) {
+                return Ok(());
+            }
+
+            let generics = vec![typeck::GenericParamInfo {
+                name: "T".to_string(),
+                arity: 0,
+                bounds: Vec::new(),
+                span: span0,
+            }];
+            let mut lowerer = FunctionLowerer::new(
+                compiler,
+                FnKind::Real,
+                ModulePath::root(),
+                name.to_string(),
+                generics,
+            );
+            lowerer.bind_type_rep_params_for_signature();
+
+            let elem_rep = lowerer
+                .generic_type_reps
+                .first()
+                .and_then(|v| *v)
+                .ok_or_else(|| {
+                    CompileError::new(
+                        format!("internal error: missing `{name}` TypeRep param"),
+                        span0,
+                    )
+                })?;
+
+            let mut locals = Vec::with_capacity(param_mutabilities.len());
+            for mutability in param_mutabilities {
+                let local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local,
+                    mutability: *mutability,
+                    ty: None,
+                });
+                locals.push(local);
+            }
+
+            let mut args = Vec::with_capacity(1 + locals.len());
+            args.push(Operand::Local(elem_rep));
+            args.extend(locals.into_iter().map(Operand::Local));
+
+            let out = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(out),
+                func: intrinsic.to_string(),
+                args,
+            });
+            lowerer.set_terminator(Terminator::Return {
+                value: Operand::Local(out),
+            })?;
+
+            let mir_fn = lowerer.finish()?;
+            compiler.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+            Ok(())
+        };
+
+        // Direct wrappers over `core::intrinsics::array_*`.
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::push",
+            &[Mutability::Mutable, Mutability::Readonly],
+            "core::intrinsics::array_push",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::pop",
+            &[Mutability::Mutable],
+            "core::intrinsics::array_pop",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::clear",
+            &[Mutability::Mutable],
+            "core::intrinsics::array_clear",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::insert",
+            &[
+                Mutability::Mutable,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::array_insert",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::remove",
+            &[Mutability::Mutable, Mutability::Readonly],
+            "core::intrinsics::array_remove",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::resize",
+            &[
+                Mutability::Mutable,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::array_resize",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::extend",
+            &[Mutability::Mutable, Mutability::Readonly],
+            "core::intrinsics::array_extend",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::concat",
+            &[Mutability::Mutable, Mutability::Readonly],
+            "core::intrinsics::array_concat",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::concat_ro",
+            &[Mutability::Readonly, Mutability::Readonly],
+            "core::intrinsics::array_concat_ro",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::slice",
+            &[
+                Mutability::Mutable,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::array_slice",
+        )?;
+        synthesize_array_intrinsic_wrapper(
+            self,
+            "array::slice_ro",
+            &[
+                Mutability::Readonly,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::array_slice_ro",
+        )?;
+
+        // `copy`/`copy_ro` are expressed via `array_slice{_ro}(0, len)`.
+        for (name, receiver_mutability, len_intr, slice_intr) in [
+            (
+                "array::copy",
+                Mutability::Mutable,
+                "core::intrinsics::array_len",
+                "core::intrinsics::array_slice",
+            ),
+            (
+                "array::copy_ro",
+                Mutability::Readonly,
+                "core::intrinsics::array_len_ro",
+                "core::intrinsics::array_slice_ro",
+            ),
+        ] {
+            if self.module.function_ids.contains_key(name) {
+                continue;
+            }
+
+            let generics = vec![typeck::GenericParamInfo {
+                name: "T".to_string(),
+                arity: 0,
+                bounds: Vec::new(),
+                span: span0,
+            }];
+            let mut lowerer = FunctionLowerer::new(
+                self,
+                FnKind::Real,
+                ModulePath::root(),
+                name.to_string(),
+                generics,
+            );
+            lowerer.bind_type_rep_params_for_signature();
+            let elem_rep = lowerer
+                .generic_type_reps
+                .first()
+                .and_then(|v| *v)
+                .ok_or_else(|| {
+                    CompileError::new(
+                        format!("internal error: missing `{name}` TypeRep param"),
+                        span0,
+                    )
+                })?;
+
+            let recv = lowerer.alloc_local();
+            lowerer.params.push(Param {
+                local: recv,
+                mutability: receiver_mutability,
+                ty: None,
+            });
+
+            let start0 = lowerer.alloc_int(0);
+
+            let len = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(len),
+                func: len_intr.to_string(),
+                args: vec![Operand::Local(elem_rep), Operand::Local(recv)],
+            });
+
+            let out = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(out),
+                func: slice_intr.to_string(),
+                args: vec![
+                    Operand::Local(elem_rep),
+                    Operand::Local(recv),
+                    Operand::Local(start0),
+                    Operand::Local(len),
+                ],
+            });
+            lowerer.set_terminator(Terminator::Return {
+                value: Operand::Local(out),
+            })?;
+
+            let mir_fn = lowerer.finish()?;
+            self.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+        }
+
         // Built-in inherent methods on primitive types.
         //
         // These are real MIR functions (not VM intrinsics) so they can be:
@@ -1992,6 +2416,48 @@ impl Compiler {
             "string::chars",
             &[Mutability::Readonly],
             "core::intrinsics::string_into_iter",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_chars",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_chars",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_utf8",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_utf8",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_utf8_strict",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_utf8_strict",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_utf16_le",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_utf16_le",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_utf16_le_strict",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_utf16_le_strict",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_utf16_be",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_utf16_be",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::from_utf16_be_strict",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_from_utf16_be_strict",
         )?;
 
         // `core::iter::Iterator` impls for built-in iterator state types.
@@ -6355,14 +6821,27 @@ impl<'a> FunctionLowerer<'a> {
                             }
                         };
 
-                        let Ty::App(typeck::TyCon::Named(type_name), recv_type_args) = operand_ty
-                        else {
-                            return Err(CompileError::new(
-                                format!(
-                                    "internal error: operator `{op:?}` interface lowering requires a nominal receiver type, got `{operand_ty}`"
-                                ),
-                                span,
-                            ));
+                        let (type_name, recv_type_args) = match operand_ty {
+                            Ty::App(typeck::TyCon::Named(type_name), recv_type_args) => {
+                                (type_name.clone(), recv_type_args.clone())
+                            }
+                            Ty::Array(elem) => ("array".to_string(), vec![*elem.clone()]),
+                            Ty::Unit => ("unit".to_string(), Vec::new()),
+                            Ty::Bool => ("bool".to_string(), Vec::new()),
+                            Ty::Int => ("int".to_string(), Vec::new()),
+                            Ty::Float => ("float".to_string(), Vec::new()),
+                            Ty::Byte => ("byte".to_string(), Vec::new()),
+                            Ty::Char => ("char".to_string(), Vec::new()),
+                            Ty::String => ("string".to_string(), Vec::new()),
+                            Ty::Bytes => ("bytes".to_string(), Vec::new()),
+                            other => {
+                                return Err(CompileError::new(
+                                    format!(
+                                        "internal error: operator `{op:?}` interface lowering requires a nominal receiver type, got `{other}`"
+                                    ),
+                                    span,
+                                ));
+                            }
                         };
                         let impl_fn = self
                             .compiler
@@ -6384,7 +6863,7 @@ impl<'a> FunctionLowerer<'a> {
                             })?;
 
                         let mut call_args = Vec::with_capacity(recv_type_args.len() + 2);
-                        for ty in recv_type_args {
+                        for ty in &recv_type_args {
                             call_args.push(self.lower_type_rep_for_ty(ty, span)?);
                         }
 

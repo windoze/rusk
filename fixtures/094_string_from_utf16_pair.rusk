@@ -1,0 +1,8 @@
+// expect: ok string "𐐷"
+
+fn main() -> string {
+    // U+10437 (𐐷) = D801 DC37
+    readonly units = [55297, 56375];
+    string::from_utf16_le(units)
+}
+

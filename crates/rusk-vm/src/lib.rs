@@ -3988,6 +3988,242 @@ fn eval_core_intrinsic(
             }
             _ => Err(bad_args("core::intrinsics::string_slice")),
         },
+        I::StringFromChars => match args.as_slice() {
+            [Value::Ref(arr)] => {
+                let out = {
+                    let Some(obj) = heap.get(arr.handle) else {
+                        return Err(
+                            "core::intrinsics::string_from_chars: dangling reference".to_string()
+                        );
+                    };
+                    let HeapValue::Array(items) = obj else {
+                        return Err(
+                            "core::intrinsics::string_from_chars: expected an array".to_string()
+                        );
+                    };
+                    let mut out = String::new();
+                    for item in items {
+                        let Value::Char(c) = item else {
+                            return Err("core::intrinsics::string_from_chars: expected `[char]`"
+                                .to_string());
+                        };
+                        out.push(*c);
+                    }
+                    out
+                };
+                alloc_string(heap, gc_allocations_since_collect, out)
+            }
+            _ => Err(bad_args("core::intrinsics::string_from_chars")),
+        },
+        I::StringFromUtf8 => match args.as_slice() {
+            [Value::Bytes(b)] => {
+                let out = {
+                    let bytes = b.as_slice(heap)?;
+                    String::from_utf8_lossy(bytes).into_owned()
+                };
+                alloc_string(heap, gc_allocations_since_collect, out)
+            }
+            _ => Err(bad_args("core::intrinsics::string_from_utf8")),
+        },
+        I::StringFromUtf8Strict => match args.as_slice() {
+            [Value::Bytes(b)] => {
+                let string_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::String,
+                    args: Vec::new(),
+                });
+                let bytes = b.as_slice(heap)?;
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(s) => {
+                        let s = alloc_string(heap, gc_allocations_since_collect, s)?;
+                        Ok(alloc_option(
+                            heap,
+                            gc_allocations_since_collect,
+                            string_rep,
+                            "Some",
+                            vec![s],
+                        ))
+                    }
+                    Err(_) => Ok(alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        string_rep,
+                        "None",
+                        Vec::new(),
+                    )),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::string_from_utf8_strict")),
+        },
+        I::StringFromUtf16Le | I::StringFromUtf16Be => match args.as_slice() {
+            [Value::Ref(arr)] => {
+                let out =
+                    {
+                        let Some(obj) = heap.get(arr.handle) else {
+                            return Err("core::intrinsics::string_from_utf16: dangling reference"
+                                .to_string());
+                        };
+                        let HeapValue::Array(items) = obj else {
+                            return Err("core::intrinsics::string_from_utf16: expected an array"
+                                .to_string());
+                        };
+                        let mut units = Vec::with_capacity(items.len());
+                        for item in items {
+                            let Value::Int(n) = item else {
+                                // lossy: invalid code unit
+                                units.push(0xFFFD);
+                                continue;
+                            };
+                            if *n < 0 || *n > 0xFFFF {
+                                units.push(0xFFFD);
+                                continue;
+                            }
+                            units.push(*n as u16);
+                        }
+
+                        let mut out = String::new();
+                        for r in char::decode_utf16(units.into_iter()) {
+                            match r {
+                                Ok(c) => out.push(c),
+                                Err(_) => out.push('\u{FFFD}'),
+                            }
+                        }
+                        out
+                    };
+                alloc_string(heap, gc_allocations_since_collect, out)
+            }
+            _ => Err(bad_args("core::intrinsics::string_from_utf16")),
+        },
+        I::StringFromUtf16LeStrict | I::StringFromUtf16BeStrict => match args.as_slice() {
+            [Value::Ref(arr)] => {
+                let string_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::String,
+                    args: Vec::new(),
+                });
+                let maybe = {
+                    let Some(obj) = heap.get(arr.handle) else {
+                        return Err(
+                            "core::intrinsics::string_from_utf16_strict: dangling reference"
+                                .to_string(),
+                        );
+                    };
+                    let HeapValue::Array(items) = obj else {
+                        return Err(
+                            "core::intrinsics::string_from_utf16_strict: expected an array"
+                                .to_string(),
+                        );
+                    };
+                    let mut units = Vec::with_capacity(items.len());
+                    for item in items {
+                        let Value::Int(n) = item else {
+                            return Ok(alloc_option(
+                                heap,
+                                gc_allocations_since_collect,
+                                string_rep,
+                                "None",
+                                Vec::new(),
+                            ));
+                        };
+                        if *n < 0 || *n > 0xFFFF {
+                            return Ok(alloc_option(
+                                heap,
+                                gc_allocations_since_collect,
+                                string_rep,
+                                "None",
+                                Vec::new(),
+                            ));
+                        }
+                        units.push(*n as u16);
+                    }
+
+                    let mut out = String::new();
+                    for r in char::decode_utf16(units.into_iter()) {
+                        match r {
+                            Ok(c) => out.push(c),
+                            Err(_) => {
+                                return Ok(alloc_option(
+                                    heap,
+                                    gc_allocations_since_collect,
+                                    string_rep,
+                                    "None",
+                                    Vec::new(),
+                                ));
+                            }
+                        }
+                    }
+                    Some(out)
+                };
+                match maybe {
+                    Some(out) => {
+                        let s = alloc_string(heap, gc_allocations_since_collect, out)?;
+                        Ok(alloc_option(
+                            heap,
+                            gc_allocations_since_collect,
+                            string_rep,
+                            "Some",
+                            vec![s],
+                        ))
+                    }
+                    None => Ok(alloc_option(
+                        heap,
+                        gc_allocations_since_collect,
+                        string_rep,
+                        "None",
+                        Vec::new(),
+                    )),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::string_from_utf16_strict")),
+        },
+
+        // Hashing: deterministic (non-cryptographic) 64-bit FNV-1a, returned as `int`.
+        I::HashInt => match args.as_slice() {
+            [Value::Int(v)] => {
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for b in (*v as u64).to_le_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                Ok(Value::Int(hash as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::hash_int")),
+        },
+        I::HashString => match args.as_slice() {
+            [Value::String(s)] => {
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for &b in s.as_str(heap)?.as_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                Ok(Value::Int(hash as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::hash_string")),
+        },
+        I::HashBytes => match args.as_slice() {
+            [Value::Bytes(b)] => {
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for &byte in b.as_slice(heap)? {
+                    hash ^= byte as u64;
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                Ok(Value::Int(hash as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::hash_bytes")),
+        },
+        I::HashCombine => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => {
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for byte in (*a as u64).to_le_bytes() {
+                    hash ^= byte as u64;
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                for byte in (*b as u64).to_le_bytes() {
+                    hash ^= byte as u64;
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                Ok(Value::Int(hash as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::hash_combine")),
+        },
 
         I::ArrayLen => match args.as_slice() {
             [Value::TypeRep(_), Value::Ref(arr)] => {

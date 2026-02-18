@@ -1,0 +1,8 @@
+pub interface Hash {
+    readonly fn hash() -> int;
+}
+
+pub fn combine(a: int, b: int) -> int {
+    super::intrinsics::hash_combine(a, b)
+}
+
