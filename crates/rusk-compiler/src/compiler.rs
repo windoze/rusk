@@ -1,11 +1,11 @@
 use crate::ast::{
-    BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, ImplHeader, ImplItem, ImplMember, Item,
-    MatchArm, MatchPat, MethodReceiverKind, PatLiteral, Pattern as AstPattern, Program, Stmt,
-    UnaryOp,
+    BinaryOp, BindingKind, Block, Expr, FnItem, FnItemKind, Ident, ImplHeader, ImplItem,
+    ImplMember, Item, MatchArm, MatchPat, MethodReceiverKind, ModItem, ModKind, PatLiteral,
+    Pattern as AstPattern, Program, Stmt, UnaryOp, Visibility,
 };
 use crate::host::CompileOptions;
 use crate::modules::{DefKind, ModuleLoader, ModulePath};
-use crate::parser::{ParseError, Parser};
+use crate::parser::ParseError;
 use crate::source::Span;
 use crate::source_map::{SourceMap, SourceName};
 use crate::typeck::{self, ProgramEnv, Ty, TypeError as TypeckError, TypeInfo};
@@ -16,7 +16,7 @@ use rusk_mir::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -539,25 +539,123 @@ pub fn compile_to_bytecode(source: &str) -> Result<rusk_bytecode::ExecutableModu
     compile_to_bytecode_with_options(source, &CompileOptions::default())
 }
 
+const SYSROOT_ENV: &str = "RUSK_SYSROOT";
+const STD_HOST_MODULE: &str = "_std_host";
+
+fn resolve_sysroot_dir(options: &CompileOptions) -> Result<PathBuf, CompileError> {
+    if let Some(path) = &options.sysroot {
+        return Ok(path.clone());
+    }
+
+    if let Some(val) = std::env::var_os(SYSROOT_ENV)
+        && !val.is_empty()
+    {
+        return Ok(PathBuf::from(val));
+    }
+
+    let cwd_sysroot = PathBuf::from("sysroot");
+    if cwd_sysroot.is_dir() {
+        return Ok(cwd_sysroot);
+    }
+
+    let crate_sysroot = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sysroot");
+    if crate_sysroot.is_dir() {
+        return Ok(crate_sysroot);
+    }
+
+    Err(CompileError::new(
+        "sysroot not found; pass `--sysroot <path>` or set `RUSK_SYSROOT`",
+        Span::new(0, 0),
+    ))
+}
+
+fn synthesize_sysroot_module(name: &str, items: Vec<Item>) -> Item {
+    let span0 = Span::new(0, 0);
+    Item::Mod(ModItem {
+        vis: Visibility::Public { span: span0 },
+        name: Ident {
+            name: name.to_string(),
+            span: span0,
+        },
+        kind: ModKind::Inline { items },
+        span: span0,
+    })
+}
+
+fn load_sysroot_items(
+    loader: &mut ModuleLoader,
+    options: &CompileOptions,
+) -> Result<Vec<Item>, CompileError> {
+    let sysroot = resolve_sysroot_dir(options)?;
+
+    let core_entry = sysroot.join("core").join("mod.rusk");
+    let core_program = loader
+        .load_program_from_file(&core_entry)
+        .map_err(CompileError::from)?;
+
+    let mut out = Vec::new();
+    out.push(synthesize_sysroot_module("core", core_program.items));
+
+    let want_std = options.load_std
+        && options
+            .host_modules
+            .iter()
+            .any(|(name, _decl)| name == STD_HOST_MODULE);
+    if want_std {
+        let std_entry = sysroot.join("std").join("mod.rusk");
+        if std_entry.is_file() {
+            let std_program = loader
+                .load_program_from_file(&std_entry)
+                .map_err(CompileError::from)?;
+            out.push(synthesize_sysroot_module("std", std_program.items));
+        }
+    }
+
+    Ok(out)
+}
+
+fn reject_reserved_module_names(items: &[Item]) -> Result<(), CompileError> {
+    fn visit_items(items: &[Item]) -> Result<(), CompileError> {
+        for item in items {
+            let Item::Mod(m) = item else {
+                continue;
+            };
+            if m.name.name == "core" {
+                return Err(CompileError::new(
+                    "module name `core` is reserved",
+                    m.name.span,
+                ));
+            }
+            if let ModKind::Inline { items } = &m.kind {
+                visit_items(items)?;
+            }
+        }
+        Ok(())
+    }
+
+    visit_items(items)
+}
+
 /// Compiles a single Rusk source file into MIR with host-module declarations.
 pub fn compile_to_mir_with_options(
     source: &str,
     options: &CompileOptions,
 ) -> Result<Module, CompileError> {
-    let mut source_map = SourceMap::new();
-    source_map.add_source(
-        SourceName::Virtual("<string>".to_string()),
-        Arc::<str>::from(source),
-        0,
-    );
+    let mut loader = ModuleLoader::new();
 
-    let result = (|| {
-        let mut parser = Parser::new(source)?;
-        let program = parser.parse_program()?;
+    let result: Result<Module, CompileError> = (|| {
+        let sysroot_items = load_sysroot_items(&mut loader, options)?;
+        let mut program = loader.load_program_from_source("<string>", source)?;
+        reject_reserved_module_names(&program.items)?;
+
+        let mut items = sysroot_items;
+        items.append(&mut program.items);
+        let program = Program { items };
+
         compile_program_to_mir(&program, options)
     })();
 
-    result.map_err(|e| e.with_source_map(&source_map))
+    result.map_err(|e| e.with_source_map(loader.source_map()))
 }
 
 pub fn compile_to_bytecode_with_options(
@@ -676,18 +774,24 @@ pub fn compile_to_mir_with_options_and_metrics(
     let total_start = Instant::now();
     let mut metrics = CompileMetrics::default();
 
-    let mut source_map = SourceMap::new();
-    source_map.add_source(
-        SourceName::Virtual("<string>".to_string()),
-        Arc::<str>::from(source),
-        0,
-    );
+    let load_start = Instant::now();
+    let mut loader = ModuleLoader::new();
+
+    let sysroot_items = load_sysroot_items(&mut loader, options)?;
+    let mut program = loader.load_program_from_source("<string>", source)?;
+    reject_reserved_module_names(&program.items)?;
+    metrics.load_time = load_start.elapsed();
+
+    let loader_metrics = loader.metrics();
+    metrics.files_read = loader_metrics.files_read;
+    metrics.bytes_read = loader_metrics.bytes_read;
+    metrics.read_time = loader_metrics.read_time;
+    metrics.parse_time = loader_metrics.parse_time;
 
     let result: Result<Module, CompileError> = (|| {
-        let parse_start = Instant::now();
-        let mut parser = Parser::new(source)?;
-        let program = parser.parse_program()?;
-        metrics.parse_time = parse_start.elapsed();
+        let mut items = sysroot_items;
+        items.append(&mut program.items);
+        let program = Program { items };
 
         let typecheck_start = Instant::now();
         let (env, types) = typecheck_program_with_entry_validation(&program, options)?;
@@ -703,7 +807,7 @@ pub fn compile_to_mir_with_options_and_metrics(
     metrics.total_time = total_start.elapsed();
     result
         .map(|module| (module, metrics))
-        .map_err(|e| e.with_source_map(&source_map))
+        .map_err(|e| e.with_source_map(loader.source_map()))
 }
 
 pub fn compile_file_to_bytecode(
@@ -719,22 +823,39 @@ pub fn compile_file_to_mir_with_options(
     options: &CompileOptions,
 ) -> Result<Module, CompileError> {
     let mut loader = ModuleLoader::new();
+
+    let sysroot_items = load_sysroot_items(&mut loader, options)
+        .map_err(|e| e.with_source_map(loader.source_map()))?;
+
     let program = match loader.load_program_from_file(entry_path) {
         Ok(program) => program,
         Err(err) => {
-            let mut err = CompileError::from(err).with_source_map(loader.source_map());
-            if err.rendered_location.is_none() {
+            let err = CompileError::from(err);
+
+            // If we fail to read a file, the module loader never adds it to the `SourceMap`.
+            // Since the sysroot is loaded first, span 0 would incorrectly map to a sysroot file.
+            // Keep the error location stable by using a fallback map rooted at the unreadable
+            // file path (best-effort extracted from the loader message).
+            if err.span == Span::new(0, 0) && err.message.starts_with("failed to read `") {
                 let mut fallback = SourceMap::new();
-                fallback.add_source(
-                    SourceName::Path(entry_path.to_path_buf()),
-                    Arc::<str>::from(""),
-                    0,
-                );
-                err = err.with_source_map(&fallback);
+                let path = err
+                    .message
+                    .strip_prefix("failed to read `")
+                    .and_then(|rest| rest.split_once('`').map(|(p, _)| PathBuf::from(p)))
+                    .unwrap_or_else(|| entry_path.to_path_buf());
+                fallback.add_source(SourceName::Path(path), Arc::<str>::from(""), 0);
+                return Err(err.with_source_map(&fallback));
             }
-            return Err(err);
+
+            // For parse/resolve errors in entry or dependency modules, the loader has already
+            // populated a correct `SourceMap`, so preserve the full mapping.
+            return Err(err.with_source_map(loader.source_map()));
         }
     };
+
+    let mut items = sysroot_items;
+    items.extend(program.items);
+    let program = Program { items };
 
     compile_program_to_mir(&program, options).map_err(|e| e.with_source_map(loader.source_map()))
 }
@@ -833,20 +954,20 @@ pub fn compile_file_to_mir_with_options_and_metrics(
 
     let load_start = Instant::now();
     let mut loader = ModuleLoader::new();
+
+    let sysroot_items = load_sysroot_items(&mut loader, options)
+        .map_err(|e| e.with_source_map(loader.source_map()))?;
+
     let program = match loader.load_program_from_file(entry_path) {
         Ok(program) => program,
         Err(err) => {
-            let mut err = CompileError::from(err).with_source_map(loader.source_map());
-            if err.rendered_location.is_none() {
-                let mut fallback = SourceMap::new();
-                fallback.add_source(
-                    SourceName::Path(entry_path.to_path_buf()),
-                    Arc::<str>::from(""),
-                    0,
-                );
-                err = err.with_source_map(&fallback);
-            }
-            return Err(err);
+            let mut fallback = SourceMap::new();
+            fallback.add_source(
+                SourceName::Path(entry_path.to_path_buf()),
+                Arc::<str>::from(""),
+                0,
+            );
+            return Err(CompileError::from(err).with_source_map(&fallback));
         }
     };
     metrics.load_time = load_start.elapsed();
@@ -858,6 +979,10 @@ pub fn compile_file_to_mir_with_options_and_metrics(
     metrics.parse_time = loader_metrics.parse_time;
 
     let result: Result<Module, CompileError> = (|| {
+        let mut items = sysroot_items;
+        items.extend(program.items);
+        let program = Program { items };
+
         let typecheck_start = Instant::now();
         let (env, types) = typecheck_program_with_entry_validation(&program, options)?;
         metrics.typecheck_time = typecheck_start.elapsed();
@@ -888,9 +1013,217 @@ fn typecheck_program_with_entry_validation(
     options: &CompileOptions,
 ) -> Result<(ProgramEnv, TypeInfo), CompileError> {
     let env = typeck::build_env(program, options)?;
+    validate_sysroot_lang_items(&env)?;
     let types = typeck::typecheck_program(program, &env)?;
     validate_entry_main_sig(&env)?;
     Ok((env, types))
+}
+
+fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
+    use typeck::TyCon;
+
+    fn require_iface<'a>(
+        env: &'a ProgramEnv,
+        iface_name: &str,
+    ) -> Result<&'a typeck::InterfaceDef, CompileError> {
+        env.interfaces.get(iface_name).ok_or_else(|| {
+            CompileError::new(
+                format!("missing required sysroot interface `{iface_name}`"),
+                Span::new(0, 0),
+            )
+        })
+    }
+
+    fn require_method<'a>(
+        iface_def: &'a typeck::InterfaceDef,
+        iface_name: &str,
+        method_name: &str,
+    ) -> Result<&'a typeck::InterfaceMethod, CompileError> {
+        iface_def.all_methods.get(method_name).ok_or_else(|| {
+            CompileError::new(
+                format!("missing required method `{iface_name}::{method_name}`"),
+                iface_def.span,
+            )
+        })
+    }
+
+    fn ensure(ok: bool, message: impl Into<String>, span: Span) -> Result<(), CompileError> {
+        if ok {
+            Ok(())
+        } else {
+            Err(CompileError::new(message, span))
+        }
+    }
+
+    fn is_option_of_self_assoc(ret: &Ty, iface: &str, assoc: &str) -> bool {
+        match ret {
+            Ty::App(TyCon::Named(name), args) if name == "Option" && args.len() == 1 => {
+                matches!(
+                    &args[0],
+                    Ty::AssocProj { iface: i, assoc: a, self_ty, .. }
+                        if i == iface && a == assoc && matches!(self_ty.as_ref(), Ty::SelfType)
+                )
+            }
+            _ => false,
+        }
+    }
+
+    // `core::iter::Iterator` (used by `for` desugaring).
+    {
+        let iface_name = "core::iter::Iterator";
+        let iface_def = require_iface(env, iface_name)?;
+
+        ensure(
+            iface_def.generics.is_empty(),
+            format!("`{iface_name}` must not be generic"),
+            iface_def.span,
+        )?;
+        ensure(
+            iface_def.all_assoc_types.contains_key("Item"),
+            format!("`{iface_name}` must declare associated type `Item`"),
+            iface_def.span,
+        )?;
+
+        let next = require_method(iface_def, iface_name, "next")?;
+        ensure(
+            !next.receiver_readonly,
+            format!("`{iface_name}::next` must be mutable (not `readonly`)"),
+            iface_def.span,
+        )?;
+        ensure(
+            next.sig.generics.is_empty(),
+            format!("`{iface_name}::next` must not be generic"),
+            iface_def.span,
+        )?;
+        ensure(
+            next.sig.params.is_empty(),
+            format!("`{iface_name}::next` must not take any parameters"),
+            iface_def.span,
+        )?;
+        ensure(
+            is_option_of_self_assoc(&next.sig.ret, iface_name, "Item"),
+            format!("`{iface_name}::next` must return `Option<Self::Item>`"),
+            iface_def.span,
+        )?;
+    }
+
+    // `core::fmt::ToString` (used by f-string desugaring).
+    {
+        let iface_name = "core::fmt::ToString";
+        let iface_def = require_iface(env, iface_name)?;
+        ensure(
+            iface_def.generics.is_empty(),
+            format!("`{iface_name}` must not be generic"),
+            iface_def.span,
+        )?;
+
+        let method = require_method(iface_def, iface_name, "to_string")?;
+        ensure(
+            method.receiver_readonly,
+            format!("`{iface_name}::to_string` must be `readonly`"),
+            iface_def.span,
+        )?;
+        ensure(
+            method.sig.generics.is_empty(),
+            format!("`{iface_name}::to_string` must not be generic"),
+            iface_def.span,
+        )?;
+        ensure(
+            method.sig.params.is_empty(),
+            format!("`{iface_name}::to_string` must not take any parameters"),
+            iface_def.span,
+        )?;
+        ensure(
+            method.sig.ret == Ty::String,
+            format!("`{iface_name}::to_string` must return `string`"),
+            iface_def.span,
+        )?;
+    }
+
+    // `core::ops::*` (used by operator lowering for non-primitive nominal types).
+    //
+    // Note: the language currently does not support source-authored impls for primitive types,
+    // so these checks focus on the interface shapes used by the compiler.
+    {
+        type OpsLangItemCheck = (&'static str, &'static str, bool, usize, fn(&Ty) -> bool);
+
+        let checks: &[OpsLangItemCheck] = &[
+            ("core::ops::Add", "add", true, 1, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Sub", "sub", true, 1, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Mul", "mul", true, 1, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Div", "div", true, 1, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Rem", "rem", true, 1, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Neg", "neg", true, 0, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Not", "not", true, 0, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Lt", "lt", true, 1, |t| matches!(t, Ty::Bool)),
+            ("core::ops::Le", "le", true, 1, |t| matches!(t, Ty::Bool)),
+            ("core::ops::Gt", "gt", true, 1, |t| matches!(t, Ty::Bool)),
+            ("core::ops::Ge", "ge", true, 1, |t| matches!(t, Ty::Bool)),
+            ("core::ops::Eq", "eq", true, 1, |t| matches!(t, Ty::Bool)),
+            ("core::ops::Ne", "ne", true, 1, |t| matches!(t, Ty::Bool)),
+        ];
+
+        for (iface_name, method_name, receiver_readonly, param_count, ret_ok) in checks {
+            let iface_def = require_iface(env, iface_name)?;
+            ensure(
+                iface_def.generics.is_empty(),
+                format!("`{iface_name}` must not be generic"),
+                iface_def.span,
+            )?;
+
+            let method = require_method(iface_def, iface_name, method_name)?;
+            ensure(
+                method.receiver_readonly == *receiver_readonly,
+                format!(
+                    "`{iface_name}::{method_name}` must be `{}`",
+                    if *receiver_readonly {
+                        "readonly"
+                    } else {
+                        "mutable"
+                    }
+                ),
+                iface_def.span,
+            )?;
+            ensure(
+                method.sig.generics.is_empty(),
+                format!("`{iface_name}::{method_name}` must not be generic"),
+                iface_def.span,
+            )?;
+            ensure(
+                method.sig.params.len() == *param_count,
+                format!("`{iface_name}::{method_name}` must take {param_count} parameter(s)"),
+                iface_def.span,
+            )?;
+            if *param_count == 1 {
+                ensure(
+                    matches!(method.sig.params.first(), Some(Ty::SelfType)),
+                    format!("`{iface_name}::{method_name}` parameter must be `Self`"),
+                    iface_def.span,
+                )?;
+            }
+            ensure(
+                ret_ok(&method.sig.ret),
+                format!("`{iface_name}::{method_name}` has an unexpected return type"),
+                iface_def.span,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_entry_main_sig(env: &ProgramEnv) -> Result<(), CompileError> {
@@ -1220,6 +1553,246 @@ impl Compiler {
             self.module.add_function(mir_fn).map_err(|message| {
                 CompileError::new(format!("internal error: {message}"), span0)
             })?;
+        }
+
+        // `core::ops::*` impls for primitives.
+        //
+        // These wrappers enable interface-based generic code like:
+        // `fn add<T: core::ops::Add>(a: T, b: T) -> T { core::ops::Add::add(a, b) }`,
+        // even though the language does not currently allow writing `impl Add for int { ... }`
+        // in Rusk source.
+        let synthesize_ops_wrapper = |compiler: &mut Self,
+                                      name: &str,
+                                      param_mutabilities: &[Mutability],
+                                      intrinsic: &str|
+         -> Result<Vec<Local>, CompileError> {
+            if compiler.module.function_ids.contains_key(name) {
+                return Ok(Vec::new());
+            }
+
+            let mut lowerer = FunctionLowerer::new(
+                compiler,
+                FnKind::Real,
+                ModulePath::root(),
+                name.to_string(),
+                Vec::new(),
+            );
+
+            let mut locals = Vec::with_capacity(param_mutabilities.len());
+            for mutability in param_mutabilities {
+                let local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local,
+                    mutability: *mutability,
+                    ty: None,
+                });
+                locals.push(local);
+            }
+
+            let args = locals.iter().copied().map(Operand::Local).collect();
+            let out = lowerer.alloc_local();
+            lowerer.emit(Instruction::Call {
+                dst: Some(out),
+                func: intrinsic.to_string(),
+                args,
+            });
+            lowerer.set_terminator(Terminator::Return {
+                value: Operand::Local(out),
+            })?;
+
+            let mir_fn = lowerer.finish()?;
+            compiler.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+
+            Ok(locals)
+        };
+
+        // Binary arithmetic: int/float.
+        for (prim, prefix) in [("int", "int"), ("float", "float")] {
+            let ro2 = &[Mutability::Readonly, Mutability::Readonly];
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::Add::for::{prim}::add"),
+                ro2,
+                &format!("core::intrinsics::{prefix}_add"),
+            )?;
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::Sub::for::{prim}::sub"),
+                ro2,
+                &format!("core::intrinsics::{prefix}_sub"),
+            )?;
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::Mul::for::{prim}::mul"),
+                ro2,
+                &format!("core::intrinsics::{prefix}_mul"),
+            )?;
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::Div::for::{prim}::div"),
+                ro2,
+                &format!("core::intrinsics::{prefix}_div"),
+            )?;
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::Rem::for::{prim}::rem"),
+                ro2,
+                &format!("core::intrinsics::{prefix}_mod"),
+            )?;
+
+            // Ordering + equality.
+            for (iface, method, suffix) in [
+                ("Eq", "eq", "eq"),
+                ("Ne", "ne", "ne"),
+                ("Lt", "lt", "lt"),
+                ("Le", "le", "le"),
+                ("Gt", "gt", "gt"),
+                ("Ge", "ge", "ge"),
+            ] {
+                let _ = synthesize_ops_wrapper(
+                    self,
+                    &format!("impl::core::ops::{iface}::for::{prim}::{method}"),
+                    ro2,
+                    &format!("core::intrinsics::{prefix}_{suffix}"),
+                )?;
+            }
+        }
+
+        // Boolean ops + equality.
+        let _ = synthesize_ops_wrapper(
+            self,
+            "impl::core::ops::Not::for::bool::not",
+            &[Mutability::Readonly],
+            "core::intrinsics::bool_not",
+        )?;
+        for (iface, method, intrinsic) in [
+            ("Eq", "eq", "core::intrinsics::bool_eq"),
+            ("Ne", "ne", "core::intrinsics::bool_ne"),
+        ] {
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::{iface}::for::bool::{method}"),
+                &[Mutability::Readonly, Mutability::Readonly],
+                intrinsic,
+            )?;
+        }
+
+        // Unit equality.
+        for (iface, method, intrinsic) in [
+            ("Eq", "eq", "core::intrinsics::unit_eq"),
+            ("Ne", "ne", "core::intrinsics::unit_ne"),
+        ] {
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::{iface}::for::unit::{method}"),
+                &[Mutability::Readonly, Mutability::Readonly],
+                intrinsic,
+            )?;
+        }
+
+        // String/bytes equality.
+        for (prim, prefix) in [("string", "string"), ("bytes", "bytes")] {
+            for (iface, method, suffix) in [("Eq", "eq", "eq"), ("Ne", "ne", "ne")] {
+                let _ = synthesize_ops_wrapper(
+                    self,
+                    &format!("impl::core::ops::{iface}::for::{prim}::{method}"),
+                    &[Mutability::Readonly, Mutability::Readonly],
+                    &format!("core::intrinsics::{prefix}_{suffix}"),
+                )?;
+            }
+        }
+
+        // Negation: int/float.
+        for (prim, prefix, zero) in [
+            ("int", "int", ConstValue::Int(0)),
+            ("float", "float", ConstValue::Float(0.0)),
+        ] {
+            let name = format!("impl::core::ops::Neg::for::{prim}::neg");
+            if !self.module.function_ids.contains_key(&name) {
+                let mut lowerer =
+                    FunctionLowerer::new(self, FnKind::Real, ModulePath::root(), name, Vec::new());
+                let recv_local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv_local,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: format!("core::intrinsics::{prefix}_sub"),
+                    args: vec![Operand::Literal(zero), Operand::Local(recv_local)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
+        // Byte/char equality via conversion to `int`.
+        for (prim, conv) in [("byte", "byte_to_int"), ("char", "char_to_int")] {
+            for (iface, method, int_cmp) in [
+                ("Eq", "eq", "core::intrinsics::int_eq"),
+                ("Ne", "ne", "core::intrinsics::int_ne"),
+            ] {
+                let name = format!("impl::core::ops::{iface}::for::{prim}::{method}");
+                if self.module.function_ids.contains_key(&name) {
+                    continue;
+                }
+
+                let mut lowerer =
+                    FunctionLowerer::new(self, FnKind::Real, ModulePath::root(), name, Vec::new());
+                let recv = lowerer.alloc_local();
+                let other = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+                lowerer.params.push(Param {
+                    local: other,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let recv_int = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(recv_int),
+                    func: format!("core::intrinsics::{conv}"),
+                    args: vec![Operand::Local(recv)],
+                });
+
+                let other_int = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(other_int),
+                    func: format!("core::intrinsics::{conv}"),
+                    args: vec![Operand::Local(other)],
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: int_cmp.to_string(),
+                    args: vec![Operand::Local(recv_int), Operand::Local(other_int)],
+                });
+
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
         }
 
         // Built-in inherent methods on primitive types.
@@ -2388,6 +2961,7 @@ impl Compiler {
                 Item::Function(func) => {
                     self.compile_real_function(module, func, None)?;
                 }
+                Item::IntrinsicFn(_) => {}
                 Item::Impl(imp) => {
                     self.compile_impl_item(module, imp)?;
                 }

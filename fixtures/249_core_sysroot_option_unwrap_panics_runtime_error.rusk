@@ -1,0 +1,7 @@
+// expect: runtime_error called `Option::unwrap()`
+
+fn main() -> int {
+    let none: Option<int> = Option::None;
+    none.unwrap()
+}
+

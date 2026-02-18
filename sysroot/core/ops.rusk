@@ -1,0 +1,52 @@
+pub interface Add {
+    readonly fn add(other: Self) -> Self;
+}
+
+pub interface Sub {
+    readonly fn sub(other: Self) -> Self;
+}
+
+pub interface Mul {
+    readonly fn mul(other: Self) -> Self;
+}
+
+pub interface Div {
+    readonly fn div(other: Self) -> Self;
+}
+
+pub interface Rem {
+    readonly fn rem(other: Self) -> Self;
+}
+
+pub interface Neg {
+    readonly fn neg() -> Self;
+}
+
+pub interface Not {
+    readonly fn not() -> Self;
+}
+
+pub interface Lt {
+    readonly fn lt(other: Self) -> bool;
+}
+
+pub interface Gt {
+    readonly fn gt(other: Self) -> bool;
+}
+
+pub interface Le {
+    readonly fn le(other: Self) -> bool;
+}
+
+pub interface Ge {
+    readonly fn ge(other: Self) -> bool;
+}
+
+pub interface Eq {
+    readonly fn eq(other: Self) -> bool;
+}
+
+pub interface Ne {
+    readonly fn ne(other: Self) -> bool;
+}
+

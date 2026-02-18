@@ -1,0 +1,25 @@
+// expect: ok int 1143
+
+fn main() -> int {
+    let a = Option::Some(1).map(|x: int| { x + 1 });
+    let b = Option::Some(2).and_then(|x: int| { Option::Some(x * 10) });
+
+    let none1: Option<int> = Option::None;
+    let c = none1.unwrap_or(5);
+
+    let none2: Option<int> = Option::None;
+    let d = none2.unwrap_or_else(| | { 7 });
+
+    let e = Option::Some(9).unwrap();
+
+    let some0: Option<int> = Option::Some(0);
+    let f = if some0.is_some() { 100 } else { 0 };
+
+    let none3: Option<int> = Option::None;
+    let g = if none3.is_none() { 1000 } else { 0 };
+
+    match (a, b) {
+        (Option::Some(x), Option::Some(y)) => x + y + c + d + e + f + g,
+        _ => 0,
+    }
+}

@@ -25,6 +25,7 @@ pub enum TokenKind {
     KwAs,
     KwIs,
     KwFn,
+    KwIntrinsic,
     KwCont,
     KwLet,
     KwConst,
@@ -118,15 +119,6 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(src: &'a str) -> Self {
-        Self {
-            src,
-            pos: 0,
-            base_offset: 0,
-            allow_shebang: true,
-        }
-    }
-
     pub fn with_base_offset(src: &'a str, base_offset: usize) -> Self {
         Self {
             src,
@@ -362,6 +354,7 @@ impl<'a> Lexer<'a> {
             "as" => TokenKind::KwAs,
             "is" => TokenKind::KwIs,
             "fn" => TokenKind::KwFn,
+            "intrinsic" => TokenKind::KwIntrinsic,
             "cont" => TokenKind::KwCont,
             "let" => TokenKind::KwLet,
             "const" => TokenKind::KwConst,

@@ -36,12 +36,6 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(src: &'a str) -> Result<Self, ParseError> {
-        let mut lexer = Lexer::new(src);
-        let lookahead = lexer.next_token()?;
-        Ok(Self { lexer, lookahead })
-    }
-
     pub fn with_base_offset(src: &'a str, base_offset: usize) -> Result<Self, ParseError> {
         let mut lexer = Lexer::with_base_offset(src, base_offset);
         let lookahead = lexer.next_token()?;
@@ -75,6 +69,7 @@ impl<'a> Parser<'a> {
         let vis = self.parse_visibility()?;
         match self.lookahead.kind {
             TokenKind::KwFn => Ok(Item::Function(self.parse_fn_item(vis)?)),
+            TokenKind::KwIntrinsic => Ok(Item::IntrinsicFn(self.parse_intrinsic_fn_item(vis)?)),
             TokenKind::KwStatic => {
                 Err(self.error_here("`static fn` is only allowed inside `impl` blocks"))
             }
@@ -136,6 +131,40 @@ impl<'a> Parser<'a> {
             ret,
             body,
             span: Span::new(start, end),
+        })
+    }
+
+    fn parse_intrinsic_fn_item(&mut self, vis: Visibility) -> Result<IntrinsicFnItem, ParseError> {
+        let start = self.expect(TokenKind::KwIntrinsic)?.span.start;
+        self.expect(TokenKind::KwFn)?;
+        let name = self.expect_ident()?;
+        let generics = self.parse_generic_params()?;
+        self.expect(TokenKind::LParen)?;
+        let params = if matches!(self.lookahead.kind, TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_param_list()?
+        };
+        let rparen = self.expect(TokenKind::RParen)?;
+        let ret = if matches!(self.lookahead.kind, TokenKind::Arrow) {
+            self.bump()?;
+            // Keep parsing rules consistent with normal functions.
+            self.parse_type_in_fn_ret_position()?
+        } else {
+            // Default return type: `unit`.
+            TypeExpr::Prim {
+                prim: PrimType::Unit,
+                span: rparen.span,
+            }
+        };
+        let semi = self.expect(TokenKind::Semi)?;
+        Ok(IntrinsicFnItem {
+            vis,
+            name,
+            generics,
+            params,
+            ret,
+            span: Span::new(start, semi.span.end),
         })
     }
 

@@ -1,0 +1,22 @@
+// expect: ok int 3134
+
+fn main() -> int {
+    let a = core::ops::Add::add(1, 2);
+
+    let b = if core::ops::Eq::eq("hi", "hi") { 10 } else { 0 };
+    let c = if core::ops::Ne::ne(b"hi", b"ho") { 20 } else { 0 };
+    let d = if core::ops::Not::not(false) { 100 } else { 0 };
+
+    let b1 = core::intrinsics::int_to_byte(1);
+    let b2 = core::intrinsics::int_to_byte(1);
+    let e = if core::ops::Eq::eq(b1, b2) { 1000 } else { 0 };
+
+    let c1 = core::intrinsics::int_to_char(65);
+    let c2 = core::intrinsics::int_to_char(66);
+    let f = if core::ops::Ne::ne(c1, c2) { 2000 } else { 0 };
+
+    let g = if core::ops::Eq::eq((), ()) { 1 } else { 0 };
+
+    a + b + c + d + e + f + g
+}
+

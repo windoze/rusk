@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostFnSig {
     pub params: Vec<HostType>,
@@ -47,11 +49,30 @@ pub struct ExternalEffectDecl {
     pub sig: HostFnSig,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileOptions {
     pub opt_level: rusk_bytecode::OptLevel,
+    /// Optional sysroot directory. When not set, the compiler tries:
+    /// - `$RUSK_SYSROOT`
+    /// - `./sysroot` (current working directory)
+    /// - `../../sysroot` relative to the `rusk-compiler` crate directory
+    pub sysroot: Option<PathBuf>,
+    /// Whether to load `sysroot/std` (if present).
+    pub load_std: bool,
     pub host_modules: Vec<(String, HostModuleDecl)>,
     pub external_effects: Vec<ExternalEffectDecl>,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            opt_level: rusk_bytecode::OptLevel::default(),
+            sysroot: None,
+            load_std: true,
+            host_modules: Vec::new(),
+            external_effects: Vec::new(),
+        }
+    }
 }
 
 impl CompileOptions {

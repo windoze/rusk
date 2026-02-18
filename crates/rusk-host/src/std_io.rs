@@ -29,45 +29,45 @@ pub fn register_host_module(options: &mut CompileOptions) {
     };
 
     options
-        .register_host_module("std", module)
-        .expect("std host module declaration must be valid");
+        .register_host_module("_std_host", module)
+        .expect("_std_host host module declaration must be valid");
 }
 
 pub fn install_vm(module: &ExecutableModule, vm: &mut Vm) {
-    if let Some(id) = module.host_import_id("std::print") {
+    if let Some(id) = module.host_import_id("_std_host::print") {
         vm.register_host_import(id, |args: &[AbiValue]| match args {
             [AbiValue::String(s)] => {
                 let mut stdout = io::stdout();
                 stdout.write_all(s.as_bytes()).map_err(|e| HostError {
-                    message: format!("std::print: io error: {e}"),
+                    message: format!("_std_host::print: io error: {e}"),
                 })?;
                 stdout.flush().ok();
                 Ok(AbiValue::Unit)
             }
             other => Err(HostError {
-                message: format!("std::print: bad args: {other:?}"),
+                message: format!("_std_host::print: bad args: {other:?}"),
             }),
         })
-        .expect("std::print host import id must be valid");
+        .expect("_std_host::print host import id must be valid");
     }
 
-    if let Some(id) = module.host_import_id("std::println") {
+    if let Some(id) = module.host_import_id("_std_host::println") {
         vm.register_host_import(id, |args: &[AbiValue]| match args {
             [AbiValue::String(s)] => {
                 let mut stdout = io::stdout();
                 stdout.write_all(s.as_bytes()).map_err(|e| HostError {
-                    message: format!("std::println: io error: {e}"),
+                    message: format!("_std_host::println: io error: {e}"),
                 })?;
                 stdout.write_all(b"\n").map_err(|e| HostError {
-                    message: format!("std::println: io error: {e}"),
+                    message: format!("_std_host::println: io error: {e}"),
                 })?;
                 stdout.flush().ok();
                 Ok(AbiValue::Unit)
             }
             other => Err(HostError {
-                message: format!("std::println: bad args: {other:?}"),
+                message: format!("_std_host::println: bad args: {other:?}"),
             }),
         })
-        .expect("std::println host import id must be valid");
+        .expect("_std_host::println host import id must be valid");
     }
 }

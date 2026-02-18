@@ -1,0 +1,36 @@
+// expect: ok int 151
+
+use core::iter::Iterator;
+
+fn main() -> int {
+    let it1 = core::intrinsics::into_iter([10, 20, 30, 40]);
+    let nth = it1.nth(2);
+
+    let it2 = core::intrinsics::into_iter([1, 2, 3]);
+    let last = it2.last();
+
+    let it3 = core::intrinsics::into_iter([1, 2, 3, 4, 5]);
+    let cnt = it3.count();
+
+    let it4 = core::intrinsics::into_iter([1, 2, 3, 4]);
+    let found = it4.find(|x: int| { x == 3 });
+
+    let it5 = core::intrinsics::into_iter([1, 2, 3]);
+    let any = it5.any(|x: int| { x > 2 });
+
+    let it6 = core::intrinsics::into_iter([1, 2, 3]);
+    let all = it6.all(|x: int| { x < 4 });
+
+    let bonus1 = if any { 10 } else { 0 };
+    let bonus2 = if all { 100 } else { 0 };
+
+    let it7 = core::intrinsics::into_iter([1, 2]);
+    let neg = it7.nth(-1);
+
+    match (nth, last, found, neg) {
+        (Option::Some(a), Option::Some(b), Option::Some(c), Option::None) => {
+            a + b + c + bonus1 + bonus2 + cnt
+        }
+        _ => 0,
+    }
+}

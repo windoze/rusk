@@ -1,0 +1,100 @@
+// VM-provided intrinsics declared for typechecking and sysroot code.
+//
+// `intrinsic fn` declarations have no bodies; their implementations live in the VM / bytecode
+// instruction set.
+
+pub struct ArrayIter<T> { arr: [T], idx: int }
+pub struct StringIter { s: string, idx: int }
+pub struct BytesIter { b: bytes, idx: int }
+
+// f-string helpers.
+pub intrinsic fn string_concat(a: string, b: string) -> string;
+pub intrinsic fn to_string<T>(value: T) -> string;
+
+// Panic.
+pub intrinsic fn panic<T>(msg: string) -> T;
+
+// Boolean.
+pub intrinsic fn bool_not(v: bool) -> bool;
+pub intrinsic fn bool_eq(a: bool, b: bool) -> bool;
+pub intrinsic fn bool_ne(a: bool, b: bool) -> bool;
+
+// Integer arithmetic & comparisons.
+pub intrinsic fn int_add(a: int, b: int) -> int;
+pub intrinsic fn int_sub(a: int, b: int) -> int;
+pub intrinsic fn int_mul(a: int, b: int) -> int;
+pub intrinsic fn int_div(a: int, b: int) -> int;
+pub intrinsic fn int_mod(a: int, b: int) -> int;
+
+pub intrinsic fn int_eq(a: int, b: int) -> bool;
+pub intrinsic fn int_ne(a: int, b: int) -> bool;
+pub intrinsic fn int_lt(a: int, b: int) -> bool;
+pub intrinsic fn int_le(a: int, b: int) -> bool;
+pub intrinsic fn int_gt(a: int, b: int) -> bool;
+pub intrinsic fn int_ge(a: int, b: int) -> bool;
+
+// `byte` / `char` conversions.
+pub intrinsic fn int_to_byte(v: int) -> byte;
+pub intrinsic fn int_try_byte(v: int) -> Option<byte>;
+pub intrinsic fn byte_to_int(v: byte) -> int;
+
+pub intrinsic fn int_to_char(v: int) -> char;
+pub intrinsic fn int_try_char(v: int) -> Option<char>;
+pub intrinsic fn char_to_int(v: char) -> int;
+
+// Float arithmetic & comparisons.
+pub intrinsic fn float_add(a: float, b: float) -> float;
+pub intrinsic fn float_sub(a: float, b: float) -> float;
+pub intrinsic fn float_mul(a: float, b: float) -> float;
+pub intrinsic fn float_div(a: float, b: float) -> float;
+pub intrinsic fn float_mod(a: float, b: float) -> float;
+
+pub intrinsic fn float_eq(a: float, b: float) -> bool;
+pub intrinsic fn float_ne(a: float, b: float) -> bool;
+pub intrinsic fn float_lt(a: float, b: float) -> bool;
+pub intrinsic fn float_le(a: float, b: float) -> bool;
+pub intrinsic fn float_gt(a: float, b: float) -> bool;
+pub intrinsic fn float_ge(a: float, b: float) -> bool;
+
+// Primitive equality helpers.
+pub intrinsic fn string_eq(a: string, b: string) -> bool;
+pub intrinsic fn string_ne(a: string, b: string) -> bool;
+pub intrinsic fn bytes_eq(a: bytes, b: bytes) -> bool;
+pub intrinsic fn bytes_ne(a: bytes, b: bytes) -> bool;
+pub intrinsic fn unit_eq(a: unit, b: unit) -> bool;
+pub intrinsic fn unit_ne(a: unit, b: unit) -> bool;
+
+// Iterator protocol.
+pub intrinsic fn into_iter<T>(arr: [T]) -> ArrayIter<T>;
+pub intrinsic fn next<T>(it: ArrayIter<T>) -> Option<T>;
+
+pub intrinsic fn string_into_iter(s: string) -> StringIter;
+pub intrinsic fn string_next(it: StringIter) -> Option<char>;
+
+pub intrinsic fn bytes_into_iter(b: bytes) -> BytesIter;
+pub intrinsic fn bytes_next(it: BytesIter) -> Option<byte>;
+
+// `bytes` operations.
+pub intrinsic fn bytes_get(b: bytes, idx: int) -> Option<byte>;
+pub intrinsic fn bytes_slice(b: bytes, start: int, end: Option<int>) -> bytes;
+pub intrinsic fn bytes_to_array(b: bytes) -> [byte];
+pub intrinsic fn bytes_from_array(b: readonly [byte]) -> bytes;
+
+// `string` operations.
+pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
+
+// Array operations.
+pub intrinsic fn array_len<T>(a: [T]) -> int;
+pub intrinsic fn array_len_ro<T>(a: readonly [T]) -> int;
+pub intrinsic fn array_push<T>(a: [T], v: T) -> unit;
+pub intrinsic fn array_pop<T>(a: [T]) -> Option<T>;
+pub intrinsic fn array_clear<T>(a: [T]) -> unit;
+pub intrinsic fn array_resize<T>(a: [T], new_len: int, value: T) -> unit;
+pub intrinsic fn array_insert<T>(a: [T], idx: int, v: T) -> unit;
+pub intrinsic fn array_remove<T>(a: [T], idx: int) -> T;
+pub intrinsic fn array_extend<T>(a: [T], b: [T]) -> unit;
+pub intrinsic fn array_concat<T>(a: [T], b: [T]) -> [T];
+pub intrinsic fn array_concat_ro<T>(a: readonly [T], b: readonly [T]) -> [readonly T];
+pub intrinsic fn array_slice<T>(a: [T], start: int, end: int) -> [T];
+pub intrinsic fn array_slice_ro<T>(a: readonly [T], start: int, end: int) -> [readonly T];
+

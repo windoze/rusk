@@ -179,9 +179,10 @@ impl ModuleResolver {
         resolver.collect_module(&ModulePath::root(), &program.items)?;
 
         resolver.inject_builtin_option()?;
-        resolver.inject_builtin_core()?;
+        resolver.inject_core_binding_into_all_scopes()?;
         resolver.inject_host_modules(host_modules)?;
         resolver.resolve_all_uses()?;
+        resolver.apply_core_prelude_auto_import()?;
         Ok(resolver)
     }
 
@@ -327,6 +328,44 @@ impl ModuleResolver {
                         });
                     }
                 }
+                Item::IntrinsicFn(f) => {
+                    let local_name = f.name.name.clone();
+                    let full_name = path.qualify(&local_name);
+                    if scope.values.contains_key(&local_name) {
+                        return Err(ResolveError {
+                            message: format!(
+                                "duplicate function `{local_name}` in {}",
+                                path.display()
+                            ),
+                            span: f.name.span,
+                        });
+                    }
+                    scope.values.insert(
+                        local_name,
+                        Binding {
+                            vis: f.vis,
+                            defining_module: path.clone(),
+                            span: f.name.span,
+                            target: BindingTarget::Function(full_name.clone()),
+                        },
+                    );
+                    if self
+                        .defs
+                        .insert(
+                            full_name.clone(),
+                            DefDecl {
+                                vis: f.vis,
+                                defining_module: path.clone(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(ResolveError {
+                            message: format!("duplicate function `{full_name}`"),
+                            span: f.name.span,
+                        });
+                    }
+                }
                 Item::Struct(s) => self.collect_type_def(
                     &mut scope,
                     path,
@@ -421,12 +460,6 @@ impl ModuleResolver {
         item: &ModItem,
     ) -> Result<(), ResolveError> {
         let local_name = item.name.name.clone();
-        if local_name == "core" {
-            return Err(ResolveError {
-                message: format!("module name `{local_name}` is reserved"),
-                span: item.name.span,
-            });
-        }
         if scope.modules.contains_key(&local_name) {
             return Err(ResolveError {
                 message: format!(
@@ -505,25 +538,16 @@ impl ModuleResolver {
         Ok(())
     }
 
-    fn inject_builtin_core(&mut self) -> Result<(), ResolveError> {
-        // Inject a built-in `core` module, available from every module (extern-prelude-like).
+    fn inject_core_binding_into_all_scopes(&mut self) -> Result<(), ResolveError> {
+        // `core` is always available as an absolute module path (extern-prelude-like), even from
+        // nested modules.
         let core_path = ModulePath::root().child("core");
-        if self.scopes.contains_key(&core_path) {
+        if !self.scopes.contains_key(&core_path) {
             return Err(ResolveError {
-                message: "module path `core` is reserved".to_string(),
+                message: "missing required sysroot module `core`".to_string(),
                 span: Span::new(0, 0),
             });
         }
-
-        self.defs.insert(
-            core_path.fqn(),
-            DefDecl {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: ModulePath::root(),
-            },
-        );
 
         let core_binding = Binding {
             vis: Visibility::Public {
@@ -533,11 +557,15 @@ impl ModuleResolver {
             span: Span::new(0, 0),
             target: BindingTarget::Module(core_path.clone()),
         };
+
         for scope in self.scopes.values_mut() {
-            if scope.modules.contains_key("core") {
+            if let Some(existing) = scope.modules.get("core") {
+                if matches!(&existing.target, BindingTarget::Module(p) if p == &core_path) {
+                    continue;
+                }
                 return Err(ResolveError {
                     message: "module name `core` is reserved".to_string(),
-                    span: Span::new(0, 0),
+                    span: existing.span,
                 });
             }
             scope
@@ -545,361 +573,59 @@ impl ModuleResolver {
                 .insert("core".to_string(), core_binding.clone());
         }
 
-        let intrinsics_path = core_path.child("intrinsics");
-        let prelude_path = core_path.child("prelude");
-        let ops_path = core_path.child("ops");
-        let iter_path = core_path.child("iter");
-        let fmt_path = core_path.child("fmt");
+        Ok(())
+    }
 
-        // Module defs for `core::intrinsics`, `core::prelude`, and language-recognized interfaces.
-        for module_path in [
-            &intrinsics_path,
-            &prelude_path,
-            &ops_path,
-            &iter_path,
-            &fmt_path,
-        ] {
-            self.defs.insert(
-                module_path.fqn(),
-                DefDecl {
-                    vis: Visibility::Public {
-                        span: Span::new(0, 0),
-                    },
-                    defining_module: core_path.clone(),
-                },
-            );
-        }
-
-        // `core` scope.
-        let mut core_scope = ModuleScope {
-            path: core_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-
-        // Submodules.
-        let core_child_binding = |target: &ModulePath| Binding {
-            vis: Visibility::Public {
-                span: Span::new(0, 0),
-            },
-            defining_module: core_path.clone(),
+    fn apply_core_prelude_auto_import(&mut self) -> Result<(), ResolveError> {
+        // Auto-import all public items from `core::prelude` into every module scope.
+        let prelude_path = ModulePath::root().child("core").child("prelude");
+        let prelude_scope = self.scopes.get(&prelude_path).ok_or_else(|| ResolveError {
+            message: "missing required sysroot module `core::prelude`".to_string(),
             span: Span::new(0, 0),
-            target: BindingTarget::Module(target.clone()),
-        };
-        core_scope.modules.insert(
-            "intrinsics".to_string(),
-            core_child_binding(&intrinsics_path),
-        );
-        core_scope
-            .modules
-            .insert("prelude".to_string(), core_child_binding(&prelude_path));
-        core_scope
-            .modules
-            .insert("ops".to_string(), core_child_binding(&ops_path));
-        core_scope
-            .modules
-            .insert("iter".to_string(), core_child_binding(&iter_path));
-        core_scope
-            .modules
-            .insert("fmt".to_string(), core_child_binding(&fmt_path));
+        })?;
 
-        // Re-exports from `core::intrinsics` into `core` root.
-        core_scope.types.insert(
-            "ArrayIter".to_string(),
-            Binding {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: core_path.clone(),
-                span: Span::new(0, 0),
-                target: BindingTarget::Struct("core::intrinsics::ArrayIter".to_string()),
-            },
-        );
-        core_scope.types.insert(
-            "StringIter".to_string(),
-            Binding {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: core_path.clone(),
-                span: Span::new(0, 0),
-                target: BindingTarget::Struct("core::intrinsics::StringIter".to_string()),
-            },
-        );
-        core_scope.types.insert(
-            "BytesIter".to_string(),
-            Binding {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: core_path.clone(),
-                span: Span::new(0, 0),
-                target: BindingTarget::Struct("core::intrinsics::BytesIter".to_string()),
-            },
-        );
-        for (local, target) in [
-            ("panic", "core::intrinsics::panic"),
-            ("into_iter", "core::intrinsics::into_iter"),
-            ("next", "core::intrinsics::next"),
-        ] {
-            core_scope.values.insert(
-                local.to_string(),
-                Binding {
-                    vis: Visibility::Public {
-                        span: Span::new(0, 0),
-                    },
-                    defining_module: core_path.clone(),
-                    span: Span::new(0, 0),
-                    target: BindingTarget::Function(target.to_string()),
-                },
-            );
-        }
+        let prelude_values: Vec<(String, BindingTarget)> = prelude_scope
+            .values
+            .iter()
+            .filter(|(_name, b)| b.vis.is_public())
+            .map(|(name, b)| (name.clone(), b.target.clone()))
+            .collect();
+        let prelude_types: Vec<(String, BindingTarget)> = prelude_scope
+            .types
+            .iter()
+            .filter(|(_name, b)| b.vis.is_public())
+            .map(|(name, b)| (name.clone(), b.target.clone()))
+            .collect();
 
-        // `core::intrinsics` scope.
-        let mut intrinsics_scope = ModuleScope {
-            path: intrinsics_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-
-        self.inject_builtin_type(
-            &mut intrinsics_scope,
-            &intrinsics_path,
-            "ArrayIter",
-            DefKind::Struct,
-            "core::intrinsics::ArrayIter",
-        )?;
-        self.inject_builtin_type(
-            &mut intrinsics_scope,
-            &intrinsics_path,
-            "StringIter",
-            DefKind::Struct,
-            "core::intrinsics::StringIter",
-        )?;
-        self.inject_builtin_type(
-            &mut intrinsics_scope,
-            &intrinsics_path,
-            "BytesIter",
-            DefKind::Struct,
-            "core::intrinsics::BytesIter",
-        )?;
-
-        for name in [
-            // f-string helpers.
-            "core::intrinsics::string_concat",
-            "core::intrinsics::to_string",
-            // Panic.
-            "core::intrinsics::panic",
-            // Boolean.
-            "core::intrinsics::bool_not",
-            "core::intrinsics::bool_eq",
-            "core::intrinsics::bool_ne",
-            // Integer arithmetic & comparisons.
-            "core::intrinsics::int_add",
-            "core::intrinsics::int_sub",
-            "core::intrinsics::int_mul",
-            "core::intrinsics::int_div",
-            "core::intrinsics::int_mod",
-            "core::intrinsics::int_eq",
-            "core::intrinsics::int_ne",
-            "core::intrinsics::int_lt",
-            "core::intrinsics::int_le",
-            "core::intrinsics::int_gt",
-            "core::intrinsics::int_ge",
-            // `byte` / `char` conversions.
-            "core::intrinsics::int_to_byte",
-            "core::intrinsics::int_try_byte",
-            "core::intrinsics::byte_to_int",
-            "core::intrinsics::int_to_char",
-            "core::intrinsics::int_try_char",
-            "core::intrinsics::char_to_int",
-            // Float arithmetic & comparisons.
-            "core::intrinsics::float_add",
-            "core::intrinsics::float_sub",
-            "core::intrinsics::float_mul",
-            "core::intrinsics::float_div",
-            "core::intrinsics::float_mod",
-            "core::intrinsics::float_eq",
-            "core::intrinsics::float_ne",
-            "core::intrinsics::float_lt",
-            "core::intrinsics::float_le",
-            "core::intrinsics::float_gt",
-            "core::intrinsics::float_ge",
-            // Primitive equality helpers.
-            "core::intrinsics::string_eq",
-            "core::intrinsics::string_ne",
-            "core::intrinsics::bytes_eq",
-            "core::intrinsics::bytes_ne",
-            "core::intrinsics::unit_eq",
-            "core::intrinsics::unit_ne",
-            // Iterator protocol.
-            "core::intrinsics::into_iter",
-            "core::intrinsics::next",
-            "core::intrinsics::string_into_iter",
-            "core::intrinsics::string_next",
-            "core::intrinsics::bytes_into_iter",
-            "core::intrinsics::bytes_next",
-            // `bytes` operations.
-            "core::intrinsics::bytes_get",
-            "core::intrinsics::bytes_slice",
-            "core::intrinsics::bytes_to_array",
-            "core::intrinsics::bytes_from_array",
-            // `string` operations.
-            "core::intrinsics::string_slice",
-            // Array operations.
-            "core::intrinsics::array_len",
-            "core::intrinsics::array_len_ro",
-            "core::intrinsics::array_push",
-            "core::intrinsics::array_pop",
-            "core::intrinsics::array_clear",
-            "core::intrinsics::array_resize",
-            "core::intrinsics::array_insert",
-            "core::intrinsics::array_remove",
-            "core::intrinsics::array_extend",
-            "core::intrinsics::array_concat",
-            "core::intrinsics::array_concat_ro",
-            "core::intrinsics::array_slice",
-            "core::intrinsics::array_slice_ro",
-        ] {
-            let local = name
-                .strip_prefix("core::intrinsics::")
-                .unwrap_or(name)
-                .to_string();
-            if intrinsics_scope.values.contains_key(&local) {
-                continue;
-            }
-            intrinsics_scope.values.insert(
-                local,
-                Binding {
-                    vis: Visibility::Public {
-                        span: Span::new(0, 0),
-                    },
-                    defining_module: intrinsics_path.clone(),
-                    span: Span::new(0, 0),
-                    target: BindingTarget::Function(name.to_string()),
-                },
-            );
-            self.defs.insert(
-                name.to_string(),
-                DefDecl {
-                    vis: Visibility::Public {
-                        span: Span::new(0, 0),
-                    },
-                    defining_module: intrinsics_path.clone(),
-                },
-            );
-        }
-
-        // `core::prelude` scope.
-        let mut prelude_scope = ModuleScope {
-            path: prelude_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-        prelude_scope.values.insert(
-            "panic".to_string(),
-            Binding {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: prelude_path.clone(),
-                span: Span::new(0, 0),
-                target: BindingTarget::Function("core::intrinsics::panic".to_string()),
-            },
-        );
-
-        // `core::ops` scope (operator interfaces).
-        let mut ops_scope = ModuleScope {
-            path: ops_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-        for iface in [
-            ("Add", "core::ops::Add"),
-            ("Sub", "core::ops::Sub"),
-            ("Mul", "core::ops::Mul"),
-            ("Div", "core::ops::Div"),
-            ("Rem", "core::ops::Rem"),
-            ("Neg", "core::ops::Neg"),
-            ("Not", "core::ops::Not"),
-            ("Lt", "core::ops::Lt"),
-            ("Gt", "core::ops::Gt"),
-            ("Le", "core::ops::Le"),
-            ("Ge", "core::ops::Ge"),
-            ("Eq", "core::ops::Eq"),
-            ("Ne", "core::ops::Ne"),
-        ] {
-            self.inject_builtin_type(
-                &mut ops_scope,
-                &ops_path,
-                iface.0,
-                DefKind::Interface,
-                iface.1,
-            )?;
-        }
-
-        // `core::iter` scope (Iterator interface).
-        let mut iter_scope = ModuleScope {
-            path: iter_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-        self.inject_builtin_type(
-            &mut iter_scope,
-            &iter_path,
-            "Iterator",
-            DefKind::Interface,
-            "core::iter::Iterator",
-        )?;
-
-        // `core::fmt` scope (ToString interface).
-        let mut fmt_scope = ModuleScope {
-            path: fmt_path.clone(),
-            modules: BTreeMap::new(),
-            types: BTreeMap::new(),
-            values: BTreeMap::new(),
-            pending_uses: Vec::new(),
-        };
-        self.inject_builtin_type(
-            &mut fmt_scope,
-            &fmt_path,
-            "ToString",
-            DefKind::Interface,
-            "core::fmt::ToString",
-        )?;
-
-        // Install built-in scopes.
-        self.scopes.insert(intrinsics_path, intrinsics_scope);
-        self.scopes.insert(prelude_path, prelude_scope);
-        self.scopes.insert(ops_path, ops_scope);
-        self.scopes.insert(iter_path, iter_scope);
-        self.scopes.insert(fmt_path, fmt_scope);
-        self.scopes.insert(core_path, core_scope);
-
-        // Auto-import `core::prelude` (currently: `panic`) into every module.
         for scope in self.scopes.values_mut() {
-            if scope.values.contains_key("panic") {
-                continue;
+            for (name, target) in &prelude_values {
+                if scope.values.contains_key(name) {
+                    continue;
+                }
+                scope.values.insert(
+                    name.clone(),
+                    Binding {
+                        vis: Visibility::Private,
+                        defining_module: scope.path.clone(),
+                        span: Span::new(0, 0),
+                        target: target.clone(),
+                    },
+                );
             }
-            scope.values.insert(
-                "panic".to_string(),
-                Binding {
-                    vis: Visibility::Private,
-                    defining_module: scope.path.clone(),
-                    span: Span::new(0, 0),
-                    target: BindingTarget::Function("core::intrinsics::panic".to_string()),
-                },
-            );
+            for (name, target) in &prelude_types {
+                if scope.types.contains_key(name) {
+                    continue;
+                }
+                scope.types.insert(
+                    name.clone(),
+                    Binding {
+                        vis: Visibility::Private,
+                        defining_module: scope.path.clone(),
+                        span: Span::new(0, 0),
+                        target: target.clone(),
+                    },
+                );
+            }
         }
 
         Ok(())
@@ -1055,48 +781,6 @@ impl ModuleResolver {
             }
         }
 
-        Ok(())
-    }
-
-    fn inject_builtin_type(
-        &mut self,
-        scope: &mut ModuleScope,
-        defining_module: &ModulePath,
-        local_name: &str,
-        kind: DefKind,
-        fqn: &str,
-    ) -> Result<(), ResolveError> {
-        if scope.types.contains_key(local_name) {
-            return Err(ResolveError {
-                message: format!("duplicate builtin type `{local_name}`"),
-                span: Span::new(0, 0),
-            });
-        }
-        let target = match kind {
-            DefKind::Struct => BindingTarget::Struct(fqn.to_string()),
-            DefKind::Enum => BindingTarget::Enum(fqn.to_string()),
-            DefKind::Interface => BindingTarget::Interface(fqn.to_string()),
-        };
-        scope.types.insert(
-            local_name.to_string(),
-            Binding {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: defining_module.clone(),
-                span: Span::new(0, 0),
-                target,
-            },
-        );
-        self.defs.insert(
-            fqn.to_string(),
-            DefDecl {
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-                defining_module: defining_module.clone(),
-            },
-        );
         Ok(())
     }
 
@@ -1610,6 +1294,24 @@ impl ModuleLoader {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         program.items = self.inline_modules(program.items, &module_dir)?;
+        Ok(program)
+    }
+
+    pub(crate) fn load_program_from_source(
+        &mut self,
+        name: impl Into<String>,
+        source: &str,
+    ) -> Result<Program, LoadError> {
+        let name = name.into();
+        let src: Arc<str> = Arc::from(source);
+        let base_offset = self.alloc_base_offset(&src);
+        self.source_map
+            .add_source(SourceName::Virtual(name), Arc::clone(&src), base_offset);
+
+        let parse_start = Instant::now();
+        let mut parser = Parser::with_base_offset(&src, base_offset)?;
+        let program = parser.parse_program()?;
+        self.metrics.parse_time += parse_start.elapsed();
         Ok(program)
     }
 

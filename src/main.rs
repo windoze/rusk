@@ -8,11 +8,49 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 fn main() {
-    let mut args = env::args_os().skip(1);
+    let mut args = env::args_os().skip(1).peekable();
+
+    let mut sysroot: Option<PathBuf> = None;
+    let mut load_std = true;
+
+    while let Some(arg) = args.peek() {
+        let s = arg.to_string_lossy();
+        match s.as_ref() {
+            "--help" | "-h" => {
+                eprintln!(
+                    "usage: rusk [--sysroot <path>] [--no-std] <file.rusk|file.rbc> [args...]"
+                );
+                process::exit(0);
+            }
+            "--sysroot" => {
+                let _ = args.next();
+                let Some(path) = args.next() else {
+                    eprintln!("error: `--sysroot` expects a path argument");
+                    process::exit(2);
+                };
+                sysroot = Some(PathBuf::from(path));
+            }
+            "--no-std" => {
+                let _ = args.next();
+                load_std = false;
+            }
+            "--" => {
+                let _ = args.next();
+                break;
+            }
+            _ if s.starts_with("--") => {
+                eprintln!("error: unknown option `{s}`");
+                process::exit(2);
+            }
+            _ => break,
+        }
+    }
+
     let Some(path) = args.next() else {
-        eprintln!("usage: rusk <file.rusk|file.rbc> [args...]");
+        eprintln!("usage: rusk [--sysroot <path>] [--no-std] <file.rusk|file.rbc> [args...]");
         process::exit(2);
     };
+
     let input_path = PathBuf::from(path);
     let argv0 = absolute_path_string(&input_path);
     let mut argv: Vec<String> = Vec::with_capacity(1);
@@ -41,8 +79,14 @@ fn main() {
         }
         Some("rusk") => {
             // 编译 .rusk 文件
-            let mut options = CompileOptions::default();
-            std_io::register_host_module(&mut options);
+            let mut options = CompileOptions {
+                sysroot,
+                load_std,
+                ..Default::default()
+            };
+            if load_std {
+                std_io::register_host_module(&mut options);
+            }
             match compile_file_to_bytecode_with_options(&input_path, &options) {
                 Ok(m) => m,
                 Err(e) => {

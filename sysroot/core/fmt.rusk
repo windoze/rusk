@@ -1,0 +1,4 @@
+pub interface ToString {
+    readonly fn to_string() -> string;
+}
+

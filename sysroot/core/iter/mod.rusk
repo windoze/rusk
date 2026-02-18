@@ -1,0 +1,108 @@
+pub interface Iterator {
+    type Item;
+
+    fn next() -> Option<Self::Item>;
+
+    fn nth(n: int) -> Option<Self::Item> {
+        if n < 0 { return Option::None; };
+
+        let idx = 0;
+        loop {
+            match self.next() {
+                Option::Some(v) => {
+                    if idx == n { return Option::Some(v); };
+                    idx = idx + 1;
+                    ()
+                }
+                Option::None => { return Option::None; }
+            }
+        };
+        Option::None
+    }
+
+    fn last() -> Option<Self::Item> {
+        let cur = self.next();
+        match cur {
+            Option::None => Option::None,
+            Option::Some(first) => {
+                let out = first;
+                loop {
+                    match self.next() {
+                        Option::Some(v) => { out = v; () }
+                        Option::None => { return Option::Some(out); }
+                    }
+                };
+                Option::Some(out)
+            }
+        }
+    }
+
+    fn count() -> int {
+        let n = 0;
+        loop {
+            match self.next() {
+                Option::Some(_) => { n = n + 1; () }
+                Option::None => { return n; }
+            }
+        };
+        n
+    }
+
+    fn find(pred: fn(Self::Item) -> bool) -> Option<Self::Item> {
+        loop {
+            match self.next() {
+                Option::Some(v) => {
+                    if pred(v) { return Option::Some(v); };
+                    ()
+                }
+                Option::None => { return Option::None; }
+            }
+        };
+        Option::None
+    }
+
+    fn any(pred: fn(Self::Item) -> bool) -> bool {
+        loop {
+            match self.next() {
+                Option::Some(v) => {
+                    if pred(v) { return true; };
+                    ()
+                }
+                Option::None => { return false; }
+            }
+        };
+        false
+    }
+
+    fn all(pred: fn(Self::Item) -> bool) -> bool {
+        loop {
+            match self.next() {
+                Option::Some(v) => {
+                    if !pred(v) { return false; };
+                    ()
+                }
+                Option::None => { return true; }
+            }
+        };
+        true
+    }
+}
+
+// Built-in iterator state types are defined in `core::intrinsics`.
+//
+// These impls keep the iterator protocol source-authored, while delegating hot paths to the VM.
+
+impl<T> Iterator for super::intrinsics::ArrayIter<T> {
+    type Item = T;
+    fn next() -> Option<T> { super::intrinsics::next(self) }
+}
+
+impl Iterator for super::intrinsics::StringIter {
+    type Item = char;
+    fn next() -> Option<char> { super::intrinsics::string_next(self) }
+}
+
+impl Iterator for super::intrinsics::BytesIter {
+    type Item = byte;
+    fn next() -> Option<byte> { super::intrinsics::bytes_next(self) }
+}

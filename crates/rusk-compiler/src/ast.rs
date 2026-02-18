@@ -20,6 +20,7 @@ impl Visibility {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     Function(FnItem),
+    IntrinsicFn(IntrinsicFnItem),
     Struct(StructItem),
     Enum(EnumItem),
     Interface(InterfaceItem),
@@ -64,6 +65,16 @@ pub struct FnItem {
     pub params: Vec<Param>,
     pub ret: TypeExpr,
     pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IntrinsicFnItem {
+    pub vis: Visibility,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub params: Vec<Param>,
+    pub ret: TypeExpr,
     pub span: Span,
 }
 

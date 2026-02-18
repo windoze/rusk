@@ -1,8 +1,8 @@
 use crate::ast::{
     BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, FnItemKind, GenericParam,
-    Ident, ImplHeader, ImplItem, ImplMember, InterfaceItem, InterfaceMember, Item, MatchArm,
-    MatchPat, MethodReceiverKind, Param, PatLiteral, Pattern, PrimType, Program, StructItem,
-    TypeExpr, UnaryOp, Visibility,
+    Ident, ImplHeader, ImplItem, ImplMember, InterfaceItem, InterfaceMember, IntrinsicFnItem, Item,
+    MatchArm, MatchPat, MethodReceiverKind, Param, PatLiteral, Pattern, PrimType, Program,
+    StructItem, TypeExpr, UnaryOp, Visibility,
 };
 use crate::host::{CompileOptions, HostVisibility};
 use crate::modules::{ModulePath, ModuleResolver};
@@ -483,8 +483,17 @@ pub(crate) fn build_env(
         &mut |module, item| match item {
             Item::Function(f) => {
                 let full_name = module.qualify(&f.name.name);
+                if expected_core_intrinsic_sig(&full_name).is_some() {
+                    return Err(TypeError {
+                        message: format!(
+                            "intrinsic `{full_name}` must be declared with `intrinsic fn`"
+                        ),
+                        span: f.name.span,
+                    });
+                }
                 declare_function_sig(&mut env, module, &[], f, Some(full_name))
             }
+            Item::IntrinsicFn(f) => declare_intrinsic_fn_sig(&mut env, module, f),
             _ => Ok(()),
         },
     )?;
@@ -628,447 +637,22 @@ fn add_prelude(env: &mut ProgramEnv) {
             ]),
         },
     );
-
-    // Built-in iterator struct used by `for` desugaring.
-    env.structs.insert(
-        "core::intrinsics::ArrayIter".to_string(),
-        StructDef {
-            name: "core::intrinsics::ArrayIter".to_string(),
-            generics: vec![GenericParamInfo {
-                name: "T".to_string(),
-                arity: 0,
-                bounds: Vec::new(),
-                span: Span::new(0, 0),
-            }],
-            fields: vec![
-                ("arr".to_string(), Ty::Array(Box::new(Ty::Gen(0)))),
-                ("idx".to_string(), Ty::Int),
-            ],
-            is_newtype: false,
-        },
-    );
-
-    // Built-in iterator state for string iteration.
-    env.structs.insert(
-        "core::intrinsics::StringIter".to_string(),
-        StructDef {
-            name: "core::intrinsics::StringIter".to_string(),
-            generics: Vec::new(),
-            fields: vec![("s".to_string(), Ty::String), ("idx".to_string(), Ty::Int)],
-            is_newtype: false,
-        },
-    );
-
-    // Built-in iterator state for bytes iteration.
-    env.structs.insert(
-        "core::intrinsics::BytesIter".to_string(),
-        StructDef {
-            name: "core::intrinsics::BytesIter".to_string(),
-            generics: Vec::new(),
-            fields: vec![("b".to_string(), Ty::Bytes), ("idx".to_string(), Ty::Int)],
-            is_newtype: false,
-        },
-    );
-
-    // Built-in language-recognized interfaces.
     let span0 = Span::new(0, 0);
-
-    let mut insert_simple_iface =
-        |iface_name: &str, method_name: &str, receiver_readonly: bool, params: Vec<Ty>, ret: Ty| {
-            let sig = InterfaceMethodSig {
-                generics: Vec::new(),
-                params,
-                ret,
-            };
-            let decl = InterfaceMethodDecl {
-                receiver_readonly,
-                has_default: false,
-                default_template: None,
-                sig: sig.clone(),
-            };
-            let method = InterfaceMethod {
-                origin: iface_name.to_string(),
-                receiver_readonly,
-                has_default: false,
-                default_template: None,
-                sig,
-            };
-
-            env.interfaces.insert(
-                iface_name.to_string(),
-                InterfaceDef {
-                    name: iface_name.to_string(),
-                    generics: Vec::new(),
-                    supers: Vec::new(),
-                    assoc_types: BTreeMap::new(),
-                    all_assoc_types: BTreeMap::new(),
-                    methods: BTreeMap::from([(method_name.to_string(), decl)]),
-                    all_methods: BTreeMap::from([(method_name.to_string(), method)]),
-                    span: span0,
-                },
-            );
-        };
-
-    // `core::ops`: operator interfaces.
-    for (iface, method, receiver_readonly, params, ret) in [
-        (
-            "core::ops::Add",
-            "add",
-            true,
-            vec![Ty::SelfType],
-            Ty::SelfType,
-        ),
-        (
-            "core::ops::Sub",
-            "sub",
-            true,
-            vec![Ty::SelfType],
-            Ty::SelfType,
-        ),
-        (
-            "core::ops::Mul",
-            "mul",
-            true,
-            vec![Ty::SelfType],
-            Ty::SelfType,
-        ),
-        (
-            "core::ops::Div",
-            "div",
-            true,
-            vec![Ty::SelfType],
-            Ty::SelfType,
-        ),
-        (
-            "core::ops::Rem",
-            "rem",
-            true,
-            vec![Ty::SelfType],
-            Ty::SelfType,
-        ),
-        ("core::ops::Neg", "neg", true, vec![], Ty::SelfType),
-        ("core::ops::Not", "not", true, vec![], Ty::SelfType),
-        ("core::ops::Lt", "lt", true, vec![Ty::SelfType], Ty::Bool),
-        ("core::ops::Gt", "gt", true, vec![Ty::SelfType], Ty::Bool),
-        ("core::ops::Le", "le", true, vec![Ty::SelfType], Ty::Bool),
-        ("core::ops::Ge", "ge", true, vec![Ty::SelfType], Ty::Bool),
-        ("core::ops::Eq", "eq", true, vec![Ty::SelfType], Ty::Bool),
-        ("core::ops::Ne", "ne", true, vec![Ty::SelfType], Ty::Bool),
-    ] {
-        insert_simple_iface(iface, method, receiver_readonly, params, ret);
-    }
-
-    // `core::fmt::ToString`.
-    insert_simple_iface("core::fmt::ToString", "to_string", true, vec![], Ty::String);
-
-    // `core::iter::Iterator`.
-    let iter_iface = "core::iter::Iterator";
-    let item_proj = Ty::AssocProj {
-        iface: iter_iface.to_string(),
-        iface_args: Vec::new(),
-        assoc: "Item".to_string(),
-        self_ty: Box::new(Ty::SelfType),
-    };
-    let iter_next_sig = InterfaceMethodSig {
-        generics: Vec::new(),
-        params: Vec::new(),
-        ret: Ty::App(TyCon::Named("Option".to_string()), vec![item_proj]),
-    };
-    env.interfaces.insert(
-        iter_iface.to_string(),
-        InterfaceDef {
-            name: iter_iface.to_string(),
-            generics: Vec::new(),
-            supers: Vec::new(),
-            assoc_types: BTreeMap::from([("Item".to_string(), InterfaceAssocTypeDecl {})]),
-            all_assoc_types: BTreeMap::from([(
-                "Item".to_string(),
-                InterfaceAssocType {
-                    origin: iter_iface.to_string(),
-                },
-            )]),
-            methods: BTreeMap::from([(
-                "next".to_string(),
-                InterfaceMethodDecl {
-                    receiver_readonly: false,
-                    has_default: false,
-                    default_template: None,
-                    sig: iter_next_sig.clone(),
-                },
-            )]),
-            all_methods: BTreeMap::from([(
-                "next".to_string(),
-                InterfaceMethod {
-                    origin: iter_iface.to_string(),
-                    receiver_readonly: false,
-                    has_default: false,
-                    default_template: None,
-                    sig: iter_next_sig,
-                },
-            )]),
-            span: span0,
-        },
-    );
 
     let mut add_fn = |name: &str, generics: Vec<GenericParamInfo>, params: Vec<Ty>, ret: Ty| {
         env.functions.insert(
             name.to_string(),
             FnSig {
                 name: name.to_string(),
-                vis: Visibility::Public {
-                    span: Span::new(0, 0),
-                },
+                vis: Visibility::Public { span: span0 },
                 defining_module: ModulePath::root(),
                 generics,
                 params,
                 ret,
-                span: Span::new(0, 0),
+                span: span0,
             },
         );
     };
-
-    // f"..." desugaring helpers.
-    add_fn(
-        "core::intrinsics::string_concat",
-        Vec::new(),
-        vec![Ty::String, Ty::String],
-        Ty::String,
-    );
-    add_fn(
-        "core::intrinsics::to_string",
-        vec![GenericParamInfo {
-            name: "T".to_string(),
-            arity: 0,
-            bounds: Vec::new(),
-            span: Span::new(0, 0),
-        }],
-        vec![Ty::Gen(0)],
-        Ty::String,
-    );
-
-    // Panic (diverging) intrinsic.
-    add_fn(
-        "core::intrinsics::panic",
-        vec![GenericParamInfo {
-            name: "T".to_string(),
-            arity: 0,
-            bounds: Vec::new(),
-            span: Span::new(0, 0),
-        }],
-        vec![Ty::String],
-        Ty::Gen(0),
-    );
-
-    // Boolean.
-    add_fn(
-        "core::intrinsics::bool_not",
-        Vec::new(),
-        vec![Ty::Bool],
-        Ty::Bool,
-    );
-    add_fn(
-        "core::intrinsics::bool_eq",
-        Vec::new(),
-        vec![Ty::Bool, Ty::Bool],
-        Ty::Bool,
-    );
-    add_fn(
-        "core::intrinsics::bool_ne",
-        Vec::new(),
-        vec![Ty::Bool, Ty::Bool],
-        Ty::Bool,
-    );
-
-    // Integer arithmetic & comparisons.
-    for (name, ret) in [
-        ("core::intrinsics::int_add", Ty::Int),
-        ("core::intrinsics::int_sub", Ty::Int),
-        ("core::intrinsics::int_mul", Ty::Int),
-        ("core::intrinsics::int_div", Ty::Int),
-        ("core::intrinsics::int_mod", Ty::Int),
-        ("core::intrinsics::int_eq", Ty::Bool),
-        ("core::intrinsics::int_ne", Ty::Bool),
-        ("core::intrinsics::int_lt", Ty::Bool),
-        ("core::intrinsics::int_le", Ty::Bool),
-        ("core::intrinsics::int_gt", Ty::Bool),
-        ("core::intrinsics::int_ge", Ty::Bool),
-    ] {
-        add_fn(name, Vec::new(), vec![Ty::Int, Ty::Int], ret);
-    }
-
-    // Float arithmetic & comparisons.
-    for (name, ret) in [
-        ("core::intrinsics::float_add", Ty::Float),
-        ("core::intrinsics::float_sub", Ty::Float),
-        ("core::intrinsics::float_mul", Ty::Float),
-        ("core::intrinsics::float_div", Ty::Float),
-        ("core::intrinsics::float_mod", Ty::Float),
-        ("core::intrinsics::float_eq", Ty::Bool),
-        ("core::intrinsics::float_ne", Ty::Bool),
-        ("core::intrinsics::float_lt", Ty::Bool),
-        ("core::intrinsics::float_le", Ty::Bool),
-        ("core::intrinsics::float_gt", Ty::Bool),
-        ("core::intrinsics::float_ge", Ty::Bool),
-    ] {
-        add_fn(name, Vec::new(), vec![Ty::Float, Ty::Float], ret);
-    }
-
-    // Primitive equality helpers.
-    for (name, ty) in [
-        ("core::intrinsics::string_eq", Ty::String),
-        ("core::intrinsics::string_ne", Ty::String),
-        ("core::intrinsics::bytes_eq", Ty::Bytes),
-        ("core::intrinsics::bytes_ne", Ty::Bytes),
-        ("core::intrinsics::unit_eq", Ty::Unit),
-        ("core::intrinsics::unit_ne", Ty::Unit),
-    ] {
-        add_fn(name, Vec::new(), vec![ty.clone(), ty.clone()], Ty::Bool);
-    }
-
-    // Primitive conversions: `int` ↔ `byte` / `char`.
-    add_fn(
-        "core::intrinsics::int_to_byte",
-        Vec::new(),
-        vec![Ty::Int],
-        Ty::Byte,
-    );
-    add_fn(
-        "core::intrinsics::int_try_byte",
-        Vec::new(),
-        vec![Ty::Int],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
-    );
-    add_fn(
-        "core::intrinsics::byte_to_int",
-        Vec::new(),
-        vec![Ty::Byte],
-        Ty::Int,
-    );
-
-    add_fn(
-        "core::intrinsics::int_to_char",
-        Vec::new(),
-        vec![Ty::Int],
-        Ty::Char,
-    );
-    add_fn(
-        "core::intrinsics::int_try_char",
-        Vec::new(),
-        vec![Ty::Int],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Char]),
-    );
-    add_fn(
-        "core::intrinsics::char_to_int",
-        Vec::new(),
-        vec![Ty::Char],
-        Ty::Int,
-    );
-
-    // `bytes`.
-    add_fn(
-        "core::intrinsics::bytes_get",
-        Vec::new(),
-        vec![Ty::Bytes, Ty::Int],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
-    );
-    add_fn(
-        "core::intrinsics::bytes_slice",
-        Vec::new(),
-        vec![
-            Ty::Bytes,
-            Ty::Int,
-            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
-        ],
-        Ty::Bytes,
-    );
-    add_fn(
-        "core::intrinsics::bytes_to_array",
-        Vec::new(),
-        vec![Ty::Bytes],
-        Ty::Array(Box::new(Ty::Byte)),
-    );
-    add_fn(
-        "core::intrinsics::bytes_from_array",
-        Vec::new(),
-        vec![Ty::Readonly(Box::new(Ty::Array(Box::new(Ty::Byte))))],
-        Ty::Bytes,
-    );
-
-    // `string`.
-    add_fn(
-        "core::intrinsics::string_slice",
-        Vec::new(),
-        vec![
-            Ty::String,
-            Ty::Int,
-            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
-        ],
-        Ty::String,
-    );
-
-    // Iterator protocol (currently for dynamic arrays only).
-    let iter_generics = vec![GenericParamInfo {
-        name: "T".to_string(),
-        arity: 0,
-        bounds: Vec::new(),
-        span: Span::new(0, 0),
-    }];
-    add_fn(
-        "core::intrinsics::into_iter",
-        iter_generics.clone(),
-        vec![Ty::Array(Box::new(Ty::Gen(0)))],
-        Ty::App(
-            TyCon::Named("core::intrinsics::ArrayIter".to_string()),
-            vec![Ty::Gen(0)],
-        ),
-    );
-    add_fn(
-        "core::intrinsics::next",
-        iter_generics.clone(),
-        vec![Ty::App(
-            TyCon::Named("core::intrinsics::ArrayIter".to_string()),
-            vec![Ty::Gen(0)],
-        )],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Gen(0)]),
-    );
-
-    // Iterator protocol (strings + bytes).
-    add_fn(
-        "core::intrinsics::string_into_iter",
-        Vec::new(),
-        vec![Ty::String],
-        Ty::App(
-            TyCon::Named("core::intrinsics::StringIter".to_string()),
-            vec![],
-        ),
-    );
-    add_fn(
-        "core::intrinsics::string_next",
-        Vec::new(),
-        vec![Ty::App(
-            TyCon::Named("core::intrinsics::StringIter".to_string()),
-            vec![],
-        )],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Char]),
-    );
-    add_fn(
-        "core::intrinsics::bytes_into_iter",
-        Vec::new(),
-        vec![Ty::Bytes],
-        Ty::App(
-            TyCon::Named("core::intrinsics::BytesIter".to_string()),
-            vec![],
-        ),
-    );
-    add_fn(
-        "core::intrinsics::bytes_next",
-        Vec::new(),
-        vec![Ty::App(
-            TyCon::Named("core::intrinsics::BytesIter".to_string()),
-            vec![],
-        )],
-        Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Byte]),
-    );
 
     // Built-in inherent methods on primitive types (method-call sugar support).
     //
@@ -1221,162 +805,47 @@ fn add_prelude(env: &mut ProgramEnv) {
         );
     }
 
-    let iter_iface = "core::iter::Iterator";
-    // core::intrinsics::ArrayIter<T>: Item = T
-    env.interface_impls.insert((
-        "core::intrinsics::ArrayIter".to_string(),
-        iter_iface.to_string(),
-    ));
-    env.interface_assoc_types.insert(
-        (
-            "core::intrinsics::ArrayIter".to_string(),
-            iter_iface.to_string(),
-            "Item".to_string(),
-        ),
-        Ty::Gen(0),
-    );
-    env.interface_methods.insert(
-        (
-            "core::intrinsics::ArrayIter".to_string(),
-            iter_iface.to_string(),
-            "next".to_string(),
-        ),
-        "impl::core::iter::Iterator::for::core::intrinsics::ArrayIter::next".to_string(),
-    );
+    // Built-in `core::ops::*` interface impls for primitives.
+    //
+    // The language currently does not allow source-authored `impl ... for int`/`bool`/etc, but we
+    // still want generic code to be able to use the operator interfaces from `core::ops`.
+    let add_ops_impl = |env: &mut ProgramEnv, prim: &str, iface: &str, method: &str| {
+        env.interface_impls
+            .insert((prim.to_string(), iface.to_string()));
+        env.interface_methods.insert(
+            (prim.to_string(), iface.to_string(), method.to_string()),
+            format!("impl::{iface}::for::{prim}::{method}"),
+        );
+    };
 
-    // core::intrinsics::StringIter: Item = char
-    env.interface_impls.insert((
-        "core::intrinsics::StringIter".to_string(),
-        iter_iface.to_string(),
-    ));
-    env.interface_assoc_types.insert(
-        (
-            "core::intrinsics::StringIter".to_string(),
-            iter_iface.to_string(),
-            "Item".to_string(),
-        ),
-        Ty::Char,
-    );
-    env.interface_methods.insert(
-        (
-            "core::intrinsics::StringIter".to_string(),
-            iter_iface.to_string(),
-            "next".to_string(),
-        ),
-        "impl::core::iter::Iterator::for::core::intrinsics::StringIter::next".to_string(),
-    );
+    // Arithmetic.
+    for prim in ["int", "float"] {
+        add_ops_impl(env, prim, "core::ops::Add", "add");
+        add_ops_impl(env, prim, "core::ops::Sub", "sub");
+        add_ops_impl(env, prim, "core::ops::Mul", "mul");
+        add_ops_impl(env, prim, "core::ops::Div", "div");
+        add_ops_impl(env, prim, "core::ops::Rem", "rem");
+        add_ops_impl(env, prim, "core::ops::Neg", "neg");
+    }
 
-    // core::intrinsics::BytesIter: Item = byte
-    env.interface_impls.insert((
-        "core::intrinsics::BytesIter".to_string(),
-        iter_iface.to_string(),
-    ));
-    env.interface_assoc_types.insert(
-        (
-            "core::intrinsics::BytesIter".to_string(),
-            iter_iface.to_string(),
-            "Item".to_string(),
-        ),
-        Ty::Byte,
-    );
-    env.interface_methods.insert(
-        (
-            "core::intrinsics::BytesIter".to_string(),
-            iter_iface.to_string(),
-            "next".to_string(),
-        ),
-        "impl::core::iter::Iterator::for::core::intrinsics::BytesIter::next".to_string(),
-    );
+    // Boolean ops.
+    add_ops_impl(env, "bool", "core::ops::Not", "not");
 
-    // Array operations.
-    let array_generics = vec![GenericParamInfo {
-        name: "T".to_string(),
-        arity: 0,
-        bounds: Vec::new(),
-        span: Span::new(0, 0),
-    }];
-    let array_ty = |t: Ty| Ty::Array(Box::new(t));
-    let ro_array_ty = |t: Ty| Ty::Readonly(Box::new(Ty::Array(Box::new(t))));
-    let option_ty = |t: Ty| Ty::App(TyCon::Named("Option".to_string()), vec![t]);
+    // Equality.
+    for prim in [
+        "unit", "bool", "int", "float", "byte", "char", "string", "bytes",
+    ] {
+        add_ops_impl(env, prim, "core::ops::Eq", "eq");
+        add_ops_impl(env, prim, "core::ops::Ne", "ne");
+    }
 
-    add_fn(
-        "core::intrinsics::array_len",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0))],
-        Ty::Int,
-    );
-    add_fn(
-        "core::intrinsics::array_len_ro",
-        array_generics.clone(),
-        vec![ro_array_ty(Ty::Gen(0))],
-        Ty::Int,
-    );
-    add_fn(
-        "core::intrinsics::array_push",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), Ty::Gen(0)],
-        Ty::Unit,
-    );
-    add_fn(
-        "core::intrinsics::array_pop",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0))],
-        option_ty(Ty::Gen(0)),
-    );
-    add_fn(
-        "core::intrinsics::array_clear",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0))],
-        Ty::Unit,
-    );
-    add_fn(
-        "core::intrinsics::array_resize",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
-        Ty::Unit,
-    );
-    add_fn(
-        "core::intrinsics::array_insert",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
-        Ty::Unit,
-    );
-    add_fn(
-        "core::intrinsics::array_remove",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), Ty::Int],
-        Ty::Gen(0),
-    );
-    add_fn(
-        "core::intrinsics::array_extend",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), array_ty(Ty::Gen(0))],
-        Ty::Unit,
-    );
-    add_fn(
-        "core::intrinsics::array_concat",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), array_ty(Ty::Gen(0))],
-        array_ty(Ty::Gen(0)),
-    );
-    add_fn(
-        "core::intrinsics::array_concat_ro",
-        array_generics.clone(),
-        vec![ro_array_ty(Ty::Gen(0)), ro_array_ty(Ty::Gen(0))],
-        array_ty(Ty::Readonly(Box::new(Ty::Gen(0)))),
-    );
-    add_fn(
-        "core::intrinsics::array_slice",
-        array_generics.clone(),
-        vec![array_ty(Ty::Gen(0)), Ty::Int, Ty::Int],
-        array_ty(Ty::Gen(0)),
-    );
-    add_fn(
-        "core::intrinsics::array_slice_ro",
-        array_generics.clone(),
-        vec![ro_array_ty(Ty::Gen(0)), Ty::Int, Ty::Int],
-        array_ty(Ty::Readonly(Box::new(Ty::Gen(0)))),
-    );
+    // Ordering.
+    for prim in ["int", "float"] {
+        add_ops_impl(env, prim, "core::ops::Lt", "lt");
+        add_ops_impl(env, prim, "core::ops::Le", "le");
+        add_ops_impl(env, prim, "core::ops::Gt", "gt");
+        add_ops_impl(env, prim, "core::ops::Ge", "ge");
+    }
 }
 
 fn declare_struct(
@@ -1546,6 +1015,371 @@ fn declare_function_sig(
     validate_assoc_projs_in_ty(env, &ret, func.ret.span())?;
     validate_assoc_projs_well_formed_in_ty(env, &generics, &ret, func.ret.span())?;
     validate_value_ty(env, &ret, func.ret.span())?;
+
+    env.functions.insert(
+        name.clone(),
+        FnSig {
+            name,
+            vis: func.vis,
+            defining_module: module.clone(),
+            generics,
+            params,
+            ret,
+            span: func.span,
+        },
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct ExpectedIntrinsicSig {
+    generic_count: usize,
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
+    use TyCon::Named;
+
+    let option = |t: Ty| Ty::App(Named("Option".to_string()), vec![t]);
+    let array = |t: Ty| Ty::Array(Box::new(t));
+    let ro = |t: Ty| Ty::Readonly(Box::new(t));
+    let array_iter = |t: Ty| Ty::App(Named("core::intrinsics::ArrayIter".to_string()), vec![t]);
+    let string_iter = || Ty::App(Named("core::intrinsics::StringIter".to_string()), vec![]);
+    let bytes_iter = || Ty::App(Named("core::intrinsics::BytesIter".to_string()), vec![]);
+
+    Some(match name {
+        // f-string helpers.
+        "core::intrinsics::string_concat" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String, Ty::String],
+            ret: Ty::String,
+        },
+        "core::intrinsics::to_string" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![Ty::Gen(0)],
+            ret: Ty::String,
+        },
+
+        // Panic.
+        "core::intrinsics::panic" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![Ty::String],
+            ret: Ty::Gen(0),
+        },
+
+        // Boolean.
+        "core::intrinsics::bool_not" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bool],
+            ret: Ty::Bool,
+        },
+        "core::intrinsics::bool_eq" | "core::intrinsics::bool_ne" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bool, Ty::Bool],
+            ret: Ty::Bool,
+        },
+
+        // Integer arithmetic & comparisons.
+        "core::intrinsics::int_add"
+        | "core::intrinsics::int_sub"
+        | "core::intrinsics::int_mul"
+        | "core::intrinsics::int_div"
+        | "core::intrinsics::int_mod" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int, Ty::Int],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::int_eq"
+        | "core::intrinsics::int_ne"
+        | "core::intrinsics::int_lt"
+        | "core::intrinsics::int_le"
+        | "core::intrinsics::int_gt"
+        | "core::intrinsics::int_ge" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int, Ty::Int],
+            ret: Ty::Bool,
+        },
+
+        // Float arithmetic & comparisons.
+        "core::intrinsics::float_add"
+        | "core::intrinsics::float_sub"
+        | "core::intrinsics::float_mul"
+        | "core::intrinsics::float_div"
+        | "core::intrinsics::float_mod" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Float, Ty::Float],
+            ret: Ty::Float,
+        },
+        "core::intrinsics::float_eq"
+        | "core::intrinsics::float_ne"
+        | "core::intrinsics::float_lt"
+        | "core::intrinsics::float_le"
+        | "core::intrinsics::float_gt"
+        | "core::intrinsics::float_ge" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Float, Ty::Float],
+            ret: Ty::Bool,
+        },
+
+        // Primitive equality helpers.
+        "core::intrinsics::string_eq" | "core::intrinsics::string_ne" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String, Ty::String],
+            ret: Ty::Bool,
+        },
+        "core::intrinsics::bytes_eq" | "core::intrinsics::bytes_ne" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes, Ty::Bytes],
+            ret: Ty::Bool,
+        },
+        "core::intrinsics::unit_eq" | "core::intrinsics::unit_ne" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Unit, Ty::Unit],
+            ret: Ty::Bool,
+        },
+
+        // Primitive conversions: `int` ↔ `byte` / `char`.
+        "core::intrinsics::int_to_byte" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int],
+            ret: Ty::Byte,
+        },
+        "core::intrinsics::int_try_byte" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int],
+            ret: option(Ty::Byte),
+        },
+        "core::intrinsics::byte_to_int" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Byte],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::int_to_char" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int],
+            ret: Ty::Char,
+        },
+        "core::intrinsics::int_try_char" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int],
+            ret: option(Ty::Char),
+        },
+        "core::intrinsics::char_to_int" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Char],
+            ret: Ty::Int,
+        },
+
+        // `bytes` operations.
+        "core::intrinsics::bytes_get" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes, Ty::Int],
+            ret: option(Ty::Byte),
+        },
+        "core::intrinsics::bytes_slice" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes, Ty::Int, option(Ty::Int)],
+            ret: Ty::Bytes,
+        },
+        "core::intrinsics::bytes_to_array" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes],
+            ret: array(Ty::Byte),
+        },
+        "core::intrinsics::bytes_from_array" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![ro(array(Ty::Byte))],
+            ret: Ty::Bytes,
+        },
+
+        // `string` operations.
+        "core::intrinsics::string_slice" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String, Ty::Int, option(Ty::Int)],
+            ret: Ty::String,
+        },
+
+        // Iterator protocol.
+        "core::intrinsics::into_iter" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0))],
+            ret: array_iter(Ty::Gen(0)),
+        },
+        "core::intrinsics::next" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array_iter(Ty::Gen(0))],
+            ret: option(Ty::Gen(0)),
+        },
+        "core::intrinsics::string_into_iter" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String],
+            ret: string_iter(),
+        },
+        "core::intrinsics::string_next" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![string_iter()],
+            ret: option(Ty::Char),
+        },
+        "core::intrinsics::bytes_into_iter" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes],
+            ret: bytes_iter(),
+        },
+        "core::intrinsics::bytes_next" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![bytes_iter()],
+            ret: option(Ty::Byte),
+        },
+
+        // Array operations.
+        "core::intrinsics::array_len" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0))],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::array_len_ro" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![ro(array(Ty::Gen(0)))],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::array_push" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), Ty::Gen(0)],
+            ret: Ty::Unit,
+        },
+        "core::intrinsics::array_pop" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0))],
+            ret: option(Ty::Gen(0)),
+        },
+        "core::intrinsics::array_clear" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0))],
+            ret: Ty::Unit,
+        },
+        "core::intrinsics::array_resize" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
+            ret: Ty::Unit,
+        },
+        "core::intrinsics::array_insert" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), Ty::Int, Ty::Gen(0)],
+            ret: Ty::Unit,
+        },
+        "core::intrinsics::array_remove" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), Ty::Int],
+            ret: Ty::Gen(0),
+        },
+        "core::intrinsics::array_extend" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), array(Ty::Gen(0))],
+            ret: Ty::Unit,
+        },
+        "core::intrinsics::array_concat" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), array(Ty::Gen(0))],
+            ret: array(Ty::Gen(0)),
+        },
+        "core::intrinsics::array_concat_ro" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![ro(array(Ty::Gen(0))), ro(array(Ty::Gen(0)))],
+            ret: array(ro(Ty::Gen(0))),
+        },
+        "core::intrinsics::array_slice" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![array(Ty::Gen(0)), Ty::Int, Ty::Int],
+            ret: array(Ty::Gen(0)),
+        },
+        "core::intrinsics::array_slice_ro" => ExpectedIntrinsicSig {
+            generic_count: 1,
+            params: vec![ro(array(Ty::Gen(0))), Ty::Int, Ty::Int],
+            ret: array(ro(Ty::Gen(0))),
+        },
+
+        _ => return None,
+    })
+}
+
+fn declare_intrinsic_fn_sig(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    func: &IntrinsicFnItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&func.name.name);
+    if env.functions.contains_key(&name) {
+        return Err(TypeError {
+            message: format!("duplicate function `{name}`"),
+            span: func.name.span,
+        });
+    }
+
+    let Some(expected) = expected_core_intrinsic_sig(&name) else {
+        return Err(TypeError {
+            message: format!("unknown intrinsic `{name}`"),
+            span: func.name.span,
+        });
+    };
+
+    let generics = lower_generic_params_in_scope(env, module, &[], &func.generics, true)?;
+    if generics.len() != expected.generic_count {
+        return Err(TypeError {
+            message: format!(
+                "intrinsic `{name}` generic arity mismatch: expected {}, got {}",
+                expected.generic_count,
+                generics.len()
+            ),
+            span: func.span,
+        });
+    }
+
+    let scope = GenericScope::new(&generics)?;
+    for gp in &generics {
+        for bound in &gp.bounds {
+            if contains_self_type(bound) {
+                return Err(TypeError {
+                    message: "`Self` can only be used in interface or instance-method contexts"
+                        .to_string(),
+                    span: gp.span,
+                });
+            }
+        }
+    }
+
+    let mut params = Vec::with_capacity(func.params.len());
+    for p in &func.params {
+        let ty = lower_type_expr(env, module, &scope, &p.ty)?;
+        if contains_self_type(&ty) {
+            return Err(TypeError {
+                message: "`Self` can only be used in interface or instance-method contexts"
+                    .to_string(),
+                span: p.ty.span(),
+            });
+        }
+        validate_assoc_projs_in_ty(env, &ty, p.ty.span())?;
+        validate_assoc_projs_well_formed_in_ty(env, &generics, &ty, p.ty.span())?;
+        validate_value_ty(env, &ty, p.ty.span())?;
+        params.push(ty);
+    }
+    let ret = lower_type_expr(env, module, &scope, &func.ret)?;
+    if contains_self_type(&ret) {
+        return Err(TypeError {
+            message: "`Self` can only be used in interface or instance-method contexts".to_string(),
+            span: func.ret.span(),
+        });
+    }
+    validate_assoc_projs_in_ty(env, &ret, func.ret.span())?;
+    validate_assoc_projs_well_formed_in_ty(env, &generics, &ret, func.ret.span())?;
+    validate_value_ty(env, &ret, func.ret.span())?;
+
+    if params != expected.params || ret != expected.ret {
+        return Err(TypeError {
+            message: format!("invalid signature for intrinsic `{name}`"),
+            span: func.span,
+        });
+    }
 
     env.functions.insert(
         name.clone(),
