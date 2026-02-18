@@ -3,8 +3,10 @@ use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
 use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
 
 fn compile_o2(src: &str) -> rusk_bytecode::ExecutableModule {
-    let mut options = CompileOptions::default();
-    options.opt_level = OptLevel::O2;
+    let options = CompileOptions {
+        opt_level: OptLevel::O2,
+        ..CompileOptions::default()
+    };
     compile_to_bytecode_with_options(src, &options).expect("compile")
 }
 
