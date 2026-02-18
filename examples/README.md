@@ -37,3 +37,8 @@ Notes:
 - `15-effects-generator.rusk`: implementing generators using algebraic effects with `yield` and `resume`
 - `16-fixed-point-combinator.rusk`: Y-combinator and fixed-point recursion using generics and higher-order functions
 - `17-effects-state-management.rusk`: React-like state management, demonstrating how effects overcome `useEffect` limitations
+- `18-newtype-structs.rusk`: new-type structs (nominal wrappers) for type safety
+- `19-destructuring-patterns.rusk`: destructuring in `let`/`const`/`readonly` statements
+- `20-associated-types.rusk`: associated types in interfaces with `Self::Item` and qualified projections
+- `21-byte-char-slicing.rusk`: `byte` and `char` primitives, zero-copy string/bytes slicing
+- `22-option-methods.rusk`: `Option` methods (`map`, `and_then`, `unwrap_or`, etc.)

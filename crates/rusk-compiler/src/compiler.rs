@@ -1357,6 +1357,7 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         "core::intrinsics::bytes_get" => {
             Some(sig(vec![HostType::Bytes, HostType::Int], HostType::Any))
         }
+        "core::intrinsics::bytes_len" => Some(sig(vec![HostType::Bytes], HostType::Int)),
         "core::intrinsics::bytes_slice" => Some(sig(
             vec![HostType::Bytes, HostType::Int, HostType::Any],
             HostType::Bytes,
@@ -1795,6 +1796,66 @@ impl Compiler {
             }
         }
 
+        // `core::len::Len` impls for built-in container types.
+        let _ = synthesize_ops_wrapper(
+            self,
+            "impl::core::len::Len::for::bytes::len",
+            &[Mutability::Readonly],
+            "core::intrinsics::bytes_len",
+        )?;
+        {
+            let name = "impl::core::len::Len::for::array::len";
+            if !self.module.function_ids.contains_key(name) {
+                let generics = vec![typeck::GenericParamInfo {
+                    name: "T".to_string(),
+                    arity: 0,
+                    bounds: Vec::new(),
+                    span: span0,
+                }];
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    generics,
+                );
+                lowerer.bind_type_rep_params_for_signature();
+
+                let elem_rep = lowerer
+                    .generic_type_reps
+                    .first()
+                    .and_then(|v| *v)
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "internal error: missing `array` Len<T> TypeRep param",
+                            span0,
+                        )
+                    })?;
+
+                let recv_local = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv_local,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::intrinsics::array_len_ro".to_string(),
+                    args: vec![Operand::Local(elem_rep), Operand::Local(recv_local)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
         // Built-in inherent methods on primitive types.
         //
         // These are real MIR functions (not VM intrinsics) so they can be:
@@ -1925,6 +1986,12 @@ impl Compiler {
                 Mutability::Readonly,
             ],
             "core::intrinsics::string_slice",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::chars",
+            &[Mutability::Readonly],
+            "core::intrinsics::string_into_iter",
         )?;
 
         // `core::iter::Iterator` impls for built-in iterator state types.
@@ -6822,6 +6889,7 @@ impl<'a> FunctionLowerer<'a> {
             Ty::Char => Some(("char".to_string(), Vec::new())),
             Ty::String => Some(("string".to_string(), Vec::new())),
             Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
+            Ty::Array(elem) => Some(("array".to_string(), vec![*elem.clone()])),
             _ => None,
         };
 
@@ -7169,6 +7237,7 @@ impl<'a> FunctionLowerer<'a> {
         };
         let recv_type_args = match self.strip_readonly_ty(&recv_ty) {
             Ty::App(typeck::TyCon::Named(_), args) => args.clone(),
+            Ty::Array(elem) => vec![*elem.clone()],
             _ => Vec::new(),
         };
         let method_id = format!("{origin_iface}::{}", method.name);
@@ -7739,6 +7808,7 @@ impl<'a> FunctionLowerer<'a> {
 fn nominal_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Readonly(inner) => nominal_type_name(inner),
+        Ty::Array(_) => Some("array"),
         Ty::Unit => Some("unit"),
         Ty::Bool => Some("bool"),
         Ty::Int => Some("int"),

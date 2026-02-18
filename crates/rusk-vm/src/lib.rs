@@ -3843,6 +3843,16 @@ fn eval_core_intrinsic(
             }
             _ => Err(bad_args("core::intrinsics::bytes_get")),
         },
+        I::BytesLen => match args.as_slice() {
+            [Value::Bytes(b)] => {
+                let len_i64: i64 = b
+                    .len_usize()
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::bytes_len: len overflow".to_string())?;
+                Ok(Value::Int(len_i64))
+            }
+            _ => Err(bad_args("core::intrinsics::bytes_len")),
+        },
         I::BytesSlice => match args.as_slice() {
             [Value::Bytes(b), Value::Int(from), to] => {
                 let len_i64: i64 = b

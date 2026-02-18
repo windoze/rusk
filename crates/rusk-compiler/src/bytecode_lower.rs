@@ -246,6 +246,7 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::char_to_int" => Intrinsic::CharToInt,
 
         "core::intrinsics::bytes_get" => Intrinsic::BytesGet,
+        "core::intrinsics::bytes_len" => Intrinsic::BytesLen,
         "core::intrinsics::bytes_slice" => Intrinsic::BytesSlice,
         "core::intrinsics::bytes_to_array" => Intrinsic::BytesToArray,
         "core::intrinsics::bytes_from_array" => Intrinsic::BytesFromArray,

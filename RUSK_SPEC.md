@@ -1434,6 +1434,12 @@ Required iterator interface impls:
 - `impl core::iter::Iterator for core::intrinsics::StringIter { type Item = char; ... }`
 - `impl core::iter::Iterator for core::intrinsics::BytesIter { type Item = byte; ... }`
 
+Library wrappers:
+
+- `readonly fn string::chars() -> core::intrinsics::StringIter`
+  - equivalent to `core::intrinsics::string_into_iter(self)`
+  - useful for `"s".chars().count()` (length in Unicode scalar values)
+
 - `enum Option<T> { Some(T), None }`
 
 ### 9.5 Panic
@@ -1548,6 +1554,7 @@ Array conversion (copying):
 Lowering targets (canonical intrinsics):
 
 - `core::intrinsics::bytes_get(b: bytes, idx: int) -> Option<byte>`
+- `core::intrinsics::bytes_len(b: bytes) -> int`
 - `core::intrinsics::bytes_slice(b: bytes, from: int, to: Option<int>) -> bytes`
 - `core::intrinsics::bytes_to_array(b: bytes) -> [byte]`
 - `core::intrinsics::bytes_from_array(xs: readonly [byte]) -> bytes`
@@ -1567,6 +1574,27 @@ Zero-copy slicing is supported for `string` by **byte offsets**:
 Lowering target (canonical intrinsic):
 
 - `core::intrinsics::string_slice(s: string, from: int, to: Option<int>) -> string`
+
+### 9.8 Length (`core::len`)
+
+Core provides a simple length interface for built-in container types:
+
+- `interface core::len::Len { readonly fn len() -> int; }`
+
+Built-in implementations:
+
+- `bytes` implements `core::len::Len`
+  - `bs.len()` returns the number of bytes in the `bytes` view (O(1))
+  - canonical lowering target: `core::intrinsics::bytes_len(b: bytes) -> int`
+- arrays (`[T]` and `readonly [T]`) implement `core::len::Len`
+  - `xs.len()` returns the number of elements (O(1))
+  - canonical lowering targets:
+    - `core::intrinsics::array_len<T>(xs: [T]) -> int`
+    - `core::intrinsics::array_len_ro<T>(xs: readonly [T]) -> int`
+
+`string` does not implement `Len` in v0.4 because the choice of “length in bytes” vs “length in
+Unicode scalar values” is user-visible. Use `"s".chars().count()` to count Unicode scalar values,
+or `string::slice` byte offsets for byte-level operations.
 
 ## 10. Compilation Pipeline (Normative)
 

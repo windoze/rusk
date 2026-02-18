@@ -788,6 +788,21 @@ fn add_prelude(env: &mut ProgramEnv) {
         InherentMethodKind::Instance { readonly: true },
     );
 
+    // `string` iteration helpers.
+    add_fn(
+        "string::chars",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::String))],
+        Ty::App(
+            TyCon::Named("core::intrinsics::StringIter".to_string()),
+            Vec::new(),
+        ),
+    );
+    env.inherent_method_kinds.insert(
+        "string::chars".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
     // Built-in interface impls (used by desugarings).
     let to_string_iface = "core::fmt::ToString";
     for prim in [
@@ -845,6 +860,21 @@ fn add_prelude(env: &mut ProgramEnv) {
         add_ops_impl(env, prim, "core::ops::Le", "le");
         add_ops_impl(env, prim, "core::ops::Gt", "gt");
         add_ops_impl(env, prim, "core::ops::Ge", "ge");
+    }
+
+    // `core::len::Len` for built-in container types.
+    let len_iface = "core::len::Len";
+    for type_name in ["bytes", "array"] {
+        env.interface_impls
+            .insert((type_name.to_string(), len_iface.to_string()));
+        env.interface_methods.insert(
+            (
+                type_name.to_string(),
+                len_iface.to_string(),
+                "len".to_string(),
+            ),
+            format!("impl::{len_iface}::for::{type_name}::len"),
+        );
     }
 }
 
@@ -1172,6 +1202,11 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
         },
 
         // `bytes` operations.
+        "core::intrinsics::bytes_len" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Bytes],
+            ret: Ty::Int,
+        },
         "core::intrinsics::bytes_get" => ExpectedIntrinsicSig {
             generic_count: 0,
             params: vec![Ty::Bytes, Ty::Int],
@@ -8919,6 +8954,21 @@ impl<'a> FnTypechecker<'a> {
                 Some(Vec::new())
             }
 
+            // Arrays are not nominal types, but can have built-in impls (arity-0 only for now).
+            Ty::Array(_elem) => {
+                if iface_arity != 0 {
+                    return None;
+                }
+                if !self
+                    .env
+                    .interface_impls
+                    .contains(&("array".to_string(), iface.to_string()))
+                {
+                    return None;
+                }
+                Some(Vec::new())
+            }
+
             _ => None,
         }
     }
@@ -9031,6 +9081,16 @@ impl<'a> FnTypechecker<'a> {
                 self.env
                     .interface_impls
                     .contains(&(type_name.to_string(), iface_name.to_string()))
+            }
+
+            // Arrays are not nominal types, but can have built-in impls (arity-0 only for now).
+            Ty::Array(_elem) => {
+                if !iface_args.is_empty() {
+                    return false;
+                }
+                self.env
+                    .interface_impls
+                    .contains(&("array".to_string(), iface_name.to_string()))
             }
 
             _ => false,
@@ -9354,6 +9414,7 @@ fn interface_method_sig_mentions_self_or_assoc(sig: &InterfaceMethodSig) -> bool
 fn nominal_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Readonly(inner) => nominal_type_name(inner),
+        Ty::Array(_) => Some("array"),
         Ty::Unit => Some("unit"),
         Ty::Bool => Some("bool"),
         Ty::Int => Some("int"),

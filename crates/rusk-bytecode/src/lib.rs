@@ -177,6 +177,7 @@ pub enum Intrinsic {
 
     // `bytes` operations.
     BytesGet,
+    BytesLen,
     BytesSlice,
     BytesToArray,
     BytesFromArray,

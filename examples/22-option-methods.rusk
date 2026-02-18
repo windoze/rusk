@@ -1,0 +1,166 @@
+// 22 - Option Methods
+//
+// Rusk's Option type provides many useful methods for working with
+// optional values in a functional style.
+
+fn divide(a: int, b: int) -> Option<int> {
+    if b == 0 {
+        Option::None
+    } else {
+        Option::Some(a / b)
+    }
+}
+
+fn parse_positive(s: string) -> Option<int> {
+    // Simplified parser (just returns a hardcoded value for demo)
+    if s == "42" {
+        Option::Some(42)
+    } else if s == "100" {
+        Option::Some(100)
+    } else {
+        Option::None
+    }
+}
+
+// Safe access helper
+fn safe_get(arr: [int], idx: int) -> Option<int> {
+    let len = core::intrinsics::array_len(arr);
+    if idx >= 0 && idx < len {
+        Option::Some(arr[idx])
+    } else {
+        Option::None
+    }
+}
+
+fn main() -> int {
+    // ===== is_some / is_none =====
+
+    let some_value = Option::Some(42);
+    let none_value = Option::None;
+
+    std::println(f"some_value.is_some() = {some_value.is_some()}");
+    std::println(f"some_value.is_none() = {some_value.is_none()}");
+    std::println(f"none_value.is_some() = {none_value.is_some()}");
+    std::println(f"none_value.is_none() = {none_value.is_none()}");
+
+    // ===== map: transform the value inside Some =====
+
+    let doubled = Option::Some(21).map(|x: int| { x * 2 });
+    match doubled {
+        Option::Some(v) => {
+            std::println(f"Doubled: {v}");
+        }
+        Option::None => {
+            std::println("No value");
+        }
+    }
+
+    // map on None returns None
+    let none_mapped = none_value.map(|x: int| { x * 2 });
+    std::println(f"None mapped is_none: {none_mapped.is_none()}");
+
+    // ===== and_then: chain operations that return Option =====
+
+    let result1 = divide(20, 2).and_then(|x: int| {
+        divide(x, 5)
+    });
+    match result1 {
+        Option::Some(v) => {
+            std::println(f"20 / 2 / 5 = {v}");
+        }
+        Option::None => {
+            std::println("Division failed");
+        }
+    }
+
+    // and_then with failure
+    let result2 = divide(20, 0).and_then(|x: int| {
+        divide(x, 5)
+    });
+    std::println(f"20 / 0 / 5 failed: {result2.is_none()}");
+
+    // ===== unwrap: extract value or panic =====
+
+    let safe_unwrap = Option::Some(99).unwrap();
+    std::println(f"Unwrapped: {safe_unwrap}");
+
+    // This would panic:
+    // let panic_unwrap = Option::None.unwrap();
+
+    // ===== unwrap_or: provide default value =====
+
+    let with_default = Option::Some(42).unwrap_or(100);
+    std::println(f"Some with default: {with_default}");
+
+    let none_with_default = none_value.unwrap_or(100);
+    std::println(f"None with default: {none_with_default}");
+
+    // ===== unwrap_or_else: compute default lazily =====
+
+    let lazy_default = Option::Some(42).unwrap_or_else {
+        std::println("Computing default (not called for Some)");
+        999
+    };
+    std::println(f"Result with lazy default: {lazy_default}");
+
+    let none_lazy_default = none_value.unwrap_or_else {
+        std::println("Computing default for None");
+        999
+    };
+    std::println(f"None with lazy default: {none_lazy_default}");
+
+    // ===== Chaining multiple operations =====
+
+    let chain_result = parse_positive("42")
+        .map(|x: int| { x * 2 })
+        .and_then(|x: int| { divide(x, 4) })
+        .unwrap_or(0);
+
+    std::println(f"Chained operations result: {chain_result}");
+
+    // ===== Practical example: safe array access =====
+
+    let numbers = [10, 20, 30, 40, 50];
+    let len = core::intrinsics::array_len(numbers);
+
+    match safe_get(numbers, 2) {
+        Option::Some(v) => {
+            std::println(f"numbers[2] = {v}");
+        }
+        Option::None => {
+            std::println("Index out of bounds");
+        }
+    }
+
+    let out_of_bounds = safe_get(numbers, 100).unwrap_or(-1);
+    std::println(f"Out of bounds access with default: {out_of_bounds}");
+
+    // ===== Working with multiple Options =====
+
+    let a = Option::Some(10);
+    let b = Option::Some(20);
+    let c = Option::None;
+
+    // Combine two Some values
+    let sum = a.and_then(|x: int| {
+        b.map(|y: int| { x + y })
+    });
+
+    match sum {
+        Option::Some(v) => {
+            std::println(f"Sum of two Some values: {v}");
+        }
+        Option::None => {
+            std::println("One or both values were None");
+        }
+    }
+
+    // If any value is None, result is None
+    let sum_with_none = a.and_then(|x: int| {
+        c.map(|y: int| { x + y })
+    });
+
+    std::println(f"Sum with None is_none: {sum_with_none.is_none()}");
+
+    0
+}

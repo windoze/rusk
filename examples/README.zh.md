@@ -35,3 +35,8 @@ cargo run --bin rusk -- examples/10-modules/main.rusk
 - `15-effects-generator.rusk`：使用代数效应实现生成器，演示 `yield` 和 `resume`
 - `16-fixed-point-combinator.rusk`：Y-组合子和不动点递归，展示泛型和高阶函数的能力
 - `17-effects-state-management.rusk`：类 React 状态管理，展示如何用 effects 克服 `useEffect` 的限制
+- `18-newtype-structs.rusk`：新类型结构体（名义包装器）用于类型安全
+- `19-destructuring-patterns.rusk`：在 `let`/`const`/`readonly` 语句中使用解构模式
+- `20-associated-types.rusk`：接口中的关联类型，展示 `Self::Item` 和限定投影
+- `21-byte-char-slicing.rusk`：`byte` 和 `char` 原始类型，零拷贝字符串/字节切片
+- `22-option-methods.rusk`：`Option` 方法（`map`、`and_then`、`unwrap_or` 等）

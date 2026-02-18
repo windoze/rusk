@@ -590,7 +590,7 @@ The current intrinsic set includes:
 - primitive equality helpers: `StringEq`, `StringNe`, `BytesEq`, `BytesNe`, `UnitEq`, `UnitNe`
 - primitive conversions: `IntToByte`, `IntTryByte`, `ByteToInt`, `IntToChar`, `IntTryChar`,
   `CharToInt`
-- `bytes` helpers: `BytesGet`, `BytesSlice`, `BytesToArray`, `BytesFromArray`
+- `bytes` helpers: `BytesGet`, `BytesLen`, `BytesSlice`, `BytesToArray`, `BytesFromArray`
 - `string` helpers: `StringSlice`
 - iterator protocol: `IntoIter`, `Next`, `StringIntoIter`, `StringNext`, `BytesIntoIter`,
   `BytesNext`
@@ -600,7 +600,7 @@ The current intrinsic set includes:
 
 ---
 
-## 10. `.rbc` serialization format (v0.3)
+## 10. `.rbc` serialization format (v0.4)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -654,7 +654,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `3`
+- minor = `4`
 
 The reference decoder requires an **exact** version match.
 
@@ -747,7 +747,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### Intrinsics (`u16`)
 
-Intrinsics use `u16` tags `0..=63`:
+Intrinsics use `u16` tags `0..=64`:
 
 - `0`: `StringConcat`
 - `1`: `ToString`
@@ -813,6 +813,7 @@ Intrinsics use `u16` tags `0..=63`:
 - `61`: `BytesToArray`
 - `62`: `BytesFromArray`
 - `63`: `StringSlice`
+- `64`: `BytesLen`
 
 #### Call targets (`u8`)
 
@@ -824,7 +825,7 @@ Intrinsics use `u16` tags `0..=63`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.3):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.4):
 
 - `0`: `Const`
 - `1`: `Copy`

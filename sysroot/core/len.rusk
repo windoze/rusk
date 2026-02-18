@@ -1,0 +1,5 @@
+// Shared length interface for built-in container types.
+
+pub interface Len {
+    readonly fn len() -> int;
+}

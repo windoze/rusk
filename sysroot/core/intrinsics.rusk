@@ -76,6 +76,7 @@ pub intrinsic fn bytes_next(it: BytesIter) -> Option<byte>;
 
 // `bytes` operations.
 pub intrinsic fn bytes_get(b: bytes, idx: int) -> Option<byte>;
+pub intrinsic fn bytes_len(b: bytes) -> int;
 pub intrinsic fn bytes_slice(b: bytes, start: int, end: Option<int>) -> bytes;
 pub intrinsic fn bytes_to_array(b: bytes) -> [byte];
 pub intrinsic fn bytes_from_array(b: readonly [byte]) -> bytes;
@@ -97,4 +98,3 @@ pub intrinsic fn array_concat<T>(a: [T], b: [T]) -> [T];
 pub intrinsic fn array_concat_ro<T>(a: readonly [T], b: readonly [T]) -> [readonly T];
 pub intrinsic fn array_slice<T>(a: [T], start: int, end: int) -> [T];
 pub intrinsic fn array_slice_ro<T>(a: readonly [T], start: int, end: int) -> [readonly T];
-
