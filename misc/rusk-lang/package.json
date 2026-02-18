@@ -1,8 +1,11 @@
 {
-  "name": "rusk",
-  "displayName": "Rusk Support",
-  "description": "Rusk Language Support",
+  "name": "rusk-lang",
+  "displayName": "Rusk Language Support",
+  "description": "Syntax highlighting for the Rusk programming language",
   "version": "0.0.1",
+  "repository": {
+    "url": "https://github.com/windoze/rusk"
+  },
   "engines": {
     "vscode": "^1.109.0"
   },

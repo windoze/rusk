@@ -138,3 +138,8 @@ doc/
 # Benchmarking 和性能测试
 criterion/
 benchmarks/target/
+
+# Rusk 相关
+*.rusk.bak
+*.rusk.bk
+*.rbc
