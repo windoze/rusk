@@ -910,6 +910,32 @@ fn lower_mir_instruction(
             });
         }
 
+        I::CallIdMulti { dsts, func, args } => {
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(arg, code, temps)?);
+            }
+
+            let func = match func {
+                MirCallTarget::Mir(fid) => CallTarget::Bc(FunctionId(fid.0)),
+                MirCallTarget::Host(hid) => {
+                    let name = mir_module
+                        .host_import(*hid)
+                        .map(|h| h.name.as_str())
+                        .unwrap_or("<unknown>");
+                    return Err(LowerError::new(format!(
+                        "CallIdMulti to host import `{name}` is not supported"
+                    )));
+                }
+            };
+
+            code.push(Instruction::CallMulti {
+                dsts: dsts.iter().copied().map(local).collect(),
+                func,
+                args: bc_args,
+            });
+        }
+
         I::Call { dst, func, args } => {
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
@@ -1097,6 +1123,13 @@ fn lower_mir_terminator(
         T::Return { value } => {
             let value = op_reg(value, code, temps)?;
             code.push(Instruction::Return { value });
+        }
+        T::ReturnMulti { values } => {
+            let mut regs = Vec::with_capacity(values.len());
+            for op in values {
+                regs.push(op_reg(op, code, temps)?);
+            }
+            code.push(Instruction::ReturnMulti { values: regs });
         }
         T::Trap { message } => {
             code.push(Instruction::Trap {

@@ -6,6 +6,7 @@ mod bytecode_lower;
 mod capture_analysis_tests;
 pub mod host;
 mod lexer;
+mod mir_opt;
 mod modules;
 mod parser;
 mod typeck;

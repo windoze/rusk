@@ -655,6 +655,7 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
         Instruction::BoolNot { v, .. } => vec![*v],
 
         Instruction::Call { args, .. } => args.clone(),
+        Instruction::CallMulti { args, .. } => args.clone(),
         Instruction::ICall { fnptr, args, .. } => {
             let mut out = Vec::with_capacity(1 + args.len());
             out.push(*fnptr);
@@ -693,6 +694,7 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
         Instruction::Switch { value, .. } => vec![*value],
 
         Instruction::Return { value } => vec![*value],
+        Instruction::ReturnMulti { values } => values.clone(),
         Instruction::Trap { .. } => Vec::new(),
     }
 }
@@ -736,6 +738,8 @@ fn instr_write_regs(instr: &Instruction) -> Vec<Reg> {
         | Instruction::VCall { dst: Some(dst), .. }
         | Instruction::Perform { dst: Some(dst), .. }
         | Instruction::Resume { dst: Some(dst), .. } => vec![*dst],
+
+        Instruction::CallMulti { dsts, .. } => dsts.clone(),
 
         _ => Vec::new(),
     }
@@ -849,6 +853,11 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
                 *r = f(*r);
             }
         }
+        Instruction::CallMulti { args, .. } => {
+            for r in args {
+                *r = f(*r);
+            }
+        }
         Instruction::ICall { fnptr, args, .. } => {
             *fnptr = f(*fnptr);
             for r in args {
@@ -900,6 +909,11 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
         Instruction::Switch { value, .. } => *value = f(*value),
 
         Instruction::Return { value } => *value = f(*value),
+        Instruction::ReturnMulti { values } => {
+            for r in values {
+                *r = f(*r);
+            }
+        }
         Instruction::Trap { .. } => {}
     }
 }

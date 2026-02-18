@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 3;
+const VERSION_MINOR: u16 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -766,6 +766,12 @@ impl Encoder {
                 self.write_call_target(func)?;
                 self.write_vec_reg(args)?;
             }
+            Instruction::CallMulti { dsts, func, args } => {
+                self.write_u8(47);
+                self.write_vec_reg(dsts)?;
+                self.write_call_target(func)?;
+                self.write_vec_reg(args)?;
+            }
             Instruction::ICall { dst, fnptr, args } => {
                 self.write_u8(35);
                 self.write_option_reg(dst)?;
@@ -843,6 +849,10 @@ impl Encoder {
             Instruction::Return { value } => {
                 self.write_u8(44);
                 self.write_u32(*value);
+            }
+            Instruction::ReturnMulti { values } => {
+                self.write_u8(48);
+                self.write_vec_reg(values)?;
             }
             Instruction::Trap { message } => {
                 self.write_u8(45);
@@ -1572,6 +1582,11 @@ impl<'a> Decoder<'a> {
                 func: self.read_call_target()?,
                 args: self.read_vec_reg()?,
             }),
+            47 => Ok(Instruction::CallMulti {
+                dsts: self.read_vec_reg()?,
+                func: self.read_call_target()?,
+                args: self.read_vec_reg()?,
+            }),
             35 => Ok(Instruction::ICall {
                 dst: self.read_option_reg()?,
                 fnptr: self.read_u32()?,
@@ -1631,6 +1646,9 @@ impl<'a> Decoder<'a> {
             }
             44 => Ok(Instruction::Return {
                 value: self.read_u32()?,
+            }),
+            48 => Ok(Instruction::ReturnMulti {
+                values: self.read_vec_reg()?,
             }),
             45 => Ok(Instruction::Trap {
                 message: self.read_string()?,
