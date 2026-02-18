@@ -447,6 +447,13 @@ but avoid call/dispatch overhead.
     - `host(HostImportId)` for declared host imports
   - This avoids repeated string-key lookups on hot paths (e.g. arithmetic lowered to host calls).
 
+- `call_id_multi` (direct, resolved, multi-return; compiler-internal):
+  - Syntax: `(%dst0, %dst1, ...) = call_id_multi <target> (<op_args...>)`
+  - Semantics: like `call_id`, but the callee returns **multiple values** via `return_multi`.
+    Each returned value is assigned to the corresponding destination local.
+  - This is currently used by compiler optimizations (e.g. unboxed `Option<T>` returns) and is
+    not part of the public language surface.
+
 - `icall` (indirect):
   - Syntax: `%dst = icall <op_fnptr> (<op_args...>)`
   - Trap: operand is not a function reference.
@@ -515,6 +522,11 @@ Every basic block ends with exactly one terminator.
 
 - `return`:
   - Syntax: `return <op_value>`
+
+- `return_multi` (multi-return; compiler-internal):
+  - Syntax: `return_multi (<op_values...>)`
+  - Semantics: end the current function, returning multiple values to a `call_id_multi` caller.
+  - Trap: invalid MIR where the caller destination count does not match the returned arity.
 
 - `trap`:
   - Syntax: `trap <message>`

@@ -510,6 +510,13 @@ These ops trap if operands are uninitialized or of the wrong type:
     `generic_arity > 0`, the VM may treat the first `generic_arity` arguments as runtime type args
     and dispatch to a host import specialization registered for `(fid, type_args)` instead of
     interpreting the bytecode body.
+- `CallMulti { dsts, func, args }`
+  - Multi-register return variant of `Call`, used by internal compiler optimizations (e.g. unboxed
+    `Option<T>` returns).
+  - `dsts` is the list of destination registers in the caller frame; its length must match the
+    callee’s `ReturnMulti { values }` arity.
+  - v0 restriction: `func` must be `Bc(FunctionId)` (host imports and intrinsics are not supported
+    for multi-return calls).
 - `ICall { dst, fnptr, args }`
   - `fnptr` must contain a function reference value.
   - Otherwise identical to `Call` into bytecode.
@@ -535,8 +542,8 @@ Effects:
 
 `ResumeTail` is a tail-call variant of `Resume`. It consumes and resumes the continuation like
 `Resume`, but instead of returning to the current frame it replaces the current frame with the
-captured continuation segment, preserving the current frame’s `return_dst`. This is equivalent to
-resuming in a `return` position (tail resume).
+captured continuation segment, preserving the current frame’s return destination(s). This is
+equivalent to resuming in a `return` position (tail resume).
 
 Control flow:
 
@@ -555,6 +562,11 @@ Control flow:
   - Returns from the current frame.
   - If there is a caller frame and `return_dst` is set, writes the value into the caller register.
   - If returning from the entry frame, the return value must be ABI-safe; otherwise the VM traps.
+- `ReturnMulti { values }`
+  - Multi-register return variant of `Return`, used by internal compiler optimizations.
+  - If there is a caller frame and multi-return destinations are set, writes each returned value
+    into its corresponding caller register.
+  - Returning multiple values from the entry frame is not supported and traps.
 - `Trap { message }`
   - Traps immediately with the provided message.
 
@@ -861,6 +873,8 @@ Instruction opcodes are normative tags used by the `.rbc` encoding (v0.3):
 - `44`: `Return`
 - `45`: `Trap`
 - `46`: `ResumeTail`
+- `47`: `CallMulti`
+- `48`: `ReturnMulti`
 
 Instruction payloads are encoded by writing each operand field in the order listed in the
 instruction definition, using the primitive encodings from §10.2 (e.g. `u32` for registers and PC

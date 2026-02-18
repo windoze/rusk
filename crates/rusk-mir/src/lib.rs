@@ -567,6 +567,15 @@ pub enum Instruction {
         func: CallTarget,
         args: Vec<Operand>,
     },
+    /// Multi-register return variant of [`Instruction::CallId`].
+    ///
+    /// This is currently used for internal compiler optimizations (e.g. unboxed `Option<T>`
+    /// returns) and is not part of the public language surface.
+    CallIdMulti {
+        dsts: Vec<Local>,
+        func: CallTarget,
+        args: Vec<Operand>,
+    },
     VCall {
         dst: Option<Local>,
         obj: Operand,
@@ -624,6 +633,13 @@ pub enum Terminator {
     },
     Return {
         value: Operand,
+    },
+    /// Multi-register return variant of [`Terminator::Return`].
+    ///
+    /// Like [`Terminator::Return`], this ends the current function, but it returns multiple values
+    /// to the caller via the internal ABI.
+    ReturnMulti {
+        values: Vec<Operand>,
     },
     Trap {
         message: String,

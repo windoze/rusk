@@ -9,10 +9,18 @@ interface Tick { fn tick(n: int) -> int; }
 
 fn sum_pair(Pair { x, y }: Pair) -> int { x + y }
 
+fn maybe_add_one(x: int) -> Option<int> {
+    if x > 0 { Option::Some(x + 1) } else { Option::None }
+}
+
 fn main() -> int {
     let p = Pair { x: 1, y: 2 };
     let base = sum_pair(p) + [1, 2, 3][0];
-    match @Tick.tick(base) {
+    let maybe = match maybe_add_one(base) {
+        Option::Some(v) => v,
+        Option::None => base,
+    };
+    match @Tick.tick(maybe) {
         @Tick.tick(n) => resume(n * 10)
         v => v
     }

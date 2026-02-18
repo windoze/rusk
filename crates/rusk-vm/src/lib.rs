@@ -131,7 +131,7 @@ impl VmMetrics {
                 self.bool_op_instructions += 1
             }
 
-            I::Call { .. } => self.call_instructions += 1,
+            I::Call { .. } | I::CallMulti { .. } => self.call_instructions += 1,
             I::ICall { .. } => self.icall_instructions += 1,
             I::VCall { .. } => self.vcall_instructions += 1,
 
@@ -145,7 +145,7 @@ impl VmMetrics {
             I::JumpIf { .. } => self.jumpif_instructions += 1,
             I::Switch { .. } => self.switch_instructions += 1,
 
-            I::Return { .. } => self.return_instructions += 1,
+            I::Return { .. } | I::ReturnMulti { .. } => self.return_instructions += 1,
             I::Trap { .. } => self.trap_instructions += 1,
 
             _ => self.other_instructions += 1,
@@ -674,11 +674,27 @@ struct HandlerLookupCacheEntry {
 }
 
 #[derive(Debug, Clone)]
+enum ReturnDsts {
+    None,
+    One(rusk_bytecode::Reg),
+    Multi(Vec<rusk_bytecode::Reg>),
+}
+
+impl ReturnDsts {
+    fn from_option(dst: Option<rusk_bytecode::Reg>) -> Self {
+        match dst {
+            Some(r) => ReturnDsts::One(r),
+            None => ReturnDsts::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Frame {
     func: FunctionId,
     pc: usize,
     regs: Vec<Option<Value>>,
-    return_dst: Option<rusk_bytecode::Reg>,
+    return_dsts: ReturnDsts,
 }
 
 #[derive(Debug)]
@@ -771,7 +787,7 @@ impl Vm {
                 func: entry,
                 pc: 0,
                 regs,
-                return_dst: None,
+                return_dsts: ReturnDsts::None,
             }],
             handlers: Vec::new(),
             handler_stack_generation: 0,
@@ -1032,7 +1048,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
         if frame.pc >= func.code.len() {
             let ret = Value::Unit;
-            let return_dst = frame.return_dst;
+            let return_dsts = frame.return_dsts.clone();
             vm.frames.pop();
             let popped_handlers = unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
             if popped_handlers {
@@ -1042,27 +1058,47 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 );
             }
             if let Some(caller) = vm.frames.last_mut() {
-                if let Some(dst) = return_dst {
-                    let idx: usize = match dst.try_into() {
-                        Ok(i) => i,
-                        Err(_) => {
-                            let message = format!("return dst reg {dst} overflow");
+                match return_dsts {
+                    ReturnDsts::None => {}
+                    ReturnDsts::One(dst) => {
+                        let idx: usize = match dst.try_into() {
+                            Ok(i) => i,
+                            Err(_) => {
+                                let message = format!("return dst reg {dst} overflow");
+                                vm.state = VmState::Trapped {
+                                    message: message.clone(),
+                                };
+                                return StepResult::Trap { message };
+                            }
+                        };
+                        if idx >= caller.regs.len() {
+                            let message = format!("return dst reg {dst} out of range");
                             vm.state = VmState::Trapped {
                                 message: message.clone(),
                             };
                             return StepResult::Trap { message };
                         }
-                    };
-                    if idx >= caller.regs.len() {
-                        let message = format!("return dst reg {dst} out of range");
+                        caller.regs[idx] = Some(ret);
+                    }
+                    ReturnDsts::Multi(dsts) => {
+                        let message = format!(
+                            "unexpected implicit return from multi-return frame (dsts={})",
+                            dsts.len()
+                        );
                         vm.state = VmState::Trapped {
                             message: message.clone(),
                         };
                         return StepResult::Trap { message };
                     }
-                    caller.regs[idx] = Some(ret);
                 }
                 continue;
+            }
+
+            if !matches!(return_dsts, ReturnDsts::None) {
+                return trap(
+                    vm,
+                    "non-empty return destination at entry return".to_string(),
+                );
             }
 
             let ret = match ret.try_to_abi(&vm.heap) {
@@ -2065,6 +2101,58 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
             }
 
+            rusk_bytecode::Instruction::CallMulti { dsts, func, args } => match func {
+                rusk_bytecode::CallTarget::Bc(fid) => {
+                    let Some(callee) = vm.module.function(*fid) else {
+                        let message = format!("invalid function id {}", fid.0);
+                        vm.state = VmState::Trapped {
+                            message: message.clone(),
+                        };
+                        return StepResult::Trap { message };
+                    };
+                    if args.len() != callee.param_count as usize {
+                        let message = format!(
+                            "call arity mismatch: expected {} args but got {}",
+                            callee.param_count,
+                            args.len()
+                        );
+                        vm.state = VmState::Trapped {
+                            message: message.clone(),
+                        };
+                        return StepResult::Trap { message };
+                    }
+
+                    let mut regs: Vec<Option<Value>> =
+                        Vec::with_capacity(callee.reg_count as usize);
+                    regs.resize(callee.reg_count as usize, None);
+                    for (idx, arg_reg) in args.iter().enumerate() {
+                        let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
+                        let Some(v) = frame.regs.get(src_idx).and_then(|v| v.as_ref()).cloned()
+                        else {
+                            let message = format!("call arg reg {arg_reg} is uninitialized");
+                            vm.state = VmState::Trapped {
+                                message: message.clone(),
+                            };
+                            return StepResult::Trap { message };
+                        };
+                        regs[idx] = Some(v);
+                    }
+
+                    vm.frames.push(Frame {
+                        func: *fid,
+                        pc: 0,
+                        regs,
+                        return_dsts: ReturnDsts::Multi(dsts.clone()),
+                    });
+                }
+                _ => {
+                    return trap(
+                        vm,
+                        "CallMulti target must be a bytecode function".to_string(),
+                    );
+                }
+            },
+
             rusk_bytecode::Instruction::Call { dst, func, args } => match func {
                 rusk_bytecode::CallTarget::Bc(fid) => {
                     let Some(callee) = vm.module.function(*fid) else {
@@ -2147,7 +2235,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         func: *fid,
                         pc: 0,
                         regs,
-                        return_dst: *dst,
+                        return_dsts: ReturnDsts::from_option(*dst),
                     });
                 }
                 rusk_bytecode::CallTarget::Host(hid) => {
@@ -2229,7 +2317,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     func: id,
                     pc: 0,
                     regs,
-                    return_dst: *dst,
+                    return_dsts: ReturnDsts::from_option(*dst),
                 });
             }
 
@@ -2336,7 +2424,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     func: fn_id,
                     pc: 0,
                     regs,
-                    return_dst: *dst,
+                    return_dsts: ReturnDsts::from_option(*dst),
                 });
             }
 
@@ -2734,7 +2822,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 let Some(bottom) = cont.frames.first_mut() else {
                     return trap(vm, "invalid resume".to_string());
                 };
-                bottom.return_dst = *dst;
+                bottom.return_dsts = ReturnDsts::from_option(*dst);
 
                 for handler in &mut cont.handlers {
                     handler.owner_depth = handler.owner_depth.saturating_add(base_depth);
@@ -2780,12 +2868,12 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 // Tail call: replace the current frame with the captured continuation segment.
                 let base_depth = frame_index;
-                let return_dst = frame.return_dst;
+                let return_dsts = frame.return_dsts.clone();
 
                 let Some(bottom) = cont.frames.first_mut() else {
                     return trap(vm, "invalid resume".to_string());
                 };
-                bottom.return_dst = return_dst;
+                bottom.return_dsts = return_dsts;
 
                 for handler in &mut cont.handlers {
                     handler.owner_depth = handler.owner_depth.saturating_add(base_depth);
@@ -2881,7 +2969,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     return StepResult::Trap { message };
                 };
 
-                let return_dst = frame.return_dst;
+                let return_dsts = frame.return_dsts.clone();
                 vm.frames.pop();
                 let popped_handlers =
                     unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
@@ -2892,7 +2980,100 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     );
                 }
                 if let Some(caller) = vm.frames.last_mut() {
-                    if let Some(dst) = return_dst {
+                    match return_dsts {
+                        ReturnDsts::None => {}
+                        ReturnDsts::One(dst) => {
+                            let idx: usize = match dst.try_into() {
+                                Ok(i) => i,
+                                Err(_) => {
+                                    let message = format!("return dst reg {dst} overflow");
+                                    vm.state = VmState::Trapped {
+                                        message: message.clone(),
+                                    };
+                                    return StepResult::Trap { message };
+                                }
+                            };
+                            if idx >= caller.regs.len() {
+                                let message = format!("return dst reg {dst} out of range");
+                                vm.state = VmState::Trapped {
+                                    message: message.clone(),
+                                };
+                                return StepResult::Trap { message };
+                            }
+                            caller.regs[idx] = Some(v);
+                        }
+                        ReturnDsts::Multi(dsts) => {
+                            let message = format!(
+                                "single-value return does not match multi-return destination (dsts={})",
+                                dsts.len()
+                            );
+                            vm.state = VmState::Trapped {
+                                message: message.clone(),
+                            };
+                            return StepResult::Trap { message };
+                        }
+                    }
+                    continue;
+                }
+
+                if !matches!(return_dsts, ReturnDsts::None) {
+                    return trap(
+                        vm,
+                        "non-empty return destination at entry return".to_string(),
+                    );
+                }
+
+                let ret = match v.try_to_abi(&vm.heap) {
+                    Ok(Some(ret)) => ret,
+                    Ok(None) => return trap(vm, "non-ABI-safe return value".to_string()),
+                    Err(msg) => return trap(vm, msg),
+                };
+                vm.state = VmState::Done { value: ret.clone() };
+                return StepResult::Done { value: ret };
+            }
+            rusk_bytecode::Instruction::ReturnMulti { values } => {
+                let mut rets = Vec::with_capacity(values.len());
+                for value_reg in values {
+                    let idx: usize = (*value_reg).try_into().unwrap_or(usize::MAX);
+                    let Some(v) = frame.regs.get(idx).and_then(|v| v.as_ref()).cloned() else {
+                        let message = format!("return from uninitialized reg {value_reg}");
+                        vm.state = VmState::Trapped {
+                            message: message.clone(),
+                        };
+                        return StepResult::Trap { message };
+                    };
+                    rets.push(v);
+                }
+
+                let return_dsts = frame.return_dsts.clone();
+                vm.frames.pop();
+                let popped_handlers =
+                    unwind_handlers_to_stack_len(&mut vm.handlers, vm.frames.len());
+                if popped_handlers {
+                    handler_stack_changed(
+                        &mut vm.handler_stack_generation,
+                        &mut vm.handler_lookup_cache,
+                    );
+                }
+
+                if let Some(caller) = vm.frames.last_mut() {
+                    let ReturnDsts::Multi(dsts) = return_dsts else {
+                        return trap(
+                            vm,
+                            "multi-value return does not match caller destination".to_string(),
+                        );
+                    };
+                    if dsts.len() != rets.len() {
+                        return trap(
+                            vm,
+                            format!(
+                                "return arity mismatch: expected {} values but got {}",
+                                dsts.len(),
+                                rets.len()
+                            ),
+                        );
+                    }
+                    for (dst, value) in dsts.into_iter().zip(rets.into_iter()) {
                         let idx: usize = match dst.try_into() {
                             Ok(i) => i,
                             Err(_) => {
@@ -2910,18 +3091,15 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                             };
                             return StepResult::Trap { message };
                         }
-                        caller.regs[idx] = Some(v);
+                        caller.regs[idx] = Some(value);
                     }
                     continue;
                 }
 
-                let ret = match v.try_to_abi(&vm.heap) {
-                    Ok(Some(ret)) => ret,
-                    Ok(None) => return trap(vm, "non-ABI-safe return value".to_string()),
-                    Err(msg) => return trap(vm, msg),
-                };
-                vm.state = VmState::Done { value: ret.clone() };
-                return StepResult::Done { value: ret };
+                return trap(
+                    vm,
+                    "multi-value return from entry frame is not supported".to_string(),
+                );
             }
             rusk_bytecode::Instruction::Trap { message } => {
                 vm.state = VmState::Trapped {

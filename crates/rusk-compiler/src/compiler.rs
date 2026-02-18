@@ -564,7 +564,8 @@ pub fn compile_to_bytecode_with_options(
     source: &str,
     options: &CompileOptions,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
-    let mir = compile_to_mir_with_options(source, options)?;
+    let mut mir = compile_to_mir_with_options(source, options)?;
+    crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
         let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
@@ -601,7 +602,11 @@ pub fn compile_to_bytecode_with_options_and_metrics(
 ) -> Result<(rusk_bytecode::ExecutableModule, CompileMetrics), CompileError> {
     let total_start = Instant::now();
 
-    let (mir, mut metrics) = compile_to_mir_with_options_and_metrics(source, options)?;
+    let (mut mir, mut metrics) = compile_to_mir_with_options_and_metrics(source, options)?;
+
+    let mir_opt_start = Instant::now();
+    crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
+    metrics.lower_time += mir_opt_start.elapsed();
 
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
@@ -738,7 +743,8 @@ pub fn compile_file_to_bytecode_with_options(
     entry_path: &Path,
     options: &CompileOptions,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
-    let mir = compile_file_to_mir_with_options(entry_path, options)?;
+    let mut mir = compile_file_to_mir_with_options(entry_path, options)?;
+    crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
         let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
@@ -775,7 +781,11 @@ pub fn compile_file_to_bytecode_with_options_and_metrics(
 ) -> Result<(rusk_bytecode::ExecutableModule, CompileMetrics), CompileError> {
     let total_start = Instant::now();
 
-    let (mir, mut metrics) = compile_file_to_mir_with_options_and_metrics(entry_path, options)?;
+    let (mut mir, mut metrics) = compile_file_to_mir_with_options_and_metrics(entry_path, options)?;
+
+    let mir_opt_start = Instant::now();
+    crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
+    metrics.lower_time += mir_opt_start.elapsed();
 
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
@@ -1889,6 +1899,7 @@ impl Compiler {
                 },
                 Instruction::Call { .. }
                 | Instruction::CallId { .. }
+                | Instruction::CallIdMulti { .. }
                 | Instruction::VCall { .. }
                 | Instruction::ICall { .. }
                 | Instruction::PushHandler { .. }
@@ -2240,6 +2251,12 @@ impl Compiler {
                     }
                     Ok(())
                 }
+                Instruction::CallIdMulti { args, .. } => {
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
                 Instruction::VCall {
                     obj,
                     method_type_args,
@@ -2319,6 +2336,12 @@ impl Compiler {
                     Ok(())
                 }
                 Terminator::Return { value } => resolve_operand(function_ids, value),
+                Terminator::ReturnMulti { values } => {
+                    for op in values {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
                 Terminator::Trap { .. } => Ok(()),
             }
         }

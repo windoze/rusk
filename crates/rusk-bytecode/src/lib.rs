@@ -455,6 +455,15 @@ pub enum Instruction {
         func: CallTarget,
         args: Vec<Reg>,
     },
+    /// Multi-register return variant of [`Instruction::Call`].
+    ///
+    /// This is currently used for internal compiler optimizations (e.g. unboxed `Option<T>`
+    /// returns) and is not part of the public language surface.
+    CallMulti {
+        dsts: Vec<Reg>,
+        func: CallTarget,
+        args: Vec<Reg>,
+    },
     ICall {
         dst: Option<Reg>,
         fnptr: Reg,
@@ -508,6 +517,10 @@ pub enum Instruction {
 
     Return {
         value: Reg,
+    },
+    /// Multi-register return variant of [`Instruction::Return`].
+    ReturnMulti {
+        values: Vec<Reg>,
     },
     Trap {
         message: String,

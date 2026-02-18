@@ -143,12 +143,152 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         }
     }
 
+    let return_arities = compute_return_arities(module)?;
+
     // Function bodies.
     for (fn_idx, func) in module.functions.iter().enumerate() {
         let fn_id = FunctionId(fn_idx as u32);
         verify_function(module, fn_id, func)?;
     }
 
+    verify_call_return_arities(module, &return_arities)?;
+
+    Ok(())
+}
+
+fn compute_return_arities(module: &ExecutableModule) -> Result<Vec<usize>, VerifyError> {
+    #[derive(Clone, Copy, Debug)]
+    enum ReturnKind {
+        Single,
+        Multi(usize),
+    }
+
+    let mut out = Vec::with_capacity(module.functions.len());
+    for func in &module.functions {
+        let mut kind: Option<ReturnKind> = None;
+        for inst in &func.code {
+            match inst {
+                Instruction::Return { .. } => {
+                    if matches!(kind, Some(ReturnKind::Multi(_))) {
+                        return Err(VerifyError {
+                            message: format!(
+                                "function `{}` mixes Return and ReturnMulti",
+                                func.name
+                            ),
+                        });
+                    }
+                    kind = Some(ReturnKind::Single);
+                }
+                Instruction::ReturnMulti { values } => {
+                    let arity = values.len();
+                    if arity == 0 {
+                        return Err(VerifyError {
+                            message: format!(
+                                "function `{}` has invalid ReturnMulti with 0 values",
+                                func.name
+                            ),
+                        });
+                    }
+                    match kind {
+                        None => kind = Some(ReturnKind::Multi(arity)),
+                        Some(ReturnKind::Single) => {
+                            return Err(VerifyError {
+                                message: format!(
+                                    "function `{}` mixes Return and ReturnMulti",
+                                    func.name
+                                ),
+                            });
+                        }
+                        Some(ReturnKind::Multi(existing)) if existing == arity => {}
+                        Some(ReturnKind::Multi(existing)) => {
+                            return Err(VerifyError {
+                                message: format!(
+                                    "function `{}` has inconsistent ReturnMulti arity: expected {existing}, got {arity}",
+                                    func.name
+                                ),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Functions that fall off the end return `unit` (single return) implicitly.
+        let arity = match kind {
+            None | Some(ReturnKind::Single) => 1,
+            Some(ReturnKind::Multi(n)) => n,
+        };
+        out.push(arity);
+    }
+
+    Ok(out)
+}
+
+fn verify_call_return_arities(
+    module: &ExecutableModule,
+    return_arities: &[usize],
+) -> Result<(), VerifyError> {
+    for func in &module.functions {
+        let here = |pc: usize| format!("function `{}` pc {}", func.name, pc);
+        for (pc, inst) in func.code.iter().enumerate() {
+            match inst {
+                Instruction::Call { func: target, .. } => {
+                    let CallTarget::Bc(fid) = target else {
+                        continue;
+                    };
+                    let callee_arity = return_arities.get(fid.0 as usize).copied().unwrap_or(1);
+                    if callee_arity != 1 {
+                        return Err(VerifyError {
+                            message: format!(
+                                "{}: Call expects single return, but callee `{}` returns {callee_arity} values",
+                                here(pc),
+                                module
+                                    .function(*fid)
+                                    .map(|f| f.name.as_str())
+                                    .unwrap_or("<unknown>")
+                            ),
+                        });
+                    }
+                }
+                Instruction::CallMulti {
+                    dsts, func: target, ..
+                } => {
+                    let CallTarget::Bc(fid) = target else {
+                        return Err(VerifyError {
+                            message: format!(
+                                "{}: CallMulti only supports bytecode functions",
+                                here(pc)
+                            ),
+                        });
+                    };
+                    let expected = dsts.len();
+                    if expected == 0 {
+                        return Err(VerifyError {
+                            message: format!(
+                                "{}: CallMulti requires at least one dst register",
+                                here(pc)
+                            ),
+                        });
+                    }
+                    let callee_arity = return_arities.get(fid.0 as usize).copied().unwrap_or(1);
+                    if callee_arity != expected {
+                        return Err(VerifyError {
+                            message: format!(
+                                "{}: CallMulti dst count {expected} does not match callee `{}` return arity {callee_arity}",
+                                here(pc),
+                                module
+                                    .function(*fid)
+                                    .map(|f| f.name.as_str())
+                                    .unwrap_or("<unknown>")
+                            ),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(())
 }
 
@@ -372,6 +512,19 @@ fn verify_instruction(
                 verify_reg(reg_count, *r, &format!("{}: arg", here()))?;
             }
         }
+        Instruction::CallMulti {
+            dsts,
+            func: target,
+            args,
+        } => {
+            for dst in dsts {
+                verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
+            }
+            verify_call_target(module, target, &here())?;
+            for r in args {
+                verify_reg(reg_count, *r, &format!("{}: arg", here()))?;
+            }
+        }
         Instruction::ICall { dst, fnptr, args } => {
             if let Some(dst) = dst {
                 verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
@@ -500,6 +653,16 @@ fn verify_instruction(
         }
         Instruction::Return { value } => {
             verify_reg(reg_count, *value, &format!("{}: return value", here()))?;
+        }
+        Instruction::ReturnMulti { values } => {
+            if values.is_empty() {
+                return Err(VerifyError {
+                    message: format!("{}: ReturnMulti must return at least one value", here()),
+                });
+            }
+            for r in values {
+                verify_reg(reg_count, *r, &format!("{}: return value", here()))?;
+            }
         }
         Instruction::Trap { .. } => {}
     }
