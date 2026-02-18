@@ -710,6 +710,58 @@ fn lambda_params_can_be_inferred_from_call_site() {
 }
 
 #[test]
+fn trailing_lambda_call_sugar_allows_omitting_parens() {
+    let src = r#"
+        fn apply_to_41(f: fn(int) -> int) -> int { f(41) }
+        fn test() -> int { apply_to_41 |n: int| { n + 1 } }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
+}
+
+#[test]
+fn trailing_lambda_call_sugar_appends_to_existing_call() {
+    let src = r#"
+        fn apply_last(x: int, f: fn(int) -> int) -> int { f(x) }
+        fn test() -> int { apply_last(41) |n: int| { n + 1 } }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
+}
+
+#[test]
+fn trailing_lambda_named_binds_work() {
+    let src = r#"
+        fn with(a: int, b: int, f: fn(int) -> int) -> int { f(a + b) }
+        fn test() -> int { with(a=40, b=1) |n: int| { n + 1 } }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
+}
+
+#[test]
+fn turbofish_allows_trailing_lambda_without_parens() {
+    let src = r#"
+        fn map<T>(f: fn(int) -> T) -> T { f(41) }
+        fn test() -> int { map::<int> |n: int| { n + 1 } }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
+}
+
+#[test]
+fn trailing_lambda_call_sugar_works_in_if_condition() {
+    let src = r#"
+        fn check(f: fn(int) -> bool) -> bool { f(1) }
+        fn test() -> int {
+            if check |n: int| { n == 1 } { 42 } else { 0 }
+        }
+    "#;
+
+    assert_eq!(run0(src, "test").expect("run"), AbiValue::Int(42));
+}
+
+#[test]
 fn using_generic_function_as_value_is_rejected() {
     let src = r#"
         fn id<T>(x: T) -> T { x }

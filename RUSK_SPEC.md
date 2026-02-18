@@ -411,7 +411,7 @@ TupleLit       := "(" Expr "," ArgList? ")" ;
 
 `::<...>` is a Rust-style *turbofish* that supplies explicit type arguments for a generic call.
 It is only valid immediately before a call (either `(...)` or the trailing-closure call sugar
-`callee { ... }`).
+`callee { ... }` / `callee |...| { ... }`).
 
 `expr as I` performs an explicit interface upcast. The RHS must be an `interface` type. The cast
 does not allocate and does not change runtime representation; it only changes the static type, and
@@ -561,20 +561,30 @@ protocol in the standard library (see §9.4).
 
 #### 3.6.7 Trailing closures (syntax sugar)
 
-Rusk supports trailing-closure call syntax for *zero-argument* lambdas.
+Rusk supports trailing-closure call syntax for lambdas.
 
 This syntax is **purely syntactic sugar** and does not introduce any new semantics.
 
 Desugaring:
 
-- `f(a, b) { body }` is equivalent to `f(a, b, || { body })`.
-- `f { body }` is equivalent to `f(|| { body })`.
+- Trailing block form (zero-argument closure):
+  - `f(a, b) { body }` is equivalent to `f(a, b, | | { body })`.
+  - `f { body }` is equivalent to `f(| | { body })`.
+
+- Trailing lambda form (any arity):
+  - `f(a, b) |x| { body }` is equivalent to `f(a, b, |x| { body })`.
+  - `f |x| { body }` is equivalent to `f(|x| { body })`.
 
 Named-bind form:
 
 - `f(x=ex, y=ey) { body }` is equivalent to:
   ```rust
-  { let x = ex; let y = ey; f(x, y, || { body }) }
+  { let x = ex; let y = ey; f(x, y, | | { body }) }
+  ```
+
+- `f(x=ex, y=ey) |n| { body }` is equivalent to:
+  ```rust
+  { let x = ex; let y = ey; f(x, y, |n| { body }) }
   ```
 
 Rules:

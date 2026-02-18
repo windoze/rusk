@@ -1174,7 +1174,10 @@ impl<'a> Parser<'a> {
 
         loop {
             if pending_type_args.is_some()
-                && !matches!(self.lookahead.kind, TokenKind::LParen | TokenKind::LBrace)
+                && !matches!(
+                    self.lookahead.kind,
+                    TokenKind::LParen | TokenKind::LBrace | TokenKind::Pipe
+                )
             {
                 return Err(self.error_here("type arguments must be followed by a call"));
             }
@@ -1205,6 +1208,22 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
+                TokenKind::Pipe => {
+                    if !Self::is_trailing_closure_callee(&lhs) {
+                        break;
+                    }
+
+                    // Trailing closure syntax sugar:
+                    // - `foo(a, b) |x| { ... }`  ==>  `foo(a, b, |x| { ... })`
+                    // - `foo |x| { ... }`       ==>  `foo(|x| { ... })`
+                    let closure = self.parse_lambda()?;
+                    lhs = self.apply_trailing_closure_sugar(
+                        lhs,
+                        &mut pending_type_args,
+                        closure,
+                    )?;
+                    continue;
+                }
                 TokenKind::LBrace => {
                     if !Self::is_trailing_closure_callee(&lhs) {
                         break;
@@ -1218,7 +1237,6 @@ impl<'a> Parser<'a> {
                     // "named binds" sugar for capturing values into the trailing closure:
                     // - `foo(a=expr1, b=expr2) { ... }`
                     //   ==> `{ let a = expr1; let b = expr2; foo(a, b, || { ... }) }`
-                    let start = lhs.span().start;
                     let body = self.parse_block()?;
                     let closure_span = body.span;
                     let closure = Expr::Lambda {
@@ -1226,115 +1244,7 @@ impl<'a> Parser<'a> {
                         body,
                         span: closure_span,
                     };
-
-                    lhs = match lhs {
-                        Expr::Call {
-                            callee,
-                            type_args,
-                            args,
-                            span,
-                        } => {
-                            // Detect `name = expr` bind list.
-                            let is_named_bind_arg = |arg: &Expr| -> bool {
-                                matches!(
-                                    arg,
-                                    Expr::Assign { target, .. }
-                                        if matches!(
-                                            target.as_ref(),
-                                            Expr::Path { path, .. } if path.segments.len() == 1
-                                        )
-                                )
-                            };
-
-                            let any_named = args.iter().any(is_named_bind_arg);
-                            let all_named = args.iter().all(is_named_bind_arg);
-
-                            if any_named {
-                                if !all_named {
-                                    return Err(ParseError {
-                                        message: "trailing-closure named bindings require every argument to be `name = expr`".to_string(),
-                                        span,
-                                    });
-                                }
-                                let mut bind_pairs: Vec<(Ident, Expr)> =
-                                    Vec::with_capacity(args.len());
-                                for arg in args {
-                                    let Expr::Assign { target, value, .. } = arg else {
-                                        unreachable!("all args checked by all_named");
-                                    };
-                                    let Expr::Path { path, .. } = *target else {
-                                        unreachable!("all args checked by all_named");
-                                    };
-                                    debug_assert_eq!(path.segments.len(), 1);
-                                    bind_pairs.push((path.segments[0].clone(), *value));
-                                }
-
-                                let mut seen = std::collections::BTreeSet::<String>::new();
-                                let mut stmts = Vec::with_capacity(bind_pairs.len());
-                                let mut call_args = Vec::with_capacity(bind_pairs.len() + 1);
-                                for (name, init) in bind_pairs {
-                                    if !seen.insert(name.name.clone()) {
-                                        return Err(ParseError {
-                                            message: format!(
-                                                "duplicate trailing-closure binding `{}`",
-                                                name.name
-                                            ),
-                                            span: name.span,
-                                        });
-                                    }
-                                    let stmt_span = Span::new(name.span.start, init.span().end);
-                                    stmts.push(Stmt::Let {
-                                        kind: BindingKind::Let,
-                                        pat: Pattern::Bind {
-                                            name: name.clone(),
-                                            span: name.span,
-                                        },
-                                        ty: None,
-                                        init: Some(init),
-                                        span: stmt_span,
-                                    });
-                                    call_args.push(Expr::Path {
-                                        path: Path {
-                                            segments: vec![name.clone()],
-                                            span: name.span,
-                                        },
-                                        span: name.span,
-                                    });
-                                }
-                                call_args.push(closure);
-                                let call_span = Span::new(span.start, closure_span.end);
-                                let call_expr = Expr::Call {
-                                    callee,
-                                    type_args,
-                                    args: call_args,
-                                    span: call_span,
-                                };
-                                Expr::Block {
-                                    block: Block {
-                                        stmts,
-                                        tail: Some(Box::new(call_expr)),
-                                        span: call_span,
-                                    },
-                                    span: call_span,
-                                }
-                            } else {
-                                let mut new_args = args;
-                                new_args.push(closure);
-                                Expr::Call {
-                                    callee,
-                                    type_args,
-                                    args: new_args,
-                                    span: Span::new(span.start, closure_span.end),
-                                }
-                            }
-                        }
-                        other => Expr::Call {
-                            callee: Box::new(other),
-                            type_args: pending_type_args.take().unwrap_or_default(),
-                            args: vec![closure],
-                            span: Span::new(start, closure_span.end),
-                        },
-                    };
+                    lhs = self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
                     continue;
                 }
                 TokenKind::Dot => {
@@ -1486,12 +1396,130 @@ impl<'a> Parser<'a> {
         )
     }
 
+    fn apply_trailing_closure_sugar(
+        &mut self,
+        lhs: Expr,
+        pending_type_args: &mut Option<Vec<TypeExpr>>,
+        closure: Expr,
+    ) -> Result<Expr, ParseError> {
+        let start = lhs.span().start;
+        let closure_end = closure.span().end;
+
+        Ok(match lhs {
+            Expr::Call {
+                callee,
+                type_args,
+                args,
+                span,
+            } => {
+                // Detect `name = expr` bind list.
+                let is_named_bind_arg = |arg: &Expr| -> bool {
+                    matches!(
+                        arg,
+                        Expr::Assign { target, .. }
+                            if matches!(
+                                target.as_ref(),
+                                Expr::Path { path, .. } if path.segments.len() == 1
+                            )
+                    )
+                };
+
+                let any_named = args.iter().any(is_named_bind_arg);
+                let all_named = args.iter().all(is_named_bind_arg);
+
+                if any_named {
+                    if !all_named {
+                        return Err(ParseError {
+                            message: "trailing-closure named bindings require every argument to be `name = expr`"
+                                .to_string(),
+                            span,
+                        });
+                    }
+                    let mut bind_pairs: Vec<(Ident, Expr)> = Vec::with_capacity(args.len());
+                    for arg in args {
+                        let Expr::Assign { target, value, .. } = arg else {
+                            unreachable!("all args checked by all_named");
+                        };
+                        let Expr::Path { path, .. } = *target else {
+                            unreachable!("all args checked by all_named");
+                        };
+                        debug_assert_eq!(path.segments.len(), 1);
+                        bind_pairs.push((path.segments[0].clone(), *value));
+                    }
+
+                    let mut seen = std::collections::BTreeSet::<String>::new();
+                    let mut stmts = Vec::with_capacity(bind_pairs.len());
+                    let mut call_args = Vec::with_capacity(bind_pairs.len() + 1);
+                    for (name, init) in bind_pairs {
+                        if !seen.insert(name.name.clone()) {
+                            return Err(ParseError {
+                                message: format!("duplicate trailing-closure binding `{}`", name.name),
+                                span: name.span,
+                            });
+                        }
+                        let stmt_span = Span::new(name.span.start, init.span().end);
+                        stmts.push(Stmt::Let {
+                            kind: BindingKind::Let,
+                            pat: Pattern::Bind {
+                                name: name.clone(),
+                                span: name.span,
+                            },
+                            ty: None,
+                            init: Some(init),
+                            span: stmt_span,
+                        });
+                        call_args.push(Expr::Path {
+                            path: Path {
+                                segments: vec![name.clone()],
+                                span: name.span,
+                            },
+                            span: name.span,
+                        });
+                    }
+                    call_args.push(closure);
+                    let call_span = Span::new(span.start, closure_end);
+                    let call_expr = Expr::Call {
+                        callee,
+                        type_args,
+                        args: call_args,
+                        span: call_span,
+                    };
+                    Expr::Block {
+                        block: Block {
+                            stmts,
+                            tail: Some(Box::new(call_expr)),
+                            span: call_span,
+                        },
+                        span: call_span,
+                    }
+                } else {
+                    let mut new_args = args;
+                    new_args.push(closure);
+                    Expr::Call {
+                        callee,
+                        type_args,
+                        args: new_args,
+                        span: Span::new(span.start, closure_end),
+                    }
+                }
+            }
+            other => Expr::Call {
+                callee: Box::new(other),
+                type_args: pending_type_args.take().unwrap_or_default(),
+                args: vec![closure],
+                span: Span::new(start, closure_end),
+            },
+        })
+    }
+
     fn parse_expr_bp_no_struct_lit(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_prefix_no_struct_lit()?;
         let mut pending_type_args: Option<Vec<TypeExpr>> = None;
 
         loop {
-            if pending_type_args.is_some() && !matches!(self.lookahead.kind, TokenKind::LParen) {
+            if pending_type_args.is_some()
+                && !matches!(self.lookahead.kind, TokenKind::LParen | TokenKind::Pipe)
+            {
                 return Err(self.error_here("type arguments must be followed by a call"));
             }
 
@@ -1519,6 +1547,19 @@ impl<'a> Parser<'a> {
                         args,
                         span: Span::new(start, end),
                     };
+                    continue;
+                }
+                TokenKind::Pipe => {
+                    if !Self::is_trailing_closure_callee(&lhs) {
+                        break;
+                    }
+
+                    let closure = self.parse_lambda()?;
+                    lhs = self.apply_trailing_closure_sugar(
+                        lhs,
+                        &mut pending_type_args,
+                        closure,
+                    )?;
                     continue;
                 }
                 TokenKind::Dot => {
