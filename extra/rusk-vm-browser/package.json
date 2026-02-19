@@ -1,0 +1,10 @@
+{
+  "name": "rusk-vm-browser-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wasm-pack build --target web --release --out-dir pkg",
+    "test": "wasm-pack test --node"
+  }
+}
+

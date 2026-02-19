@@ -1,0 +1,27 @@
+[package]
+name = "rusk-vm-browser"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys = "0.3"
+rusk-bytecode = { path = "../../crates/rusk-bytecode" }
+rusk-vm = { path = "../../crates/rusk-vm" }
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+rusk-compiler = { path = "../../crates/rusk-compiler" }
+wasm-bindgen-test = "0.3"
+
+[build-dependencies]
+rusk-bytecode = { path = "../../crates/rusk-bytecode" }
+rusk-compiler = { path = "../../crates/rusk-compiler" }
+
+[workspace]
+members = ["."]
+resolver = "2"

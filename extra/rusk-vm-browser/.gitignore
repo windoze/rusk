@@ -1,0 +1,6 @@
+# wasm-pack output (generated)
+/pkg/
+
+# Example bytecode (generated)
+/examples/**/program.rbc
+

@@ -1,0 +1,20 @@
+interface Dom {
+    fn wait_event() -> string;
+}
+
+fn main() -> unit {
+    let count = 0;
+    dom::set_text("count", core::intrinsics::to_string(count));
+
+    while true {
+        let ev = @Dom.wait_event();
+        match ev {
+            "inc" => count = count + 1
+            "dec" => count = count - 1
+            "reset" => count = 0
+            _ => ()
+        };
+        dom::set_text("count", core::intrinsics::to_string(count));
+    };
+}
+

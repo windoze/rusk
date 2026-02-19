@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rusk-vm-browser: basic-run</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        margin: 24px;
+      }
+      pre {
+        background: #0b1020;
+        color: #d8e2ff;
+        padding: 12px;
+        border-radius: 8px;
+        overflow: auto;
+      }
+      button {
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>basic-run</h1>
+    <p>Runs a tiny Rusk program to completion and shows the returned value.</p>
+    <p>
+      <button id="run">Run</button>
+    </p>
+    <pre id="out">(not run yet)</pre>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
+
