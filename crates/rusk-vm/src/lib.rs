@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use rusk_bytecode::{AbiType, EffectId, ExecutableModule, FunctionId, HostImportId};
+use rusk_bytecode::{AbiType, EffectId, ExecutableModule, FunctionId, HostImportId, MethodId, TypeId};
 use rusk_gc::{GcHeap, GcRef, ImmixHeap, Trace, Tracer};
 use std::collections::HashMap;
 
@@ -315,9 +315,9 @@ enum TypeCtor {
     Bytes,
     Array,
     Tuple(usize),
-    Struct(String),
-    Enum(String),
-    Interface(String),
+    Struct(TypeId),
+    Enum(TypeId),
+    Interface(TypeId),
     Fn,
     Cont,
 }
@@ -360,8 +360,11 @@ impl TypeReps {
         self.nodes.get(id.0 as usize)
     }
 
-    fn ctor_from_lit(lit: &rusk_bytecode::TypeRepLit) -> TypeCtor {
-        match lit {
+    fn ctor_from_lit(
+        module: &ExecutableModule,
+        lit: &rusk_bytecode::TypeRepLit,
+    ) -> Result<TypeCtor, String> {
+        Ok(match lit {
             rusk_bytecode::TypeRepLit::Unit => TypeCtor::Unit,
             rusk_bytecode::TypeRepLit::Never => TypeCtor::Never,
             rusk_bytecode::TypeRepLit::Bool => TypeCtor::Bool,
@@ -373,12 +376,24 @@ impl TypeReps {
             rusk_bytecode::TypeRepLit::Bytes => TypeCtor::Bytes,
             rusk_bytecode::TypeRepLit::Array => TypeCtor::Array,
             rusk_bytecode::TypeRepLit::Tuple(arity) => TypeCtor::Tuple(*arity),
-            rusk_bytecode::TypeRepLit::Struct(name) => TypeCtor::Struct(name.clone()),
-            rusk_bytecode::TypeRepLit::Enum(name) => TypeCtor::Enum(name.clone()),
-            rusk_bytecode::TypeRepLit::Interface(name) => TypeCtor::Interface(name.clone()),
+            rusk_bytecode::TypeRepLit::Struct(name) => TypeCtor::Struct(
+                module
+                    .type_id(name.as_str())
+                    .ok_or_else(|| format!("unknown struct type `{name}`"))?,
+            ),
+            rusk_bytecode::TypeRepLit::Enum(name) => TypeCtor::Enum(
+                module
+                    .type_id(name.as_str())
+                    .ok_or_else(|| format!("unknown enum type `{name}`"))?,
+            ),
+            rusk_bytecode::TypeRepLit::Interface(name) => TypeCtor::Interface(
+                module
+                    .type_id(name.as_str())
+                    .ok_or_else(|| format!("unknown interface type `{name}`"))?,
+            ),
             rusk_bytecode::TypeRepLit::Fn => TypeCtor::Fn,
             rusk_bytecode::TypeRepLit::Cont => TypeCtor::Cont,
-        }
+        })
     }
 }
 
@@ -583,14 +598,14 @@ enum HeapValue {
         data: Box<str>,
     },
     Struct {
-        type_name: String,
+        type_id: TypeId,
         type_args: Vec<TypeRepId>,
         fields: Vec<Value>,
     },
     Array(Vec<Value>),
     Tuple(Vec<Value>),
     Enum {
-        enum_name: String,
+        type_id: TypeId,
         type_args: Vec<TypeRepId>,
         variant: String,
         fields: Vec<Value>,
@@ -723,10 +738,62 @@ enum VmState {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PrimitiveTypeIds {
+    unit: TypeId,
+    bool: TypeId,
+    int: TypeId,
+    float: TypeId,
+    byte: TypeId,
+    char: TypeId,
+    string: TypeId,
+    bytes: TypeId,
+}
+
+impl PrimitiveTypeIds {
+    fn from_module(module: &ExecutableModule) -> Result<Self, VmError> {
+        let lookup = |name: &str| {
+            module.type_id(name).ok_or_else(|| VmError::InvalidState {
+                message: format!("missing required primitive type name `{name}` in module type table"),
+            })
+        };
+
+        Ok(Self {
+            unit: lookup("unit")?,
+            bool: lookup("bool")?,
+            int: lookup("int")?,
+            float: lookup("float")?,
+            byte: lookup("byte")?,
+            char: lookup("char")?,
+            string: lookup("string")?,
+            bytes: lookup("bytes")?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VCallFastPathIds {
+    hash: Option<MethodId>,
+    eq: Option<MethodId>,
+    ne: Option<MethodId>,
+}
+
+impl VCallFastPathIds {
+    fn from_module(module: &ExecutableModule) -> Self {
+        Self {
+            hash: module.method_id("core::hash::Hash::hash"),
+            eq: module.method_id("core::ops::Eq::eq"),
+            ne: module.method_id("core::ops::Ne::ne"),
+        }
+    }
+}
+
 pub struct Vm {
     heap: ImmixHeap<HeapValue>,
     gc_allocations_since_collect: usize,
     module: ExecutableModule,
+    primitive_type_ids: PrimitiveTypeIds,
+    vcall_fast_path_ids: VCallFastPathIds,
     state: VmState,
     frames: Vec<Frame>,
     handlers: Vec<HandlerEntry>,
@@ -783,6 +850,9 @@ impl Vm {
         let mut regs = Vec::with_capacity(reg_count);
         regs.resize(reg_count, None);
 
+        let primitive_type_ids = PrimitiveTypeIds::from_module(&module)?;
+        let vcall_fast_path_ids = VCallFastPathIds::from_module(&module);
+
         let mut vm = Self {
             heap: ImmixHeap::new(),
             gc_allocations_since_collect: 0,
@@ -793,6 +863,8 @@ impl Vm {
                 host_fns
             },
             module,
+            primitive_type_ids,
+            vcall_fast_path_ids,
             state: VmState::Running,
             frames: vec![Frame {
                 func: entry,
@@ -906,11 +978,16 @@ impl Vm {
         &mut self,
         base: &rusk_bytecode::TypeRepLit,
         args: &[TypeRepId],
-    ) -> TypeRepId {
-        self.type_reps.intern(TypeRepNode {
-            ctor: TypeReps::ctor_from_lit(base),
+    ) -> Result<TypeRepId, VmError> {
+        let ctor = TypeReps::ctor_from_lit(&self.module, base).map_err(|message| {
+            VmError::InvalidState {
+                message: format!("invalid typerep literal: {message}"),
+            }
+        })?;
+        Ok(self.type_reps.intern(TypeRepNode {
+            ctor,
             args: args.to_vec(),
-        })
+        }))
     }
 
     pub fn register_generic_specialization(
@@ -1168,8 +1245,12 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         }
                     }
                     rusk_bytecode::ConstValue::TypeRep(lit) => {
+                        let ctor = match TypeReps::ctor_from_lit(&vm.module, lit) {
+                            Ok(ctor) => ctor,
+                            Err(msg) => return trap(vm, format!("const typerep: {msg}")),
+                        };
                         let id = vm.type_reps.intern(TypeRepNode {
-                            ctor: TypeReps::ctor_from_lit(lit),
+                            ctor,
                             args: Vec::new(),
                         });
                         Value::TypeRep(id)
@@ -1243,7 +1324,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(id) => id,
                     Err(msg) => return trap(vm, format!("is_type ty: {msg}")),
                 };
-                let ok = match type_test(&vm.module, &vm.type_reps, &vm.heap, &v, target) {
+                let ok = match type_test(
+                    &vm.module,
+                    &vm.type_reps,
+                    &vm.heap,
+                    &vm.primitive_type_ids,
+                    &v,
+                    target,
+                ) {
                     Ok(ok) => ok,
                     Err(msg) => return trap(vm, msg),
                 };
@@ -1260,7 +1348,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(id) => id,
                     Err(msg) => return trap(vm, format!("checked_cast ty: {msg}")),
                 };
-                let ok = match type_test(&vm.module, &vm.type_reps, &vm.heap, &v, target) {
+                let ok = match type_test(
+                    &vm.module,
+                    &vm.type_reps,
+                    &vm.heap,
+                    &vm.primitive_type_ids,
+                    &v,
+                    target,
+                ) {
                     Ok(ok) => ok,
                     Err(msg) => return trap(vm, msg),
                 };
@@ -1269,11 +1364,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 } else {
                     ("None".to_string(), Vec::new())
                 };
+                let Some(option_type_id) = vm.module.type_id("Option") else {
+                    return trap(vm, "missing required enum type `Option`".to_string());
+                };
                 let option = alloc_ref(
                     &mut vm.heap,
                     &mut vm.gc_allocations_since_collect,
                     HeapValue::Enum {
-                        enum_name: "Option".to_string(),
+                        type_id: option_type_id,
                         type_args: vec![target],
                         variant,
                         fields,
@@ -1293,8 +1391,12 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     };
                     arg_ids.push(id);
                 }
+                let ctor = match TypeReps::ctor_from_lit(&vm.module, base) {
+                    Ok(ctor) => ctor,
+                    Err(msg) => return trap(vm, format!("make_typerep base: {msg}")),
+                };
                 let id = vm.type_reps.intern(TypeRepNode {
-                    ctor: TypeReps::ctor_from_lit(base),
+                    ctor,
                     args: arg_ids,
                 });
                 if let Err(msg) = write_value(frame, *dst, Value::TypeRep(id)) {
@@ -1304,7 +1406,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
             rusk_bytecode::Instruction::MakeStruct {
                 dst,
-                type_name,
+                type_id,
                 type_args,
                 fields,
             } => {
@@ -1317,10 +1419,16 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     arg_ids.push(id);
                 }
 
-                let layout = match vm.module.struct_layouts.get(type_name.as_str()) {
+                let layout = match vm
+                    .module
+                    .struct_layouts
+                    .get(type_id.0 as usize)
+                    .and_then(|v| v.as_ref())
+                {
                     Some(l) => l,
                     None => {
-                        return trap(vm, format!("missing struct layout for `{type_name}`"));
+                        let ty = vm.module.type_name(*type_id).unwrap_or("<unknown>");
+                        return trap(vm, format!("missing struct layout for `{ty}`"));
                     }
                 };
 
@@ -1336,9 +1444,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         return trap(vm, format!("missing field: {field_name}"));
                     };
                     if out[idx].is_some() {
+                        let ty = vm.module.type_name(*type_id).unwrap_or("<unknown>");
                         return trap(
                             vm,
-                            format!("duplicate field `{field_name}` in `{type_name}` literal"),
+                            format!("duplicate field `{field_name}` in `{ty}` literal"),
                         );
                     }
                     out[idx] = Some(value);
@@ -1353,7 +1462,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
 
                 let obj = HeapValue::Struct {
-                    type_name: type_name.clone(),
+                    type_id: *type_id,
                     type_args: arg_ids,
                     fields: values,
                 };
@@ -1415,7 +1524,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
             }
             rusk_bytecode::Instruction::MakeEnum {
                 dst,
-                enum_name,
+                enum_type_id,
                 type_args,
                 variant,
                 fields,
@@ -1437,7 +1546,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     values.push(v);
                 }
                 let obj = HeapValue::Enum {
-                    enum_name: enum_name.clone(),
+                    type_id: *enum_type_id,
                     type_args: arg_ids,
                     variant: variant.clone(),
                     fields: values,
@@ -1471,11 +1580,11 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 };
                 let value = match obj {
                     HeapValue::Struct {
-                        type_name, fields, ..
+                        type_id, fields, ..
                     } => {
                         let idx = match struct_field_index(
                             &vm.module,
-                            type_name.as_str(),
+                            *type_id,
                             field.as_str(),
                         ) {
                             Ok(i) => i,
@@ -1543,11 +1652,11 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 match obj {
                     HeapValue::Struct {
-                        type_name, fields, ..
+                        type_id, fields, ..
                     } => {
                         let idx = match struct_field_index(
                             &vm.module,
-                            type_name.as_str(),
+                            *type_id,
                             field.as_str(),
                         ) {
                             Ok(i) => i,
@@ -1595,13 +1704,14 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 };
                 let value = match obj {
                     HeapValue::Struct {
-                        type_name, fields, ..
+                        type_id, fields, ..
                     } => {
                         let Some(v) = fields.get(*idx) else {
                             let field_name = vm
                                 .module
                                 .struct_layouts
-                                .get(type_name.as_str())
+                                .get(type_id.0 as usize)
+                                .and_then(|layout| layout.as_ref())
                                 .and_then(|names| names.get(*idx))
                                 .cloned()
                                 .unwrap_or_else(|| format!("#{idx}"));
@@ -2350,247 +2460,283 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 // even when the runtime receiver is a known primitive (e.g. `Hash::hash` on
                 // `int` keys in `core::map::Map`).
                 if method_type_args.is_empty() {
-                    let fast_out: Option<Value> = match (method.as_str(), &recv, args.as_slice()) {
-                        ("core::hash::Hash::hash", Value::Unit, []) => Some(Value::Int(0)),
-                        ("core::hash::Hash::hash", Value::Bool(b), []) => {
-                            Some(Value::Int(hash_int_fnv(if *b { 1 } else { 0 })))
-                        }
-                        ("core::hash::Hash::hash", Value::Int(v), []) => {
-                            Some(Value::Int(hash_int_fnv(*v)))
-                        }
-                        ("core::hash::Hash::hash", Value::Byte(v), []) => {
-                            Some(Value::Int(hash_int_fnv(*v as i64)))
-                        }
-                        ("core::hash::Hash::hash", Value::Char(v), []) => {
-                            Some(Value::Int(hash_int_fnv(*v as u32 as i64)))
-                        }
-                        ("core::hash::Hash::hash", Value::String(s), []) => {
-                            let bytes = match s.as_str(&vm.heap) {
-                                Ok(s) => s.as_bytes(),
-                                Err(msg) => return trap(vm, format!("vcall hash_string: {msg}")),
-                            };
-                            Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
-                        }
-                        ("core::hash::Hash::hash", Value::Bytes(b), []) => {
-                            let bytes = match b.as_slice(&vm.heap) {
-                                Ok(b) => b,
-                                Err(msg) => return trap(vm, format!("vcall hash_bytes: {msg}")),
-                            };
-                            Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
-                        }
-
-                        ("core::ops::Eq::eq", Value::Unit, [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            matches!(other, Value::Unit).then_some(Value::Bool(true))
-                        }
-                        ("core::ops::Ne::ne", Value::Unit, [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            matches!(other, Value::Unit).then_some(Value::Bool(false))
-                        }
-                        ("core::ops::Eq::eq", Value::Bool(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Bool(b) => Some(Value::Bool(*a == b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Ne::ne", Value::Bool(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Bool(b) => Some(Value::Bool(*a != b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Eq::eq", Value::Int(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Int(b) => Some(Value::Bool(*a == b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Ne::ne", Value::Int(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Int(b) => Some(Value::Bool(*a != b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Eq::eq", Value::Float(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Float(b) => Some(Value::Bool(*a == b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Ne::ne", Value::Float(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Float(b) => Some(Value::Bool(*a != b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Eq::eq", Value::Byte(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Byte(b) => Some(Value::Bool(*a == b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Ne::ne", Value::Byte(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Byte(b) => Some(Value::Bool(*a != b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Eq::eq", Value::Char(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Char(b) => Some(Value::Bool(*a == b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Ne::ne", Value::Char(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Char(b) => Some(Value::Bool(*a != b)),
-                                _ => None,
-                            }
-                        }
-                        ("core::ops::Eq::eq", Value::String(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::String(b) => {
-                                    let a_str = match a.as_str(&vm.heap) {
-                                        Ok(s) => s,
+                    let fast_out: Option<Value> =
+                        if vm.vcall_fast_path_ids.hash == Some(*method) {
+                            match (&recv, args.as_slice()) {
+                                (Value::Unit, []) => Some(Value::Int(0)),
+                                (Value::Bool(b), []) => {
+                                    Some(Value::Int(hash_int_fnv(if *b { 1 } else { 0 })))
+                                }
+                                (Value::Int(v), []) => Some(Value::Int(hash_int_fnv(*v))),
+                                (Value::Byte(v), []) => Some(Value::Int(hash_int_fnv(*v as i64))),
+                                (Value::Char(v), []) => {
+                                    Some(Value::Int(hash_int_fnv(*v as u32 as i64)))
+                                }
+                                (Value::String(s), []) => {
+                                    let bytes = match s.as_str(&vm.heap) {
+                                        Ok(s) => s.as_bytes(),
                                         Err(msg) => {
-                                            return trap(vm, format!("vcall string_eq: {msg}"));
+                                            return trap(vm, format!("vcall hash_string: {msg}"));
                                         }
                                     };
-                                    let b_str = match b.as_str(&vm.heap) {
-                                        Ok(s) => s,
+                                    Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
+                                }
+                                (Value::Bytes(b), []) => {
+                                    let bytes = match b.as_slice(&vm.heap) {
+                                        Ok(b) => b,
                                         Err(msg) => {
-                                            return trap(vm, format!("vcall string_eq: {msg}"));
+                                            return trap(vm, format!("vcall hash_bytes: {msg}"));
                                         }
                                     };
-                                    Some(Value::Bool(a_str == b_str))
+                                    Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
                                 }
                                 _ => None,
                             }
-                        }
-                        ("core::ops::Ne::ne", Value::String(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::String(b) => {
-                                    let a_str = match a.as_str(&vm.heap) {
-                                        Ok(s) => s,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall string_ne: {msg}"));
-                                        }
+                        } else if vm.vcall_fast_path_ids.eq == Some(*method) {
+                            match (&recv, args.as_slice()) {
+                                (Value::Unit, [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
                                     };
-                                    let b_str = match b.as_str(&vm.heap) {
-                                        Ok(s) => s,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall string_ne: {msg}"));
-                                        }
+                                    matches!(other, Value::Unit).then_some(Value::Bool(true))
+                                }
+                                (Value::Bool(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
                                     };
-                                    Some(Value::Bool(a_str != b_str))
+                                    match other {
+                                        Value::Bool(b) => Some(Value::Bool(*a == b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Int(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Int(b) => Some(Value::Bool(*a == b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Float(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Float(b) => Some(Value::Bool(*a == b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Byte(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Byte(b) => Some(Value::Bool(*a == b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Char(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Char(b) => Some(Value::Bool(*a == b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::String(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::String(b) => {
+                                            let a_str = match a.as_str(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall string_eq: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            let b_str = match b.as_str(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall string_eq: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            Some(Value::Bool(a_str == b_str))
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Bytes(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Bytes(b) => {
+                                            let a_bytes = match a.as_slice(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall bytes_eq: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            let b_bytes = match b.as_slice(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall bytes_eq: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            Some(Value::Bool(a_bytes == b_bytes))
+                                        }
+                                        _ => None,
+                                    }
                                 }
                                 _ => None,
                             }
-                        }
-                        ("core::ops::Eq::eq", Value::Bytes(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Bytes(b) => {
-                                    let a_bytes = match a.as_slice(&vm.heap) {
-                                        Ok(s) => s,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall bytes_eq: {msg}"));
-                                        }
+                        } else if vm.vcall_fast_path_ids.ne == Some(*method) {
+                            match (&recv, args.as_slice()) {
+                                (Value::Unit, [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
                                     };
-                                    let b_bytes = match b.as_slice(&vm.heap) {
-                                        Ok(s) => s,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall bytes_eq: {msg}"));
-                                        }
+                                    matches!(other, Value::Unit).then_some(Value::Bool(false))
+                                }
+                                (Value::Bool(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
                                     };
-                                    Some(Value::Bool(a_bytes == b_bytes))
+                                    match other {
+                                        Value::Bool(b) => Some(Value::Bool(*a != b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Int(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Int(b) => Some(Value::Bool(*a != b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Float(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Float(b) => Some(Value::Bool(*a != b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Byte(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Byte(b) => Some(Value::Bool(*a != b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Char(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Char(b) => Some(Value::Bool(*a != b)),
+                                        _ => None,
+                                    }
+                                }
+                                (Value::String(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::String(b) => {
+                                            let a_str = match a.as_str(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall string_ne: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            let b_str = match b.as_str(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall string_ne: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            Some(Value::Bool(a_str != b_str))
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                (Value::Bytes(a), [other]) => {
+                                    let other = match read_value(frame, *other) {
+                                        Ok(v) => v,
+                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                    };
+                                    match other {
+                                        Value::Bytes(b) => {
+                                            let a_bytes = match a.as_slice(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall bytes_ne: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            let b_bytes = match b.as_slice(&vm.heap) {
+                                                Ok(s) => s,
+                                                Err(msg) => {
+                                                    return trap(
+                                                        vm,
+                                                        format!("vcall bytes_ne: {msg}"),
+                                                    );
+                                                }
+                                            };
+                                            Some(Value::Bool(a_bytes != b_bytes))
+                                        }
+                                        _ => None,
+                                    }
                                 }
                                 _ => None,
                             }
-                        }
-                        ("core::ops::Ne::ne", Value::Bytes(a), [other]) => {
-                            let other = match read_value(frame, *other) {
-                                Ok(v) => v,
-                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                            };
-                            match other {
-                                Value::Bytes(b) => {
-                                    let a_bytes = match a.as_slice(&vm.heap) {
-                                        Ok(s) => s,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall bytes_ne: {msg}"));
-                                        }
-                                    };
-                                    let b_bytes = match b.as_slice(&vm.heap) {
-                                        Ok(s) => s,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall bytes_ne: {msg}"));
-                                        }
-                                    };
-                                    Some(Value::Bool(a_bytes != b_bytes))
-                                }
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
+                        } else {
+                            None
+                        };
 
                     if let Some(out) = fast_out {
                         if vm.collect_metrics {
@@ -2605,30 +2751,30 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         continue;
                     }
                 }
-                let (type_name, type_args) = match &recv {
-                    Value::Unit => ("unit".to_string(), Vec::new()),
-                    Value::Bool(_) => ("bool".to_string(), Vec::new()),
-                    Value::Int(_) => ("int".to_string(), Vec::new()),
-                    Value::Float(_) => ("float".to_string(), Vec::new()),
-                    Value::Byte(_) => ("byte".to_string(), Vec::new()),
-                    Value::Char(_) => ("char".to_string(), Vec::new()),
-                    Value::String(_) => ("string".to_string(), Vec::new()),
-                    Value::Bytes(_) => ("bytes".to_string(), Vec::new()),
+                let (type_id, type_args) = match &recv {
+                    Value::Unit => (vm.primitive_type_ids.unit, Vec::new()),
+                    Value::Bool(_) => (vm.primitive_type_ids.bool, Vec::new()),
+                    Value::Int(_) => (vm.primitive_type_ids.int, Vec::new()),
+                    Value::Float(_) => (vm.primitive_type_ids.float, Vec::new()),
+                    Value::Byte(_) => (vm.primitive_type_ids.byte, Vec::new()),
+                    Value::Char(_) => (vm.primitive_type_ids.char, Vec::new()),
+                    Value::String(_) => (vm.primitive_type_ids.string, Vec::new()),
+                    Value::Bytes(_) => (vm.primitive_type_ids.bytes, Vec::new()),
                     Value::Ref(r) => {
                         let Some(obj) = vm.heap.get(r.handle) else {
                             return trap(vm, "vcall: dangling reference".to_string());
                         };
                         match obj {
                             HeapValue::Struct {
-                                type_name,
+                                type_id,
                                 type_args,
                                 ..
-                            } => (type_name.clone(), type_args.clone()),
+                            } => (*type_id, type_args.clone()),
                             HeapValue::Enum {
-                                enum_name,
+                                type_id,
                                 type_args,
                                 ..
-                            } => (enum_name.clone(), type_args.clone()),
+                            } => (*type_id, type_args.clone()),
                             HeapValue::Array(_)
                             | HeapValue::Tuple(_)
                             | HeapValue::BytesBuf { .. }
@@ -2654,12 +2800,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     }
                 };
 
-                let lookup_key = (type_name.clone(), method.clone());
-                let Some(fn_id) = vm.module.methods.get(&lookup_key).copied() else {
-                    return trap(
-                        vm,
-                        format!("unresolved vcall method: {method} on {type_name}"),
-                    );
+                let Some(fn_id) = vm.module.vcall_target(type_id, *method) else {
+                    let type_name = vm.module.type_name(type_id).unwrap_or("<unknown>");
+                    let method_name = vm.module.method_name(*method).unwrap_or("<unknown>");
+                    return trap(vm, format!("unresolved vcall method: {method_name} on {type_name}"));
                 };
 
                 let Some(callee) = vm.module.function(fn_id) else {
@@ -3608,11 +3752,16 @@ fn tuple_field_index(field: &str) -> Option<usize> {
 
 fn struct_field_index(
     module: &ExecutableModule,
-    type_name: &str,
+    type_id: TypeId,
     field: &str,
 ) -> Result<usize, String> {
-    let Some(layout) = module.struct_layouts.get(type_name) else {
-        return Err(format!("missing struct layout for `{type_name}`"));
+    let Some(layout) = module
+        .struct_layouts
+        .get(type_id.0 as usize)
+        .and_then(|v| v.as_ref())
+    else {
+        let ty = module.type_name(type_id).unwrap_or("<unknown>");
+        return Err(format!("missing struct layout for `{ty}`"));
     };
     layout
         .iter()
@@ -3620,10 +3769,28 @@ fn struct_field_index(
         .ok_or_else(|| format!("missing field: {field}"))
 }
 
+fn struct_layout_by_name<'a>(
+    module: &'a ExecutableModule,
+    type_name: &str,
+) -> Result<(TypeId, &'a [String]), String> {
+    let Some(type_id) = module.type_id(type_name) else {
+        return Err(format!("unknown struct type `{type_name}`"));
+    };
+    let Some(layout) = module
+        .struct_layouts
+        .get(type_id.0 as usize)
+        .and_then(|v| v.as_ref())
+    else {
+        return Err(format!("missing struct layout for `{type_name}`"));
+    };
+    Ok((type_id, layout.as_slice()))
+}
+
 fn type_test(
     module: &ExecutableModule,
     type_reps: &TypeReps,
     heap: &ImmixHeap<HeapValue>,
+    primitive_type_ids: &PrimitiveTypeIds,
     value: &Value,
     target: TypeRepId,
 ) -> Result<bool, String> {
@@ -3658,56 +3825,68 @@ fn type_test(
             },
             _ => false,
         },
-        TypeCtor::Struct(name) => match value {
+        TypeCtor::Struct(type_id) => match value {
             Value::Ref(r) => match heap.get(r.handle) {
                 Some(HeapValue::Struct {
-                    type_name,
+                    type_id: dyn_type_id,
                     type_args,
                     ..
-                }) => type_name == name && type_args.as_slice() == target.args.as_slice(),
+                }) => dyn_type_id == type_id && type_args.as_slice() == target.args.as_slice(),
                 Some(_) => false,
                 None => return Err("dangling reference in type test".to_string()),
             },
             _ => false,
         },
-        TypeCtor::Enum(name) => match value {
+        TypeCtor::Enum(type_id) => match value {
             Value::Ref(r) => match heap.get(r.handle) {
                 Some(HeapValue::Enum {
-                    enum_name,
+                    type_id: dyn_type_id,
                     type_args,
                     ..
-                }) => enum_name == name && type_args.as_slice() == target.args.as_slice(),
+                }) => dyn_type_id == type_id && type_args.as_slice() == target.args.as_slice(),
                 Some(_) => false,
                 None => return Err("dangling reference in type test".to_string()),
             },
             _ => false,
         },
-        TypeCtor::Interface(iface) => {
-            let Value::Ref(r) = value else {
-                return Ok(false);
+        TypeCtor::Interface(iface_id) => {
+            let (dyn_type_id, dyn_type_args): (TypeId, &[TypeRepId]) = match value {
+                Value::Unit => (primitive_type_ids.unit, &[]),
+                Value::Bool(_) => (primitive_type_ids.bool, &[]),
+                Value::Int(_) => (primitive_type_ids.int, &[]),
+                Value::Float(_) => (primitive_type_ids.float, &[]),
+                Value::Byte(_) => (primitive_type_ids.byte, &[]),
+                Value::Char(_) => (primitive_type_ids.char, &[]),
+                Value::String(_) => (primitive_type_ids.string, &[]),
+                Value::Bytes(_) => (primitive_type_ids.bytes, &[]),
+                Value::Ref(r) => {
+                    let Some(obj) = heap.get(r.handle) else {
+                        return Err("dangling reference in type test".to_string());
+                    };
+                    match obj {
+                        HeapValue::Struct {
+                            type_id,
+                            type_args,
+                            ..
+                        } => (*type_id, type_args.as_slice()),
+                        HeapValue::Enum {
+                            type_id,
+                            type_args,
+                            ..
+                        } => (*type_id, type_args.as_slice()),
+                        _ => return Ok(false),
+                    }
+                }
+                Value::TypeRep(_) | Value::Function(_) | Value::Continuation(_) => return Ok(false),
             };
 
-            let Some(obj) = heap.get(r.handle) else {
-                return Err("dangling reference in type test".to_string());
+            let Some(ifaces) = module.interface_impls.get(dyn_type_id.0 as usize) else {
+                return Err(format!(
+                    "invalid TypeId {} in interface_impls lookup",
+                    dyn_type_id.0
+                ));
             };
-            let (dyn_type, dyn_type_args) = match obj {
-                HeapValue::Struct {
-                    type_name,
-                    type_args,
-                    ..
-                } => (type_name.as_str(), type_args.as_slice()),
-                HeapValue::Enum {
-                    enum_name,
-                    type_args,
-                    ..
-                } => (enum_name.as_str(), type_args.as_slice()),
-                _ => return Ok(false),
-            };
-
-            let implements_iface = module
-                .interface_impls
-                .get(dyn_type)
-                .is_some_and(|ifaces| ifaces.contains(iface.as_str()));
+            let implements_iface = ifaces.binary_search(iface_id).is_ok();
             if !implements_iface {
                 return Ok(false);
             }
@@ -3772,25 +3951,36 @@ fn eval_core_intrinsic(
     let bad_args = |name: &str| -> String { format!("{name}: bad args: {args:?}") };
 
     fn alloc_option(
+        module: &ExecutableModule,
         heap: &mut ImmixHeap<HeapValue>,
         gc_allocations_since_collect: &mut usize,
         type_arg: TypeRepId,
         variant: &str,
         fields: Vec<Value>,
-    ) -> Value {
-        alloc_ref(
+    ) -> Result<Value, String> {
+        let Some(option_type_id) = module.type_id("Option") else {
+            return Err("missing required enum type `Option`".to_string());
+        };
+        Ok(alloc_ref(
             heap,
             gc_allocations_since_collect,
             HeapValue::Enum {
-                enum_name: "Option".to_string(),
+                type_id: option_type_id,
                 type_args: vec![type_arg],
                 variant: variant.to_string(),
                 fields,
             },
-        )
+        ))
     }
 
-    fn read_option_int(heap: &ImmixHeap<HeapValue>, v: &Value) -> Result<Option<i64>, String> {
+    fn read_option_int(
+        module: &ExecutableModule,
+        heap: &ImmixHeap<HeapValue>,
+        v: &Value,
+    ) -> Result<Option<i64>, String> {
+        let Some(option_type_id) = module.type_id("Option") else {
+            return Err("missing required enum type `Option`".to_string());
+        };
         let Value::Ref(r) = v else {
             return Err("expected `Option<int>` value".to_string());
         };
@@ -3798,7 +3988,7 @@ fn eval_core_intrinsic(
             return Err("dangling reference in `Option<int>` value".to_string());
         };
         let HeapValue::Enum {
-            enum_name,
+            type_id,
             variant,
             fields,
             ..
@@ -3806,8 +3996,9 @@ fn eval_core_intrinsic(
         else {
             return Err("expected `Option<int>` enum value".to_string());
         };
-        if enum_name != "Option" {
-            return Err(format!("expected `Option`, got `{enum_name}`"));
+        if *type_id != option_type_id {
+            let got = module.type_name(*type_id).unwrap_or("<unknown>");
+            return Err(format!("expected `Option`, got `{got}`"));
         }
         match variant.as_str() {
             "None" => Ok(None),
@@ -4033,20 +4224,22 @@ fn eval_core_intrinsic(
                 });
                 let out = if (0..=255).contains(v) {
                     alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         byte_rep,
                         "Some",
                         vec![Value::Byte(*v as u8)],
-                    )
+                    )?
                 } else {
                     alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         byte_rep,
                         "None",
                         Vec::new(),
-                    )
+                    )?
                 };
                 Ok(out)
             }
@@ -4083,20 +4276,22 @@ fn eval_core_intrinsic(
                     && let Some(ch) = char::from_u32(u)
                 {
                     alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         char_rep,
                         "Some",
                         vec![Value::Char(ch)],
-                    )
+                    )?
                 } else {
                     alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         char_rep,
                         "None",
                         Vec::new(),
-                    )
+                    )?
                 };
                 Ok(out)
             }
@@ -4114,33 +4309,36 @@ fn eval_core_intrinsic(
                     args: Vec::new(),
                 });
                 let Some(i) = usize::try_from(*idx).ok() else {
-                    return Ok(alloc_option(
+                    return alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         byte_rep,
                         "None",
                         Vec::new(),
-                    ));
+                    );
                 };
                 let byte = {
                     let bytes = b.as_slice(heap)?;
                     bytes.get(i).copied()
                 };
                 match byte {
-                    Some(v) => Ok(alloc_option(
+                    Some(v) => alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         byte_rep,
                         "Some",
                         vec![Value::Byte(v)],
-                    )),
-                    None => Ok(alloc_option(
+                    ),
+                    None => alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         byte_rep,
                         "None",
                         Vec::new(),
-                    )),
+                    ),
                 }
             }
             _ => Err(bad_args("core::intrinsics::bytes_get")),
@@ -4161,7 +4359,7 @@ fn eval_core_intrinsic(
                     .len_usize()
                     .try_into()
                     .map_err(|_| "core::intrinsics::bytes_slice: len overflow".to_string())?;
-                let to = read_option_int(heap, to)?.unwrap_or(len_i64);
+                let to = read_option_int(module, heap, to)?.unwrap_or(len_i64);
 
                 if *from < 0 {
                     return Err("core::intrinsics::bytes_slice: from must be >= 0".to_string());
@@ -4243,7 +4441,7 @@ fn eval_core_intrinsic(
                     .len_usize()
                     .try_into()
                     .map_err(|_| "core::intrinsics::string_slice: len overflow".to_string())?;
-                let to = read_option_int(heap, to)?.unwrap_or(len_i64);
+                let to = read_option_int(module, heap, to)?.unwrap_or(len_i64);
                 let s_str = s.as_str(heap)?;
 
                 if *from < 0 {
@@ -4337,21 +4535,23 @@ fn eval_core_intrinsic(
                 match String::from_utf8(bytes.to_vec()) {
                     Ok(s) => {
                         let s = alloc_string(heap, gc_allocations_since_collect, s)?;
-                        Ok(alloc_option(
+                        alloc_option(
+                            module,
                             heap,
                             gc_allocations_since_collect,
                             string_rep,
                             "Some",
                             vec![s],
-                        ))
+                        )
                     }
-                    Err(_) => Ok(alloc_option(
+                    Err(_) => alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         string_rep,
                         "None",
                         Vec::new(),
-                    )),
+                    ),
                 }
             }
             _ => Err(bad_args("core::intrinsics::string_from_utf8_strict")),
@@ -4417,22 +4617,24 @@ fn eval_core_intrinsic(
                     let mut units = Vec::with_capacity(items.len());
                     for item in items {
                         let Value::Int(n) = item else {
-                            return Ok(alloc_option(
+                            return alloc_option(
+                                module,
                                 heap,
                                 gc_allocations_since_collect,
                                 string_rep,
                                 "None",
                                 Vec::new(),
-                            ));
+                            );
                         };
                         if *n < 0 || *n > 0xFFFF {
-                            return Ok(alloc_option(
+                            return alloc_option(
+                                module,
                                 heap,
                                 gc_allocations_since_collect,
                                 string_rep,
                                 "None",
                                 Vec::new(),
-                            ));
+                            );
                         }
                         units.push(*n as u16);
                     }
@@ -4442,13 +4644,14 @@ fn eval_core_intrinsic(
                         match r {
                             Ok(c) => out.push(c),
                             Err(_) => {
-                                return Ok(alloc_option(
+                                return alloc_option(
+                                    module,
                                     heap,
                                     gc_allocations_since_collect,
                                     string_rep,
                                     "None",
                                     Vec::new(),
-                                ));
+                                );
                             }
                         }
                     }
@@ -4457,21 +4660,23 @@ fn eval_core_intrinsic(
                 match maybe {
                     Some(out) => {
                         let s = alloc_string(heap, gc_allocations_since_collect, out)?;
-                        Ok(alloc_option(
+                        alloc_option(
+                            module,
                             heap,
                             gc_allocations_since_collect,
                             string_rep,
                             "Some",
                             vec![s],
-                        ))
+                        )
                     }
-                    None => Ok(alloc_option(
+                    None => alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
                         string_rep,
                         "None",
                         Vec::new(),
-                    )),
+                    ),
                 }
             }
             _ => Err(bad_args("core::intrinsics::string_from_utf16_strict")),
@@ -4582,26 +4787,22 @@ fn eval_core_intrinsic(
                     items.pop()
                 };
                 match popped {
-                    Some(v) => Ok(alloc_ref(
+                    Some(v) => alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
-                            variant: "Some".to_string(),
-                            fields: vec![v],
-                        },
-                    )),
-                    None => Ok(alloc_ref(
+                        *elem_rep,
+                        "Some",
+                        vec![v],
+                    ),
+                    None => alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
-                            variant: "None".to_string(),
-                            fields: Vec::new(),
-                        },
-                    )),
+                        *elem_rep,
+                        "None",
+                        Vec::new(),
+                    ),
                 }
             }
             _ => Err(bad_args("core::intrinsics::array_pop")),
@@ -4923,14 +5124,11 @@ fn eval_core_intrinsic(
                     }
                 };
 
-                let layout = module
-                    .struct_layouts
-                    .get(ARRAY_ITER_TYPE)
-                    .ok_or_else(|| format!("missing struct layout for `{ARRAY_ITER_TYPE}`"))?;
+                let (iter_type_id, layout) = struct_layout_by_name(module, ARRAY_ITER_TYPE)?;
                 let mut fields = vec![Value::Unit; layout.len()];
 
-                let arr_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_ARRAY)?;
-                let idx_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_INDEX)?;
+                let arr_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_ARRAY)?;
+                let idx_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_INDEX)?;
 
                 fields[arr_idx] = Value::Ref(arr.clone());
                 fields[idx_idx] = Value::Int(0);
@@ -4939,7 +5137,7 @@ fn eval_core_intrinsic(
                     heap,
                     gc_allocations_since_collect,
                     HeapValue::Struct {
-                        type_name: ARRAY_ITER_TYPE.to_string(),
+                        type_id: iter_type_id,
                         type_args: vec![*elem_rep],
                         fields,
                     },
@@ -4953,22 +5151,26 @@ fn eval_core_intrinsic(
                     return Err("illegal write through readonly reference".to_string());
                 }
 
-                let arr_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_ARRAY)?;
-                let idx_idx = struct_field_index(module, ARRAY_ITER_TYPE, ARRAY_ITER_FIELD_INDEX)?;
+                let iter_type_id = module
+                    .type_id(ARRAY_ITER_TYPE)
+                    .ok_or_else(|| format!("unknown struct type `{ARRAY_ITER_TYPE}`"))?;
+                let arr_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_ARRAY)?;
+                let idx_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_INDEX)?;
 
                 let (arr_ref, idx) = {
                     let Some(obj) = heap.get(iter.handle) else {
                         return Err("core::intrinsics::next: dangling reference".to_string());
                     };
                     let HeapValue::Struct {
-                        type_name, fields, ..
+                        type_id, fields, ..
                     } = obj
                     else {
                         return Err("core::intrinsics::next: expected iterator struct".to_string());
                     };
-                    if type_name != ARRAY_ITER_TYPE {
+                    if *type_id != iter_type_id {
+                        let got = module.type_name(*type_id).unwrap_or("<unknown>");
                         return Err(format!(
-                            "core::intrinsics::next: expected `{ARRAY_ITER_TYPE}`, got `{type_name}`"
+                            "core::intrinsics::next: expected `{ARRAY_ITER_TYPE}`, got `{got}`"
                         ));
                     }
 
@@ -5009,27 +5211,23 @@ fn eval_core_intrinsic(
                     if arr_ref.is_readonly() {
                         item = item.into_readonly_view();
                     }
-                    alloc_ref(
+                    alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
-                            variant: "Some".to_string(),
-                            fields: vec![item],
-                        },
-                    )
+                        *elem_rep,
+                        "Some",
+                        vec![item],
+                    )?
                 } else {
-                    alloc_ref(
+                    alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![*elem_rep],
-                            variant: "None".to_string(),
-                            fields: Vec::new(),
-                        },
-                    )
+                        *elem_rep,
+                        "None",
+                        Vec::new(),
+                    )?
                 };
 
                 {
@@ -5054,15 +5252,12 @@ fn eval_core_intrinsic(
 
         I::StringIntoIter => match args.as_slice() {
             [Value::String(s)] => {
-                let layout = module
-                    .struct_layouts
-                    .get(STRING_ITER_TYPE)
-                    .ok_or_else(|| format!("missing struct layout for `{STRING_ITER_TYPE}`"))?;
+                let (iter_type_id, layout) = struct_layout_by_name(module, STRING_ITER_TYPE)?;
                 let mut fields = vec![Value::Unit; layout.len()];
 
-                let s_idx = struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_STRING)?;
+                let s_idx = struct_field_index(module, iter_type_id, STRING_ITER_FIELD_STRING)?;
                 let idx_idx =
-                    struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_INDEX)?;
+                    struct_field_index(module, iter_type_id, STRING_ITER_FIELD_INDEX)?;
 
                 fields[s_idx] = Value::String(*s);
                 fields[idx_idx] = Value::Int(0);
@@ -5071,7 +5266,7 @@ fn eval_core_intrinsic(
                     heap,
                     gc_allocations_since_collect,
                     HeapValue::Struct {
-                        type_name: STRING_ITER_TYPE.to_string(),
+                        type_id: iter_type_id,
                         type_args: Vec::new(),
                         fields,
                     },
@@ -5085,25 +5280,29 @@ fn eval_core_intrinsic(
                     return Err("illegal write through readonly reference".to_string());
                 }
 
-                let s_idx = struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_STRING)?;
+                let iter_type_id = module
+                    .type_id(STRING_ITER_TYPE)
+                    .ok_or_else(|| format!("unknown struct type `{STRING_ITER_TYPE}`"))?;
+                let s_idx = struct_field_index(module, iter_type_id, STRING_ITER_FIELD_STRING)?;
                 let idx_idx =
-                    struct_field_index(module, STRING_ITER_TYPE, STRING_ITER_FIELD_INDEX)?;
+                    struct_field_index(module, iter_type_id, STRING_ITER_FIELD_INDEX)?;
 
                 let (ch, next_idx) = {
                     let Some(obj) = heap.get(iter.handle) else {
                         return Err("core::intrinsics::string_next: dangling reference".to_string());
                     };
                     let HeapValue::Struct {
-                        type_name, fields, ..
+                        type_id, fields, ..
                     } = obj
                     else {
                         return Err(
                             "core::intrinsics::string_next: expected iterator struct".to_string()
                         );
                     };
-                    if type_name != STRING_ITER_TYPE {
+                    if *type_id != iter_type_id {
+                        let got = module.type_name(*type_id).unwrap_or("<unknown>");
                         return Err(format!(
-                            "core::intrinsics::string_next: expected `{STRING_ITER_TYPE}`, got `{type_name}`"
+                            "core::intrinsics::string_next: expected `{STRING_ITER_TYPE}`, got `{got}`"
                         ));
                     }
 
@@ -5148,27 +5347,23 @@ fn eval_core_intrinsic(
                     args: Vec::new(),
                 });
                 let out = if let Some(ch) = ch {
-                    alloc_ref(
+                    alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![char_rep],
-                            variant: "Some".to_string(),
-                            fields: vec![Value::Char(ch)],
-                        },
-                    )
+                        char_rep,
+                        "Some",
+                        vec![Value::Char(ch)],
+                    )?
                 } else {
-                    alloc_ref(
+                    alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![char_rep],
-                            variant: "None".to_string(),
-                            fields: Vec::new(),
-                        },
-                    )
+                        char_rep,
+                        "None",
+                        Vec::new(),
+                    )?
                 };
 
                 {
@@ -5196,14 +5391,11 @@ fn eval_core_intrinsic(
 
         I::BytesIntoIter => match args.as_slice() {
             [Value::Bytes(b)] => {
-                let layout = module
-                    .struct_layouts
-                    .get(BYTES_ITER_TYPE)
-                    .ok_or_else(|| format!("missing struct layout for `{BYTES_ITER_TYPE}`"))?;
+                let (iter_type_id, layout) = struct_layout_by_name(module, BYTES_ITER_TYPE)?;
                 let mut fields = vec![Value::Unit; layout.len()];
 
-                let b_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_BYTES)?;
-                let idx_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_INDEX)?;
+                let b_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_BYTES)?;
+                let idx_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_INDEX)?;
 
                 fields[b_idx] = Value::Bytes(*b);
                 fields[idx_idx] = Value::Int(0);
@@ -5212,7 +5404,7 @@ fn eval_core_intrinsic(
                     heap,
                     gc_allocations_since_collect,
                     HeapValue::Struct {
-                        type_name: BYTES_ITER_TYPE.to_string(),
+                        type_id: iter_type_id,
                         type_args: Vec::new(),
                         fields,
                     },
@@ -5226,24 +5418,28 @@ fn eval_core_intrinsic(
                     return Err("illegal write through readonly reference".to_string());
                 }
 
-                let b_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_BYTES)?;
-                let idx_idx = struct_field_index(module, BYTES_ITER_TYPE, BYTES_ITER_FIELD_INDEX)?;
+                let iter_type_id = module
+                    .type_id(BYTES_ITER_TYPE)
+                    .ok_or_else(|| format!("unknown struct type `{BYTES_ITER_TYPE}`"))?;
+                let b_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_BYTES)?;
+                let idx_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_INDEX)?;
 
                 let (byte, next_idx) = {
                     let Some(obj) = heap.get(iter.handle) else {
                         return Err("core::intrinsics::bytes_next: dangling reference".to_string());
                     };
                     let HeapValue::Struct {
-                        type_name, fields, ..
+                        type_id, fields, ..
                     } = obj
                     else {
                         return Err(
                             "core::intrinsics::bytes_next: expected iterator struct".to_string()
                         );
                     };
-                    if type_name != BYTES_ITER_TYPE {
+                    if *type_id != iter_type_id {
+                        let got = module.type_name(*type_id).unwrap_or("<unknown>");
                         return Err(format!(
-                            "core::intrinsics::bytes_next: expected `{BYTES_ITER_TYPE}`, got `{type_name}`"
+                            "core::intrinsics::bytes_next: expected `{BYTES_ITER_TYPE}`, got `{got}`"
                         ));
                     }
 
@@ -5270,34 +5466,28 @@ fn eval_core_intrinsic(
                     (byte, *idx + 1)
                 };
 
+                let byte_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Byte,
+                    args: Vec::new(),
+                });
                 let out = if let Some(byte) = byte {
-                    alloc_ref(
+                    alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![type_reps.intern(TypeRepNode {
-                                ctor: TypeCtor::Byte,
-                                args: Vec::new(),
-                            })],
-                            variant: "Some".to_string(),
-                            fields: vec![Value::Byte(byte)],
-                        },
-                    )
+                        byte_rep,
+                        "Some",
+                        vec![Value::Byte(byte)],
+                    )?
                 } else {
-                    alloc_ref(
+                    alloc_option(
+                        module,
                         heap,
                         gc_allocations_since_collect,
-                        HeapValue::Enum {
-                            enum_name: "Option".to_string(),
-                            type_args: vec![type_reps.intern(TypeRepNode {
-                                ctor: TypeCtor::Byte,
-                                args: Vec::new(),
-                            })],
-                            variant: "None".to_string(),
-                            fields: Vec::new(),
-                        },
-                    )
+                        byte_rep,
+                        "None",
+                        Vec::new(),
+                    )?
                 };
 
                 {
@@ -5347,9 +5537,12 @@ fn match_pattern(
             (ConstValue::Float(a), Value::Float(b)) => a == b,
             (ConstValue::String(a), Value::String(b)) => a == b.as_str(heap)?,
             (ConstValue::Bytes(a), Value::Bytes(b)) => a.as_slice() == b.as_slice(heap)?,
-            (ConstValue::TypeRep(lit), Value::TypeRep(id)) => type_reps
-                .node(*id)
-                .is_some_and(|n| n.ctor == TypeReps::ctor_from_lit(lit) && n.args.is_empty()),
+            (ConstValue::TypeRep(lit), Value::TypeRep(id)) => {
+                match (type_reps.node(*id), TypeReps::ctor_from_lit(module, lit)) {
+                    (Some(n), Ok(ctor)) => n.ctor == ctor && n.args.is_empty(),
+                    _ => false,
+                }
+            }
             (ConstValue::Function(a), Value::Function(b)) => a == b,
             _ => false,
         }),
@@ -5364,16 +5557,20 @@ fn match_pattern(
             let Some(obj) = heap.get(r.handle) else {
                 return Err("dangling reference in pattern match".to_string());
             };
-            let (e, v, actual_fields) = match obj {
+            let Some(pat_enum_id) = module.type_id(enum_name.as_str()) else {
+                return Ok(false);
+            };
+            let (actual_enum_id, v, actual_fields) = match obj {
                 HeapValue::Enum {
-                    enum_name,
+                    type_id,
                     variant,
                     fields,
                     ..
-                } => (enum_name.clone(), variant.clone(), fields.clone()),
+                } => (*type_id, variant.clone(), fields.clone()),
                 _ => return Ok(false),
             };
-            if e != *enum_name || v != *variant || actual_fields.len() != fields.len() {
+            if actual_enum_id != pat_enum_id || v != *variant || actual_fields.len() != fields.len()
+            {
                 return Ok(false);
             }
             for (p, actual) in fields.iter().zip(actual_fields.iter()) {
@@ -5493,22 +5690,20 @@ fn match_pattern(
             let Some(obj) = heap.get(r.handle) else {
                 return Err("dangling reference in pattern match".to_string());
             };
-            let (actual_ty, actual_fields) = match obj {
+            let Some(pat_type_id) = module.type_id(type_name.as_str()) else {
+                return Ok(false);
+            };
+            let (actual_type_id, actual_fields) = match obj {
                 HeapValue::Struct {
-                    type_name, fields, ..
-                } => (type_name.clone(), fields.clone()),
+                    type_id, fields, ..
+                } => (*type_id, fields.clone()),
                 _ => return Ok(false),
             };
-            if actual_ty != *type_name {
+            if actual_type_id != pat_type_id {
                 return Ok(false);
             }
-            let Some(layout) = module.struct_layouts.get(actual_ty.as_str()) else {
-                return Err(format!("missing struct layout for `{actual_ty}`"));
-            };
             for (field_name, field_pat) in fields.iter() {
-                let Some(idx) = layout.iter().position(|f| f == field_name) else {
-                    return Err(format!("missing field: {field_name}"));
-                };
+                let idx = struct_field_index(module, actual_type_id, field_name.as_str())?;
                 let Some(field_value) = actual_fields.get(idx) else {
                     return Err(format!("missing field: {field_name}"));
                 };
@@ -6079,9 +6274,11 @@ mod tests {
     #[test]
     fn vcall_dispatch_reads_receiver_type_args_and_calls_method() {
         let mut module = ExecutableModule::default();
+        let s_type_id = module.intern_type("S".to_string()).unwrap();
         module
-            .struct_layouts
-            .insert("S".to_string(), vec!["x".to_string()]);
+            .set_struct_layout(s_type_id, vec!["x".to_string()])
+            .unwrap();
+        let foo_method = module.intern_method("foo".to_string()).unwrap();
 
         let foo = module
             .add_function(Function {
@@ -6129,14 +6326,14 @@ mod tests {
                     },
                     Instruction::MakeStruct {
                         dst: 3,
-                        type_name: "S".to_string(),
+                        type_id: s_type_id,
                         type_args: vec![0],
                         fields: vec![("x".to_string(), 2)],
                     },
                     Instruction::VCall {
                         dst: Some(4),
                         obj: 3,
-                        method: "foo".to_string(),
+                        method: foo_method,
                         method_type_args: vec![1],
                         args: vec![],
                     },
@@ -6146,9 +6343,7 @@ mod tests {
             .unwrap();
 
         module.entry = main;
-        module
-            .methods
-            .insert(("S".to_string(), "foo".to_string()), foo);
+        module.add_vcall_entry(s_type_id, foo_method, foo).unwrap();
 
         let mut vm = Vm::new(module).unwrap();
         assert_eq!(

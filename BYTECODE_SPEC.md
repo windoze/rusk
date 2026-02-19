@@ -33,8 +33,8 @@ Execution is deterministic given:
 - **Registers** are numbered starting at `0`.
 - **Program counters (PCs)** are instruction indices into a function’s `code: Vec<Instruction>`,
   starting at `0`.
-- **FunctionId / HostImportId / EffectId** are dense `u32` indices into their respective module
-  tables.
+- **FunctionId / HostImportId / EffectId / TypeId / MethodId** are dense `u32` indices into their
+  respective module tables.
 
 ### 1.3 Traps
 
@@ -158,12 +158,18 @@ A bytecode module contains:
   - parallel to `functions`; gives the number of leading runtime `typerep` parameters (generic
     arity) for each function.
 - `host_imports: Vec<HostImport>`
-- `methods: (type_name, method_name) -> FunctionId`
-  - used by `vcall` dynamic dispatch
-- `interface_impls: type_name -> set(interface_name)`
-  - used by runtime `typerep` interface checks (`is_type` / `checked_cast`)
-- `struct_layouts: type_name -> [field_name...]`
-  - used by struct construction and field access
+- `type_names: Vec<String>`
+  - interned type name table; `TypeId(u32)` indexes this table
+  - must include primitive type names (`unit`, `bool`, `int`, `float`, `byte`, `char`, `string`,
+    `bytes`)
+- `method_names: Vec<String>`
+  - interned method name table; `MethodId(u32)` indexes this table
+- `vcall_dispatch: Vec<Vec<(MethodId, FunctionId)>>`
+  - parallel to `type_names`; used by `vcall` dynamic dispatch
+- `interface_impls: Vec<Vec<TypeId>>`
+  - parallel to `type_names`; used by runtime interface checks (`is_type` / `checked_cast`)
+- `struct_layouts: Vec<Option<Vec<String>>>`
+  - parallel to `type_names`; struct field layouts by `TypeId`
 - `external_effects: Vec<ExternalEffectDecl>`
   - the set of effects that may “bubble” to the host as `StepResult::Request`
 - `entry: FunctionId`
@@ -214,7 +220,10 @@ Execution proceeds with a call stack of **frames**. Each frame contains:
 - `func: FunctionId`
 - `pc: usize` (next instruction index)
 - `regs: Vec<Option<Value>>` (length = `reg_count`)
-- `return_dst: Option<Reg>` (destination in the caller frame)
+- `return_dsts` (return destinations in the caller frame)
+  - `None`: return value(s) are discarded
+  - `One(Reg)`: single-register return (from `Call` / `ICall` / `VCall`)
+  - `Multi([Reg...])`: multi-register return (from `CallMulti`)
 
 Instruction fetch behavior:
 
@@ -429,17 +438,17 @@ This section defines operational semantics per instruction. All register indices
 
 Type test notes (reference VM behavior):
 
-- `struct`/`enum` tests compare type name **and** applied type args.
+- `struct`/`enum` tests compare `TypeId` **and** applied type args.
 - `interface` tests require metadata in `module.interface_impls`.
 
 ### 8.3 Heap construction
 
-- `MakeStruct { dst, type_name, type_args, fields }`
+- `MakeStruct { dst, type_id, type_args, fields }`
   - `type_args` must be `typerep` registers.
-  - Uses `module.struct_layouts[type_name]` to determine field order.
+  - Uses `module.struct_layouts[type_id]` to determine field order.
   - `fields` is a list of `(field_name, reg)`; all layout fields must be provided exactly once.
   - Allocates and writes a struct reference.
-- `MakeEnum { dst, enum_name, type_args, variant, fields }`
+- `MakeEnum { dst, enum_type_id, type_args, variant, fields }`
   - `type_args` must be `typerep` registers.
   - Allocates and writes an enum reference.
 - `MakeArray { dst, items }`
@@ -454,7 +463,7 @@ There are two styles: name-based and index-based.
 
 - `GetField { dst, obj, field }`
   - `obj` must be a reference to a struct or tuple.
-  - For structs: `field` is a field name resolved via `module.struct_layouts`.
+  - For structs: `field` is a field name resolved via `module.struct_layouts[receiver_type_id]`.
   - For tuples: `field` is a string of the form `".<index>"` (e.g. `".0"`).
 - `SetField { obj, field, value }`
   - Like `GetField`, but mutates the referenced object.
@@ -521,13 +530,14 @@ These ops trap if operands are uninitialized or of the wrong type:
   - `fnptr` must contain a function reference value.
   - Otherwise identical to `Call` into bytecode.
 - `VCall { dst, obj, method, method_type_args, args }`
-  - Dynamic dispatch on the receiver’s runtime type name:
+  - Dynamic dispatch on the receiver’s runtime `TypeId`:
     - receiver must be either:
       - a struct or enum reference, or
       - a primitive value (`unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`)
-    - lookup uses `module.methods[(dyn_type_name, method)]`
+    - lookup uses `module.vcall_dispatch[receiver_type_id]` to resolve `method: MethodId` to a
+      `FunctionId`
     - an implementation may provide equivalent fast paths for well-known core methods on primitive
-      receivers (e.g. `core::hash::Hash::hash` on `int`), bypassing the method table
+      receivers (e.g. `core::hash::Hash::hash` on `int`), bypassing the dispatch table
     - receiver type args are empty for primitive receivers
   - The callee is invoked with argument list:
     1. receiver type args as leading `typerep` values,
@@ -605,7 +615,7 @@ The current intrinsic set includes:
 
 ---
 
-## 10. `.rbc` serialization format (v0.4)
+## 10. `.rbc` serialization format (v0.6)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -629,7 +639,7 @@ All integers are little-endian.
 Common scalar aliases:
 
 - `Reg`: `u32`
-- `FunctionId` / `HostImportId` / `EffectId`: `u32`
+- `FunctionId` / `HostImportId` / `EffectId` / `TypeId` / `MethodId`: `u32`
 - `pc` targets: `u32` (instruction indices)
 
 Booleans:
@@ -659,7 +669,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `4`
+- minor = `6`
 
 The reference decoder requires an **exact** version match.
 
@@ -673,15 +683,24 @@ After the header, the module is encoded as:
 4. `function_generic_params: [u32; function_generic_params_len]`
 5. `host_imports_len: len`
 6. `host_imports: [HostImport; host_imports_len]`
-7. `methods_len: len`
-8. `methods: repeat methods_len times { type_name: string, method_name: string, fn_id: u32 }`
-9. `interface_impls_len: len`
-10. `interface_impls: repeat { type_name: string, ifaces_len: len, ifaces: [string; ifaces_len] }`
-11. `struct_layouts_len: len`
-12. `struct_layouts: repeat { type_name: string, fields_len: len, fields: [string; fields_len] }`
-13. `external_effects_len: len`
-14. `external_effects: [ExternalEffectDecl; external_effects_len]`
-15. `entry: u32` (FunctionId)
+7. `type_names_len: len`
+8. `type_names: [string; type_names_len]`
+9. `method_names_len: len`
+10. `method_names: [string; method_names_len]`
+11. `vcall_dispatch_len: len`
+12. `vcall_dispatch: repeat vcall_dispatch_len times { type_id: u32, method_id: u32, fn_id: u32 }`
+    - `type_id` is a `TypeId` index into `type_names`
+    - `method_id` is a `MethodId` index into `method_names`
+    - `fn_id` is a `FunctionId` index into `functions`
+13. `interface_impls_len: len`
+14. `interface_impls: repeat interface_impls_len times { type_id: u32, ifaces_len: len, ifaces: [u32; ifaces_len] }`
+    - `type_id` is a `TypeId` (dynamic type)
+    - each `iface` is a `TypeId` naming an interface
+15. `struct_layouts_len: len`
+16. `struct_layouts: repeat struct_layouts_len times { type_id: u32, fields_len: len, fields: [string; fields_len] }`
+17. `external_effects_len: len`
+18. `external_effects: [ExternalEffectDecl; external_effects_len]`
+19. `entry: u32` (FunctionId)
 
 The decoder rejects trailing bytes after the module.
 
@@ -831,7 +850,6 @@ Intrinsics use `u16` tags `0..=75`:
 - `73`: `HashString`
 - `74`: `HashBytes`
 - `75`: `HashCombine`
-- `64`: `BytesLen`
 
 #### Call targets (`u8`)
 
@@ -843,7 +861,7 @@ Intrinsics use `u16` tags `0..=75`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.4):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.6):
 
 - `0`: `Const`
 - `1`: `Copy`

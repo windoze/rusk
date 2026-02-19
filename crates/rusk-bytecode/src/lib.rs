@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -27,6 +27,14 @@ pub struct HostImportId(pub u32);
 /// A stable identifier for an externalized effect operation within an [`ExecutableModule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct EffectId(pub u32);
+
+/// A stable identifier for an interned type name within an [`ExecutableModule`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct TypeId(pub u32);
+
+/// A stable identifier for an interned method name within an [`ExecutableModule`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct MethodId(pub u32);
 
 /// A VM/host boundary ABI type (v0): builtin primitives only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,7 +333,7 @@ pub enum Instruction {
 
     MakeStruct {
         dst: Reg,
-        type_name: String,
+        type_id: TypeId,
         type_args: Vec<Reg>,
         fields: Vec<(String, Reg)>,
     },
@@ -339,7 +347,7 @@ pub enum Instruction {
     },
     MakeEnum {
         dst: Reg,
-        enum_name: String,
+        enum_type_id: TypeId,
         type_args: Vec<Reg>,
         variant: String,
         fields: Vec<Reg>,
@@ -487,7 +495,7 @@ pub enum Instruction {
     VCall {
         dst: Option<Reg>,
         obj: Reg,
-        method: String,
+        method: MethodId,
         method_type_args: Vec<Reg>,
         args: Vec<Reg>,
     },
@@ -554,7 +562,7 @@ pub struct Function {
 }
 
 /// A compact, ID-based executable module derived from MIR.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ExecutableModule {
     pub functions: Vec<Function>,
     pub function_ids: BTreeMap<String, FunctionId>,
@@ -566,9 +574,28 @@ pub struct ExecutableModule {
     pub host_imports: Vec<HostImport>,
     pub host_import_ids: BTreeMap<String, HostImportId>,
 
-    pub methods: BTreeMap<(String, String), FunctionId>,
-    pub interface_impls: BTreeMap<String, BTreeSet<String>>,
-    pub struct_layouts: BTreeMap<String, Vec<String>>,
+    /// Interned type names (including primitives like `"int"`).
+    pub type_names: Vec<String>,
+    pub type_ids: BTreeMap<String, TypeId>,
+
+    /// Interned method ids for dynamic dispatch (`VCall`).
+    pub method_names: Vec<String>,
+    pub method_ids: BTreeMap<String, MethodId>,
+
+    /// Dynamic dispatch table indexed by receiver `TypeId`.
+    ///
+    /// `vcall_dispatch[type_id]` is a sorted list of `(MethodId, FunctionId)` pairs.
+    pub vcall_dispatch: Vec<Vec<(MethodId, FunctionId)>>,
+
+    /// Runtime interface membership table indexed by dynamic `TypeId`.
+    ///
+    /// `interface_impls[type_id]` is a sorted list of implemented interface `TypeId`s.
+    pub interface_impls: Vec<Vec<TypeId>>,
+
+    /// Optional struct field layout indexed by `TypeId`.
+    ///
+    /// `struct_layouts[type_id] = Some([field_name...])` for struct types.
+    pub struct_layouts: Vec<Option<Vec<String>>>,
 
     pub external_effects: Vec<ExternalEffectDecl>,
     pub external_effect_ids: BTreeMap<(String, String), EffectId>,
@@ -578,6 +605,35 @@ pub struct ExecutableModule {
 }
 
 impl ExecutableModule {
+    pub fn new() -> Self {
+        let mut out = Self {
+            functions: Vec::new(),
+            function_ids: BTreeMap::new(),
+            function_generic_params: Vec::new(),
+            host_imports: Vec::new(),
+            host_import_ids: BTreeMap::new(),
+            type_names: Vec::new(),
+            type_ids: BTreeMap::new(),
+            method_names: Vec::new(),
+            method_ids: BTreeMap::new(),
+            vcall_dispatch: Vec::new(),
+            interface_impls: Vec::new(),
+            struct_layouts: Vec::new(),
+            external_effects: Vec::new(),
+            external_effect_ids: BTreeMap::new(),
+            entry: FunctionId(0),
+        };
+
+        for name in [
+            "unit", "bool", "int", "float", "byte", "char", "string", "bytes",
+        ] {
+            out.intern_type(name.to_string())
+                .expect("primitive type interning cannot fail");
+        }
+
+        out
+    }
+
     pub fn add_function(&mut self, func: Function) -> Result<FunctionId, String> {
         if self.function_ids.contains_key(func.name.as_str()) {
             return Err(format!("duplicate function `{}`", func.name));
@@ -629,6 +685,114 @@ impl ExecutableModule {
         self.host_import_ids.get(name).copied()
     }
 
+    pub fn intern_type(&mut self, name: String) -> Result<TypeId, String> {
+        if name.is_empty() {
+            return Err("cannot intern empty type name".to_string());
+        }
+        if let Some(id) = self.type_ids.get(name.as_str()).copied() {
+            return Ok(id);
+        }
+        let id_u32: u32 = self
+            .type_names
+            .len()
+            .try_into()
+            .map_err(|_| "type name table overflow".to_string())?;
+        let id = TypeId(id_u32);
+        self.type_ids.insert(name.clone(), id);
+        self.type_names.push(name);
+        self.vcall_dispatch.push(Vec::new());
+        self.interface_impls.push(Vec::new());
+        self.struct_layouts.push(None);
+        Ok(id)
+    }
+
+    pub fn type_id(&self, name: &str) -> Option<TypeId> {
+        self.type_ids.get(name).copied()
+    }
+
+    pub fn type_name(&self, id: TypeId) -> Option<&str> {
+        self.type_names.get(id.0 as usize).map(|s| s.as_str())
+    }
+
+    pub fn intern_method(&mut self, name: String) -> Result<MethodId, String> {
+        if name.is_empty() {
+            return Err("cannot intern empty method name".to_string());
+        }
+        if let Some(id) = self.method_ids.get(name.as_str()).copied() {
+            return Ok(id);
+        }
+        let id_u32: u32 = self
+            .method_names
+            .len()
+            .try_into()
+            .map_err(|_| "method name table overflow".to_string())?;
+        let id = MethodId(id_u32);
+        self.method_ids.insert(name.clone(), id);
+        self.method_names.push(name);
+        Ok(id)
+    }
+
+    pub fn method_id(&self, name: &str) -> Option<MethodId> {
+        self.method_ids.get(name).copied()
+    }
+
+    pub fn method_name(&self, id: MethodId) -> Option<&str> {
+        self.method_names.get(id.0 as usize).map(|s| s.as_str())
+    }
+
+    pub fn add_vcall_entry(
+        &mut self,
+        type_id: TypeId,
+        method: MethodId,
+        fn_id: FunctionId,
+    ) -> Result<(), String> {
+        let Some(entries) = self.vcall_dispatch.get_mut(type_id.0 as usize) else {
+            return Err(format!("invalid TypeId {}", type_id.0));
+        };
+        let pos = entries
+            .binary_search_by_key(&method.0, |(m, _)| m.0)
+            .map_err(|pos| pos)
+            .unwrap_or_else(|pos| pos);
+
+        if entries.get(pos).is_some_and(|(m, _)| *m == method) {
+            return Err(format!(
+                "duplicate vcall dispatch entry for type {} method {}",
+                type_id.0, method.0
+            ));
+        }
+        entries.insert(pos, (method, fn_id));
+        Ok(())
+    }
+
+    pub fn vcall_target(&self, type_id: TypeId, method: MethodId) -> Option<FunctionId> {
+        let entries = self.vcall_dispatch.get(type_id.0 as usize)?;
+        let idx = entries
+            .binary_search_by_key(&method.0, |(m, _)| m.0)
+            .ok()?;
+        entries.get(idx).map(|(_, f)| *f)
+    }
+
+    pub fn set_interface_impls(&mut self, type_id: TypeId, mut ifaces: Vec<TypeId>) -> Result<(), String> {
+        let Some(slot) = self.interface_impls.get_mut(type_id.0 as usize) else {
+            return Err(format!("invalid TypeId {}", type_id.0));
+        };
+        ifaces.sort_by_key(|id| id.0);
+        ifaces.dedup();
+        *slot = ifaces;
+        Ok(())
+    }
+
+    pub fn set_struct_layout(&mut self, type_id: TypeId, fields: Vec<String>) -> Result<(), String> {
+        let Some(slot) = self.struct_layouts.get_mut(type_id.0 as usize) else {
+            return Err(format!("invalid TypeId {}", type_id.0));
+        };
+        if slot.is_some() {
+            return Err(format!("duplicate struct layout for type {}", type_id.0));
+        }
+        *slot = Some(fields);
+        Ok(())
+    }
+
     pub fn add_external_effect(&mut self, decl: ExternalEffectDecl) -> Result<EffectId, String> {
         let key = (decl.interface.clone(), decl.method.clone());
         if self.external_effect_ids.contains_key(&key) {
@@ -656,5 +820,11 @@ impl ExecutableModule {
         self.external_effect_ids
             .get(&(interface.to_string(), method.to_string()))
             .copied()
+    }
+}
+
+impl Default for ExecutableModule {
+    fn default() -> Self {
+        Self::new()
     }
 }

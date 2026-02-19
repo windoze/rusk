@@ -48,13 +48,14 @@ fn option_unboxed_return_eliminates_heap_allocation() {
     "#;
 
     let module = compile_o2(src);
+    let option_id = module.type_id("Option").expect("Option type id");
 
     // Callee: should have an internal `$unboxed` variant with no `MakeEnum Option`.
     let unboxed = func_by_name(&module, "maybe_inc$unboxed");
     assert_eq!(
         count_instr(
             unboxed,
-            |i| matches!(i, Instruction::MakeEnum { enum_name, .. } if enum_name == "Option")
+            |i| matches!(i, Instruction::MakeEnum { enum_type_id, .. } if *enum_type_id == option_id)
         ),
         0,
         "unboxed variant should not allocate Option"
@@ -119,12 +120,13 @@ fn option_make_enum_followed_by_match_is_sroa_eliminated() {
     "#;
 
     let module = compile_o2(src);
+    let option_id = module.type_id("Option").expect("Option type id");
     let main = func_by_name(&module, "main");
 
     assert_eq!(
         count_instr(
             main,
-            |i| matches!(i, Instruction::MakeEnum { enum_name, .. } if enum_name == "Option")
+            |i| matches!(i, Instruction::MakeEnum { enum_type_id, .. } if *enum_type_id == option_id)
         ),
         0,
         "immediate match should not allocate Option at O2"

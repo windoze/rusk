@@ -12,19 +12,19 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::{
     AbiType, CallTarget, ConstValue, EffectId, EffectSpec, ExecutableModule, ExternalEffectDecl,
     Function, FunctionId, HandlerClause, HostFnSig, HostImport, HostImportId, Instruction,
-    Intrinsic, Pattern, Reg, SwitchCase, TypeRepLit,
+    Intrinsic, MethodId, Pattern, Reg, SwitchCase, TypeId, TypeRepLit,
 };
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 5;
+const VERSION_MINOR: u16 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -186,28 +186,65 @@ impl Encoder {
             self.write_host_import(import)?;
         }
 
-        // Methods (sorted by BTreeMap).
-        self.write_len(module.methods.len())?;
-        for ((type_name, method_name), fn_id) in &module.methods {
-            self.write_string(type_name)?;
-            self.write_string(method_name)?;
-            self.write_u32(fn_id.0);
+        // Interned type names.
+        self.write_len(module.type_names.len())?;
+        for name in &module.type_names {
+            self.write_string(name)?;
         }
 
-        // Interface impls.
-        self.write_len(module.interface_impls.len())?;
-        for (type_name, ifaces) in &module.interface_impls {
-            self.write_string(type_name)?;
-            self.write_len(ifaces.len())?;
-            for iface in ifaces {
-                self.write_string(iface)?;
+        // Interned method names.
+        self.write_len(module.method_names.len())?;
+        for name in &module.method_names {
+            self.write_string(name)?;
+        }
+
+        // VCall dispatch table (sparse encoding, deterministic order by type_id then method_id).
+        let mut dispatch_len: usize = 0;
+        for entries in &module.vcall_dispatch {
+            dispatch_len = dispatch_len.saturating_add(entries.len());
+        }
+        self.write_len(dispatch_len)?;
+        for (type_index, entries) in module.vcall_dispatch.iter().enumerate() {
+            let type_id = TypeId(type_index as u32);
+            for (method_id, fn_id) in entries {
+                self.write_u32(type_id.0);
+                self.write_u32(method_id.0);
+                self.write_u32(fn_id.0);
             }
         }
 
-        // Struct layouts.
-        self.write_len(module.struct_layouts.len())?;
-        for (type_name, fields) in &module.struct_layouts {
-            self.write_string(type_name)?;
+        // Interface impls (sparse encoding).
+        let impl_len = module
+            .interface_impls
+            .iter()
+            .filter(|ifaces| !ifaces.is_empty())
+            .count();
+        self.write_len(impl_len)?;
+        for (type_index, ifaces) in module.interface_impls.iter().enumerate() {
+            if ifaces.is_empty() {
+                continue;
+            }
+            let type_id = TypeId(type_index as u32);
+            self.write_u32(type_id.0);
+            self.write_len(ifaces.len())?;
+            for iface_id in ifaces {
+                self.write_u32(iface_id.0);
+            }
+        }
+
+        // Struct layouts (sparse encoding).
+        let layout_len = module
+            .struct_layouts
+            .iter()
+            .filter(|layout| layout.is_some())
+            .count();
+        self.write_len(layout_len)?;
+        for (type_index, layout) in module.struct_layouts.iter().enumerate() {
+            let Some(fields) = layout.as_ref() else {
+                continue;
+            };
+            let type_id = TypeId(type_index as u32);
+            self.write_u32(type_id.0);
             self.write_len(fields.len())?;
             for field in fields {
                 self.write_string(field)?;
@@ -587,13 +624,13 @@ impl Encoder {
             }
             Instruction::MakeStruct {
                 dst,
-                type_name,
+                type_id,
                 type_args,
                 fields,
             } => {
                 self.write_u8(7);
                 self.write_u32(*dst);
-                self.write_string(type_name)?;
+                self.write_u32(type_id.0);
                 self.write_vec_reg(type_args)?;
                 self.write_len(fields.len())?;
                 for (name, reg) in fields {
@@ -613,14 +650,14 @@ impl Encoder {
             }
             Instruction::MakeEnum {
                 dst,
-                enum_name,
+                enum_type_id,
                 type_args,
                 variant,
                 fields,
             } => {
                 self.write_u8(10);
                 self.write_u32(*dst);
-                self.write_string(enum_name)?;
+                self.write_u32(enum_type_id.0);
                 self.write_vec_reg(type_args)?;
                 self.write_string(variant)?;
                 self.write_vec_reg(fields)?;
@@ -801,7 +838,7 @@ impl Encoder {
                 self.write_u8(36);
                 self.write_option_reg(dst)?;
                 self.write_u32(*obj);
-                self.write_string(method)?;
+                self.write_u32(method.0);
                 self.write_vec_reg(method_type_args)?;
                 self.write_vec_reg(args)?;
             }
@@ -1020,40 +1057,98 @@ impl<'a> Decoder<'a> {
             host_imports.push(self.read_host_import()?);
         }
 
-        // Methods
-        let method_len = self.read_len()?;
-        let mut methods = BTreeMap::new();
-        for _ in 0..method_len {
-            let type_name = self.read_string()?;
-            let method_name = self.read_string()?;
-            let fn_id = FunctionId(self.read_u32()?);
-            methods.insert((type_name, method_name), fn_id);
+        // Interned type names.
+        let type_len = self.read_len()?;
+        let mut type_names = Vec::with_capacity(type_len);
+        for _ in 0..type_len {
+            type_names.push(self.read_string()?);
         }
-
-        // Interface impls
-        let impl_len = self.read_len()?;
-        let mut interface_impls = BTreeMap::new();
-        for _ in 0..impl_len {
-            let type_name = self.read_string()?;
-            let iface_len = self.read_len()?;
-            let mut set = BTreeSet::new();
-            for _ in 0..iface_len {
-                set.insert(self.read_string()?);
+        let mut type_ids = BTreeMap::new();
+        for (idx, name) in type_names.iter().enumerate() {
+            let id = TypeId(idx as u32);
+            if type_ids.insert(name.clone(), id).is_some() {
+                return Err(self.err(format!("duplicate type name `{name}`")));
             }
-            interface_impls.insert(type_name, set);
         }
 
-        // Struct layouts
+        // Interned method names.
+        let method_len = self.read_len()?;
+        let mut method_names = Vec::with_capacity(method_len);
+        for _ in 0..method_len {
+            method_names.push(self.read_string()?);
+        }
+        let mut method_ids = BTreeMap::new();
+        for (idx, name) in method_names.iter().enumerate() {
+            let id = MethodId(idx as u32);
+            if method_ids.insert(name.clone(), id).is_some() {
+                return Err(self.err(format!("duplicate method name `{name}`")));
+            }
+        }
+
+        // Dispatch table.
+        let mut vcall_dispatch: Vec<Vec<(MethodId, FunctionId)>> = Vec::with_capacity(type_len);
+        vcall_dispatch.resize_with(type_len, Vec::new);
+        let dispatch_len = self.read_len()?;
+        for _ in 0..dispatch_len {
+            let type_id = TypeId(self.read_u32()?);
+            let method_id = MethodId(self.read_u32()?);
+            let fn_id = FunctionId(self.read_u32()?);
+            let idx: usize = type_id
+                .0
+                .try_into()
+                .map_err(|_| self.err("type id overflow".to_string()))?;
+            let Some(entries) = vcall_dispatch.get_mut(idx) else {
+                return Err(self.err(format!("invalid TypeId {} in dispatch entry", type_id.0)));
+            };
+            entries.push((method_id, fn_id));
+        }
+
+        // Interface impls.
+        let mut interface_impls: Vec<Vec<TypeId>> = Vec::with_capacity(type_len);
+        interface_impls.resize_with(type_len, Vec::new);
+        let impl_len = self.read_len()?;
+        for _ in 0..impl_len {
+            let type_id = TypeId(self.read_u32()?);
+            let idx: usize = type_id
+                .0
+                .try_into()
+                .map_err(|_| self.err("type id overflow".to_string()))?;
+            let Some(slot) = interface_impls.get_mut(idx) else {
+                return Err(self.err(format!("invalid TypeId {} in interface impls", type_id.0)));
+            };
+            let iface_len = self.read_len()?;
+            let mut ifaces = Vec::with_capacity(iface_len);
+            for _ in 0..iface_len {
+                ifaces.push(TypeId(self.read_u32()?));
+            }
+            *slot = ifaces;
+        }
+
+        // Struct layouts.
+        let mut struct_layouts: Vec<Option<Vec<String>>> = Vec::with_capacity(type_len);
+        struct_layouts.resize_with(type_len, || None);
         let layout_len = self.read_len()?;
-        let mut struct_layouts = BTreeMap::new();
         for _ in 0..layout_len {
-            let type_name = self.read_string()?;
+            let type_id = TypeId(self.read_u32()?);
+            let idx: usize = type_id
+                .0
+                .try_into()
+                .map_err(|_| self.err("type id overflow".to_string()))?;
+            let Some(slot) = struct_layouts.get_mut(idx) else {
+                return Err(self.err(format!("invalid TypeId {} in struct layouts", type_id.0)));
+            };
+            if slot.is_some() {
+                return Err(self.err(format!(
+                    "duplicate struct layout entry for TypeId {}",
+                    type_id.0
+                )));
+            }
             let field_len = self.read_len()?;
             let mut fields = Vec::with_capacity(field_len);
             for _ in 0..field_len {
                 fields.push(self.read_string()?);
             }
-            struct_layouts.insert(type_name, fields);
+            *slot = Some(fields);
         }
 
         // External effects.
@@ -1100,7 +1195,11 @@ impl<'a> Decoder<'a> {
             function_generic_params,
             host_imports,
             host_import_ids,
-            methods,
+            type_names,
+            type_ids,
+            method_names,
+            method_ids,
+            vcall_dispatch,
             interface_impls,
             struct_layouts,
             external_effects,
@@ -1451,7 +1550,7 @@ impl<'a> Decoder<'a> {
             }),
             7 => {
                 let dst = self.read_u32()?;
-                let type_name = self.read_string()?;
+                let type_id = TypeId(self.read_u32()?);
                 let type_args = self.read_vec_reg()?;
                 let n = self.read_len()?;
                 let mut fields = Vec::with_capacity(n);
@@ -1462,7 +1561,7 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(Instruction::MakeStruct {
                     dst,
-                    type_name,
+                    type_id,
                     type_args,
                     fields,
                 })
@@ -1477,7 +1576,7 @@ impl<'a> Decoder<'a> {
             }),
             10 => Ok(Instruction::MakeEnum {
                 dst: self.read_u32()?,
-                enum_name: self.read_string()?,
+                enum_type_id: TypeId(self.read_u32()?),
                 type_args: self.read_vec_reg()?,
                 variant: self.read_string()?,
                 fields: self.read_vec_reg()?,
@@ -1621,7 +1720,7 @@ impl<'a> Decoder<'a> {
             36 => Ok(Instruction::VCall {
                 dst: self.read_option_reg()?,
                 obj: self.read_u32()?,
-                method: self.read_string()?,
+                method: MethodId(self.read_u32()?),
                 method_type_args: self.read_vec_reg()?,
                 args: self.read_vec_reg()?,
             }),

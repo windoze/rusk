@@ -3,7 +3,10 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 
-use crate::{CallTarget, EffectSpec, ExecutableModule, Function, FunctionId, Instruction, Reg};
+use crate::{
+    CallTarget, ConstValue, EffectSpec, ExecutableModule, Function, FunctionId, Instruction,
+    MethodId, Reg, TypeId, TypeRepLit,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyError {
@@ -98,44 +101,159 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         });
     }
 
-    // Method table integrity.
-    for ((type_name, method_name), fn_id) in &module.methods {
-        if (fn_id.0 as usize) >= module.functions.len() {
+    // Parallel tables must match the type table.
+    let types_len = module.type_names.len();
+    if module.vcall_dispatch.len() != types_len {
+        return Err(VerifyError {
+            message: format!(
+                "vcall_dispatch length {} does not match type_names length {}",
+                module.vcall_dispatch.len(),
+                types_len
+            ),
+        });
+    }
+    if module.interface_impls.len() != types_len {
+        return Err(VerifyError {
+            message: format!(
+                "interface_impls length {} does not match type_names length {}",
+                module.interface_impls.len(),
+                types_len
+            ),
+        });
+    }
+    if module.struct_layouts.len() != types_len {
+        return Err(VerifyError {
+            message: format!(
+                "struct_layouts length {} does not match type_names length {}",
+                module.struct_layouts.len(),
+                types_len
+            ),
+        });
+    }
+
+    // Recompute interning maps and ensure they match the stored ones.
+    let mut expected_type_ids = BTreeMap::new();
+    for (idx, name) in module.type_names.iter().enumerate() {
+        if name.is_empty() {
             return Err(VerifyError {
-                message: format!(
-                    "method table entry ({type_name},{method_name}) points to invalid function id {}",
-                    fn_id.0
-                ),
+                message: "type_names contains empty type name".to_string(),
+            });
+        }
+        let id = TypeId(idx as u32);
+        if expected_type_ids.insert(name.clone(), id).is_some() {
+            return Err(VerifyError {
+                message: format!("duplicate type name `{name}`"),
+            });
+        }
+    }
+    if expected_type_ids != module.type_ids {
+        return Err(VerifyError {
+            message: "type_ids map does not match type_names table".to_string(),
+        });
+    }
+
+    let mut expected_method_ids = BTreeMap::new();
+    for (idx, name) in module.method_names.iter().enumerate() {
+        if name.is_empty() {
+            return Err(VerifyError {
+                message: "method_names contains empty method name".to_string(),
+            });
+        }
+        let id = MethodId(idx as u32);
+        if expected_method_ids.insert(name.clone(), id).is_some() {
+            return Err(VerifyError {
+                message: format!("duplicate method name `{name}`"),
+            });
+        }
+    }
+    if expected_method_ids != module.method_ids {
+        return Err(VerifyError {
+            message: "method_ids map does not match method_names table".to_string(),
+        });
+    }
+
+    // Ensure primitive type names are present (needed for unified runtime dispatch and diagnostics).
+    for name in [
+        "unit", "bool", "int", "float", "byte", "char", "string", "bytes",
+    ] {
+        if module.type_id(name).is_none() {
+            return Err(VerifyError {
+                message: format!("missing required primitive type name `{name}` in type table"),
             });
         }
     }
 
-    // Interface impls are only string metadata; ensure there are no empty names.
-    for (type_name, interfaces) in &module.interface_impls {
-        if type_name.is_empty() {
-            return Err(VerifyError {
-                message: "interface_impls contains empty type name".to_string(),
-            });
-        }
-        for iface in interfaces {
-            if iface.is_empty() {
+    // VCall dispatch table integrity.
+    let method_count = module.method_names.len() as u32;
+    for (type_idx, entries) in module.vcall_dispatch.iter().enumerate() {
+        let mut prev: Option<MethodId> = None;
+        for (method_id, fn_id) in entries {
+            if method_id.0 >= method_count {
                 return Err(VerifyError {
-                    message: format!("interface_impls for `{type_name}` contains empty interface"),
+                    message: format!(
+                        "vcall dispatch entry for TypeId {type_idx} has invalid MethodId {} (methods={method_count})",
+                        method_id.0
+                    ),
                 });
             }
+            if let Some(prev) = prev {
+                if prev.0 >= method_id.0 {
+                    return Err(VerifyError {
+                        message: format!(
+                            "vcall dispatch list for TypeId {type_idx} is not strictly sorted/unique by MethodId"
+                        ),
+                    });
+                }
+            }
+            if (fn_id.0 as usize) >= module.functions.len() {
+                return Err(VerifyError {
+                    message: format!(
+                        "vcall dispatch entry (TypeId {type_idx}, MethodId {}) points to invalid function id {}",
+                        method_id.0,
+                        fn_id.0
+                    ),
+                });
+            }
+            prev = Some(*method_id);
         }
     }
 
-    // Struct layout indices must be consistent with instruction use; we can only check basic
-    // constraints here.
-    for (type_name, fields) in &module.struct_layouts {
-        if type_name.is_empty() {
-            return Err(VerifyError {
-                message: "struct_layouts contains empty type name".to_string(),
-            });
+    // Interface impl tables are sorted lists of TypeId.
+    let type_count = module.type_names.len() as u32;
+    for (type_idx, ifaces) in module.interface_impls.iter().enumerate() {
+        let mut prev: Option<TypeId> = None;
+        for iface_id in ifaces {
+            if iface_id.0 >= type_count {
+                return Err(VerifyError {
+                    message: format!(
+                        "interface_impls for TypeId {type_idx} contains invalid interface TypeId {} (types={type_count})",
+                        iface_id.0
+                    ),
+                });
+            }
+            if let Some(prev) = prev {
+                if prev.0 >= iface_id.0 {
+                    return Err(VerifyError {
+                        message: format!(
+                            "interface_impls list for TypeId {type_idx} is not strictly sorted/unique"
+                        ),
+                    });
+                }
+            }
+            prev = Some(*iface_id);
         }
+    }
+
+    // Struct layouts.
+    for (type_idx, layout) in module.struct_layouts.iter().enumerate() {
+        let Some(fields) = layout.as_ref() else {
+            continue;
+        };
         for field in fields {
             if field.is_empty() {
+                let type_name = module
+                    .type_name(TypeId(type_idx as u32))
+                    .unwrap_or("<unknown>");
                 return Err(VerifyError {
                     message: format!("struct_layouts for `{type_name}` contains empty field name"),
                 });
@@ -343,6 +461,60 @@ fn verify_pc(code_len: u32, pc: u32, context: &str) -> Result<(), VerifyError> {
     Ok(())
 }
 
+fn verify_type_id(module: &ExecutableModule, id: TypeId, context: &str) -> Result<(), VerifyError> {
+    let len = module.type_names.len();
+    if (id.0 as usize) >= len {
+        return Err(VerifyError {
+            message: format!("{context}: TypeId {} out of range (types={len})", id.0),
+        });
+    }
+    Ok(())
+}
+
+fn verify_method_id(
+    module: &ExecutableModule,
+    id: MethodId,
+    context: &str,
+) -> Result<(), VerifyError> {
+    let len = module.method_names.len();
+    if (id.0 as usize) >= len {
+        return Err(VerifyError {
+            message: format!("{context}: MethodId {} out of range (methods={len})", id.0),
+        });
+    }
+    Ok(())
+}
+
+fn verify_type_rep_lit_interned(
+    module: &ExecutableModule,
+    lit: &TypeRepLit,
+    context: &str,
+) -> Result<(), VerifyError> {
+    match lit {
+        TypeRepLit::Struct(name) | TypeRepLit::Enum(name) | TypeRepLit::Interface(name) => {
+            if module.type_id(name.as_str()).is_none() {
+                return Err(VerifyError {
+                    message: format!("{context}: unknown type name `{name}` (not interned)"),
+                });
+            }
+        }
+        TypeRepLit::Unit
+        | TypeRepLit::Never
+        | TypeRepLit::Bool
+        | TypeRepLit::Int
+        | TypeRepLit::Float
+        | TypeRepLit::Byte
+        | TypeRepLit::Char
+        | TypeRepLit::String
+        | TypeRepLit::Bytes
+        | TypeRepLit::Array
+        | TypeRepLit::Tuple(_)
+        | TypeRepLit::Fn
+        | TypeRepLit::Cont => {}
+    }
+    Ok(())
+}
+
 fn count_pattern_binds(p: &crate::Pattern) -> usize {
     match p {
         crate::Pattern::Wildcard => 0,
@@ -385,8 +557,11 @@ fn verify_instruction(
     let here = || format!("function `{}` pc {pc}", func.name);
 
     match inst {
-        Instruction::Const { dst, .. } => {
-            verify_reg(reg_count, *dst, &format!("{}: const dst", here()))?
+        Instruction::Const { dst, value } => {
+            verify_reg(reg_count, *dst, &format!("{}: const dst", here()))?;
+            if let ConstValue::TypeRep(lit) = value {
+                verify_type_rep_lit_interned(module, lit, &format!("{}: const typerep", here()))?;
+            }
         }
         Instruction::Copy { dst, src }
         | Instruction::Move { dst, src }
@@ -399,8 +574,13 @@ fn verify_instruction(
             verify_reg(reg_count, *value, &format!("{}: value", here()))?;
             verify_reg(reg_count, *ty, &format!("{}: ty", here()))?;
         }
-        Instruction::MakeTypeRep { dst, args, .. } => {
+        Instruction::MakeTypeRep { dst, base, args } => {
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
+            verify_type_rep_lit_interned(
+                module,
+                base,
+                &format!("{}: MakeTypeRep base", here()),
+            )?;
             for r in args {
                 verify_reg(reg_count, *r, &format!("{}: MakeTypeRep arg", here()))?;
             }
@@ -409,8 +589,20 @@ fn verify_instruction(
             dst,
             type_args,
             fields,
-            type_name: _,
+            type_id,
         } => {
+            verify_type_id(module, *type_id, &format!("{}: type id", here()))?;
+            let Some(layout) = module.struct_layouts.get(type_id.0 as usize) else {
+                return Err(VerifyError {
+                    message: format!("{}: invalid TypeId {}", here(), type_id.0),
+                });
+            };
+            if layout.is_none() {
+                let ty = module.type_name(*type_id).unwrap_or("<unknown>");
+                return Err(VerifyError {
+                    message: format!("{}: missing struct layout for `{ty}`", here()),
+                });
+            }
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             for r in type_args {
                 verify_reg(reg_count, *r, &format!("{}: type arg", here()))?;
@@ -429,9 +621,10 @@ fn verify_instruction(
             dst,
             type_args,
             fields,
-            enum_name: _,
+            enum_type_id,
             variant: _,
         } => {
+            verify_type_id(module, *enum_type_id, &format!("{}: enum type id", here()))?;
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             for r in type_args {
                 verify_reg(reg_count, *r, &format!("{}: type arg", here()))?;
@@ -537,10 +730,11 @@ fn verify_instruction(
         Instruction::VCall {
             dst,
             obj,
-            method: _,
+            method,
             method_type_args,
             args,
         } => {
+            verify_method_id(module, *method, &format!("{}: method id", here()))?;
             if let Some(dst) = dst {
                 verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             }

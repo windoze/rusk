@@ -126,6 +126,13 @@ def _gather_env(repo_root: Path) -> dict[str, Any]:
         )
     except Exception:
         env["git_commit"] = None
+    try:
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=repo_root, text=True
+        ).strip()
+        env["git_dirty"] = status != ""
+    except Exception:
+        env["git_dirty"] = None
     return env
 
 
@@ -351,6 +358,10 @@ def _render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Cargo: `{env['cargo']}`")
     if env.get("git_commit"):
         lines.append(f"- Git commit: `{env['git_commit']}`")
+    if env.get("git_dirty") is True:
+        lines.append("- Git tree: `dirty`")
+    elif env.get("git_dirty") is False:
+        lines.append("- Git tree: `clean`")
     lines.append("")
     lines.append("## Parameters")
     lines.append("")

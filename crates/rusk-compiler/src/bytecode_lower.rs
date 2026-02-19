@@ -63,8 +63,11 @@ fn abi_sig_from_host_sig(sig: &rusk_mir::HostFnSig) -> Option<HostFnSig> {
     Some(HostFnSig { params, ret })
 }
 
-fn lower_type_rep_lit(lit: &rusk_mir::TypeRepLit) -> TypeRepLit {
-    match lit {
+fn lower_type_rep_lit(
+    out: &mut ExecutableModule,
+    lit: &rusk_mir::TypeRepLit,
+) -> Result<TypeRepLit, LowerError> {
+    Ok(match lit {
         rusk_mir::TypeRepLit::Unit => TypeRepLit::Unit,
         rusk_mir::TypeRepLit::Never => TypeRepLit::Never,
         rusk_mir::TypeRepLit::Bool => TypeRepLit::Bool,
@@ -76,21 +79,34 @@ fn lower_type_rep_lit(lit: &rusk_mir::TypeRepLit) -> TypeRepLit {
         rusk_mir::TypeRepLit::Bytes => TypeRepLit::Bytes,
         rusk_mir::TypeRepLit::Array => TypeRepLit::Array,
         rusk_mir::TypeRepLit::Tuple(arity) => TypeRepLit::Tuple(*arity),
-        rusk_mir::TypeRepLit::Struct(name) => TypeRepLit::Struct(name.clone()),
-        rusk_mir::TypeRepLit::Enum(name) => TypeRepLit::Enum(name.clone()),
-        rusk_mir::TypeRepLit::Interface(name) => TypeRepLit::Interface(name.clone()),
+        rusk_mir::TypeRepLit::Struct(name) => {
+            out.intern_type(name.clone()).map_err(LowerError::new)?;
+            TypeRepLit::Struct(name.clone())
+        }
+        rusk_mir::TypeRepLit::Enum(name) => {
+            out.intern_type(name.clone()).map_err(LowerError::new)?;
+            TypeRepLit::Enum(name.clone())
+        }
+        rusk_mir::TypeRepLit::Interface(name) => {
+            out.intern_type(name.clone()).map_err(LowerError::new)?;
+            TypeRepLit::Interface(name.clone())
+        }
         rusk_mir::TypeRepLit::Fn => TypeRepLit::Fn,
         rusk_mir::TypeRepLit::Cont => TypeRepLit::Cont,
-    }
+    })
 }
 
-fn lower_pattern(mir: &rusk_mir::Module, pat: &rusk_mir::Pattern) -> Result<Pattern, LowerError> {
+fn lower_pattern(
+    out: &mut ExecutableModule,
+    mir: &rusk_mir::Module,
+    pat: &rusk_mir::Pattern,
+) -> Result<Pattern, LowerError> {
     use rusk_mir::Pattern as P;
 
     Ok(match pat {
         P::Wildcard => Pattern::Wildcard,
         P::Bind => Pattern::Bind,
-        P::Literal(lit) => Pattern::Literal(lower_pattern_lit(mir, lit)?),
+        P::Literal(lit) => Pattern::Literal(lower_pattern_lit(out, mir, lit)?),
         P::Tuple {
             prefix,
             rest,
@@ -98,15 +114,15 @@ fn lower_pattern(mir: &rusk_mir::Module, pat: &rusk_mir::Pattern) -> Result<Patt
         } => Pattern::Tuple {
             prefix: prefix
                 .iter()
-                .map(|p| lower_pattern(mir, p))
+                .map(|p| lower_pattern(out, mir, p))
                 .collect::<Result<Vec<_>, _>>()?,
             rest: match rest {
                 None => None,
-                Some(p) => Some(Box::new(lower_pattern(mir, p)?)),
+                Some(p) => Some(Box::new(lower_pattern(out, mir, p)?)),
             },
             suffix: suffix
                 .iter()
-                .map(|p| lower_pattern(mir, p))
+                .map(|p| lower_pattern(out, mir, p))
                 .collect::<Result<Vec<_>, _>>()?,
         },
         P::Enum {
@@ -118,14 +134,14 @@ fn lower_pattern(mir: &rusk_mir::Module, pat: &rusk_mir::Pattern) -> Result<Patt
             variant: variant.clone(),
             fields: fields
                 .iter()
-                .map(|p| lower_pattern(mir, p))
+                .map(|p| lower_pattern(out, mir, p))
                 .collect::<Result<Vec<_>, _>>()?,
         },
         P::Struct { type_name, fields } => Pattern::Struct {
             type_name: type_name.clone(),
             fields: fields
                 .iter()
-                .map(|(name, p)| Ok((name.clone(), lower_pattern(mir, p)?)))
+                .map(|(name, p)| Ok((name.clone(), lower_pattern(out, mir, p)?)))
                 .collect::<Result<Vec<_>, _>>()?,
         },
         P::Array {
@@ -135,21 +151,22 @@ fn lower_pattern(mir: &rusk_mir::Module, pat: &rusk_mir::Pattern) -> Result<Patt
         } => Pattern::Array {
             prefix: prefix
                 .iter()
-                .map(|p| lower_pattern(mir, p))
+                .map(|p| lower_pattern(out, mir, p))
                 .collect::<Result<Vec<_>, _>>()?,
             rest: match rest {
                 None => None,
-                Some(p) => Some(Box::new(lower_pattern(mir, p)?)),
+                Some(p) => Some(Box::new(lower_pattern(out, mir, p)?)),
             },
             suffix: suffix
                 .iter()
-                .map(|p| lower_pattern(mir, p))
+                .map(|p| lower_pattern(out, mir, p))
                 .collect::<Result<Vec<_>, _>>()?,
         },
     })
 }
 
 fn lower_pattern_lit(
+    out: &mut ExecutableModule,
     mir: &rusk_mir::Module,
     lit: &rusk_mir::ConstValue,
 ) -> Result<ConstValue, LowerError> {
@@ -160,7 +177,7 @@ fn lower_pattern_lit(
         rusk_mir::ConstValue::Float(x) => Ok(ConstValue::Float(*x)),
         rusk_mir::ConstValue::String(s) => Ok(ConstValue::String(s.clone())),
         rusk_mir::ConstValue::Bytes(b) => Ok(ConstValue::Bytes(b.clone())),
-        rusk_mir::ConstValue::TypeRep(rep) => Ok(ConstValue::TypeRep(lower_type_rep_lit(rep))),
+        rusk_mir::ConstValue::TypeRep(rep) => Ok(ConstValue::TypeRep(lower_type_rep_lit(out, rep)?)),
         rusk_mir::ConstValue::Function(name) => {
             let Some(id) = mir.function_id(name.as_str()) else {
                 return Err(LowerError::new(format!(
@@ -320,7 +337,8 @@ pub fn lower_mir_module_with_options(
             .try_into()
             .map_err(|_| LowerError::new("generic param count overflow"))?;
 
-        let bc_func = lower_mir_function(mir, func, &host_id_map, &external_effect_ids)?;
+        let bc_func =
+            lower_mir_function(&mut out, mir, func, &host_id_map, &external_effect_ids)?;
         let id = out.add_function(bc_func).map_err(LowerError::new)?;
         let expect = FunctionId(idx as u32);
         if id != expect {
@@ -342,13 +360,29 @@ pub fn lower_mir_module_with_options(
     };
     out.entry = FunctionId(main_id.0);
 
-    out.methods = mir
-        .methods
-        .iter()
-        .map(|((ty, method), id)| ((ty.clone(), method.clone()), FunctionId(id.0)))
-        .collect();
-    out.interface_impls = mir.interface_impls.clone();
-    out.struct_layouts = mir.struct_layouts.clone();
+    // Populate dynamic dispatch tables + runtime type metadata.
+    for ((ty, method), id) in &mir.methods {
+        let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
+        let method_id = out.intern_method(method.clone()).map_err(LowerError::new)?;
+        out.add_vcall_entry(type_id, method_id, FunctionId(id.0))
+            .map_err(LowerError::new)?;
+    }
+
+    for (ty, ifaces) in &mir.interface_impls {
+        let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
+        let mut ids = Vec::with_capacity(ifaces.len());
+        for iface in ifaces {
+            ids.push(out.intern_type(iface.clone()).map_err(LowerError::new)?);
+        }
+        out.set_interface_impls(type_id, ids)
+            .map_err(LowerError::new)?;
+    }
+
+    for (ty, fields) in &mir.struct_layouts {
+        let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
+        out.set_struct_layout(type_id, fields.clone())
+            .map_err(LowerError::new)?;
+    }
 
     Ok(out)
 }
@@ -392,6 +426,7 @@ enum PcPatch {
 }
 
 fn lower_mir_function(
+    out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
     mir_func: &rusk_mir::Function,
     host_id_map: &[Option<HostImportId>],
@@ -426,6 +461,7 @@ fn lower_mir_function(
 
         for instr in &block.instructions {
             lower_mir_instruction(
+                out,
                 mir_module,
                 mir_func,
                 instr,
@@ -438,6 +474,7 @@ fn lower_mir_function(
         }
 
         lower_mir_terminator(
+            out,
             mir_module,
             mir_func,
             &block.terminator,
@@ -543,6 +580,7 @@ fn lower_mir_function(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_mir_instruction(
+    out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
     mir_func: &rusk_mir::Function,
     instr: &rusk_mir::Instruction,
@@ -556,13 +594,14 @@ fn lower_mir_instruction(
 
     let local = |l: rusk_mir::Local| -> Reg { l.0 as Reg };
 
-    let op_reg = |op: &Operand, code: &mut Vec<Instruction>, temps: &mut TempAlloc| {
-        lower_operand_to_reg(mir_module, op, code, temps)
-    };
+    let op_reg = |out: &mut ExecutableModule,
+                  op: &Operand,
+                  code: &mut Vec<Instruction>,
+                  temps: &mut TempAlloc| { lower_operand_to_reg(out, mir_module, op, code, temps) };
 
     match instr {
         I::Const { dst, value } => {
-            let value = lower_const_value(mir_module, value)?;
+            let value = lower_const_value(out, mir_module, value)?;
             code.push(Instruction::Const {
                 dst: local(*dst),
                 value,
@@ -587,8 +626,8 @@ fn lower_mir_instruction(
             });
         }
         I::IsType { dst, value, ty } => {
-            let value = op_reg(value, code, temps)?;
-            let ty = op_reg(ty, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
+            let ty = op_reg(out, ty, code, temps)?;
             code.push(Instruction::IsType {
                 dst: local(*dst),
                 value,
@@ -596,8 +635,8 @@ fn lower_mir_instruction(
             });
         }
         I::CheckedCast { dst, value, ty } => {
-            let value = op_reg(value, code, temps)?;
-            let ty = op_reg(ty, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
+            let ty = op_reg(out, ty, code, temps)?;
             code.push(Instruction::CheckedCast {
                 dst: local(*dst),
                 value,
@@ -608,11 +647,11 @@ fn lower_mir_instruction(
         I::MakeTypeRep { dst, base, args } => {
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
             code.push(Instruction::MakeTypeRep {
                 dst: local(*dst),
-                base: lower_type_rep_lit(base),
+                base: lower_type_rep_lit(out, base)?,
                 args: bc_args,
             });
         }
@@ -623,19 +662,22 @@ fn lower_mir_instruction(
             type_args,
             fields,
         } => {
+            let type_id = out
+                .intern_type(type_name.clone())
+                .map_err(LowerError::new)?;
             let mut bc_type_args = Vec::with_capacity(type_args.len());
             for arg in type_args {
-                bc_type_args.push(op_reg(arg, code, temps)?);
+                bc_type_args.push(op_reg(out, arg, code, temps)?);
             }
 
             let mut bc_fields = Vec::with_capacity(fields.len());
             for (field, op) in fields {
-                bc_fields.push((field.clone(), op_reg(op, code, temps)?));
+                bc_fields.push((field.clone(), op_reg(out, op, code, temps)?));
             }
 
             code.push(Instruction::MakeStruct {
                 dst: local(*dst),
-                type_name: type_name.clone(),
+                type_id,
                 type_args: bc_type_args,
                 fields: bc_fields,
             });
@@ -643,7 +685,7 @@ fn lower_mir_instruction(
         I::MakeArray { dst, items } => {
             let mut bc_items = Vec::with_capacity(items.len());
             for op in items {
-                bc_items.push(op_reg(op, code, temps)?);
+                bc_items.push(op_reg(out, op, code, temps)?);
             }
             code.push(Instruction::MakeArray {
                 dst: local(*dst),
@@ -653,7 +695,7 @@ fn lower_mir_instruction(
         I::MakeTuple { dst, items } => {
             let mut bc_items = Vec::with_capacity(items.len());
             for op in items {
-                bc_items.push(op_reg(op, code, temps)?);
+                bc_items.push(op_reg(out, op, code, temps)?);
             }
             code.push(Instruction::MakeTuple {
                 dst: local(*dst),
@@ -667,19 +709,22 @@ fn lower_mir_instruction(
             variant,
             fields,
         } => {
+            let enum_type_id = out
+                .intern_type(enum_name.clone())
+                .map_err(LowerError::new)?;
             let mut bc_type_args = Vec::with_capacity(type_args.len());
             for arg in type_args {
-                bc_type_args.push(op_reg(arg, code, temps)?);
+                bc_type_args.push(op_reg(out, arg, code, temps)?);
             }
 
             let mut bc_fields = Vec::with_capacity(fields.len());
             for op in fields {
-                bc_fields.push(op_reg(op, code, temps)?);
+                bc_fields.push(op_reg(out, op, code, temps)?);
             }
 
             code.push(Instruction::MakeEnum {
                 dst: local(*dst),
-                enum_name: enum_name.clone(),
+                enum_type_id,
                 type_args: bc_type_args,
                 variant: variant.clone(),
                 fields: bc_fields,
@@ -687,7 +732,7 @@ fn lower_mir_instruction(
         }
 
         I::GetField { dst, obj, field } => {
-            let obj = op_reg(obj, code, temps)?;
+            let obj = op_reg(out, obj, code, temps)?;
             code.push(Instruction::GetField {
                 dst: local(*dst),
                 obj,
@@ -695,8 +740,8 @@ fn lower_mir_instruction(
             });
         }
         I::SetField { obj, field, value } => {
-            let obj = op_reg(obj, code, temps)?;
-            let value = op_reg(value, code, temps)?;
+            let obj = op_reg(out, obj, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
             code.push(Instruction::SetField {
                 obj,
                 field: field.clone(),
@@ -705,7 +750,7 @@ fn lower_mir_instruction(
         }
 
         I::StructGet { dst, obj, idx } => {
-            let obj = op_reg(obj, code, temps)?;
+            let obj = op_reg(out, obj, code, temps)?;
             code.push(Instruction::StructGet {
                 dst: local(*dst),
                 obj,
@@ -713,8 +758,8 @@ fn lower_mir_instruction(
             });
         }
         I::StructSet { obj, idx, value } => {
-            let obj = op_reg(obj, code, temps)?;
-            let value = op_reg(value, code, temps)?;
+            let obj = op_reg(out, obj, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
             code.push(Instruction::StructSet {
                 obj,
                 idx: *idx,
@@ -723,7 +768,7 @@ fn lower_mir_instruction(
         }
 
         I::TupleGet { dst, tup, idx } => {
-            let tup = op_reg(tup, code, temps)?;
+            let tup = op_reg(out, tup, code, temps)?;
             code.push(Instruction::TupleGet {
                 dst: local(*dst),
                 tup,
@@ -731,8 +776,8 @@ fn lower_mir_instruction(
             });
         }
         I::TupleSet { tup, idx, value } => {
-            let tup = op_reg(tup, code, temps)?;
-            let value = op_reg(value, code, temps)?;
+            let tup = op_reg(out, tup, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
             code.push(Instruction::TupleSet {
                 tup,
                 idx: *idx,
@@ -741,8 +786,8 @@ fn lower_mir_instruction(
         }
 
         I::IndexGet { dst, arr, idx } => {
-            let arr = op_reg(arr, code, temps)?;
-            let idx = op_reg(idx, code, temps)?;
+            let arr = op_reg(out, arr, code, temps)?;
+            let idx = op_reg(out, idx, code, temps)?;
             code.push(Instruction::IndexGet {
                 dst: local(*dst),
                 arr,
@@ -750,13 +795,13 @@ fn lower_mir_instruction(
             });
         }
         I::IndexSet { arr, idx, value } => {
-            let arr = op_reg(arr, code, temps)?;
-            let idx = op_reg(idx, code, temps)?;
-            let value = op_reg(value, code, temps)?;
+            let arr = op_reg(out, arr, code, temps)?;
+            let idx = op_reg(out, idx, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
             code.push(Instruction::IndexSet { arr, idx, value });
         }
         I::Len { dst, arr } => {
-            let arr = op_reg(arr, code, temps)?;
+            let arr = op_reg(out, arr, code, temps)?;
             code.push(Instruction::Len {
                 dst: local(*dst),
                 arr,
@@ -764,8 +809,8 @@ fn lower_mir_instruction(
         }
 
         I::IntAdd { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntAdd {
                 dst: local(*dst),
                 a,
@@ -773,8 +818,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntSub { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntSub {
                 dst: local(*dst),
                 a,
@@ -782,8 +827,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntMul { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntMul {
                 dst: local(*dst),
                 a,
@@ -791,8 +836,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntDiv { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntDiv {
                 dst: local(*dst),
                 a,
@@ -800,8 +845,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntMod { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntMod {
                 dst: local(*dst),
                 a,
@@ -810,8 +855,8 @@ fn lower_mir_instruction(
         }
 
         I::IntLt { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntLt {
                 dst: local(*dst),
                 a,
@@ -819,8 +864,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntLe { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntLe {
                 dst: local(*dst),
                 a,
@@ -828,8 +873,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntGt { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntGt {
                 dst: local(*dst),
                 a,
@@ -837,8 +882,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntGe { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntGe {
                 dst: local(*dst),
                 a,
@@ -846,8 +891,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntEq { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntEq {
                 dst: local(*dst),
                 a,
@@ -855,8 +900,8 @@ fn lower_mir_instruction(
             });
         }
         I::IntNe { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::IntNe {
                 dst: local(*dst),
                 a,
@@ -865,15 +910,15 @@ fn lower_mir_instruction(
         }
 
         I::BoolNot { dst, v } => {
-            let v = op_reg(v, code, temps)?;
+            let v = op_reg(out, v, code, temps)?;
             code.push(Instruction::BoolNot {
                 dst: local(*dst),
                 v,
             });
         }
         I::BoolEq { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::BoolEq {
                 dst: local(*dst),
                 a,
@@ -881,8 +926,8 @@ fn lower_mir_instruction(
             });
         }
         I::BoolNe { dst, a, b } => {
-            let a = op_reg(a, code, temps)?;
-            let b = op_reg(b, code, temps)?;
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
             code.push(Instruction::BoolNe {
                 dst: local(*dst),
                 a,
@@ -893,7 +938,7 @@ fn lower_mir_instruction(
         I::CallId { dst, func, args } => {
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
 
             let func = match func {
@@ -927,7 +972,7 @@ fn lower_mir_instruction(
         I::CallIdMulti { dsts, func, args } => {
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
 
             let func = match func {
@@ -953,7 +998,7 @@ fn lower_mir_instruction(
         I::Call { dst, func, args } => {
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
 
             let func = if let Some(intr) = core_intrinsic(func.as_str()) {
@@ -980,10 +1025,10 @@ fn lower_mir_instruction(
         }
 
         I::ICall { dst, fnptr, args } => {
-            let fnptr = op_reg(fnptr, code, temps)?;
+            let fnptr = op_reg(out, fnptr, code, temps)?;
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
             code.push(Instruction::ICall {
                 dst: dst.map(local),
@@ -999,22 +1044,25 @@ fn lower_mir_instruction(
             method_type_args,
             args,
         } => {
-            let obj = op_reg(obj, code, temps)?;
+            let obj = op_reg(out, obj, code, temps)?;
+            let method_id = out
+                .intern_method(method.clone())
+                .map_err(LowerError::new)?;
 
             let mut bc_method_type_args = Vec::with_capacity(method_type_args.len());
             for arg in method_type_args {
-                bc_method_type_args.push(op_reg(arg, code, temps)?);
+                bc_method_type_args.push(op_reg(out, arg, code, temps)?);
             }
 
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
 
             code.push(Instruction::VCall {
                 dst: dst.map(local),
                 obj,
-                method: method.clone(),
+                method: method_id,
                 method_type_args: bc_method_type_args,
                 args: bc_args,
             });
@@ -1028,7 +1076,7 @@ fn lower_mir_instruction(
             for clause in clauses {
                 let mut interface_args = Vec::with_capacity(clause.effect.interface_args.len());
                 for op in &clause.effect.interface_args {
-                    interface_args.push(op_reg(op, code, temps)?);
+                    interface_args.push(op_reg(out, op, code, temps)?);
                 }
 
                 let bind_count = count_binds_in_patterns(&clause.arg_patterns);
@@ -1049,7 +1097,7 @@ fn lower_mir_instruction(
 
                 let mut bc_arg_patterns = Vec::with_capacity(clause.arg_patterns.len());
                 for pat in &clause.arg_patterns {
-                    bc_arg_patterns.push(lower_pattern(mir_module, pat)?);
+                    bc_arg_patterns.push(lower_pattern(out, mir_module, pat)?);
                 }
 
                 bc_clauses.push(HandlerClause {
@@ -1083,11 +1131,11 @@ fn lower_mir_instruction(
         I::Perform { dst, effect, args } => {
             let mut interface_args = Vec::with_capacity(effect.interface_args.len());
             for op in &effect.interface_args {
-                interface_args.push(op_reg(op, code, temps)?);
+                interface_args.push(op_reg(out, op, code, temps)?);
             }
             let mut bc_args = Vec::with_capacity(args.len());
             for arg in args {
-                bc_args.push(op_reg(arg, code, temps)?);
+                bc_args.push(op_reg(out, arg, code, temps)?);
             }
 
             code.push(Instruction::Perform {
@@ -1102,8 +1150,8 @@ fn lower_mir_instruction(
         }
 
         I::Resume { dst, k, value } => {
-            let k = op_reg(k, code, temps)?;
-            let value = op_reg(value, code, temps)?;
+            let k = op_reg(out, k, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
             code.push(Instruction::Resume {
                 dst: dst.map(local),
                 k,
@@ -1119,6 +1167,7 @@ fn lower_mir_instruction(
 }
 
 fn lower_mir_terminator(
+    out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
     mir_func: &rusk_mir::Function,
     term: &rusk_mir::Terminator,
@@ -1129,19 +1178,20 @@ fn lower_mir_terminator(
 ) -> Result<(), LowerError> {
     use rusk_mir::Terminator as T;
 
-    let op_reg = |op: &Operand, code: &mut Vec<Instruction>, temps: &mut TempAlloc| {
-        lower_operand_to_reg(mir_module, op, code, temps)
-    };
+    let op_reg = |out: &mut ExecutableModule,
+                  op: &Operand,
+                  code: &mut Vec<Instruction>,
+                  temps: &mut TempAlloc| { lower_operand_to_reg(out, mir_module, op, code, temps) };
 
     match term {
         T::Return { value } => {
-            let value = op_reg(value, code, temps)?;
+            let value = op_reg(out, value, code, temps)?;
             code.push(Instruction::Return { value });
         }
         T::ReturnMulti { values } => {
             let mut regs = Vec::with_capacity(values.len());
             for op in values {
-                regs.push(op_reg(op, code, temps)?);
+                regs.push(op_reg(out, op, code, temps)?);
             }
             code.push(Instruction::ReturnMulti { values: regs });
         }
@@ -1156,7 +1206,7 @@ fn lower_mir_terminator(
                 .get(target.0)
                 .ok_or_else(|| LowerError::new("invalid br target block id"))?
                 .params;
-            emit_branch_arg_copies(mir_module, params, args, host_id_map, temps, code)?;
+            emit_branch_arg_copies(out, mir_module, params, args, host_id_map, temps, code)?;
             let instr_index = code.len();
             code.push(Instruction::Jump { target_pc: 0 });
             patches.push(PcPatch::Jump {
@@ -1171,7 +1221,7 @@ fn lower_mir_terminator(
             else_target,
             else_args,
         } => {
-            let cond_reg = op_reg(cond, code, temps)?;
+            let cond_reg = op_reg(out, cond, code, temps)?;
 
             let jumpif_index = code.len();
             code.push(Instruction::JumpIf {
@@ -1190,7 +1240,7 @@ fn lower_mir_terminator(
                     .get(then_target.0)
                     .ok_or_else(|| LowerError::new("invalid condbr then target block id"))?
                     .params;
-                emit_branch_arg_copies(mir_module, params, then_args, host_id_map, temps, code)?;
+                emit_branch_arg_copies(out, mir_module, params, then_args, host_id_map, temps, code)?;
                 let instr_index = code.len();
                 code.push(Instruction::Jump { target_pc: 0 });
                 patches.push(PcPatch::Jump {
@@ -1209,7 +1259,7 @@ fn lower_mir_terminator(
                     .get(else_target.0)
                     .ok_or_else(|| LowerError::new("invalid condbr else target block id"))?
                     .params;
-                emit_branch_arg_copies(mir_module, params, else_args, host_id_map, temps, code)?;
+                emit_branch_arg_copies(out, mir_module, params, else_args, host_id_map, temps, code)?;
                 let instr_index = code.len();
                 code.push(Instruction::Jump { target_pc: 0 });
                 patches.push(PcPatch::Jump {
@@ -1230,7 +1280,7 @@ fn lower_mir_terminator(
             cases,
             default,
         } => {
-            let scrut = op_reg(value, code, temps)?;
+            let scrut = op_reg(out, value, code, temps)?;
 
             let instr_index = code.len();
             let mut bc_cases = Vec::with_capacity(cases.len());
@@ -1250,7 +1300,7 @@ fn lower_mir_terminator(
                 }
                 let param_regs = params.iter().map(|l| l.0 as Reg).collect::<Vec<_>>();
                 bc_cases.push(SwitchCase {
-                    pattern: lower_pattern(mir_module, &case.pattern)?,
+                    pattern: lower_pattern(out, mir_module, &case.pattern)?,
                     target_pc: 0,
                     param_regs,
                 });
@@ -1320,6 +1370,7 @@ fn count_binds_in_patterns(pats: &[rusk_mir::Pattern]) -> usize {
 }
 
 fn emit_branch_arg_copies(
+    out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
     params: &[rusk_mir::Local],
     args: &[Operand],
@@ -1339,7 +1390,7 @@ fn emit_branch_arg_copies(
     let mut moves: Vec<(Reg, Reg)> = Vec::with_capacity(params.len());
     for (dst_local, arg) in params.iter().copied().zip(args.iter()) {
         let dst = dst_local.0 as Reg;
-        let src = lower_operand_to_reg(mir_module, arg, code, temps)?;
+        let src = lower_operand_to_reg(out, mir_module, arg, code, temps)?;
         moves.push((dst, src));
     }
 
@@ -1406,6 +1457,7 @@ fn emit_parallel_copies(
 }
 
 fn lower_operand_to_reg(
+    out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
     op: &Operand,
     code: &mut Vec<Instruction>,
@@ -1415,7 +1467,7 @@ fn lower_operand_to_reg(
         Operand::Local(l) => Ok(l.0 as Reg),
         Operand::Literal(v) => {
             let dst = temps.alloc();
-            let value = lower_const_value(mir_module, v)?;
+            let value = lower_const_value(out, mir_module, v)?;
             code.push(Instruction::Const { dst, value });
             Ok(dst)
         }
@@ -1423,6 +1475,7 @@ fn lower_operand_to_reg(
 }
 
 fn lower_const_value(
+    out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
     v: &MirConstValue,
 ) -> Result<ConstValue, LowerError> {
@@ -1433,7 +1486,7 @@ fn lower_const_value(
         MirConstValue::Float(x) => ConstValue::Float(*x),
         MirConstValue::String(s) => ConstValue::String(s.clone()),
         MirConstValue::Bytes(b) => ConstValue::Bytes(b.clone()),
-        MirConstValue::TypeRep(rep) => ConstValue::TypeRep(lower_type_rep_lit(rep)),
+        MirConstValue::TypeRep(rep) => ConstValue::TypeRep(lower_type_rep_lit(out, rep)?),
         MirConstValue::Function(name) => {
             let Some(id) = mir_module.function_id(name.as_str()) else {
                 return Err(LowerError::new(format!(
