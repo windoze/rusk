@@ -751,7 +751,6 @@ impl ExecutableModule {
         };
         let pos = entries
             .binary_search_by_key(&method.0, |(m, _)| m.0)
-            .map_err(|pos| pos)
             .unwrap_or_else(|pos| pos);
 
         if entries.get(pos).is_some_and(|(m, _)| *m == method) {
@@ -766,13 +765,15 @@ impl ExecutableModule {
 
     pub fn vcall_target(&self, type_id: TypeId, method: MethodId) -> Option<FunctionId> {
         let entries = self.vcall_dispatch.get(type_id.0 as usize)?;
-        let idx = entries
-            .binary_search_by_key(&method.0, |(m, _)| m.0)
-            .ok()?;
+        let idx = entries.binary_search_by_key(&method.0, |(m, _)| m.0).ok()?;
         entries.get(idx).map(|(_, f)| *f)
     }
 
-    pub fn set_interface_impls(&mut self, type_id: TypeId, mut ifaces: Vec<TypeId>) -> Result<(), String> {
+    pub fn set_interface_impls(
+        &mut self,
+        type_id: TypeId,
+        mut ifaces: Vec<TypeId>,
+    ) -> Result<(), String> {
         let Some(slot) = self.interface_impls.get_mut(type_id.0 as usize) else {
             return Err(format!("invalid TypeId {}", type_id.0));
         };
@@ -782,7 +783,11 @@ impl ExecutableModule {
         Ok(())
     }
 
-    pub fn set_struct_layout(&mut self, type_id: TypeId, fields: Vec<String>) -> Result<(), String> {
+    pub fn set_struct_layout(
+        &mut self,
+        type_id: TypeId,
+        fields: Vec<String>,
+    ) -> Result<(), String> {
         let Some(slot) = self.struct_layouts.get_mut(type_id.0 as usize) else {
             return Err(format!("invalid TypeId {}", type_id.0));
         };

@@ -177,7 +177,9 @@ fn lower_pattern_lit(
         rusk_mir::ConstValue::Float(x) => Ok(ConstValue::Float(*x)),
         rusk_mir::ConstValue::String(s) => Ok(ConstValue::String(s.clone())),
         rusk_mir::ConstValue::Bytes(b) => Ok(ConstValue::Bytes(b.clone())),
-        rusk_mir::ConstValue::TypeRep(rep) => Ok(ConstValue::TypeRep(lower_type_rep_lit(out, rep)?)),
+        rusk_mir::ConstValue::TypeRep(rep) => {
+            Ok(ConstValue::TypeRep(lower_type_rep_lit(out, rep)?))
+        }
         rusk_mir::ConstValue::Function(name) => {
             let Some(id) = mir.function_id(name.as_str()) else {
                 return Err(LowerError::new(format!(
@@ -337,8 +339,7 @@ pub fn lower_mir_module_with_options(
             .try_into()
             .map_err(|_| LowerError::new("generic param count overflow"))?;
 
-        let bc_func =
-            lower_mir_function(&mut out, mir, func, &host_id_map, &external_effect_ids)?;
+        let bc_func = lower_mir_function(&mut out, mir, func, &host_id_map, &external_effect_ids)?;
         let id = out.add_function(bc_func).map_err(LowerError::new)?;
         let expect = FunctionId(idx as u32);
         if id != expect {
@@ -594,10 +595,11 @@ fn lower_mir_instruction(
 
     let local = |l: rusk_mir::Local| -> Reg { l.0 as Reg };
 
-    let op_reg = |out: &mut ExecutableModule,
-                  op: &Operand,
-                  code: &mut Vec<Instruction>,
-                  temps: &mut TempAlloc| { lower_operand_to_reg(out, mir_module, op, code, temps) };
+    let op_reg =
+        |out: &mut ExecutableModule,
+         op: &Operand,
+         code: &mut Vec<Instruction>,
+         temps: &mut TempAlloc| { lower_operand_to_reg(out, mir_module, op, code, temps) };
 
     match instr {
         I::Const { dst, value } => {
@@ -1045,9 +1047,7 @@ fn lower_mir_instruction(
             args,
         } => {
             let obj = op_reg(out, obj, code, temps)?;
-            let method_id = out
-                .intern_method(method.clone())
-                .map_err(LowerError::new)?;
+            let method_id = out.intern_method(method.clone()).map_err(LowerError::new)?;
 
             let mut bc_method_type_args = Vec::with_capacity(method_type_args.len());
             for arg in method_type_args {
@@ -1166,6 +1166,7 @@ fn lower_mir_instruction(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_mir_terminator(
     out: &mut ExecutableModule,
     mir_module: &rusk_mir::Module,
@@ -1178,10 +1179,11 @@ fn lower_mir_terminator(
 ) -> Result<(), LowerError> {
     use rusk_mir::Terminator as T;
 
-    let op_reg = |out: &mut ExecutableModule,
-                  op: &Operand,
-                  code: &mut Vec<Instruction>,
-                  temps: &mut TempAlloc| { lower_operand_to_reg(out, mir_module, op, code, temps) };
+    let op_reg =
+        |out: &mut ExecutableModule,
+         op: &Operand,
+         code: &mut Vec<Instruction>,
+         temps: &mut TempAlloc| { lower_operand_to_reg(out, mir_module, op, code, temps) };
 
     match term {
         T::Return { value } => {
@@ -1240,7 +1242,15 @@ fn lower_mir_terminator(
                     .get(then_target.0)
                     .ok_or_else(|| LowerError::new("invalid condbr then target block id"))?
                     .params;
-                emit_branch_arg_copies(out, mir_module, params, then_args, host_id_map, temps, code)?;
+                emit_branch_arg_copies(
+                    out,
+                    mir_module,
+                    params,
+                    then_args,
+                    host_id_map,
+                    temps,
+                    code,
+                )?;
                 let instr_index = code.len();
                 code.push(Instruction::Jump { target_pc: 0 });
                 patches.push(PcPatch::Jump {
@@ -1259,7 +1269,15 @@ fn lower_mir_terminator(
                     .get(else_target.0)
                     .ok_or_else(|| LowerError::new("invalid condbr else target block id"))?
                     .params;
-                emit_branch_arg_copies(out, mir_module, params, else_args, host_id_map, temps, code)?;
+                emit_branch_arg_copies(
+                    out,
+                    mir_module,
+                    params,
+                    else_args,
+                    host_id_map,
+                    temps,
+                    code,
+                )?;
                 let instr_index = code.len();
                 code.push(Instruction::Jump { target_pc: 0 });
                 patches.push(PcPatch::Jump {

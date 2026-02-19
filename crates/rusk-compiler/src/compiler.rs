@@ -2738,9 +2738,7 @@ impl Compiler {
             if func.blocks.is_empty() || func.blocks.len() > INLINE_MAX_BLOCKS {
                 return None;
             }
-            let Some(entry) = func.blocks.first() else {
-                return None;
-            };
+            let entry = func.blocks.first()?;
 
             // The inliner splices the callee CFG into the caller. Entry block parameters would
             // require passing values from the callsite (function params already cover that).

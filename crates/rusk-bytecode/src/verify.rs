@@ -196,21 +196,20 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
                     ),
                 });
             }
-            if let Some(prev) = prev {
-                if prev.0 >= method_id.0 {
-                    return Err(VerifyError {
-                        message: format!(
-                            "vcall dispatch list for TypeId {type_idx} is not strictly sorted/unique by MethodId"
-                        ),
-                    });
-                }
+            if let Some(prev) = prev
+                && prev.0 >= method_id.0
+            {
+                return Err(VerifyError {
+                    message: format!(
+                        "vcall dispatch list for TypeId {type_idx} is not strictly sorted/unique by MethodId"
+                    ),
+                });
             }
             if (fn_id.0 as usize) >= module.functions.len() {
                 return Err(VerifyError {
                     message: format!(
                         "vcall dispatch entry (TypeId {type_idx}, MethodId {}) points to invalid function id {}",
-                        method_id.0,
-                        fn_id.0
+                        method_id.0, fn_id.0
                     ),
                 });
             }
@@ -231,14 +230,14 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
                     ),
                 });
             }
-            if let Some(prev) = prev {
-                if prev.0 >= iface_id.0 {
-                    return Err(VerifyError {
-                        message: format!(
-                            "interface_impls list for TypeId {type_idx} is not strictly sorted/unique"
-                        ),
-                    });
-                }
+            if let Some(prev) = prev
+                && prev.0 >= iface_id.0
+            {
+                return Err(VerifyError {
+                    message: format!(
+                        "interface_impls list for TypeId {type_idx} is not strictly sorted/unique"
+                    ),
+                });
             }
             prev = Some(*iface_id);
         }
@@ -576,11 +575,7 @@ fn verify_instruction(
         }
         Instruction::MakeTypeRep { dst, base, args } => {
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
-            verify_type_rep_lit_interned(
-                module,
-                base,
-                &format!("{}: MakeTypeRep base", here()),
-            )?;
+            verify_type_rep_lit_interned(module, base, &format!("{}: MakeTypeRep base", here()))?;
             for r in args {
                 verify_reg(reg_count, *r, &format!("{}: MakeTypeRep arg", here()))?;
             }

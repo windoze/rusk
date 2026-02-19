@@ -575,12 +575,13 @@ Control flow:
 
 - `Return { value }`
   - Returns from the current frame.
-  - If there is a caller frame and `return_dst` is set, writes the value into the caller register.
+  - If there is a caller frame and a single return destination is set, writes the value into the
+    caller register.
   - If returning from the entry frame, the return value must be ABI-safe; otherwise the VM traps.
 - `ReturnMulti { values }`
   - Multi-register return variant of `Return`, used by internal compiler optimizations.
-  - If there is a caller frame and multi-return destinations are set, writes each returned value
-    into its corresponding caller register.
+  - If there is a caller frame and multi-return destinations are set, writes each returned value into
+    its corresponding caller register.
   - Returning multiple values from the entry frame is not supported and traps.
 - `Trap { message }`
   - Traps immediately with the provided message.
