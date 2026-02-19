@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 6;
+const VERSION_MINOR: u16 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -345,36 +345,36 @@ impl Encoder {
     fn write_type_rep_lit(&mut self, lit: &TypeRepLit) -> Result<(), EncodeError> {
         match lit {
             TypeRepLit::Unit => self.write_u8(0),
-            TypeRepLit::Never => self.write_u8(15),
-            TypeRepLit::Bool => self.write_u8(1),
-            TypeRepLit::Int => self.write_u8(2),
-            TypeRepLit::Float => self.write_u8(3),
-            TypeRepLit::String => self.write_u8(4),
-            TypeRepLit::Bytes => self.write_u8(5),
-            TypeRepLit::Array => self.write_u8(6),
+            TypeRepLit::Never => self.write_u8(1),
+            TypeRepLit::Bool => self.write_u8(2),
+            TypeRepLit::Int => self.write_u8(3),
+            TypeRepLit::Float => self.write_u8(4),
+            TypeRepLit::Byte => self.write_u8(5),
+            TypeRepLit::Char => self.write_u8(6),
+            TypeRepLit::String => self.write_u8(7),
+            TypeRepLit::Bytes => self.write_u8(8),
+            TypeRepLit::Array => self.write_u8(9),
             TypeRepLit::Tuple(arity) => {
-                self.write_u8(7);
+                self.write_u8(10);
                 let a: u32 = (*arity).try_into().map_err(|_| EncodeError {
                     message: "tuple arity overflow".to_string(),
                 })?;
                 self.write_u32(a);
             }
             TypeRepLit::Struct(name) => {
-                self.write_u8(8);
+                self.write_u8(11);
                 self.write_string(name)?;
             }
             TypeRepLit::Enum(name) => {
-                self.write_u8(9);
+                self.write_u8(12);
                 self.write_string(name)?;
             }
             TypeRepLit::Interface(name) => {
-                self.write_u8(10);
+                self.write_u8(13);
                 self.write_string(name)?;
             }
-            TypeRepLit::Fn => self.write_u8(11),
-            TypeRepLit::Cont => self.write_u8(12),
-            TypeRepLit::Byte => self.write_u8(13),
-            TypeRepLit::Char => self.write_u8(14),
+            TypeRepLit::Fn => self.write_u8(14),
+            TypeRepLit::Cont => self.write_u8(15),
         }
         Ok(())
     }
@@ -518,48 +518,44 @@ impl Encoder {
             Intrinsic::BytesNe => 31,
             Intrinsic::UnitEq => 32,
             Intrinsic::UnitNe => 33,
-            Intrinsic::IntoIter => 34,
-            Intrinsic::Next => 35,
-            Intrinsic::ArrayLen => 36,
-            Intrinsic::ArrayLenRo => 37,
-            Intrinsic::ArrayPush => 38,
-            Intrinsic::ArrayPop => 39,
-            Intrinsic::ArrayClear => 40,
-            Intrinsic::ArrayResize => 41,
-            Intrinsic::ArrayInsert => 42,
-            Intrinsic::ArrayRemove => 43,
-            Intrinsic::ArrayExtend => 44,
-            Intrinsic::ArrayConcat => 45,
-            Intrinsic::ArrayConcatRo => 46,
-            Intrinsic::ArraySlice => 47,
-            Intrinsic::ArraySliceRo => 48,
-            Intrinsic::StringIntoIter => 49,
-            Intrinsic::StringNext => 50,
-            Intrinsic::BytesIntoIter => 51,
-            Intrinsic::BytesNext => 52,
-            Intrinsic::IntToByte => 53,
-            Intrinsic::IntTryByte => 54,
-            Intrinsic::ByteToInt => 55,
-            Intrinsic::IntToChar => 56,
-            Intrinsic::IntTryChar => 57,
-            Intrinsic::CharToInt => 58,
-            Intrinsic::BytesGet => 59,
-            Intrinsic::BytesLen => 64,
-            Intrinsic::BytesSlice => 60,
-            Intrinsic::BytesToArray => 61,
-            Intrinsic::BytesFromArray => 62,
-            Intrinsic::StringSlice => 63,
-            Intrinsic::StringFromChars => 65,
-            Intrinsic::StringFromUtf8 => 66,
-            Intrinsic::StringFromUtf8Strict => 67,
-            Intrinsic::StringFromUtf16Le => 68,
-            Intrinsic::StringFromUtf16LeStrict => 69,
-            Intrinsic::StringFromUtf16Be => 70,
-            Intrinsic::StringFromUtf16BeStrict => 71,
-            Intrinsic::HashInt => 72,
-            Intrinsic::HashString => 73,
-            Intrinsic::HashBytes => 74,
-            Intrinsic::HashCombine => 75,
+            Intrinsic::ArrayLen => 34,
+            Intrinsic::ArrayLenRo => 35,
+            Intrinsic::ArrayPush => 36,
+            Intrinsic::ArrayPop => 37,
+            Intrinsic::ArrayClear => 38,
+            Intrinsic::ArrayResize => 39,
+            Intrinsic::ArrayInsert => 40,
+            Intrinsic::ArrayRemove => 41,
+            Intrinsic::ArrayExtend => 42,
+            Intrinsic::ArrayConcat => 43,
+            Intrinsic::ArrayConcatRo => 44,
+            Intrinsic::ArraySlice => 45,
+            Intrinsic::ArraySliceRo => 46,
+            Intrinsic::IntToByte => 47,
+            Intrinsic::IntTryByte => 48,
+            Intrinsic::ByteToInt => 49,
+            Intrinsic::IntToChar => 50,
+            Intrinsic::IntTryChar => 51,
+            Intrinsic::CharToInt => 52,
+            Intrinsic::BytesGet => 53,
+            Intrinsic::BytesLen => 54,
+            Intrinsic::BytesSlice => 55,
+            Intrinsic::BytesToArray => 56,
+            Intrinsic::BytesFromArray => 57,
+            Intrinsic::StringSlice => 58,
+            Intrinsic::StringNextIndex => 59,
+            Intrinsic::StringCodepointAt => 60,
+            Intrinsic::StringFromChars => 61,
+            Intrinsic::StringFromUtf8 => 62,
+            Intrinsic::StringFromUtf8Strict => 63,
+            Intrinsic::StringFromUtf16Le => 64,
+            Intrinsic::StringFromUtf16LeStrict => 65,
+            Intrinsic::StringFromUtf16Be => 66,
+            Intrinsic::StringFromUtf16BeStrict => 67,
+            Intrinsic::HashInt => 68,
+            Intrinsic::HashString => 69,
+            Intrinsic::HashBytes => 70,
+            Intrinsic::HashCombine => 71,
         };
         self.write_u16(tag);
     }
@@ -610,14 +606,8 @@ impl Encoder {
                 self.write_u32(*value);
                 self.write_u32(*ty);
             }
-            Instruction::CheckedCast { dst, value, ty } => {
-                self.write_u8(5);
-                self.write_u32(*dst);
-                self.write_u32(*value);
-                self.write_u32(*ty);
-            }
             Instruction::MakeTypeRep { dst, base, args } => {
-                self.write_u8(6);
+                self.write_u8(5);
                 self.write_u32(*dst);
                 self.write_type_rep_lit(base)?;
                 self.write_vec_reg(args)?;
@@ -628,7 +618,7 @@ impl Encoder {
                 type_args,
                 fields,
             } => {
-                self.write_u8(7);
+                self.write_u8(6);
                 self.write_u32(*dst);
                 self.write_u32(type_id.0);
                 self.write_vec_reg(type_args)?;
@@ -639,12 +629,12 @@ impl Encoder {
                 }
             }
             Instruction::MakeArray { dst, items } => {
-                self.write_u8(8);
+                self.write_u8(7);
                 self.write_u32(*dst);
                 self.write_vec_reg(items)?;
             }
             Instruction::MakeTuple { dst, items } => {
-                self.write_u8(9);
+                self.write_u8(8);
                 self.write_u32(*dst);
                 self.write_vec_reg(items)?;
             }
@@ -655,7 +645,7 @@ impl Encoder {
                 variant,
                 fields,
             } => {
-                self.write_u8(10);
+                self.write_u8(9);
                 self.write_u32(*dst);
                 self.write_u32(enum_type_id.0);
                 self.write_vec_reg(type_args)?;
@@ -663,19 +653,19 @@ impl Encoder {
                 self.write_vec_reg(fields)?;
             }
             Instruction::GetField { dst, obj, field } => {
-                self.write_u8(11);
+                self.write_u8(10);
                 self.write_u32(*dst);
                 self.write_u32(*obj);
                 self.write_string(field)?;
             }
             Instruction::SetField { obj, field, value } => {
-                self.write_u8(12);
+                self.write_u8(11);
                 self.write_u32(*obj);
                 self.write_string(field)?;
                 self.write_u32(*value);
             }
             Instruction::StructGet { dst, obj, idx } => {
-                self.write_u8(13);
+                self.write_u8(12);
                 self.write_u32(*dst);
                 self.write_u32(*obj);
                 let n: u32 = (*idx).try_into().map_err(|_| EncodeError {
@@ -684,7 +674,7 @@ impl Encoder {
                 self.write_u32(n);
             }
             Instruction::StructSet { obj, idx, value } => {
-                self.write_u8(14);
+                self.write_u8(13);
                 self.write_u32(*obj);
                 let n: u32 = (*idx).try_into().map_err(|_| EncodeError {
                     message: "struct field index overflow".to_string(),
@@ -693,7 +683,7 @@ impl Encoder {
                 self.write_u32(*value);
             }
             Instruction::TupleGet { dst, tup, idx } => {
-                self.write_u8(15);
+                self.write_u8(14);
                 self.write_u32(*dst);
                 self.write_u32(*tup);
                 let n: u32 = (*idx).try_into().map_err(|_| EncodeError {
@@ -702,7 +692,7 @@ impl Encoder {
                 self.write_u32(n);
             }
             Instruction::TupleSet { tup, idx, value } => {
-                self.write_u8(16);
+                self.write_u8(15);
                 self.write_u32(*tup);
                 let n: u32 = (*idx).try_into().map_err(|_| EncodeError {
                     message: "tuple index overflow".to_string(),
@@ -711,119 +701,119 @@ impl Encoder {
                 self.write_u32(*value);
             }
             Instruction::IndexGet { dst, arr, idx } => {
-                self.write_u8(17);
+                self.write_u8(16);
                 self.write_u32(*dst);
                 self.write_u32(*arr);
                 self.write_u32(*idx);
             }
             Instruction::IndexSet { arr, idx, value } => {
-                self.write_u8(18);
+                self.write_u8(17);
                 self.write_u32(*arr);
                 self.write_u32(*idx);
                 self.write_u32(*value);
             }
             Instruction::Len { dst, arr } => {
-                self.write_u8(19);
+                self.write_u8(18);
                 self.write_u32(*dst);
                 self.write_u32(*arr);
             }
             Instruction::IntAdd { dst, a, b } => {
-                self.write_u8(20);
+                self.write_u8(19);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntSub { dst, a, b } => {
-                self.write_u8(21);
+                self.write_u8(20);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntMul { dst, a, b } => {
-                self.write_u8(22);
+                self.write_u8(21);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntDiv { dst, a, b } => {
-                self.write_u8(23);
+                self.write_u8(22);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntMod { dst, a, b } => {
-                self.write_u8(24);
+                self.write_u8(23);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntLt { dst, a, b } => {
-                self.write_u8(25);
+                self.write_u8(24);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntLe { dst, a, b } => {
-                self.write_u8(26);
+                self.write_u8(25);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntGt { dst, a, b } => {
-                self.write_u8(27);
+                self.write_u8(26);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntGe { dst, a, b } => {
-                self.write_u8(28);
+                self.write_u8(27);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntEq { dst, a, b } => {
-                self.write_u8(29);
+                self.write_u8(28);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::IntNe { dst, a, b } => {
-                self.write_u8(30);
+                self.write_u8(29);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::BoolNot { dst, v } => {
-                self.write_u8(31);
+                self.write_u8(30);
                 self.write_u32(*dst);
                 self.write_u32(*v);
             }
             Instruction::BoolEq { dst, a, b } => {
-                self.write_u8(32);
+                self.write_u8(31);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::BoolNe { dst, a, b } => {
-                self.write_u8(33);
+                self.write_u8(32);
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
             Instruction::Call { dst, func, args } => {
-                self.write_u8(34);
+                self.write_u8(33);
                 self.write_option_reg(dst)?;
                 self.write_call_target(func)?;
                 self.write_vec_reg(args)?;
             }
             Instruction::CallMulti { dsts, func, args } => {
-                self.write_u8(47);
+                self.write_u8(46);
                 self.write_vec_reg(dsts)?;
                 self.write_call_target(func)?;
                 self.write_vec_reg(args)?;
             }
             Instruction::ICall { dst, fnptr, args } => {
-                self.write_u8(35);
+                self.write_u8(34);
                 self.write_option_reg(dst)?;
                 self.write_u32(*fnptr);
                 self.write_vec_reg(args)?;
@@ -835,7 +825,7 @@ impl Encoder {
                 method_type_args,
                 args,
             } => {
-                self.write_u8(36);
+                self.write_u8(35);
                 self.write_option_reg(dst)?;
                 self.write_u32(*obj);
                 self.write_u32(method.0);
@@ -843,34 +833,34 @@ impl Encoder {
                 self.write_vec_reg(args)?;
             }
             Instruction::PushHandler { clauses } => {
-                self.write_u8(37);
+                self.write_u8(36);
                 self.write_len(clauses.len())?;
                 for clause in clauses {
                     self.write_handler_clause(clause)?;
                 }
             }
             Instruction::PopHandler => {
-                self.write_u8(38);
+                self.write_u8(37);
             }
             Instruction::Perform { dst, effect, args } => {
-                self.write_u8(39);
+                self.write_u8(38);
                 self.write_option_reg(dst)?;
                 self.write_effect_spec(effect)?;
                 self.write_vec_reg(args)?;
             }
             Instruction::Resume { dst, k, value } => {
-                self.write_u8(40);
+                self.write_u8(39);
                 self.write_option_reg(dst)?;
                 self.write_u32(*k);
                 self.write_u32(*value);
             }
             Instruction::ResumeTail { k, value } => {
-                self.write_u8(46);
+                self.write_u8(45);
                 self.write_u32(*k);
                 self.write_u32(*value);
             }
             Instruction::Jump { target_pc } => {
-                self.write_u8(41);
+                self.write_u8(40);
                 self.write_u32(*target_pc);
             }
             Instruction::JumpIf {
@@ -878,7 +868,7 @@ impl Encoder {
                 then_pc,
                 else_pc,
             } => {
-                self.write_u8(42);
+                self.write_u8(41);
                 self.write_u32(*cond);
                 self.write_u32(*then_pc);
                 self.write_u32(*else_pc);
@@ -888,7 +878,7 @@ impl Encoder {
                 cases,
                 default_pc,
             } => {
-                self.write_u8(43);
+                self.write_u8(42);
                 self.write_u32(*value);
                 self.write_len(cases.len())?;
                 for case in cases {
@@ -897,15 +887,15 @@ impl Encoder {
                 self.write_u32(*default_pc);
             }
             Instruction::Return { value } => {
-                self.write_u8(44);
+                self.write_u8(43);
                 self.write_u32(*value);
             }
             Instruction::ReturnMulti { values } => {
-                self.write_u8(48);
+                self.write_u8(47);
                 self.write_vec_reg(values)?;
             }
             Instruction::Trap { message } => {
-                self.write_u8(45);
+                self.write_u8(44);
                 self.write_string(message)?;
             }
         }
@@ -1281,26 +1271,26 @@ impl<'a> Decoder<'a> {
     fn read_type_rep_lit(&mut self) -> Result<TypeRepLit, DecodeError> {
         match self.read_u8()? {
             0 => Ok(TypeRepLit::Unit),
-            15 => Ok(TypeRepLit::Never),
-            1 => Ok(TypeRepLit::Bool),
-            2 => Ok(TypeRepLit::Int),
-            3 => Ok(TypeRepLit::Float),
-            4 => Ok(TypeRepLit::String),
-            5 => Ok(TypeRepLit::Bytes),
-            6 => Ok(TypeRepLit::Array),
-            7 => {
+            1 => Ok(TypeRepLit::Never),
+            2 => Ok(TypeRepLit::Bool),
+            3 => Ok(TypeRepLit::Int),
+            4 => Ok(TypeRepLit::Float),
+            5 => Ok(TypeRepLit::Byte),
+            6 => Ok(TypeRepLit::Char),
+            7 => Ok(TypeRepLit::String),
+            8 => Ok(TypeRepLit::Bytes),
+            9 => Ok(TypeRepLit::Array),
+            10 => {
                 let arity = self.read_u32()?;
                 let arity_usize: usize = usize::try_from(arity)
                     .map_err(|_| self.err("tuple arity overflow".to_string()))?;
                 Ok(TypeRepLit::Tuple(arity_usize))
             }
-            8 => Ok(TypeRepLit::Struct(self.read_string()?)),
-            9 => Ok(TypeRepLit::Enum(self.read_string()?)),
-            10 => Ok(TypeRepLit::Interface(self.read_string()?)),
-            11 => Ok(TypeRepLit::Fn),
-            12 => Ok(TypeRepLit::Cont),
-            13 => Ok(TypeRepLit::Byte),
-            14 => Ok(TypeRepLit::Char),
+            11 => Ok(TypeRepLit::Struct(self.read_string()?)),
+            12 => Ok(TypeRepLit::Enum(self.read_string()?)),
+            13 => Ok(TypeRepLit::Interface(self.read_string()?)),
+            14 => Ok(TypeRepLit::Fn),
+            15 => Ok(TypeRepLit::Cont),
             other => Err(self.err(format!("invalid TypeRepLit tag {other}"))),
         }
     }
@@ -1459,48 +1449,44 @@ impl<'a> Decoder<'a> {
             31 => Intrinsic::BytesNe,
             32 => Intrinsic::UnitEq,
             33 => Intrinsic::UnitNe,
-            34 => Intrinsic::IntoIter,
-            35 => Intrinsic::Next,
-            36 => Intrinsic::ArrayLen,
-            37 => Intrinsic::ArrayLenRo,
-            38 => Intrinsic::ArrayPush,
-            39 => Intrinsic::ArrayPop,
-            40 => Intrinsic::ArrayClear,
-            41 => Intrinsic::ArrayResize,
-            42 => Intrinsic::ArrayInsert,
-            43 => Intrinsic::ArrayRemove,
-            44 => Intrinsic::ArrayExtend,
-            45 => Intrinsic::ArrayConcat,
-            46 => Intrinsic::ArrayConcatRo,
-            47 => Intrinsic::ArraySlice,
-            48 => Intrinsic::ArraySliceRo,
-            49 => Intrinsic::StringIntoIter,
-            50 => Intrinsic::StringNext,
-            51 => Intrinsic::BytesIntoIter,
-            52 => Intrinsic::BytesNext,
-            53 => Intrinsic::IntToByte,
-            54 => Intrinsic::IntTryByte,
-            55 => Intrinsic::ByteToInt,
-            56 => Intrinsic::IntToChar,
-            57 => Intrinsic::IntTryChar,
-            58 => Intrinsic::CharToInt,
-            59 => Intrinsic::BytesGet,
-            64 => Intrinsic::BytesLen,
-            60 => Intrinsic::BytesSlice,
-            61 => Intrinsic::BytesToArray,
-            62 => Intrinsic::BytesFromArray,
-            63 => Intrinsic::StringSlice,
-            65 => Intrinsic::StringFromChars,
-            66 => Intrinsic::StringFromUtf8,
-            67 => Intrinsic::StringFromUtf8Strict,
-            68 => Intrinsic::StringFromUtf16Le,
-            69 => Intrinsic::StringFromUtf16LeStrict,
-            70 => Intrinsic::StringFromUtf16Be,
-            71 => Intrinsic::StringFromUtf16BeStrict,
-            72 => Intrinsic::HashInt,
-            73 => Intrinsic::HashString,
-            74 => Intrinsic::HashBytes,
-            75 => Intrinsic::HashCombine,
+            34 => Intrinsic::ArrayLen,
+            35 => Intrinsic::ArrayLenRo,
+            36 => Intrinsic::ArrayPush,
+            37 => Intrinsic::ArrayPop,
+            38 => Intrinsic::ArrayClear,
+            39 => Intrinsic::ArrayResize,
+            40 => Intrinsic::ArrayInsert,
+            41 => Intrinsic::ArrayRemove,
+            42 => Intrinsic::ArrayExtend,
+            43 => Intrinsic::ArrayConcat,
+            44 => Intrinsic::ArrayConcatRo,
+            45 => Intrinsic::ArraySlice,
+            46 => Intrinsic::ArraySliceRo,
+            47 => Intrinsic::IntToByte,
+            48 => Intrinsic::IntTryByte,
+            49 => Intrinsic::ByteToInt,
+            50 => Intrinsic::IntToChar,
+            51 => Intrinsic::IntTryChar,
+            52 => Intrinsic::CharToInt,
+            53 => Intrinsic::BytesGet,
+            54 => Intrinsic::BytesLen,
+            55 => Intrinsic::BytesSlice,
+            56 => Intrinsic::BytesToArray,
+            57 => Intrinsic::BytesFromArray,
+            58 => Intrinsic::StringSlice,
+            59 => Intrinsic::StringNextIndex,
+            60 => Intrinsic::StringCodepointAt,
+            61 => Intrinsic::StringFromChars,
+            62 => Intrinsic::StringFromUtf8,
+            63 => Intrinsic::StringFromUtf8Strict,
+            64 => Intrinsic::StringFromUtf16Le,
+            65 => Intrinsic::StringFromUtf16LeStrict,
+            66 => Intrinsic::StringFromUtf16Be,
+            67 => Intrinsic::StringFromUtf16BeStrict,
+            68 => Intrinsic::HashInt,
+            69 => Intrinsic::HashString,
+            70 => Intrinsic::HashBytes,
+            71 => Intrinsic::HashCombine,
             other => return Err(self.err(format!("invalid Intrinsic tag {other}"))),
         };
         Ok(intr)
@@ -1538,17 +1524,12 @@ impl<'a> Decoder<'a> {
                 value: self.read_u32()?,
                 ty: self.read_u32()?,
             }),
-            5 => Ok(Instruction::CheckedCast {
-                dst: self.read_u32()?,
-                value: self.read_u32()?,
-                ty: self.read_u32()?,
-            }),
-            6 => Ok(Instruction::MakeTypeRep {
+            5 => Ok(Instruction::MakeTypeRep {
                 dst: self.read_u32()?,
                 base: self.read_type_rep_lit()?,
                 args: self.read_vec_reg()?,
             }),
-            7 => {
+            6 => {
                 let dst = self.read_u32()?;
                 let type_id = TypeId(self.read_u32()?);
                 let type_args = self.read_vec_reg()?;
@@ -1566,165 +1547,165 @@ impl<'a> Decoder<'a> {
                     fields,
                 })
             }
-            8 => Ok(Instruction::MakeArray {
+            7 => Ok(Instruction::MakeArray {
                 dst: self.read_u32()?,
                 items: self.read_vec_reg()?,
             }),
-            9 => Ok(Instruction::MakeTuple {
+            8 => Ok(Instruction::MakeTuple {
                 dst: self.read_u32()?,
                 items: self.read_vec_reg()?,
             }),
-            10 => Ok(Instruction::MakeEnum {
+            9 => Ok(Instruction::MakeEnum {
                 dst: self.read_u32()?,
                 enum_type_id: TypeId(self.read_u32()?),
                 type_args: self.read_vec_reg()?,
                 variant: self.read_string()?,
                 fields: self.read_vec_reg()?,
             }),
-            11 => Ok(Instruction::GetField {
+            10 => Ok(Instruction::GetField {
                 dst: self.read_u32()?,
                 obj: self.read_u32()?,
                 field: self.read_string()?,
             }),
-            12 => Ok(Instruction::SetField {
+            11 => Ok(Instruction::SetField {
                 obj: self.read_u32()?,
                 field: self.read_string()?,
                 value: self.read_u32()?,
             }),
-            13 => {
+            12 => {
                 let dst = self.read_u32()?;
                 let obj = self.read_u32()?;
                 let idx = usize::try_from(self.read_u32()?)
                     .map_err(|_| self.err("struct field index overflow".to_string()))?;
                 Ok(Instruction::StructGet { dst, obj, idx })
             }
-            14 => {
+            13 => {
                 let obj = self.read_u32()?;
                 let idx = usize::try_from(self.read_u32()?)
                     .map_err(|_| self.err("struct field index overflow".to_string()))?;
                 let value = self.read_u32()?;
                 Ok(Instruction::StructSet { obj, idx, value })
             }
-            15 => {
+            14 => {
                 let dst = self.read_u32()?;
                 let tup = self.read_u32()?;
                 let idx = usize::try_from(self.read_u32()?)
                     .map_err(|_| self.err("tuple index overflow".to_string()))?;
                 Ok(Instruction::TupleGet { dst, tup, idx })
             }
-            16 => {
+            15 => {
                 let tup = self.read_u32()?;
                 let idx = usize::try_from(self.read_u32()?)
                     .map_err(|_| self.err("tuple index overflow".to_string()))?;
                 let value = self.read_u32()?;
                 Ok(Instruction::TupleSet { tup, idx, value })
             }
-            17 => Ok(Instruction::IndexGet {
+            16 => Ok(Instruction::IndexGet {
                 dst: self.read_u32()?,
                 arr: self.read_u32()?,
                 idx: self.read_u32()?,
             }),
-            18 => Ok(Instruction::IndexSet {
+            17 => Ok(Instruction::IndexSet {
                 arr: self.read_u32()?,
                 idx: self.read_u32()?,
                 value: self.read_u32()?,
             }),
-            19 => Ok(Instruction::Len {
+            18 => Ok(Instruction::Len {
                 dst: self.read_u32()?,
                 arr: self.read_u32()?,
             }),
-            20 => Ok(Instruction::IntAdd {
+            19 => Ok(Instruction::IntAdd {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            21 => Ok(Instruction::IntSub {
+            20 => Ok(Instruction::IntSub {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            22 => Ok(Instruction::IntMul {
+            21 => Ok(Instruction::IntMul {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            23 => Ok(Instruction::IntDiv {
+            22 => Ok(Instruction::IntDiv {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            24 => Ok(Instruction::IntMod {
+            23 => Ok(Instruction::IntMod {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            25 => Ok(Instruction::IntLt {
+            24 => Ok(Instruction::IntLt {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            26 => Ok(Instruction::IntLe {
+            25 => Ok(Instruction::IntLe {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            27 => Ok(Instruction::IntGt {
+            26 => Ok(Instruction::IntGt {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            28 => Ok(Instruction::IntGe {
+            27 => Ok(Instruction::IntGe {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            29 => Ok(Instruction::IntEq {
+            28 => Ok(Instruction::IntEq {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            30 => Ok(Instruction::IntNe {
+            29 => Ok(Instruction::IntNe {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            31 => Ok(Instruction::BoolNot {
+            30 => Ok(Instruction::BoolNot {
                 dst: self.read_u32()?,
                 v: self.read_u32()?,
             }),
-            32 => Ok(Instruction::BoolEq {
+            31 => Ok(Instruction::BoolEq {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            33 => Ok(Instruction::BoolNe {
+            32 => Ok(Instruction::BoolNe {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
-            34 => Ok(Instruction::Call {
+            33 => Ok(Instruction::Call {
                 dst: self.read_option_reg()?,
                 func: self.read_call_target()?,
                 args: self.read_vec_reg()?,
             }),
-            47 => Ok(Instruction::CallMulti {
+            46 => Ok(Instruction::CallMulti {
                 dsts: self.read_vec_reg()?,
                 func: self.read_call_target()?,
                 args: self.read_vec_reg()?,
             }),
-            35 => Ok(Instruction::ICall {
+            34 => Ok(Instruction::ICall {
                 dst: self.read_option_reg()?,
                 fnptr: self.read_u32()?,
                 args: self.read_vec_reg()?,
             }),
-            36 => Ok(Instruction::VCall {
+            35 => Ok(Instruction::VCall {
                 dst: self.read_option_reg()?,
                 obj: self.read_u32()?,
                 method: MethodId(self.read_u32()?),
                 method_type_args: self.read_vec_reg()?,
                 args: self.read_vec_reg()?,
             }),
-            37 => {
+            36 => {
                 let n = self.read_len()?;
                 let mut clauses = Vec::with_capacity(n);
                 for _ in 0..n {
@@ -1732,30 +1713,30 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(Instruction::PushHandler { clauses })
             }
-            38 => Ok(Instruction::PopHandler),
-            39 => Ok(Instruction::Perform {
+            37 => Ok(Instruction::PopHandler),
+            38 => Ok(Instruction::Perform {
                 dst: self.read_option_reg()?,
                 effect: self.read_effect_spec()?,
                 args: self.read_vec_reg()?,
             }),
-            40 => Ok(Instruction::Resume {
+            39 => Ok(Instruction::Resume {
                 dst: self.read_option_reg()?,
                 k: self.read_u32()?,
                 value: self.read_u32()?,
             }),
-            46 => Ok(Instruction::ResumeTail {
+            45 => Ok(Instruction::ResumeTail {
                 k: self.read_u32()?,
                 value: self.read_u32()?,
             }),
-            41 => Ok(Instruction::Jump {
+            40 => Ok(Instruction::Jump {
                 target_pc: self.read_u32()?,
             }),
-            42 => Ok(Instruction::JumpIf {
+            41 => Ok(Instruction::JumpIf {
                 cond: self.read_u32()?,
                 then_pc: self.read_u32()?,
                 else_pc: self.read_u32()?,
             }),
-            43 => {
+            42 => {
                 let value = self.read_u32()?;
                 let n = self.read_len()?;
                 let mut cases = Vec::with_capacity(n);
@@ -1769,13 +1750,13 @@ impl<'a> Decoder<'a> {
                     default_pc,
                 })
             }
-            44 => Ok(Instruction::Return {
+            43 => Ok(Instruction::Return {
                 value: self.read_u32()?,
             }),
-            48 => Ok(Instruction::ReturnMulti {
+            47 => Ok(Instruction::ReturnMulti {
                 values: self.read_vec_reg()?,
             }),
-            45 => Ok(Instruction::Trap {
+            44 => Ok(Instruction::Trap {
                 message: self.read_string()?,
             }),
             other => Err(self.err(format!("invalid Instruction opcode {other}"))),

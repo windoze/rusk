@@ -402,11 +402,6 @@ pub enum Instruction {
         value: Operand,
         ty: Operand,
     },
-    CheckedCast {
-        dst: Local,
-        value: Operand,
-        ty: Operand,
-    },
 
     MakeTypeRep {
         dst: Local,

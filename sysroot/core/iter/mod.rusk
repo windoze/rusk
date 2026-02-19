@@ -88,21 +88,5 @@ pub interface Iterator {
     }
 }
 
-// Built-in iterator state types are defined in `core::intrinsics`.
-//
-// These impls keep the iterator protocol source-authored, while delegating hot paths to the VM.
-
-impl<T> Iterator for super::intrinsics::ArrayIter<T> {
-    type Item = T;
-    fn next() -> Option<T> { super::intrinsics::next(self) }
-}
-
-impl Iterator for super::intrinsics::StringIter {
-    type Item = char;
-    fn next() -> Option<char> { super::intrinsics::string_next(self) }
-}
-
-impl Iterator for super::intrinsics::BytesIter {
-    type Item = byte;
-    fn next() -> Option<byte> { super::intrinsics::bytes_next(self) }
-}
+// Note: built-in container iteration (`for x in [..]`, `for b in bytes`, `for c in string`) is a
+// compiler feature; user-visible iterators are regular structs implementing `Iterator`.

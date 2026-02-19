@@ -512,7 +512,6 @@ fn instr_def_reg(instr: &Instruction) -> Option<Reg> {
         | Instruction::Move { dst, .. }
         | Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
-        | Instruction::CheckedCast { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
@@ -555,7 +554,6 @@ fn set_instr_dst(instr: &mut Instruction, new_dst: Reg) -> bool {
         | Instruction::Move { dst, .. }
         | Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
-        | Instruction::CheckedCast { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
@@ -608,7 +606,6 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
         Instruction::Move { src, .. } => vec![*src],
         Instruction::AsReadonly { src, .. } => vec![*src],
         Instruction::IsType { value, ty, .. } => vec![*value, *ty],
-        Instruction::CheckedCast { value, ty, .. } => vec![*value, *ty],
 
         Instruction::MakeTypeRep { args, .. } => args.clone(),
         Instruction::MakeStruct {
@@ -705,7 +702,6 @@ fn instr_write_regs(instr: &Instruction) -> Vec<Reg> {
         | Instruction::Copy { dst, .. }
         | Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
-        | Instruction::CheckedCast { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
@@ -765,10 +761,6 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
         }
         Instruction::AsReadonly { src, .. } => *src = f(*src),
         Instruction::IsType { value, ty, .. } => {
-            *value = f(*value);
-            *ty = f(*ty);
-        }
-        Instruction::CheckedCast { value, ty, .. } => {
             *value = f(*value);
             *ty = f(*ty);
         }
@@ -1284,7 +1276,6 @@ fn update_const_env(env: &mut BTreeMap<Reg, ScalarConst>, instr: &Instruction) {
         // Any other write to `dst` invalidates our scalar const view.
         Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
-        | Instruction::CheckedCast { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }

@@ -1339,48 +1339,6 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     return trap(vm, format!("is_type dst: {msg}"));
                 }
             }
-            rusk_bytecode::Instruction::CheckedCast { dst, value, ty } => {
-                let v = match read_value(frame, *value) {
-                    Ok(v) => v,
-                    Err(msg) => return trap(vm, format!("checked_cast value: {msg}")),
-                };
-                let target = match read_type_rep(frame, *ty) {
-                    Ok(id) => id,
-                    Err(msg) => return trap(vm, format!("checked_cast ty: {msg}")),
-                };
-                let ok = match type_test(
-                    &vm.module,
-                    &vm.type_reps,
-                    &vm.heap,
-                    &vm.primitive_type_ids,
-                    &v,
-                    target,
-                ) {
-                    Ok(ok) => ok,
-                    Err(msg) => return trap(vm, msg),
-                };
-                let (variant, fields) = if ok {
-                    ("Some".to_string(), vec![v])
-                } else {
-                    ("None".to_string(), Vec::new())
-                };
-                let Some(option_type_id) = vm.module.type_id("Option") else {
-                    return trap(vm, "missing required enum type `Option`".to_string());
-                };
-                let option = alloc_ref(
-                    &mut vm.heap,
-                    &mut vm.gc_allocations_since_collect,
-                    HeapValue::Enum {
-                        type_id: option_type_id,
-                        type_args: vec![target],
-                        variant,
-                        fields,
-                    },
-                );
-                if let Err(msg) = write_value(frame, *dst, option) {
-                    return trap(vm, format!("checked_cast dst: {msg}"));
-                }
-            }
 
             rusk_bytecode::Instruction::MakeTypeRep { dst, base, args } => {
                 let mut arg_ids = Vec::with_capacity(args.len());
@@ -3769,23 +3727,6 @@ fn struct_field_index(
         .ok_or_else(|| format!("missing field: {field}"))
 }
 
-fn struct_layout_by_name<'a>(
-    module: &'a ExecutableModule,
-    type_name: &str,
-) -> Result<(TypeId, &'a [String]), String> {
-    let Some(type_id) = module.type_id(type_name) else {
-        return Err(format!("unknown struct type `{type_name}`"));
-    };
-    let Some(layout) = module
-        .struct_layouts
-        .get(type_id.0 as usize)
-        .and_then(|v| v.as_ref())
-    else {
-        return Err(format!("missing struct layout for `{type_name}`"));
-    };
-    Ok((type_id, layout.as_slice()))
-}
-
 fn type_test(
     module: &ExecutableModule,
     type_reps: &TypeReps,
@@ -3902,18 +3843,6 @@ fn type_test(
         TypeCtor::Fn | TypeCtor::Cont => false,
     })
 }
-
-const ARRAY_ITER_TYPE: &str = "core::intrinsics::ArrayIter";
-const ARRAY_ITER_FIELD_ARRAY: &str = "arr";
-const ARRAY_ITER_FIELD_INDEX: &str = "idx";
-
-const STRING_ITER_TYPE: &str = "core::intrinsics::StringIter";
-const STRING_ITER_FIELD_STRING: &str = "s";
-const STRING_ITER_FIELD_INDEX: &str = "idx";
-
-const BYTES_ITER_TYPE: &str = "core::intrinsics::BytesIter";
-const BYTES_ITER_FIELD_BYTES: &str = "b";
-const BYTES_ITER_FIELD_INDEX: &str = "idx";
 
 // Hashing: deterministic (non-cryptographic) 64-bit FNV-1a, returned as `int`.
 const FNV1A_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -4487,6 +4416,69 @@ fn eval_core_intrinsic(
                 }))
             }
             _ => Err(bad_args("core::intrinsics::string_slice")),
+        },
+        I::StringNextIndex => match args.as_slice() {
+            [Value::String(s), Value::Int(idx)] => {
+                if *idx < 0 {
+                    return Err(
+                        "core::intrinsics::string_next_index: idx must be >= 0".to_string()
+                    );
+                }
+                let idx_usize: usize = (*idx)
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_next_index: idx overflow".to_string())?;
+
+                let s_str = s.as_str(heap)?;
+                if idx_usize > s_str.len() {
+                    return Err("core::intrinsics::string_next_index: idx out of bounds".to_string());
+                }
+                if idx_usize == s_str.len() {
+                    return Ok(Value::Int(-1));
+                }
+                if !s_str.is_char_boundary(idx_usize) {
+                    return Err(
+                        "core::intrinsics::string_next_index: invalid UTF-8 boundary".to_string()
+                    );
+                }
+                let ch = s_str[idx_usize..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| "core::intrinsics::string_next_index: invalid UTF-8".to_string())?;
+                let next_idx = idx_usize.checked_add(ch.len_utf8()).ok_or_else(|| {
+                    "core::intrinsics::string_next_index: index overflow".to_string()
+                })?;
+                Ok(Value::Int(next_idx as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::string_next_index")),
+        },
+        I::StringCodepointAt => match args.as_slice() {
+            [Value::String(s), Value::Int(idx)] => {
+                if *idx < 0 {
+                    return Err(
+                        "core::intrinsics::string_codepoint_at: idx must be >= 0".to_string()
+                    );
+                }
+                let idx_usize: usize = (*idx).try_into().map_err(|_| {
+                    "core::intrinsics::string_codepoint_at: idx overflow".to_string()
+                })?;
+
+                let s_str = s.as_str(heap)?;
+                if idx_usize >= s_str.len() {
+                    return Err(
+                        "core::intrinsics::string_codepoint_at: idx out of bounds".to_string()
+                    );
+                }
+                if !s_str.is_char_boundary(idx_usize) {
+                    return Err(
+                        "core::intrinsics::string_codepoint_at: invalid UTF-8 boundary".to_string()
+                    );
+                }
+                let ch = s_str[idx_usize..].chars().next().ok_or_else(|| {
+                    "core::intrinsics::string_codepoint_at: invalid UTF-8".to_string()
+                })?;
+                Ok(Value::Int(ch as u32 as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::string_codepoint_at")),
         },
         I::StringFromChars => match args.as_slice() {
             [Value::Ref(arr)] => {
@@ -5112,404 +5104,6 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::array_slice_ro")),
         },
 
-        I::IntoIter => match args.as_slice() {
-            [Value::TypeRep(elem_rep), Value::Ref(arr)] => {
-                match heap.get(arr.handle) {
-                    Some(HeapValue::Array(_)) => {}
-                    Some(_) => {
-                        return Err("core::intrinsics::into_iter: expected an array".to_string());
-                    }
-                    None => {
-                        return Err("core::intrinsics::into_iter: dangling reference".to_string());
-                    }
-                };
-
-                let (iter_type_id, layout) = struct_layout_by_name(module, ARRAY_ITER_TYPE)?;
-                let mut fields = vec![Value::Unit; layout.len()];
-
-                let arr_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_ARRAY)?;
-                let idx_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_INDEX)?;
-
-                fields[arr_idx] = Value::Ref(arr.clone());
-                fields[idx_idx] = Value::Int(0);
-
-                Ok(alloc_ref(
-                    heap,
-                    gc_allocations_since_collect,
-                    HeapValue::Struct {
-                        type_id: iter_type_id,
-                        type_args: vec![*elem_rep],
-                        fields,
-                    },
-                ))
-            }
-            _ => Err(bad_args("core::intrinsics::into_iter")),
-        },
-        I::Next => match args.as_slice() {
-            [Value::TypeRep(elem_rep), Value::Ref(iter)] => {
-                if iter.is_readonly() {
-                    return Err("illegal write through readonly reference".to_string());
-                }
-
-                let iter_type_id = module
-                    .type_id(ARRAY_ITER_TYPE)
-                    .ok_or_else(|| format!("unknown struct type `{ARRAY_ITER_TYPE}`"))?;
-                let arr_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_ARRAY)?;
-                let idx_idx = struct_field_index(module, iter_type_id, ARRAY_ITER_FIELD_INDEX)?;
-
-                let (arr_ref, idx) = {
-                    let Some(obj) = heap.get(iter.handle) else {
-                        return Err("core::intrinsics::next: dangling reference".to_string());
-                    };
-                    let HeapValue::Struct {
-                        type_id, fields, ..
-                    } = obj
-                    else {
-                        return Err("core::intrinsics::next: expected iterator struct".to_string());
-                    };
-                    if *type_id != iter_type_id {
-                        let got = module.type_name(*type_id).unwrap_or("<unknown>");
-                        return Err(format!(
-                            "core::intrinsics::next: expected `{ARRAY_ITER_TYPE}`, got `{got}`"
-                        ));
-                    }
-
-                    let Some(Value::Ref(arr_ref)) = fields.get(arr_idx).cloned() else {
-                        return Err(
-                            "core::intrinsics::next: iterator missing `arr` field".to_string()
-                        );
-                    };
-                    let Some(Value::Int(idx)) = fields.get(idx_idx).cloned() else {
-                        return Err(
-                            "core::intrinsics::next: iterator missing `idx` field".to_string()
-                        );
-                    };
-                    (arr_ref, idx)
-                };
-
-                if idx < 0 {
-                    return Err("core::intrinsics::next: negative iterator index".to_string());
-                }
-                let idx_usize: usize = idx as usize;
-
-                let item = match heap.get(arr_ref.handle) {
-                    Some(HeapValue::Array(items)) => items.get(idx_usize).cloned(),
-                    Some(_) => {
-                        return Err(
-                            "core::intrinsics::next: iterator `arr` is not an array".to_string()
-                        );
-                    }
-                    None => {
-                        return Err(
-                            "core::intrinsics::next: dangling reference for iterator `arr`"
-                                .to_string(),
-                        );
-                    }
-                };
-
-                let out = if let Some(mut item) = item {
-                    if arr_ref.is_readonly() {
-                        item = item.into_readonly_view();
-                    }
-                    alloc_option(
-                        module,
-                        heap,
-                        gc_allocations_since_collect,
-                        *elem_rep,
-                        "Some",
-                        vec![item],
-                    )?
-                } else {
-                    alloc_option(
-                        module,
-                        heap,
-                        gc_allocations_since_collect,
-                        *elem_rep,
-                        "None",
-                        Vec::new(),
-                    )?
-                };
-
-                {
-                    let Some(obj) = heap.get_mut(iter.handle) else {
-                        return Err("core::intrinsics::next: dangling reference".to_string());
-                    };
-                    let HeapValue::Struct { fields, .. } = obj else {
-                        return Err("core::intrinsics::next: expected iterator struct".to_string());
-                    };
-                    let Some(slot) = fields.get_mut(idx_idx) else {
-                        return Err(
-                            "core::intrinsics::next: iterator missing `idx` field".to_string()
-                        );
-                    };
-                    *slot = Value::Int(idx + 1);
-                }
-
-                Ok(out)
-            }
-            _ => Err(bad_args("core::intrinsics::next")),
-        },
-
-        I::StringIntoIter => match args.as_slice() {
-            [Value::String(s)] => {
-                let (iter_type_id, layout) = struct_layout_by_name(module, STRING_ITER_TYPE)?;
-                let mut fields = vec![Value::Unit; layout.len()];
-
-                let s_idx = struct_field_index(module, iter_type_id, STRING_ITER_FIELD_STRING)?;
-                let idx_idx =
-                    struct_field_index(module, iter_type_id, STRING_ITER_FIELD_INDEX)?;
-
-                fields[s_idx] = Value::String(*s);
-                fields[idx_idx] = Value::Int(0);
-
-                Ok(alloc_ref(
-                    heap,
-                    gc_allocations_since_collect,
-                    HeapValue::Struct {
-                        type_id: iter_type_id,
-                        type_args: Vec::new(),
-                        fields,
-                    },
-                ))
-            }
-            _ => Err(bad_args("core::intrinsics::string_into_iter")),
-        },
-        I::StringNext => match args.as_slice() {
-            [Value::Ref(iter)] => {
-                if iter.is_readonly() {
-                    return Err("illegal write through readonly reference".to_string());
-                }
-
-                let iter_type_id = module
-                    .type_id(STRING_ITER_TYPE)
-                    .ok_or_else(|| format!("unknown struct type `{STRING_ITER_TYPE}`"))?;
-                let s_idx = struct_field_index(module, iter_type_id, STRING_ITER_FIELD_STRING)?;
-                let idx_idx =
-                    struct_field_index(module, iter_type_id, STRING_ITER_FIELD_INDEX)?;
-
-                let (ch, next_idx) = {
-                    let Some(obj) = heap.get(iter.handle) else {
-                        return Err("core::intrinsics::string_next: dangling reference".to_string());
-                    };
-                    let HeapValue::Struct {
-                        type_id, fields, ..
-                    } = obj
-                    else {
-                        return Err(
-                            "core::intrinsics::string_next: expected iterator struct".to_string()
-                        );
-                    };
-                    if *type_id != iter_type_id {
-                        let got = module.type_name(*type_id).unwrap_or("<unknown>");
-                        return Err(format!(
-                            "core::intrinsics::string_next: expected `{STRING_ITER_TYPE}`, got `{got}`"
-                        ));
-                    }
-
-                    let Some(Value::String(s)) = fields.get(s_idx) else {
-                        return Err(
-                            "core::intrinsics::string_next: iterator missing `s` field".to_string()
-                        );
-                    };
-                    let Some(Value::Int(idx)) = fields.get(idx_idx) else {
-                        return Err(
-                            "core::intrinsics::string_next: iterator missing `idx` field"
-                                .to_string(),
-                        );
-                    };
-
-                    if *idx < 0 {
-                        return Err(
-                            "core::intrinsics::string_next: negative iterator index".to_string()
-                        );
-                    }
-                    let idx_usize: usize = (*idx) as usize;
-                    let s_str = s.as_str(heap)?;
-                    if idx_usize >= s_str.len() {
-                        (None, *idx)
-                    } else if !s_str.is_char_boundary(idx_usize) {
-                        return Err(
-                            "core::intrinsics::string_next: invalid UTF-8 boundary".to_string()
-                        );
-                    } else {
-                        let ch = s_str[idx_usize..].chars().next().ok_or_else(|| {
-                            "core::intrinsics::string_next: invalid UTF-8".to_string()
-                        })?;
-                        let next_idx = idx_usize.checked_add(ch.len_utf8()).ok_or_else(|| {
-                            "core::intrinsics::string_next: index overflow".to_string()
-                        })?;
-                        (Some(ch), next_idx as i64)
-                    }
-                };
-
-                let char_rep = type_reps.intern(TypeRepNode {
-                    ctor: TypeCtor::Char,
-                    args: Vec::new(),
-                });
-                let out = if let Some(ch) = ch {
-                    alloc_option(
-                        module,
-                        heap,
-                        gc_allocations_since_collect,
-                        char_rep,
-                        "Some",
-                        vec![Value::Char(ch)],
-                    )?
-                } else {
-                    alloc_option(
-                        module,
-                        heap,
-                        gc_allocations_since_collect,
-                        char_rep,
-                        "None",
-                        Vec::new(),
-                    )?
-                };
-
-                {
-                    let Some(obj) = heap.get_mut(iter.handle) else {
-                        return Err("core::intrinsics::string_next: dangling reference".to_string());
-                    };
-                    let HeapValue::Struct { fields, .. } = obj else {
-                        return Err(
-                            "core::intrinsics::string_next: expected iterator struct".to_string()
-                        );
-                    };
-                    let Some(slot) = fields.get_mut(idx_idx) else {
-                        return Err(
-                            "core::intrinsics::string_next: iterator missing `idx` field"
-                                .to_string(),
-                        );
-                    };
-                    *slot = Value::Int(next_idx);
-                }
-
-                Ok(out)
-            }
-            _ => Err(bad_args("core::intrinsics::string_next")),
-        },
-
-        I::BytesIntoIter => match args.as_slice() {
-            [Value::Bytes(b)] => {
-                let (iter_type_id, layout) = struct_layout_by_name(module, BYTES_ITER_TYPE)?;
-                let mut fields = vec![Value::Unit; layout.len()];
-
-                let b_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_BYTES)?;
-                let idx_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_INDEX)?;
-
-                fields[b_idx] = Value::Bytes(*b);
-                fields[idx_idx] = Value::Int(0);
-
-                Ok(alloc_ref(
-                    heap,
-                    gc_allocations_since_collect,
-                    HeapValue::Struct {
-                        type_id: iter_type_id,
-                        type_args: Vec::new(),
-                        fields,
-                    },
-                ))
-            }
-            _ => Err(bad_args("core::intrinsics::bytes_into_iter")),
-        },
-        I::BytesNext => match args.as_slice() {
-            [Value::Ref(iter)] => {
-                if iter.is_readonly() {
-                    return Err("illegal write through readonly reference".to_string());
-                }
-
-                let iter_type_id = module
-                    .type_id(BYTES_ITER_TYPE)
-                    .ok_or_else(|| format!("unknown struct type `{BYTES_ITER_TYPE}`"))?;
-                let b_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_BYTES)?;
-                let idx_idx = struct_field_index(module, iter_type_id, BYTES_ITER_FIELD_INDEX)?;
-
-                let (byte, next_idx) = {
-                    let Some(obj) = heap.get(iter.handle) else {
-                        return Err("core::intrinsics::bytes_next: dangling reference".to_string());
-                    };
-                    let HeapValue::Struct {
-                        type_id, fields, ..
-                    } = obj
-                    else {
-                        return Err(
-                            "core::intrinsics::bytes_next: expected iterator struct".to_string()
-                        );
-                    };
-                    if *type_id != iter_type_id {
-                        let got = module.type_name(*type_id).unwrap_or("<unknown>");
-                        return Err(format!(
-                            "core::intrinsics::bytes_next: expected `{BYTES_ITER_TYPE}`, got `{got}`"
-                        ));
-                    }
-
-                    let Some(Value::Bytes(b)) = fields.get(b_idx) else {
-                        return Err(
-                            "core::intrinsics::bytes_next: iterator missing `b` field".to_string()
-                        );
-                    };
-                    let Some(Value::Int(idx)) = fields.get(idx_idx) else {
-                        return Err("core::intrinsics::bytes_next: iterator missing `idx` field"
-                            .to_string());
-                    };
-
-                    if *idx < 0 {
-                        return Err(
-                            "core::intrinsics::bytes_next: negative iterator index".to_string()
-                        );
-                    }
-                    let idx_usize: usize = (*idx) as usize;
-                    let byte = {
-                        let bytes = b.as_slice(heap)?;
-                        bytes.get(idx_usize).copied()
-                    };
-                    (byte, *idx + 1)
-                };
-
-                let byte_rep = type_reps.intern(TypeRepNode {
-                    ctor: TypeCtor::Byte,
-                    args: Vec::new(),
-                });
-                let out = if let Some(byte) = byte {
-                    alloc_option(
-                        module,
-                        heap,
-                        gc_allocations_since_collect,
-                        byte_rep,
-                        "Some",
-                        vec![Value::Byte(byte)],
-                    )?
-                } else {
-                    alloc_option(
-                        module,
-                        heap,
-                        gc_allocations_since_collect,
-                        byte_rep,
-                        "None",
-                        Vec::new(),
-                    )?
-                };
-
-                {
-                    let Some(obj) = heap.get_mut(iter.handle) else {
-                        return Err("core::intrinsics::bytes_next: dangling reference".to_string());
-                    };
-                    let HeapValue::Struct { fields, .. } = obj else {
-                        return Err(
-                            "core::intrinsics::bytes_next: expected iterator struct".to_string()
-                        );
-                    };
-                    let Some(slot) = fields.get_mut(idx_idx) else {
-                        return Err("core::intrinsics::bytes_next: iterator missing `idx` field"
-                            .to_string());
-                    };
-                    *slot = Value::Int(next_idx);
-                }
-
-                Ok(out)
-            }
-            _ => Err(bad_args("core::intrinsics::bytes_next")),
-        },
     }
 }
 

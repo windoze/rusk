@@ -236,13 +236,6 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::unit_eq" => Intrinsic::UnitEq,
         "core::intrinsics::unit_ne" => Intrinsic::UnitNe,
 
-        "core::intrinsics::into_iter" => Intrinsic::IntoIter,
-        "core::intrinsics::next" => Intrinsic::Next,
-        "core::intrinsics::string_into_iter" => Intrinsic::StringIntoIter,
-        "core::intrinsics::string_next" => Intrinsic::StringNext,
-        "core::intrinsics::bytes_into_iter" => Intrinsic::BytesIntoIter,
-        "core::intrinsics::bytes_next" => Intrinsic::BytesNext,
-
         "core::intrinsics::array_len" => Intrinsic::ArrayLen,
         "core::intrinsics::array_len_ro" => Intrinsic::ArrayLenRo,
         "core::intrinsics::array_push" => Intrinsic::ArrayPush,
@@ -272,6 +265,8 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::bytes_from_array" => Intrinsic::BytesFromArray,
 
         "core::intrinsics::string_slice" => Intrinsic::StringSlice,
+        "core::intrinsics::string_next_index" => Intrinsic::StringNextIndex,
+        "core::intrinsics::string_codepoint_at" => Intrinsic::StringCodepointAt,
         "core::intrinsics::string_from_chars" => Intrinsic::StringFromChars,
         "core::intrinsics::string_from_utf8" => Intrinsic::StringFromUtf8,
         "core::intrinsics::string_from_utf8_strict" => Intrinsic::StringFromUtf8Strict,
@@ -631,15 +626,6 @@ fn lower_mir_instruction(
             let value = op_reg(out, value, code, temps)?;
             let ty = op_reg(out, ty, code, temps)?;
             code.push(Instruction::IsType {
-                dst: local(*dst),
-                value,
-                ty,
-            });
-        }
-        I::CheckedCast { dst, value, ty } => {
-            let value = op_reg(out, value, code, temps)?;
-            let ty = op_reg(out, ty, code, temps)?;
-            code.push(Instruction::CheckedCast {
                 dst: local(*dst),
                 value,
                 ty,

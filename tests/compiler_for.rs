@@ -58,10 +58,39 @@ fn for_loop_over_readonly_array_is_allowed() {
 }
 
 #[test]
+fn for_loop_continue_advances_for_builtin_arrays() {
+    let src = r#"
+        fn sum_skip_three() -> int {
+            let total = 0;
+            let xs = [1, 2, 3, 4, 5];
+            for x in xs {
+                if x == 3 { continue; };
+                total = total + x;
+            };
+            total
+        }
+
+        fn main() -> unit { () }
+    "#;
+
+    let mut module = compile_to_bytecode(src).expect("compile");
+    module.entry = module.function_id("sum_skip_three").expect("sum fn id");
+
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Int(1 + 2 + 4 + 5)
+        }
+    );
+}
+
+#[test]
 fn for_loop_over_string_iterates_unicode_scalars() {
     let src = r#"
-	        fn sum() -> int {
-	            let total = 0;
+		        fn sum() -> int {
+		            let total = 0;
 	            for c in "é" {
 	                total = total + c.to_int();
 	            };

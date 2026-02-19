@@ -799,21 +799,6 @@ fn add_prelude(env: &mut ProgramEnv) {
         InherentMethodKind::Instance { readonly: true },
     );
 
-    // `string` iteration helpers.
-    add_fn(
-        "string::chars",
-        Vec::new(),
-        vec![Ty::Readonly(Box::new(Ty::String))],
-        Ty::App(
-            TyCon::Named("core::intrinsics::StringIter".to_string()),
-            Vec::new(),
-        ),
-    );
-    env.inherent_method_kinds.insert(
-        "string::chars".to_string(),
-        InherentMethodKind::Instance { readonly: true },
-    );
-
     // `string` construction/decoding helpers (static methods).
     add_fn(
         "string::from_chars",
@@ -1247,9 +1232,6 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
     let option = |t: Ty| Ty::App(Named("Option".to_string()), vec![t]);
     let array = |t: Ty| Ty::Array(Box::new(t));
     let ro = |t: Ty| Ty::Readonly(Box::new(t));
-    let array_iter = |t: Ty| Ty::App(Named("core::intrinsics::ArrayIter".to_string()), vec![t]);
-    let string_iter = || Ty::App(Named("core::intrinsics::StringIter".to_string()), vec![]);
-    let bytes_iter = || Ty::App(Named("core::intrinsics::BytesIter".to_string()), vec![]);
 
     Some(match name {
         // f-string helpers.
@@ -1458,37 +1440,14 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
             ret: Ty::Int,
         },
 
-        // Iterator protocol.
-        "core::intrinsics::into_iter" => ExpectedIntrinsicSig {
-            generic_count: 1,
-            params: vec![array(Ty::Gen(0))],
-            ret: array_iter(Ty::Gen(0)),
-        },
-        "core::intrinsics::next" => ExpectedIntrinsicSig {
-            generic_count: 1,
-            params: vec![array_iter(Ty::Gen(0))],
-            ret: option(Ty::Gen(0)),
-        },
-        "core::intrinsics::string_into_iter" => ExpectedIntrinsicSig {
-            generic_count: 0,
-            params: vec![Ty::String],
-            ret: string_iter(),
-        },
-        "core::intrinsics::string_next" => ExpectedIntrinsicSig {
-            generic_count: 0,
-            params: vec![string_iter()],
-            ret: option(Ty::Char),
-        },
-        "core::intrinsics::bytes_into_iter" => ExpectedIntrinsicSig {
-            generic_count: 0,
-            params: vec![Ty::Bytes],
-            ret: bytes_iter(),
-        },
-        "core::intrinsics::bytes_next" => ExpectedIntrinsicSig {
-            generic_count: 0,
-            params: vec![bytes_iter()],
-            ret: option(Ty::Byte),
-        },
+        // String iteration primitives (UTF-8 byte indices).
+        "core::intrinsics::string_next_index" | "core::intrinsics::string_codepoint_at" => {
+            ExpectedIntrinsicSig {
+                generic_count: 0,
+                params: vec![Ty::String, Ty::Int],
+                ret: Ty::Int,
+            }
+        }
 
         // Array operations.
         "core::intrinsics::array_len" => ExpectedIntrinsicSig {

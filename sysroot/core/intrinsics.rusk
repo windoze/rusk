@@ -3,13 +3,9 @@
 // `intrinsic fn` declarations have no bodies; their implementations live in the VM / bytecode
 // instruction set.
 
-pub struct ArrayIter<T> { arr: [T], idx: int }
-pub struct StringIter { s: string, idx: int }
-pub struct BytesIter { b: bytes, idx: int }
-
-// f-string helpers.
-pub intrinsic fn string_concat(a: string, b: string) -> string;
-pub intrinsic fn to_string<T>(value: T) -> string;
+	// f-string helpers.
+	pub intrinsic fn string_concat(a: string, b: string) -> string;
+	pub intrinsic fn to_string<T>(value: T) -> string;
 
 // Panic.
 pub intrinsic fn panic(msg: string) -> !;
@@ -64,28 +60,28 @@ pub intrinsic fn bytes_ne(a: bytes, b: bytes) -> bool;
 pub intrinsic fn unit_eq(a: unit, b: unit) -> bool;
 pub intrinsic fn unit_ne(a: unit, b: unit) -> bool;
 
-// Iterator protocol.
-pub intrinsic fn into_iter<T>(arr: [T]) -> ArrayIter<T>;
-pub intrinsic fn next<T>(it: ArrayIter<T>) -> Option<T>;
-
-pub intrinsic fn string_into_iter(s: string) -> StringIter;
-pub intrinsic fn string_next(it: StringIter) -> Option<char>;
-
-pub intrinsic fn bytes_into_iter(b: bytes) -> BytesIter;
-pub intrinsic fn bytes_next(it: BytesIter) -> Option<byte>;
-
-// `bytes` operations.
-pub intrinsic fn bytes_get(b: bytes, idx: int) -> Option<byte>;
-pub intrinsic fn bytes_len(b: bytes) -> int;
-pub intrinsic fn bytes_slice(b: bytes, start: int, end: Option<int>) -> bytes;
+	// `bytes` operations.
+	pub intrinsic fn bytes_get(b: bytes, idx: int) -> Option<byte>;
+	pub intrinsic fn bytes_len(b: bytes) -> int;
+	pub intrinsic fn bytes_slice(b: bytes, start: int, end: Option<int>) -> bytes;
 pub intrinsic fn bytes_to_array(b: bytes) -> [byte];
 pub intrinsic fn bytes_from_array(b: readonly [byte]) -> bytes;
 
-// `string` operations.
-pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
-pub intrinsic fn string_from_chars(chars: readonly [char]) -> string;
-pub intrinsic fn string_from_utf8(data: bytes) -> string;
-pub intrinsic fn string_from_utf8_strict(data: bytes) -> Option<string>;
+	// `string` operations.
+	pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
+	// String iteration primitives (UTF-8 byte indices).
+	//
+	// These are intended for compiler lowering of `for c in s { ... }` and for sysroot iterator
+	// adapters. They operate on UTF-8 byte offsets, not Unicode scalar indices.
+	//
+	// - `string_next_index(s, idx)` returns the next UTF-8 byte index after the codepoint starting
+	//   at `idx`, or `-1` when `idx` is at end-of-string.
+	// - `string_codepoint_at(s, idx)` returns the Unicode scalar value at `idx` as an `int`.
+	pub intrinsic fn string_next_index(s: string, idx: int) -> int;
+	pub intrinsic fn string_codepoint_at(s: string, idx: int) -> int;
+	pub intrinsic fn string_from_chars(chars: readonly [char]) -> string;
+	pub intrinsic fn string_from_utf8(data: bytes) -> string;
+	pub intrinsic fn string_from_utf8_strict(data: bytes) -> Option<string>;
 pub intrinsic fn string_from_utf16_le(data: readonly [int]) -> string;
 pub intrinsic fn string_from_utf16_le_strict(data: readonly [int]) -> Option<string>;
 pub intrinsic fn string_from_utf16_be(data: readonly [int]) -> string;

@@ -1417,42 +1417,28 @@ Obtaining an iterator:
   - arrays: `[T]` and `readonly [T]`
   - strings: `string` and `readonly string`
   - bytes: `bytes` and `readonly bytes`
-  the compiler constructs a dedicated iterator state object using a
-  `core::intrinsics::*_into_iter` intrinsic.
+  the compiler performs a built-in index-based loop (rather than constructing a user-visible
+  iterator state object).
 
-Required core intrinsics functions and types:
+Built-in iteration behavior:
+
+- arrays (`[T]` and `readonly [T]`):
+  - iterates `idx = 0..len-1` over the array length
+  - yields elements using indexing (`a[idx]`)
+  - for `readonly [T]`, the yielded element view is `readonly T`
+- bytes (`bytes` and `readonly bytes`):
+  - iterates `idx = 0..len-1` over `core::intrinsics::bytes_len(b)`
+  - yields `byte` values using indexing (`b[idx]`)
+- strings (`string` and `readonly string`):
+  - iterates over Unicode scalar values (`char`) in UTF-8 byte order
+  - uses VM-provided primitives:
+    - `core::intrinsics::string_next_index(s, idx)` to advance by one codepoint
+    - `core::intrinsics::string_codepoint_at(s, idx)` to read the current codepoint as an `int`
+  - `idx` is a UTF-8 byte index; the loop terminates when `string_next_index` returns `-1`.
+
+Required core library items:
 
 - `interface core::iter::Iterator { type Item; fn next() -> Option<Self::Item>; }`
-
-Iterator state objects:
-
-- `struct core::intrinsics::ArrayIter<T> { arr: [T], idx: int }`
-- `struct core::intrinsics::StringIter { s: string, idx: int }`
-- `struct core::intrinsics::BytesIter { b: bytes, idx: int }`
-
-Iterator constructors and `next` intrinsics:
-
-- `core::intrinsics::into_iter<T>([T]) -> core::intrinsics::ArrayIter<T>`
-  - must accept `readonly [T]` as well, producing an iterator over `readonly T`
-- `core::intrinsics::next<T>(core::intrinsics::ArrayIter<T>) -> Option<T>`
-- `core::intrinsics::string_into_iter(string) -> core::intrinsics::StringIter`
-- `core::intrinsics::string_next(core::intrinsics::StringIter) -> Option<char>`
-  - returns Unicode scalar values as `char`
-- `core::intrinsics::bytes_into_iter(bytes) -> core::intrinsics::BytesIter`
-- `core::intrinsics::bytes_next(core::intrinsics::BytesIter) -> Option<byte>`
-  - returns `byte` values in `0..=255`
-
-Required iterator interface impls:
-
-- `impl core::iter::Iterator for core::intrinsics::ArrayIter<T> { type Item = T; ... }`
-- `impl core::iter::Iterator for core::intrinsics::StringIter { type Item = char; ... }`
-- `impl core::iter::Iterator for core::intrinsics::BytesIter { type Item = byte; ... }`
-
-Library wrappers:
-
-- `readonly fn string::chars() -> core::intrinsics::StringIter`
-  - equivalent to `core::intrinsics::string_into_iter(self)`
-  - useful for `"s".chars().count()` (length in Unicode scalar values)
 
 - `enum Option<T> { Some(T), None }`
 

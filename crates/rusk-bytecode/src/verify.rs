@@ -568,7 +568,7 @@ fn verify_instruction(
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             verify_reg(reg_count, *src, &format!("{}: src", here()))?;
         }
-        Instruction::IsType { dst, value, ty } | Instruction::CheckedCast { dst, value, ty } => {
+        Instruction::IsType { dst, value, ty } => {
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             verify_reg(reg_count, *value, &format!("{}: value", here()))?;
             verify_reg(reg_count, *ty, &format!("{}: ty", here()))?;

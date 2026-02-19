@@ -432,9 +432,6 @@ This section defines operational semantics per instruction. All register indices
   - Produces an interned applied `typerep(base, args...)`.
 - `IsType { dst, value, ty }`
   - Reads `ty` as a `typerep` and writes `bool` indicating whether `value` matches that type.
-- `CheckedCast { dst, value, ty }`
-  - Performs `IsType` and returns an `Option` enum value:
-    - `Option::<ty>::Some(value)` if the test succeeds, else `Option::<ty>::None`.
 
 Type test notes (reference VM behavior):
 
@@ -607,16 +604,14 @@ The current intrinsic set includes:
 - primitive conversions: `IntToByte`, `IntTryByte`, `ByteToInt`, `IntToChar`, `IntTryChar`,
   `CharToInt`
 - `bytes` helpers: `BytesGet`, `BytesLen`, `BytesSlice`, `BytesToArray`, `BytesFromArray`
-- `string` helpers: `StringSlice`
-- iterator protocol: `IntoIter`, `Next`, `StringIntoIter`, `StringNext`, `BytesIntoIter`,
-  `BytesNext`
+- `string` helpers: `StringSlice`, `StringNextIndex`, `StringCodepointAt`
 - array ops: `ArrayLen`, `ArrayLenRo`, `ArrayPush`, `ArrayPop`, `ArrayClear`, `ArrayResize`,
   `ArrayInsert`, `ArrayRemove`, `ArrayExtend`, `ArrayConcat`, `ArrayConcatRo`, `ArraySlice`,
   `ArraySliceRo`
 
 ---
 
-## 10. `.rbc` serialization format (v0.6)
+## 10. `.rbc` serialization format (v0.8)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -670,7 +665,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `6`
+- minor = `8`
 
 The reference decoder requires an **exact** version match.
 
@@ -738,21 +733,21 @@ This format uses tag bytes/words for enums. The tags are normative.
 | Tag | Variant | Payload |
 | --- | ------- | ------- |
 | 0 | `Unit` | — |
-| 1 | `Bool` | — |
-| 2 | `Int` | — |
-| 3 | `Float` | — |
-| 4 | `String` | — |
-| 5 | `Bytes` | — |
-| 6 | `Array` | — |
-| 7 | `Tuple(arity)` | `u32` arity |
-| 8 | `Struct(name)` | `string` |
-| 9 | `Enum(name)` | `string` |
-| 10 | `Interface(name)` | `string` |
-| 11 | `Fn` | — |
-| 12 | `Cont` | — |
-| 13 | `Byte` | — |
-| 14 | `Char` | — |
-| 15 | `Never` | — |
+| 1 | `Never` | — |
+| 2 | `Bool` | — |
+| 3 | `Int` | — |
+| 4 | `Float` | — |
+| 5 | `Byte` | — |
+| 6 | `Char` | — |
+| 7 | `String` | — |
+| 8 | `Bytes` | — |
+| 9 | `Array` | — |
+| 10 | `Tuple(arity)` | `u32` arity |
+| 11 | `Struct(name)` | `string` |
+| 12 | `Enum(name)` | `string` |
+| 13 | `Interface(name)` | `string` |
+| 14 | `Fn` | — |
+| 15 | `Cont` | — |
 
 #### Patterns (`u8`)
 
@@ -773,7 +768,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### Intrinsics (`u16`)
 
-Intrinsics use `u16` tags `0..=75`:
+Intrinsics use `u16` tags `0..=71`:
 
 - `0`: `StringConcat`
 - `1`: `ToString`
@@ -809,48 +804,44 @@ Intrinsics use `u16` tags `0..=75`:
 - `31`: `BytesNe`
 - `32`: `UnitEq`
 - `33`: `UnitNe`
-- `34`: `IntoIter`
-- `35`: `Next`
-- `36`: `ArrayLen`
-- `37`: `ArrayLenRo`
-- `38`: `ArrayPush`
-- `39`: `ArrayPop`
-- `40`: `ArrayClear`
-- `41`: `ArrayResize`
-- `42`: `ArrayInsert`
-- `43`: `ArrayRemove`
-- `44`: `ArrayExtend`
-- `45`: `ArrayConcat`
-- `46`: `ArrayConcatRo`
-- `47`: `ArraySlice`
-- `48`: `ArraySliceRo`
-- `49`: `StringIntoIter`
-- `50`: `StringNext`
-- `51`: `BytesIntoIter`
-- `52`: `BytesNext`
-- `53`: `IntToByte`
-- `54`: `IntTryByte`
-- `55`: `ByteToInt`
-- `56`: `IntToChar`
-- `57`: `IntTryChar`
-- `58`: `CharToInt`
-- `59`: `BytesGet`
-- `60`: `BytesSlice`
-- `61`: `BytesToArray`
-- `62`: `BytesFromArray`
-- `63`: `StringSlice`
-- `64`: `BytesLen`
-- `65`: `StringFromChars`
-- `66`: `StringFromUtf8`
-- `67`: `StringFromUtf8Strict`
-- `68`: `StringFromUtf16Le`
-- `69`: `StringFromUtf16LeStrict`
-- `70`: `StringFromUtf16Be`
-- `71`: `StringFromUtf16BeStrict`
-- `72`: `HashInt`
-- `73`: `HashString`
-- `74`: `HashBytes`
-- `75`: `HashCombine`
+- `34`: `ArrayLen`
+- `35`: `ArrayLenRo`
+- `36`: `ArrayPush`
+- `37`: `ArrayPop`
+- `38`: `ArrayClear`
+- `39`: `ArrayResize`
+- `40`: `ArrayInsert`
+- `41`: `ArrayRemove`
+- `42`: `ArrayExtend`
+- `43`: `ArrayConcat`
+- `44`: `ArrayConcatRo`
+- `45`: `ArraySlice`
+- `46`: `ArraySliceRo`
+- `47`: `IntToByte`
+- `48`: `IntTryByte`
+- `49`: `ByteToInt`
+- `50`: `IntToChar`
+- `51`: `IntTryChar`
+- `52`: `CharToInt`
+- `53`: `BytesGet`
+- `54`: `BytesLen`
+- `55`: `BytesSlice`
+- `56`: `BytesToArray`
+- `57`: `BytesFromArray`
+- `58`: `StringSlice`
+- `59`: `StringNextIndex`
+- `60`: `StringCodepointAt`
+- `61`: `StringFromChars`
+- `62`: `StringFromUtf8`
+- `63`: `StringFromUtf8Strict`
+- `64`: `StringFromUtf16Le`
+- `65`: `StringFromUtf16LeStrict`
+- `66`: `StringFromUtf16Be`
+- `67`: `StringFromUtf16BeStrict`
+- `68`: `HashInt`
+- `69`: `HashString`
+- `70`: `HashBytes`
+- `71`: `HashCombine`
 
 #### Call targets (`u8`)
 
@@ -862,57 +853,56 @@ Intrinsics use `u16` tags `0..=75`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.6):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.8):
 
 - `0`: `Const`
 - `1`: `Copy`
 - `2`: `Move`
 - `3`: `AsReadonly`
 - `4`: `IsType`
-- `5`: `CheckedCast`
-- `6`: `MakeTypeRep`
-- `7`: `MakeStruct`
-- `8`: `MakeArray`
-- `9`: `MakeTuple`
-- `10`: `MakeEnum`
-- `11`: `GetField`
-- `12`: `SetField`
-- `13`: `StructGet`
-- `14`: `StructSet`
-- `15`: `TupleGet`
-- `16`: `TupleSet`
-- `17`: `IndexGet`
-- `18`: `IndexSet`
-- `19`: `Len`
-- `20`: `IntAdd`
-- `21`: `IntSub`
-- `22`: `IntMul`
-- `23`: `IntDiv`
-- `24`: `IntMod`
-- `25`: `IntLt`
-- `26`: `IntLe`
-- `27`: `IntGt`
-- `28`: `IntGe`
-- `29`: `IntEq`
-- `30`: `IntNe`
-- `31`: `BoolNot`
-- `32`: `BoolEq`
-- `33`: `BoolNe`
-- `34`: `Call`
-- `35`: `ICall`
-- `36`: `VCall`
-- `37`: `PushHandler`
-- `38`: `PopHandler`
-- `39`: `Perform`
-- `40`: `Resume`
-- `41`: `Jump`
-- `42`: `JumpIf`
-- `43`: `Switch`
-- `44`: `Return`
-- `45`: `Trap`
-- `46`: `ResumeTail`
-- `47`: `CallMulti`
-- `48`: `ReturnMulti`
+- `5`: `MakeTypeRep`
+- `6`: `MakeStruct`
+- `7`: `MakeArray`
+- `8`: `MakeTuple`
+- `9`: `MakeEnum`
+- `10`: `GetField`
+- `11`: `SetField`
+- `12`: `StructGet`
+- `13`: `StructSet`
+- `14`: `TupleGet`
+- `15`: `TupleSet`
+- `16`: `IndexGet`
+- `17`: `IndexSet`
+- `18`: `Len`
+- `19`: `IntAdd`
+- `20`: `IntSub`
+- `21`: `IntMul`
+- `22`: `IntDiv`
+- `23`: `IntMod`
+- `24`: `IntLt`
+- `25`: `IntLe`
+- `26`: `IntGt`
+- `27`: `IntGe`
+- `28`: `IntEq`
+- `29`: `IntNe`
+- `30`: `BoolNot`
+- `31`: `BoolEq`
+- `32`: `BoolNe`
+- `33`: `Call`
+- `34`: `ICall`
+- `35`: `VCall`
+- `36`: `PushHandler`
+- `37`: `PopHandler`
+- `38`: `Perform`
+- `39`: `Resume`
+- `40`: `Jump`
+- `41`: `JumpIf`
+- `42`: `Switch`
+- `43`: `Return`
+- `44`: `Trap`
+- `45`: `ResumeTail`
+- `46`: `CallMulti`
+- `47`: `ReturnMulti`
 
 Instruction payloads are encoded by writing each operand field in the order listed in the
 instruction definition, using the primitive encodings from §10.2 (e.g. `u32` for registers and PC

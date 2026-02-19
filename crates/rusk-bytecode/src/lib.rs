@@ -153,14 +153,6 @@ pub enum Intrinsic {
     UnitEq,
     UnitNe,
 
-    // Iterator protocol.
-    IntoIter,
-    Next,
-    StringIntoIter,
-    StringNext,
-    BytesIntoIter,
-    BytesNext,
-
     // Array operations.
     ArrayLen,
     ArrayLenRo,
@@ -193,6 +185,8 @@ pub enum Intrinsic {
 
     // `string` operations.
     StringSlice,
+    StringNextIndex,
+    StringCodepointAt,
     StringFromChars,
     StringFromUtf8,
     StringFromUtf8Strict,
@@ -315,11 +309,6 @@ pub enum Instruction {
         src: Reg,
     },
     IsType {
-        dst: Reg,
-        value: Reg,
-        ty: Reg,
-    },
-    CheckedCast {
         dst: Reg,
         value: Reg,
         ty: Reg,

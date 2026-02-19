@@ -28,7 +28,7 @@ pub(crate) fn optimize_mir_module(module: &mut Module, opt_level: OptLevel) {
 
     // 2) Rewrite `call -> switch` patterns to use the `$unboxed` ABI (CallIdMulti + CondBr).
     //
-    // 3) Rewrite local `MakeEnum Option::* -> switch` and `CheckedCast -> switch` patterns.
+    // 3) Rewrite local `MakeEnum Option::* -> switch` patterns.
     //
     // These rewrites are block-local and intentionally conservative.
     for func in &mut module.functions {
@@ -152,11 +152,6 @@ fn rewrite_option_switches(func: &mut Function, unboxed: &BTreeMap<FunctionId, F
             continue;
         }
 
-        if try_rewrite_checked_cast_option_switch(next_local, block, scrutinee, last_index, targets)
-        {
-            continue;
-        }
-
         let _ = try_rewrite_make_enum_option_switch(next_local, block, scrutinee, targets);
     }
 }
@@ -268,60 +263,6 @@ fn try_rewrite_make_enum_option_switch(
             });
         }
     }
-
-    block.terminator = Terminator::CondBr {
-        cond: Operand::Local(tag_local),
-        then_target: targets.some_target,
-        then_args: if targets.binds_payload {
-            vec![Operand::Local(payload_local)]
-        } else {
-            Vec::new()
-        },
-        else_target: targets.none_target,
-        else_args: Vec::new(),
-    };
-
-    true
-}
-
-fn try_rewrite_checked_cast_option_switch(
-    next_local: &mut usize,
-    block: &mut rusk_mir::BasicBlock,
-    scrutinee: Local,
-    last_index: usize,
-    targets: OptionSwitchTargets,
-) -> bool {
-    let last_instr = block.instructions.get(last_index).cloned();
-    let Some(Instruction::CheckedCast { dst, value, ty }) = last_instr else {
-        return false;
-    };
-    let (dst, value, ty) = (dst, value, ty);
-
-    if dst != scrutinee {
-        return false;
-    }
-
-    let payload_local = alloc_local(next_local);
-    let tag_local = alloc_local(next_local);
-
-    // Materialize the cast input exactly once so we can reuse it both for the type test and for
-    // the `Some(payload)` binding.
-    block.instructions[last_index] = match value {
-        Operand::Local(src) => Instruction::Copy {
-            dst: payload_local,
-            src,
-        },
-        Operand::Literal(lit) => Instruction::Const {
-            dst: payload_local,
-            value: lit,
-        },
-    };
-
-    block.instructions.push(Instruction::IsType {
-        dst: tag_local,
-        value: Operand::Local(payload_local),
-        ty,
-    });
 
     block.terminator = Terminator::CondBr {
         cond: Operand::Local(tag_local),
@@ -680,8 +621,7 @@ fn count_local_uses(func: &Function) -> Vec<usize> {
                 | Instruction::Move { src, .. }
                 | Instruction::AsReadonly { src, .. } => bump(&mut counts, *src),
 
-                Instruction::IsType { value, ty, .. }
-                | Instruction::CheckedCast { value, ty, .. } => {
+                Instruction::IsType { value, ty, .. } => {
                     bump_operand(&mut counts, value);
                     bump_operand(&mut counts, ty);
                 }

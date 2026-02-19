@@ -80,17 +80,23 @@ fn array_len_is_available_via_core_len_interface() {
 }
 
 #[test]
-fn string_chars_returns_char_iterator() {
+fn for_loop_over_string_iterates_unicode_scalars() {
     let src = r#"
-        fn count_ascii() -> int { "hello".chars().count() }
+        fn count_ascii() -> int {
+            let n = 0;
+            for _c in "hello" { n = n + 1; };
+            n
+        }
 
-        fn count_unicode_scalars() -> int { "hé".chars().count() }
+        fn count_unicode_scalars() -> int {
+            let n = 0;
+            for _c in "hé" { n = n + 1; };
+            n
+        }
 
         fn first_char() -> int {
-            match "hé".chars().next() {
-                Option::Some(c) => c.to_int(),
-                Option::None => -1,
-            }
+            for c in "hé" { return c.to_int(); };
+            -1
         }
     "#;
 

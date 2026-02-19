@@ -1328,19 +1328,6 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         "core::intrinsics::unit_eq" | "core::intrinsics::unit_ne" => {
             Some(sig(vec![HostType::Unit, HostType::Unit], HostType::Bool))
         }
-        // Iterator protocol.
-        "core::intrinsics::into_iter" => Some(sig(
-            vec![HostType::TypeRep, HostType::Array(Box::new(HostType::Any))],
-            HostType::Any,
-        )),
-        "core::intrinsics::next" => {
-            Some(sig(vec![HostType::TypeRep, HostType::Any], HostType::Any))
-        }
-        "core::intrinsics::string_into_iter" => Some(sig(vec![HostType::String], HostType::Any)),
-        "core::intrinsics::string_next" => Some(sig(vec![HostType::Any], HostType::Any)),
-        "core::intrinsics::bytes_into_iter" => Some(sig(vec![HostType::Bytes], HostType::Any)),
-        "core::intrinsics::bytes_next" => Some(sig(vec![HostType::Any], HostType::Any)),
-
         // `byte` / `char` conversions.
         "core::intrinsics::int_to_byte" => Some(sig(vec![HostType::Int], HostType::Any)),
         "core::intrinsics::int_try_byte" => Some(sig(vec![HostType::Int], HostType::Any)),
@@ -1367,6 +1354,10 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             vec![HostType::String, HostType::Int, HostType::Any],
             HostType::String,
         )),
+        "core::intrinsics::string_next_index"
+        | "core::intrinsics::string_codepoint_at" => {
+            Some(sig(vec![HostType::String, HostType::Int], HostType::Int))
+        }
         "core::intrinsics::string_from_chars" => Some(sig(
             vec![HostType::Array(Box::new(HostType::Any))],
             HostType::String,
@@ -2410,12 +2401,6 @@ impl Compiler {
         )?;
         synthesize_prim_wrapper(
             self,
-            "string::chars",
-            &[Mutability::Readonly],
-            "core::intrinsics::string_into_iter",
-        )?;
-        synthesize_prim_wrapper(
-            self,
             "string::from_chars",
             &[Mutability::Readonly],
             "core::intrinsics::string_from_chars",
@@ -2456,139 +2441,6 @@ impl Compiler {
             &[Mutability::Readonly],
             "core::intrinsics::string_from_utf16_be_strict",
         )?;
-
-        // `core::iter::Iterator` impls for built-in iterator state types.
-        //
-        // These are used by:
-        // - `for` lowering (`Iterator::next`)
-        // - dyn dispatch over `core::iter::Iterator` (dispatch table population)
-        // and must therefore exist as real MIR functions (not just VM intrinsics).
-
-        // ArrayIter<T>::next delegates to `core::intrinsics::next`.
-        {
-            let name = "impl::core::iter::Iterator::for::core::intrinsics::ArrayIter::next";
-            if !self.module.function_ids.contains_key(name) {
-                let generics = vec![typeck::GenericParamInfo {
-                    name: "T".to_string(),
-                    arity: 0,
-                    bounds: Vec::new(),
-                    span: span0,
-                }];
-                let mut lowerer = FunctionLowerer::new(
-                    self,
-                    FnKind::Real,
-                    ModulePath::root(),
-                    name.to_string(),
-                    generics,
-                );
-                lowerer.bind_type_rep_params_for_signature();
-
-                let elem_rep = lowerer
-                    .generic_type_reps
-                    .first()
-                    .and_then(|v| *v)
-                    .ok_or_else(|| {
-                        CompileError::new(
-                            "internal error: missing ArrayIter<T> TypeRep param",
-                            span0,
-                        )
-                    })?;
-
-                let recv_local = lowerer.alloc_local();
-                lowerer.params.push(Param {
-                    local: recv_local,
-                    mutability: Mutability::Mutable,
-                    ty: None,
-                });
-
-                let out = lowerer.alloc_local();
-                lowerer.emit(Instruction::Call {
-                    dst: Some(out),
-                    func: "core::intrinsics::next".to_string(),
-                    args: vec![Operand::Local(elem_rep), Operand::Local(recv_local)],
-                });
-                lowerer.set_terminator(Terminator::Return {
-                    value: Operand::Local(out),
-                })?;
-
-                let mir_fn = lowerer.finish()?;
-                self.module.add_function(mir_fn).map_err(|message| {
-                    CompileError::new(format!("internal error: {message}"), span0)
-                })?;
-            }
-        }
-
-        // StringIter::next delegates to `core::intrinsics::string_next` (returns `Option<char>`).
-        {
-            let name = "impl::core::iter::Iterator::for::core::intrinsics::StringIter::next";
-            if !self.module.function_ids.contains_key(name) {
-                let mut lowerer = FunctionLowerer::new(
-                    self,
-                    FnKind::Real,
-                    ModulePath::root(),
-                    name.to_string(),
-                    Vec::new(),
-                );
-
-                let recv_local = lowerer.alloc_local();
-                lowerer.params.push(Param {
-                    local: recv_local,
-                    mutability: Mutability::Mutable,
-                    ty: None,
-                });
-
-                let out = lowerer.alloc_local();
-                lowerer.emit(Instruction::Call {
-                    dst: Some(out),
-                    func: "core::intrinsics::string_next".to_string(),
-                    args: vec![Operand::Local(recv_local)],
-                });
-                lowerer.set_terminator(Terminator::Return {
-                    value: Operand::Local(out),
-                })?;
-
-                let mir_fn = lowerer.finish()?;
-                self.module.add_function(mir_fn).map_err(|message| {
-                    CompileError::new(format!("internal error: {message}"), span0)
-                })?;
-            }
-        }
-
-        // BytesIter::next delegates to `core::intrinsics::bytes_next` (returns `Option<byte>`).
-        {
-            let name = "impl::core::iter::Iterator::for::core::intrinsics::BytesIter::next";
-            if !self.module.function_ids.contains_key(name) {
-                let mut lowerer = FunctionLowerer::new(
-                    self,
-                    FnKind::Real,
-                    ModulePath::root(),
-                    name.to_string(),
-                    Vec::new(),
-                );
-
-                let recv_local = lowerer.alloc_local();
-                lowerer.params.push(Param {
-                    local: recv_local,
-                    mutability: Mutability::Mutable,
-                    ty: None,
-                });
-
-                let out = lowerer.alloc_local();
-                lowerer.emit(Instruction::Call {
-                    dst: Some(out),
-                    func: "core::intrinsics::bytes_next".to_string(),
-                    args: vec![Operand::Local(recv_local)],
-                });
-                lowerer.set_terminator(Terminator::Return {
-                    value: Operand::Local(out),
-                })?;
-
-                let mir_fn = lowerer.finish()?;
-                self.module.add_function(mir_fn).map_err(|message| {
-                    CompileError::new(format!("internal error: {message}"), span0)
-                })?;
-            }
-        }
 
         Ok(())
     }
@@ -2829,11 +2681,6 @@ impl Compiler {
                     src: remap_local(map, src),
                 },
                 Instruction::IsType { dst, value, ty } => Instruction::IsType {
-                    dst: remap_local(map, dst),
-                    value: remap_operand(map, &value),
-                    ty: remap_operand(map, &ty),
-                },
-                Instruction::CheckedCast { dst, value, ty } => Instruction::CheckedCast {
                     dst: remap_local(map, dst),
                     value: remap_operand(map, &value),
                     ty: remap_operand(map, &ty),
@@ -3435,8 +3282,7 @@ impl Compiler {
                 Instruction::Copy { .. }
                 | Instruction::Move { .. }
                 | Instruction::AsReadonly { .. } => Ok(()),
-                Instruction::IsType { value, ty, .. }
-                | Instruction::CheckedCast { value, ty, .. } => {
+                Instruction::IsType { value, ty, .. } => {
                     resolve_operand(function_ids, value)?;
                     resolve_operand(function_ids, ty)
                 }
@@ -6301,15 +6147,6 @@ impl<'a> FunctionLowerer<'a> {
         body: &Block,
         span: Span,
     ) -> Result<Local, CompileError> {
-        // Desugar:
-        //   let __iterable = iter_expr;
-        //   let __it = /* either __iterable, or an intrinsic iterator constructor */;
-        //   loop {
-        //     match core::iter::Iterator::next(__it) {
-        //       Option::Some(x) => { body; }
-        //       Option::None => break;
-        //     }
-        //   }
         let iterable_local = self.lower_expr(iter)?;
         let iterable_ty = self.expr_ty(iter).ok_or_else(|| {
             CompileError::new(
@@ -6318,114 +6155,296 @@ impl<'a> FunctionLowerer<'a> {
             )
         })?;
 
-        let (it_local, it_ty) = match iterable_ty.clone() {
+        // Built-in iterable containers (arrays/bytes/strings) are lowered directly to index-based
+        // loops, so the VM/bytecode spec does not depend on sysroot iterator state objects or
+        // their layouts.
+        let builtin = match iterable_ty.clone() {
+            Ty::Array(_) | Ty::Bytes | Ty::String => Some(iterable_ty.clone()),
             Ty::Readonly(inner) => match *inner {
-                Ty::Array(elem) => {
-                    let elem_ty = elem.as_ref().as_readonly_view();
-                    let elem_rep = self.lower_type_rep_for_ty(&elem_ty, iter.span())?;
+                Ty::Array(_) | Ty::Bytes | Ty::String => Some(*inner),
+                _ => None,
+            },
+            _ => None,
+        };
 
-                    let it_local = self.alloc_local();
-                    self.emit(Instruction::Call {
-                        dst: Some(it_local),
-                        func: "core::intrinsics::into_iter".to_string(),
-                        args: vec![elem_rep, Operand::Local(iterable_local)],
+        if let Some(builtin_ty) = builtin {
+            match builtin_ty {
+                Ty::Array(_) => {
+                    // Desugar:
+                    //   let __arr = iter;
+                    //   let __i = 0;
+                    //   let __len = len(__arr);
+                    //   loop {
+                    //     if __i >= __len { break; }
+                    //     let x = __arr[__i];
+                    //     { body }
+                    //     __i = __i + 1;
+                    //   }
+                    //
+                    // `continue` must still advance `__i`, so we use a dedicated step block.
+                    let idx_local = self.alloc_int(0);
+                    let one_local = self.alloc_int(1);
+                    let len_local = self.alloc_local();
+                    self.emit(Instruction::Len {
+                        dst: len_local,
+                        arr: Operand::Local(iterable_local),
                     });
-                    (
-                        it_local,
-                        Ty::App(
-                            typeck::TyCon::Named("core::intrinsics::ArrayIter".to_string()),
-                            vec![elem_ty],
-                        ),
-                    )
-                }
-                Ty::String => {
-                    let it_local = self.alloc_local();
-                    self.emit(Instruction::Call {
-                        dst: Some(it_local),
-                        func: "core::intrinsics::string_into_iter".to_string(),
-                        args: vec![Operand::Local(iterable_local)],
+
+                    let loop_head = self.new_block("for_head");
+                    let loop_body = self.new_block("for_body");
+                    let loop_step = self.new_block("for_step");
+                    let after_block = self.new_block("for_after");
+
+                    self.set_terminator(Terminator::Br {
+                        target: loop_head,
+                        args: Vec::new(),
+                    })?;
+
+                    self.loop_stack.push(LoopTargets {
+                        continue_block: loop_step,
+                        break_block: after_block,
                     });
-                    (
-                        it_local,
-                        Ty::App(
-                            typeck::TyCon::Named("core::intrinsics::StringIter".to_string()),
-                            vec![],
-                        ),
-                    )
+
+                    self.set_current(loop_head);
+                    let cond_local = self.alloc_local();
+                    self.emit(Instruction::IntLt {
+                        dst: cond_local,
+                        a: Operand::Local(idx_local),
+                        b: Operand::Local(len_local),
+                    });
+                    self.set_terminator(Terminator::CondBr {
+                        cond: Operand::Local(cond_local),
+                        then_target: loop_body,
+                        then_args: Vec::new(),
+                        else_target: after_block,
+                        else_args: Vec::new(),
+                    })?;
+
+                    self.set_current(loop_body);
+                    let elem_local = self.alloc_local();
+                    self.emit(Instruction::IndexGet {
+                        dst: elem_local,
+                        arr: Operand::Local(iterable_local),
+                        idx: Operand::Local(idx_local),
+                    });
+
+                    self.push_scope();
+                    self.bind_var(
+                        &binding.name,
+                        VarInfo {
+                            storage: VarStorage::Local(elem_local),
+                            kind: BindingKind::Const,
+                        },
+                    );
+                    self.lower_block_stmt(body)?;
+                    self.pop_scope();
+                    if !self.is_current_terminated() {
+                        self.set_terminator(Terminator::Br {
+                            target: loop_step,
+                            args: Vec::new(),
+                        })?;
+                    }
+
+                    self.set_current(loop_step);
+                    self.emit(Instruction::IntAdd {
+                        dst: idx_local,
+                        a: Operand::Local(idx_local),
+                        b: Operand::Local(one_local),
+                    });
+                    self.set_terminator(Terminator::Br {
+                        target: loop_head,
+                        args: Vec::new(),
+                    })?;
+
+                    self.loop_stack.pop();
+                    self.set_current(after_block);
+                    let _ = span;
+                    return Ok(self.alloc_unit());
                 }
                 Ty::Bytes => {
-                    let it_local = self.alloc_local();
+                    let idx_local = self.alloc_int(0);
+                    let one_local = self.alloc_int(1);
+                    let len_local = self.alloc_local();
                     self.emit(Instruction::Call {
-                        dst: Some(it_local),
-                        func: "core::intrinsics::bytes_into_iter".to_string(),
+                        dst: Some(len_local),
+                        func: "core::intrinsics::bytes_len".to_string(),
                         args: vec![Operand::Local(iterable_local)],
                     });
-                    (
-                        it_local,
-                        Ty::App(
-                            typeck::TyCon::Named("core::intrinsics::BytesIter".to_string()),
-                            vec![],
-                        ),
-                    )
-                }
-                _ => {
-                    return Err(CompileError::new(
-                        "internal error: cannot iterate over a readonly iterator value",
-                        iter.span(),
-                    ));
-                }
-            },
-            Ty::Array(elem) => {
-                let elem_ty = *elem;
-                let elem_rep = self.lower_type_rep_for_ty(&elem_ty, iter.span())?;
 
-                let it_local = self.alloc_local();
-                self.emit(Instruction::Call {
-                    dst: Some(it_local),
-                    func: "core::intrinsics::into_iter".to_string(),
-                    args: vec![elem_rep, Operand::Local(iterable_local)],
-                });
-                (
-                    it_local,
-                    Ty::App(
-                        typeck::TyCon::Named("core::intrinsics::ArrayIter".to_string()),
-                        vec![elem_ty],
-                    ),
-                )
+                    let loop_head = self.new_block("for_head");
+                    let loop_body = self.new_block("for_body");
+                    let loop_step = self.new_block("for_step");
+                    let after_block = self.new_block("for_after");
+
+                    self.set_terminator(Terminator::Br {
+                        target: loop_head,
+                        args: Vec::new(),
+                    })?;
+
+                    self.loop_stack.push(LoopTargets {
+                        continue_block: loop_step,
+                        break_block: after_block,
+                    });
+
+                    self.set_current(loop_head);
+                    let cond_local = self.alloc_local();
+                    self.emit(Instruction::IntLt {
+                        dst: cond_local,
+                        a: Operand::Local(idx_local),
+                        b: Operand::Local(len_local),
+                    });
+                    self.set_terminator(Terminator::CondBr {
+                        cond: Operand::Local(cond_local),
+                        then_target: loop_body,
+                        then_args: Vec::new(),
+                        else_target: after_block,
+                        else_args: Vec::new(),
+                    })?;
+
+                    self.set_current(loop_body);
+                    let elem_local = self.alloc_local();
+                    self.emit(Instruction::IndexGet {
+                        dst: elem_local,
+                        arr: Operand::Local(iterable_local),
+                        idx: Operand::Local(idx_local),
+                    });
+
+                    self.push_scope();
+                    self.bind_var(
+                        &binding.name,
+                        VarInfo {
+                            storage: VarStorage::Local(elem_local),
+                            kind: BindingKind::Const,
+                        },
+                    );
+                    self.lower_block_stmt(body)?;
+                    self.pop_scope();
+                    if !self.is_current_terminated() {
+                        self.set_terminator(Terminator::Br {
+                            target: loop_step,
+                            args: Vec::new(),
+                        })?;
+                    }
+
+                    self.set_current(loop_step);
+                    self.emit(Instruction::IntAdd {
+                        dst: idx_local,
+                        a: Operand::Local(idx_local),
+                        b: Operand::Local(one_local),
+                    });
+                    self.set_terminator(Terminator::Br {
+                        target: loop_head,
+                        args: Vec::new(),
+                    })?;
+
+                    self.loop_stack.pop();
+                    self.set_current(after_block);
+                    let _ = span;
+                    return Ok(self.alloc_unit());
+                }
+                Ty::String => {
+                    // Strings iterate over Unicode scalar values (`char`) in UTF-8 byte order.
+                    let idx_local = self.alloc_int(0);
+                    let minus_one_local = self.alloc_int(-1);
+
+                    let loop_head = self.new_block("for_head");
+                    let loop_body = self.new_block("for_body");
+                    let loop_step = self.new_block("for_step");
+                    let after_block = self.new_block("for_after");
+
+                    self.set_terminator(Terminator::Br {
+                        target: loop_head,
+                        args: Vec::new(),
+                    })?;
+
+                    self.loop_stack.push(LoopTargets {
+                        continue_block: loop_step,
+                        break_block: after_block,
+                    });
+
+                    self.set_current(loop_head);
+                    let next_idx_local = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(next_idx_local),
+                        func: "core::intrinsics::string_next_index".to_string(),
+                        args: vec![Operand::Local(iterable_local), Operand::Local(idx_local)],
+                    });
+
+                    let is_end_local = self.alloc_local();
+                    self.emit(Instruction::IntEq {
+                        dst: is_end_local,
+                        a: Operand::Local(next_idx_local),
+                        b: Operand::Local(minus_one_local),
+                    });
+
+                    self.set_terminator(Terminator::CondBr {
+                        cond: Operand::Local(is_end_local),
+                        then_target: after_block,
+                        then_args: Vec::new(),
+                        else_target: loop_body,
+                        else_args: Vec::new(),
+                    })?;
+
+                    self.set_current(loop_body);
+                    let codepoint_local = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(codepoint_local),
+                        func: "core::intrinsics::string_codepoint_at".to_string(),
+                        args: vec![Operand::Local(iterable_local), Operand::Local(idx_local)],
+                    });
+                    let ch_local = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(ch_local),
+                        func: "core::intrinsics::int_to_char".to_string(),
+                        args: vec![Operand::Local(codepoint_local)],
+                    });
+
+                    self.push_scope();
+                    self.bind_var(
+                        &binding.name,
+                        VarInfo {
+                            storage: VarStorage::Local(ch_local),
+                            kind: BindingKind::Const,
+                        },
+                    );
+                    self.lower_block_stmt(body)?;
+                    self.pop_scope();
+                    if !self.is_current_terminated() {
+                        self.set_terminator(Terminator::Br {
+                            target: loop_step,
+                            args: Vec::new(),
+                        })?;
+                    }
+
+                    self.set_current(loop_step);
+                    self.emit(Instruction::Copy {
+                        dst: idx_local,
+                        src: next_idx_local,
+                    });
+                    self.set_terminator(Terminator::Br {
+                        target: loop_head,
+                        args: Vec::new(),
+                    })?;
+
+                    self.loop_stack.pop();
+                    self.set_current(after_block);
+                    let _ = span;
+                    return Ok(self.alloc_unit());
+                }
+                _ => {}
             }
-            Ty::String => {
-                let it_local = self.alloc_local();
-                self.emit(Instruction::Call {
-                    dst: Some(it_local),
-                    func: "core::intrinsics::string_into_iter".to_string(),
-                    args: vec![Operand::Local(iterable_local)],
-                });
-                (
-                    it_local,
-                    Ty::App(
-                        typeck::TyCon::Named("core::intrinsics::StringIter".to_string()),
-                        vec![],
-                    ),
-                )
-            }
-            Ty::Bytes => {
-                let it_local = self.alloc_local();
-                self.emit(Instruction::Call {
-                    dst: Some(it_local),
-                    func: "core::intrinsics::bytes_into_iter".to_string(),
-                    args: vec![Operand::Local(iterable_local)],
-                });
-                (
-                    it_local,
-                    Ty::App(
-                        typeck::TyCon::Named("core::intrinsics::BytesIter".to_string()),
-                        vec![],
-                    ),
-                )
-            }
-            // Otherwise: treat the value itself as the iterator.
-            other => (iterable_local, other),
-        };
+        }
+
+        // Otherwise: treat the value itself as the iterator, using `core::iter::Iterator::next`.
+        if matches!(iterable_ty, Ty::Readonly(_)) {
+            return Err(CompileError::new(
+                "internal error: cannot iterate over a readonly iterator value",
+                iter.span(),
+            ));
+        }
+
+        let it_local = iterable_local;
+        let it_ty = iterable_ty.clone();
 
         let loop_head = self.new_block("for_head");
         let loop_body = self.new_block("for_body");
@@ -7212,14 +7231,69 @@ impl<'a> FunctionLowerer<'a> {
                 ));
             }
         };
-        let dst = self.alloc_local();
-        self.emit(Instruction::CheckedCast {
-            dst,
+
+        // Desugar `expr as? T` to:
+        //   let v = expr;
+        //   let ok = v is T;
+        //   if ok { Option::Some(v) } else { Option::None }
+        //
+        // Note: This keeps `Option` as a regular library enum (no VM special-casing).
+        let ok_local = self.alloc_local();
+        self.emit(Instruction::IsType {
+            dst: ok_local,
             value: Operand::Local(value),
-            ty: target_ty,
+            ty: target_ty.clone(),
         });
+
+        let then_block_id = self.new_block("checked_cast_some");
+        let else_block_id = self.new_block("checked_cast_none");
+        let join_block_id = self.new_block("checked_cast_join");
+        let join_param = self.alloc_local();
+        self.blocks[join_block_id.0].params = vec![join_param];
+
+        self.set_terminator(Terminator::CondBr {
+            cond: Operand::Local(ok_local),
+            then_target: then_block_id,
+            then_args: Vec::new(),
+            else_target: else_block_id,
+            else_args: Vec::new(),
+        })?;
+
+        self.set_current(then_block_id);
+        let some_local = self.alloc_local();
+        self.emit(Instruction::MakeEnum {
+            dst: some_local,
+            enum_name: "Option".to_string(),
+            type_args: vec![target_ty.clone()],
+            variant: "Some".to_string(),
+            fields: vec![Operand::Local(value)],
+        });
+        if !self.is_current_terminated() {
+            self.set_terminator(Terminator::Br {
+                target: join_block_id,
+                args: vec![Operand::Local(some_local)],
+            })?;
+        }
+
+        self.set_current(else_block_id);
+        let none_local = self.alloc_local();
+        self.emit(Instruction::MakeEnum {
+            dst: none_local,
+            enum_name: "Option".to_string(),
+            type_args: vec![target_ty],
+            variant: "None".to_string(),
+            fields: Vec::new(),
+        });
+        if !self.is_current_terminated() {
+            self.set_terminator(Terminator::Br {
+                target: join_block_id,
+                args: vec![Operand::Local(none_local)],
+            })?;
+        }
+
+        self.set_current(join_block_id);
         let _ = span;
-        Ok(dst)
+        Ok(join_param)
     }
 
     fn lower_named_call(&mut self, func: &str, args: Vec<Operand>) -> Result<Local, CompileError> {
