@@ -73,6 +73,10 @@ pub struct VmMetrics {
     pub call_instructions: u64,
     pub icall_instructions: u64,
     pub vcall_instructions: u64,
+    /// Number of `VCall`s handled by a VM fast path rather than the module dispatch table.
+    ///
+    /// Best-effort; requires metrics enabled.
+    pub vcall_fast_path_hits: u64,
 
     pub push_handler_instructions: u64,
     pub pop_handler_instructions: u64,
@@ -191,6 +195,9 @@ impl VmMetrics {
         self.vcall_instructions = self
             .vcall_instructions
             .saturating_add(other.vcall_instructions);
+        self.vcall_fast_path_hits = self
+            .vcall_fast_path_hits
+            .saturating_add(other.vcall_fast_path_hits);
 
         self.push_handler_instructions = self
             .push_handler_instructions
@@ -1927,7 +1934,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("int_add b: {msg}")),
                 };
-                if let Err(msg) = write_value(frame, *dst, Value::Int(a + b)) {
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_add(b))) {
                     return trap(vm, format!("int_add dst: {msg}"));
                 }
             }
@@ -1940,7 +1947,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("int_sub b: {msg}")),
                 };
-                if let Err(msg) = write_value(frame, *dst, Value::Int(a - b)) {
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_sub(b))) {
                     return trap(vm, format!("int_sub dst: {msg}"));
                 }
             }
@@ -1953,7 +1960,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("int_mul b: {msg}")),
                 };
-                if let Err(msg) = write_value(frame, *dst, Value::Int(a * b)) {
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_mul(b))) {
                     return trap(vm, format!("int_mul dst: {msg}"));
                 }
             }
@@ -1969,7 +1976,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 if b == 0 {
                     return trap(vm, "int_div: division by zero".to_string());
                 }
-                if let Err(msg) = write_value(frame, *dst, Value::Int(a / b)) {
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_div(b))) {
                     return trap(vm, format!("int_div dst: {msg}"));
                 }
             }
@@ -1985,7 +1992,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 if b == 0 {
                     return trap(vm, "int_mod: modulo by zero".to_string());
                 }
-                if let Err(msg) = write_value(frame, *dst, Value::Int(a % b)) {
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_rem(b))) {
                     return trap(vm, format!("int_mod dst: {msg}"));
                 }
             }
@@ -2336,6 +2343,268 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("vcall obj: {msg}")),
                 };
+
+                // Fast path for common core interface calls on primitives.
+                //
+                // This is primarily an optimization for generic/bounded code that uses `VCall`
+                // even when the runtime receiver is a known primitive (e.g. `Hash::hash` on
+                // `int` keys in `core::map::Map`).
+                if method_type_args.is_empty() {
+                    let fast_out: Option<Value> = match (method.as_str(), &recv, args.as_slice()) {
+                        ("core::hash::Hash::hash", Value::Unit, []) => Some(Value::Int(0)),
+                        ("core::hash::Hash::hash", Value::Bool(b), []) => {
+                            Some(Value::Int(hash_int_fnv(if *b { 1 } else { 0 })))
+                        }
+                        ("core::hash::Hash::hash", Value::Int(v), []) => {
+                            Some(Value::Int(hash_int_fnv(*v)))
+                        }
+                        ("core::hash::Hash::hash", Value::Byte(v), []) => {
+                            Some(Value::Int(hash_int_fnv(*v as i64)))
+                        }
+                        ("core::hash::Hash::hash", Value::Char(v), []) => {
+                            Some(Value::Int(hash_int_fnv(*v as u32 as i64)))
+                        }
+                        ("core::hash::Hash::hash", Value::String(s), []) => {
+                            let bytes = match s.as_str(&vm.heap) {
+                                Ok(s) => s.as_bytes(),
+                                Err(msg) => return trap(vm, format!("vcall hash_string: {msg}")),
+                            };
+                            Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
+                        }
+                        ("core::hash::Hash::hash", Value::Bytes(b), []) => {
+                            let bytes = match b.as_slice(&vm.heap) {
+                                Ok(b) => b,
+                                Err(msg) => return trap(vm, format!("vcall hash_bytes: {msg}")),
+                            };
+                            Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
+                        }
+
+                        ("core::ops::Eq::eq", Value::Unit, [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            matches!(other, Value::Unit).then_some(Value::Bool(true))
+                        }
+                        ("core::ops::Ne::ne", Value::Unit, [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            matches!(other, Value::Unit).then_some(Value::Bool(false))
+                        }
+                        ("core::ops::Eq::eq", Value::Bool(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Bool(b) => Some(Value::Bool(*a == b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::Bool(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Bool(b) => Some(Value::Bool(*a != b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Eq::eq", Value::Int(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Int(b) => Some(Value::Bool(*a == b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::Int(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Int(b) => Some(Value::Bool(*a != b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Eq::eq", Value::Float(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Float(b) => Some(Value::Bool(*a == b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::Float(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Float(b) => Some(Value::Bool(*a != b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Eq::eq", Value::Byte(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Byte(b) => Some(Value::Bool(*a == b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::Byte(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Byte(b) => Some(Value::Bool(*a != b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Eq::eq", Value::Char(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Char(b) => Some(Value::Bool(*a == b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::Char(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Char(b) => Some(Value::Bool(*a != b)),
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Eq::eq", Value::String(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::String(b) => {
+                                    let a_str = match a.as_str(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall string_eq: {msg}"));
+                                        }
+                                    };
+                                    let b_str = match b.as_str(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall string_eq: {msg}"));
+                                        }
+                                    };
+                                    Some(Value::Bool(a_str == b_str))
+                                }
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::String(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::String(b) => {
+                                    let a_str = match a.as_str(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall string_ne: {msg}"));
+                                        }
+                                    };
+                                    let b_str = match b.as_str(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall string_ne: {msg}"));
+                                        }
+                                    };
+                                    Some(Value::Bool(a_str != b_str))
+                                }
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Eq::eq", Value::Bytes(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Bytes(b) => {
+                                    let a_bytes = match a.as_slice(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall bytes_eq: {msg}"));
+                                        }
+                                    };
+                                    let b_bytes = match b.as_slice(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall bytes_eq: {msg}"));
+                                        }
+                                    };
+                                    Some(Value::Bool(a_bytes == b_bytes))
+                                }
+                                _ => None,
+                            }
+                        }
+                        ("core::ops::Ne::ne", Value::Bytes(a), [other]) => {
+                            let other = match read_value(frame, *other) {
+                                Ok(v) => v,
+                                Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                            };
+                            match other {
+                                Value::Bytes(b) => {
+                                    let a_bytes = match a.as_slice(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall bytes_ne: {msg}"));
+                                        }
+                                    };
+                                    let b_bytes = match b.as_slice(&vm.heap) {
+                                        Ok(s) => s,
+                                        Err(msg) => {
+                                            return trap(vm, format!("vcall bytes_ne: {msg}"));
+                                        }
+                                    };
+                                    Some(Value::Bool(a_bytes != b_bytes))
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(out) = fast_out {
+                        if vm.collect_metrics {
+                            vm.metrics.vcall_fast_path_hits =
+                                vm.metrics.vcall_fast_path_hits.saturating_add(1);
+                        }
+                        if let Some(dst) = dst
+                            && let Err(msg) = write_value(frame, *dst, out)
+                        {
+                            return trap(vm, format!("vcall dst: {msg}"));
+                        }
+                        continue;
+                    }
+                }
                 let (type_name, type_args) = match &recv {
                     Value::Unit => ("unit".to_string(), Vec::new()),
                     Value::Bool(_) => ("bool".to_string(), Vec::new()),
@@ -3466,6 +3735,23 @@ const STRING_ITER_FIELD_INDEX: &str = "idx";
 const BYTES_ITER_TYPE: &str = "core::intrinsics::BytesIter";
 const BYTES_ITER_FIELD_BYTES: &str = "b";
 const BYTES_ITER_FIELD_INDEX: &str = "idx";
+
+// Hashing: deterministic (non-cryptographic) 64-bit FNV-1a, returned as `int`.
+const FNV1A_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV1A_PRIME: u64 = 0x100000001b3;
+
+fn fnv1a_hash<I: IntoIterator<Item = u8>>(bytes: I) -> i64 {
+    let mut hash = FNV1A_OFFSET_BASIS;
+    for b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV1A_PRIME);
+    }
+    hash as i64
+}
+
+fn hash_int_fnv(v: i64) -> i64 {
+    fnv1a_hash((v as u64).to_le_bytes())
+}
 
 fn eval_core_intrinsic(
     module: &ExecutableModule,

@@ -211,12 +211,13 @@ fn main() {
 \"run\":{{\"total_ns\":{run_total_ns},\"avg_ns\":{run_avg_ns},\
 \"vm_metrics\":{{\"executed_instructions\":{vm_ei},\"const_instructions\":{vm_const},\
 \"copy_instructions\":{vm_copy},\"move_instructions\":{vm_move},\"as_readonly_instructions\":{vm_ro},\
-\"int_binop_instructions\":{vm_ibi},\"int_cmp_instructions\":{vm_icmp},\"bool_op_instructions\":{vm_bop},\
-\"call_instructions\":{vm_call},\"icall_instructions\":{vm_icall},\"vcall_instructions\":{vm_vcall},\
-\"push_handler_instructions\":{vm_pushh},\"pop_handler_instructions\":{vm_poph},\
-\"perform_instructions\":{vm_perf},\"resume_instructions\":{vm_res},\
-\"jump_instructions\":{vm_j},\"jumpif_instructions\":{vm_jif},\"switch_instructions\":{vm_sw},\
-\"return_instructions\":{vm_ret},\"trap_instructions\":{vm_trap},\"other_instructions\":{vm_other}}}}}}}",
+	\"int_binop_instructions\":{vm_ibi},\"int_cmp_instructions\":{vm_icmp},\"bool_op_instructions\":{vm_bop},\
+	\"call_instructions\":{vm_call},\"icall_instructions\":{vm_icall},\"vcall_instructions\":{vm_vcall},\
+	\"vcall_fast_path_hits\":{vm_vcall_fast},\
+	\"push_handler_instructions\":{vm_pushh},\"pop_handler_instructions\":{vm_poph},\
+	\"perform_instructions\":{vm_perf},\"resume_instructions\":{vm_res},\
+	\"jump_instructions\":{vm_j},\"jumpif_instructions\":{vm_jif},\"switch_instructions\":{vm_sw},\
+	\"return_instructions\":{vm_ret},\"trap_instructions\":{vm_trap},\"other_instructions\":{vm_other}}}}}}}",
             load_ns = duration_ns(compile_metrics.load_time),
             read_ns = duration_ns(compile_metrics.read_time),
             parse_ns = duration_ns(compile_metrics.parse_time),
@@ -238,6 +239,7 @@ fn main() {
             vm_call = agg_metrics.call_instructions,
             vm_icall = agg_metrics.icall_instructions,
             vm_vcall = agg_metrics.vcall_instructions,
+            vm_vcall_fast = agg_metrics.vcall_fast_path_hits,
             vm_pushh = agg_metrics.push_handler_instructions,
             vm_poph = agg_metrics.pop_handler_instructions,
             vm_perf = agg_metrics.perform_instructions,

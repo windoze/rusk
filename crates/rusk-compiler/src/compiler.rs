@@ -2725,49 +2725,71 @@ impl Compiler {
     fn inline_tiny_functions(&mut self) -> Result<(), CompileError> {
         #[derive(Clone)]
         struct InlineBody {
+            name: String,
             params: Vec<Param>,
             locals: usize,
-            instructions: Vec<Instruction>,
-            return_value: Operand,
+            blocks: Vec<BasicBlock>,
         }
 
-        const INLINE_MAX_INSTRUCTIONS: usize = 16;
+        const INLINE_MAX_INSTRUCTIONS: usize = 24;
+        const INLINE_MAX_BLOCKS: usize = 8;
 
         fn inline_body_for_function(func: &Function) -> Option<InlineBody> {
-            if func.blocks.len() != 1 {
+            if func.blocks.is_empty() || func.blocks.len() > INLINE_MAX_BLOCKS {
                 return None;
             }
-            let block = func.blocks.first()?;
-            if !block.params.is_empty() {
-                return None;
-            }
-            if block.instructions.len() > INLINE_MAX_INSTRUCTIONS {
-                return None;
-            }
-            let Terminator::Return { value } = &block.terminator else {
+            let Some(entry) = func.blocks.first() else {
                 return None;
             };
 
+            // The inliner splices the callee CFG into the caller. Entry block parameters would
+            // require passing values from the callsite (function params already cover that).
+            if !entry.params.is_empty() {
+                return None;
+            }
+
+            let instr_count: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
+            if instr_count > INLINE_MAX_INSTRUCTIONS {
+                return None;
+            }
+
             // Very conservative: avoid inlining any function that can perform effects or calls.
-            for instr in &block.instructions {
-                match instr {
-                    Instruction::Call { .. }
-                    | Instruction::CallId { .. }
-                    | Instruction::ICall { .. }
-                    | Instruction::VCall { .. }
-                    | Instruction::PushHandler { .. }
-                    | Instruction::PopHandler
-                    | Instruction::Perform { .. }
-                    | Instruction::Resume { .. } => return None,
-                    _ => {}
+            for block in &func.blocks {
+                for instr in &block.instructions {
+                    match instr {
+                        // Avoid inlining allocations/mutations: these are unlikely to be net wins
+                        // for tiny-function inlining and can interfere with later MIR optimizations
+                        // (e.g. escape analysis).
+                        Instruction::MakeStruct { .. }
+                        | Instruction::MakeArray { .. }
+                        | Instruction::MakeTuple { .. }
+                        | Instruction::MakeEnum { .. }
+                        | Instruction::SetField { .. }
+                        | Instruction::StructSet { .. }
+                        | Instruction::TupleSet { .. }
+                        | Instruction::IndexSet { .. } => return None,
+                        Instruction::Call { .. }
+                        | Instruction::CallId { .. }
+                        | Instruction::CallIdMulti { .. }
+                        | Instruction::ICall { .. }
+                        | Instruction::VCall { .. }
+                        | Instruction::PushHandler { .. }
+                        | Instruction::PopHandler
+                        | Instruction::Perform { .. }
+                        | Instruction::Resume { .. } => return None,
+                        _ => {}
+                    }
+                }
+                if matches!(block.terminator, Terminator::ReturnMulti { .. }) {
+                    return None;
                 }
             }
 
             Some(InlineBody {
+                name: func.name.clone(),
                 params: func.params.clone(),
                 locals: func.locals,
-                instructions: block.instructions.clone(),
-                return_value: value.clone(),
+                blocks: func.blocks.clone(),
             })
         }
 
@@ -3000,6 +3022,83 @@ impl Compiler {
             }
         }
 
+        fn remap_terminator(
+            local_map: &[Local],
+            block_map: &[BlockId],
+            cont_block: BlockId,
+            term: Terminator,
+        ) -> Terminator {
+            match term {
+                Terminator::Return { value } => Terminator::Br {
+                    target: cont_block,
+                    args: vec![remap_operand(local_map, &value)],
+                },
+                Terminator::Trap { message } => Terminator::Trap { message },
+                Terminator::Br { target, args } => Terminator::Br {
+                    target: block_map
+                        .get(target.0)
+                        .copied()
+                        .unwrap_or_else(|| panic!("inline remap: invalid br target {target:?}")),
+                    args: args
+                        .into_iter()
+                        .map(|op| remap_operand(local_map, &op))
+                        .collect(),
+                },
+                Terminator::CondBr {
+                    cond,
+                    then_target,
+                    then_args,
+                    else_target,
+                    else_args,
+                } => Terminator::CondBr {
+                    cond: remap_operand(local_map, &cond),
+                    then_target: block_map.get(then_target.0).copied().unwrap_or_else(|| {
+                        panic!("inline remap: invalid condbr then target {then_target:?}")
+                    }),
+                    then_args: then_args
+                        .into_iter()
+                        .map(|op| remap_operand(local_map, &op))
+                        .collect(),
+                    else_target: block_map.get(else_target.0).copied().unwrap_or_else(|| {
+                        panic!("inline remap: invalid condbr else target {else_target:?}")
+                    }),
+                    else_args: else_args
+                        .into_iter()
+                        .map(|op| remap_operand(local_map, &op))
+                        .collect(),
+                },
+                Terminator::Switch {
+                    value,
+                    cases,
+                    default,
+                } => Terminator::Switch {
+                    value: remap_operand(local_map, &value),
+                    cases: cases
+                        .into_iter()
+                        .map(|case| {
+                            let target =
+                                block_map.get(case.target.0).copied().unwrap_or_else(|| {
+                                    panic!(
+                                        "inline remap: invalid switch target {target:?}",
+                                        target = case.target
+                                    )
+                                });
+                            SwitchCase {
+                                pattern: case.pattern,
+                                target,
+                            }
+                        })
+                        .collect(),
+                    default: block_map.get(default.0).copied().unwrap_or_else(|| {
+                        panic!("inline remap: invalid switch default {default:?}")
+                    }),
+                },
+                Terminator::ReturnMulti { .. } => {
+                    panic!("inline remap: ReturnMulti is not supported for inlining")
+                }
+            }
+        }
+
         let bodies = self
             .module
             .functions
@@ -3008,112 +3107,203 @@ impl Compiler {
             .collect::<Vec<_>>();
 
         for caller_idx in 0..self.module.functions.len() {
-            let Some(caller) = self.module.functions.get_mut(caller_idx) else {
-                continue;
+            let mut next_local = match self.module.functions.get(caller_idx) {
+                Some(f) => f.locals,
+                None => continue,
             };
 
-            let mut next_local = caller.locals;
-            for block in &mut caller.blocks {
-                let old_instructions = std::mem::take(&mut block.instructions);
-                let mut out = Vec::with_capacity(old_instructions.len());
-                for instr in old_instructions {
-                    let Instruction::CallId { dst, func, args } = instr else {
-                        out.push(instr);
-                        continue;
-                    };
-
-                    let CallTarget::Mir(callee_id) = func else {
-                        out.push(Instruction::CallId { dst, func, args });
-                        continue;
-                    };
-
-                    let callee_index = callee_id.0 as usize;
-                    let Some(body) = bodies.get(callee_index).and_then(|v| v.as_ref()) else {
-                        out.push(Instruction::CallId {
-                            dst,
-                            func: CallTarget::Mir(callee_id),
-                            args,
-                        });
-                        continue;
-                    };
-
-                    if args.len() != body.params.len() {
-                        out.push(Instruction::CallId {
-                            dst,
-                            func: CallTarget::Mir(callee_id),
-                            args,
-                        });
-                        continue;
-                    }
-
-                    // Allocate fresh locals for the inlined callee frame and map callee locals to
-                    // caller locals.
-                    let mut local_map = vec![None; body.locals];
-                    for (arg, param) in args.iter().zip(body.params.iter()) {
-                        let param_local = fresh_local(&mut next_local);
-                        local_map[param.local.0] = Some(param_local);
-
-                        match arg {
-                            Operand::Local(src) => out.push(Instruction::Copy {
-                                dst: param_local,
-                                src: *src,
-                            }),
-                            Operand::Literal(lit) => out.push(Instruction::Const {
-                                dst: param_local,
-                                value: lit.clone(),
-                            }),
-                        }
-
-                        if param.mutability == Mutability::Readonly {
-                            out.push(Instruction::AsReadonly {
-                                dst: param_local,
-                                src: param_local,
-                            });
-                        }
-                    }
-
-                    for slot in &mut local_map {
-                        if slot.is_none() {
-                            *slot = Some(fresh_local(&mut next_local));
-                        }
-                    }
-                    let local_map = local_map
-                        .into_iter()
-                        .map(|l| l.expect("all locals mapped"))
-                        .collect::<Vec<_>>();
-
-                    for callee_instr in body.instructions.iter().cloned() {
-                        out.push(remap_instr(&local_map, callee_instr));
-                    }
-
-                    let ret = remap_operand(&local_map, &body.return_value);
-                    if let Some(dst_local) = dst {
-                        match ret {
-                            Operand::Local(src) => {
-                                if dst_local != src {
-                                    out.push(Instruction::Copy {
-                                        dst: dst_local,
-                                        src,
-                                    });
-                                }
-                            }
-                            Operand::Literal(lit) => out.push(Instruction::Const {
-                                dst: dst_local,
-                                value: lit,
-                            }),
-                        }
-                    } else if let Operand::Local(src) = ret {
-                        // Preserve return-value evaluation for trap semantics (e.g. uninitialized
-                        // locals in invalid MIR), even when the value is ignored by the caller.
-                        let sink = fresh_local(&mut next_local);
-                        out.push(Instruction::Copy { dst: sink, src });
-                    }
+            loop {
+                #[derive(Clone)]
+                struct InlineSite {
+                    block_idx: usize,
+                    instr_idx: usize,
+                    dst: Option<Local>,
+                    callee_id: rusk_mir::FunctionId,
+                    args: Vec<Operand>,
                 }
 
-                block.instructions = out;
-            }
+                let site = {
+                    let Some(caller) = self.module.functions.get(caller_idx) else {
+                        break;
+                    };
+                    let mut found: Option<InlineSite> = None;
 
-            caller.locals = next_local;
+                    'blocks: for (block_idx, block) in caller.blocks.iter().enumerate() {
+                        for (instr_idx, instr) in block.instructions.iter().enumerate() {
+                            let Instruction::CallId { dst, func, args } = instr else {
+                                continue;
+                            };
+                            let CallTarget::Mir(callee_id) = func else {
+                                continue;
+                            };
+
+                            let callee_index = callee_id.0 as usize;
+                            let Some(body) = bodies.get(callee_index).and_then(|v| v.as_ref())
+                            else {
+                                continue;
+                            };
+                            if args.len() != body.params.len() {
+                                continue;
+                            }
+
+                            found = Some(InlineSite {
+                                block_idx,
+                                instr_idx,
+                                dst: *dst,
+                                callee_id: *callee_id,
+                                args: args.clone(),
+                            });
+                            break 'blocks;
+                        }
+                    }
+                    found
+                };
+
+                let Some(site) = site else {
+                    break;
+                };
+
+                let callee_index = site.callee_id.0 as usize;
+                let Some(body) = bodies.get(callee_index).and_then(|v| v.as_ref()) else {
+                    break;
+                };
+
+                let Some(caller) = self.module.functions.get_mut(caller_idx) else {
+                    break;
+                };
+
+                let callee_label_prefix = format!("{}::inlined", body.name);
+
+                // Split the callsite block at the call instruction.
+                let (block_label, call_prefix, call_suffix, old_term) = {
+                    let block = caller
+                        .blocks
+                        .get_mut(site.block_idx)
+                        .expect("inline site block");
+                    let block_label = block.label.clone();
+
+                    let mut instrs = std::mem::take(&mut block.instructions);
+                    let mut tail = instrs.split_off(site.instr_idx);
+                    assert!(
+                        !tail.is_empty(),
+                        "inline site instruction index out of bounds"
+                    );
+                    tail.remove(0); // drop the call itself
+
+                    let old_term = std::mem::replace(
+                        &mut block.terminator,
+                        Terminator::Trap {
+                            message: String::new(),
+                        },
+                    );
+                    (block_label, instrs, tail, old_term)
+                };
+
+                let ret_param = site.dst.unwrap_or_else(|| fresh_local(&mut next_local));
+
+                // Continuation block: contains the call suffix + original terminator.
+                let cont_block = BlockId(caller.blocks.len());
+                caller.blocks.push(BasicBlock {
+                    label: format!("{block_label}::inline_cont"),
+                    params: vec![ret_param],
+                    instructions: call_suffix,
+                    terminator: old_term,
+                });
+
+                // Allocate fresh locals for the inlined callee frame and map callee locals to
+                // caller locals.
+                let mut local_map = vec![None; body.locals];
+                let mut arg_setup = Vec::with_capacity(site.args.len().saturating_mul(2));
+                for (arg, param) in site.args.iter().zip(body.params.iter()) {
+                    let param_local = fresh_local(&mut next_local);
+                    local_map[param.local.0] = Some(param_local);
+
+                    match arg {
+                        Operand::Local(src) => arg_setup.push(Instruction::Copy {
+                            dst: param_local,
+                            src: *src,
+                        }),
+                        Operand::Literal(lit) => arg_setup.push(Instruction::Const {
+                            dst: param_local,
+                            value: lit.clone(),
+                        }),
+                    }
+
+                    if param.mutability == Mutability::Readonly {
+                        arg_setup.push(Instruction::AsReadonly {
+                            dst: param_local,
+                            src: param_local,
+                        });
+                    }
+                }
+                for slot in &mut local_map {
+                    if slot.is_none() {
+                        *slot = Some(fresh_local(&mut next_local));
+                    }
+                }
+                let local_map = local_map
+                    .into_iter()
+                    .map(|l| l.expect("all locals mapped"))
+                    .collect::<Vec<_>>();
+
+                // Allocate destination block ids for the cloned callee CFG.
+                let base = caller.blocks.len();
+                let mut block_map = Vec::with_capacity(body.blocks.len());
+                for i in 0..body.blocks.len() {
+                    block_map.push(BlockId(base + i));
+                }
+
+                let entry_block = *block_map.first().expect("inline body has blocks");
+
+                // Clone callee blocks with remapped locals and patched control flow.
+                for callee_block in &body.blocks {
+                    let params = callee_block
+                        .params
+                        .iter()
+                        .copied()
+                        .map(|l| remap_local(&local_map, l))
+                        .collect::<Vec<_>>();
+                    let instructions = callee_block
+                        .instructions
+                        .iter()
+                        .cloned()
+                        .map(|instr| remap_instr(&local_map, instr))
+                        .collect::<Vec<_>>();
+                    let terminator = remap_terminator(
+                        &local_map,
+                        &block_map,
+                        cont_block,
+                        callee_block.terminator.clone(),
+                    );
+                    caller.blocks.push(BasicBlock {
+                        label: format!(
+                            "{callee_label_prefix}::{block_label}",
+                            block_label = callee_block.label
+                        ),
+                        params,
+                        instructions,
+                        terminator,
+                    });
+                }
+
+                // Rewrite the callsite block: keep prefix instructions, add arg setup, then branch
+                // to the inlined callee entry.
+                {
+                    let block = caller
+                        .blocks
+                        .get_mut(site.block_idx)
+                        .expect("inline site block");
+                    let mut instrs = call_prefix;
+                    instrs.extend(arg_setup);
+                    block.instructions = instrs;
+                    block.terminator = Terminator::Br {
+                        target: entry_block,
+                        args: Vec::new(),
+                    };
+                }
+
+                caller.locals = next_local;
+            }
         }
 
         Ok(())

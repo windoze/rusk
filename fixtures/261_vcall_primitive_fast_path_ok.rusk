@@ -1,0 +1,24 @@
+// expect: ok int 0
+
+fn hash_generic<T: core::hash::Hash>(x: T) -> int {
+    core::hash::Hash::hash(x)
+}
+
+fn eq_generic<T: core::ops::Eq>(a: T, b: T) -> bool {
+    core::ops::Eq::eq(a, b)
+}
+
+fn main() -> int {
+    let i = 0;
+    let sum = 0;
+    while i < 1000 {
+        if eq_generic(123, 123) {
+            sum = sum + hash_generic(123);
+        } else {
+            sum = sum + 0;
+        };
+        i = i + 1;
+    };
+    sum - sum
+}
+

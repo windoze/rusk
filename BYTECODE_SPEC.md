@@ -492,7 +492,7 @@ These ops trap if operands are uninitialized or of the wrong type:
 - `IntAdd`, `IntSub`, `IntMul`, `IntDiv`, `IntMod`
   - `IntDiv` traps on division by zero.
   - `IntMod` traps on modulo by zero.
-  - Integer overflow behavior is currently not specified as a trap vs wrap; avoid relying on it.
+  - Integer overflow wraps (two's complement).
 - `IntLt`, `IntLe`, `IntGt`, `IntGe`, `IntEq`, `IntNe`
 - `BoolNot`, `BoolEq`, `BoolNe`
 
@@ -526,6 +526,8 @@ These ops trap if operands are uninitialized or of the wrong type:
       - a struct or enum reference, or
       - a primitive value (`unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`)
     - lookup uses `module.methods[(dyn_type_name, method)]`
+    - an implementation may provide equivalent fast paths for well-known core methods on primitive
+      receivers (e.g. `core::hash::Hash::hash` on `int`), bypassing the method table
     - receiver type args are empty for primitive receivers
   - The callee is invoked with argument list:
     1. receiver type args as leading `typerep` values,

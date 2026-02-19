@@ -5,6 +5,8 @@ mod bytecode_lower;
 #[cfg(test)]
 mod capture_analysis_tests;
 pub mod host;
+#[cfg(test)]
+mod inliner_tests;
 mod lexer;
 mod mir_opt;
 mod modules;
