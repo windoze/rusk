@@ -7,3 +7,4 @@ pub mod fmt;
 pub mod iter;
 pub mod len;
 pub mod hash;
+pub mod map;

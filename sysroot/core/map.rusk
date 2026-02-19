@@ -1,0 +1,291 @@
+// A simple HashMap-like structure implemented purely in Rusk.
+//
+// Implementation strategy:
+// - Open addressing with linear probing.
+// - Tombstones for removals.
+// - Rehash-on-grow (and occasional tombstone cleanup).
+//
+// Generic bounds are enforced by the typechecker:
+// - `K` must implement `core::hash::Hash` and `core::ops::Eq`.
+
+pub struct Map<K: super::hash::Hash + super::ops::Eq, V> {
+    buckets: [Slot<K, V>],
+    len: int,
+    tombstones: int,
+}
+
+enum Slot<K, V> {
+    Empty,
+    Tombstone,
+    Filled(Entry<K, V>),
+}
+
+struct Entry<K, V> {
+    hash: int,
+    key: K,
+    value: V,
+}
+
+fn buckets_for_elems(elem_capacity: int) -> int {
+    // Maintain <= ~70% load factor: elems <= buckets * 0.7
+    // => buckets >= elems / 0.7 ~= elems * 10 / 7.
+    (elem_capacity * 10) / 7 + 1
+}
+
+fn index_for(hash: int, cap: int) -> int {
+    // Rusk's `%` follows integer remainder rules; for negative hashes, make the index positive.
+    let m = hash % cap;
+    if m < 0 { m + cap } else { m }
+}
+
+fn next_index(idx: int, cap: int) -> int {
+    let n = idx + 1;
+    if n == cap { 0 } else { n }
+}
+
+impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
+    pub static fn new() -> Map<K, V> {
+        Map::with_capacity(0)
+    }
+
+    // `capacity` is the expected number of elements (not the bucket count).
+    pub static fn with_capacity(capacity: int) -> Map<K, V> {
+        if capacity < 0 { panic("Map::with_capacity: negative capacity"); };
+
+        let bucket_count = buckets_for_elems(capacity);
+        let n = if bucket_count < 8 { 8 } else { bucket_count };
+        let buckets: [Slot<K, V>] = [];
+        buckets.resize(n, Slot::Empty);
+        Map {
+            buckets: buckets,
+            len: 0,
+            tombstones: 0,
+        }
+    }
+
+    pub readonly fn len() -> int { self.len }
+
+    pub readonly fn is_empty() -> bool { self.len == 0 }
+
+    pub readonly fn capacity() -> int { self.buckets.len() }
+
+    pub fn clear() -> unit {
+        let cap = self.buckets.len();
+        self.buckets = self.alloc_buckets(cap);
+        self.len = 0;
+        self.tombstones = 0;
+        ()
+    }
+
+    pub fn reserve(additional: int) -> unit {
+        if additional < 0 { panic("Map::reserve: negative additional"); };
+        self.ensure_capacity(additional);
+        ()
+    }
+
+    pub readonly fn get(key: K) -> Option<readonly V> {
+        if self.len == 0 { return Option::None; };
+
+        let cap = self.buckets.len();
+        if cap == 0 { return Option::None; };
+
+        let hash = super::hash::Hash::hash(key);
+        let idx = index_for(hash, cap);
+
+        let steps = 0;
+        let cur = idx;
+        loop {
+            match self.buckets[cur] {
+                Slot::Empty => { return Option::None; }
+                Slot::Tombstone => { () }
+                Slot::Filled(e) => {
+                    if e.hash == hash && super::ops::Eq::eq(e.key, key) {
+                        return Option::Some(e.value);
+                    };
+                    ()
+                }
+            }
+
+            steps = steps + 1;
+            if steps >= cap { return Option::None; };
+            cur = next_index(cur, cap);
+        };
+        Option::None
+    }
+
+    pub readonly fn contains_key(key: K) -> bool {
+        match self.get(key) {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    // Inserts `value` for `key`, returning the previous value if present.
+    pub fn insert(key: K, value: V) -> Option<V> {
+        self.ensure_capacity(1);
+
+        let hash = super::hash::Hash::hash(key);
+        self.insert_hashed(hash, key, value)
+    }
+
+    pub fn remove(key: K) -> Option<V> {
+        if self.len == 0 { return Option::None; };
+
+        let cap = self.buckets.len();
+        if cap == 0 { return Option::None; };
+
+        let hash = super::hash::Hash::hash(key);
+        let idx = index_for(hash, cap);
+
+        let steps = 0;
+        let cur = idx;
+        loop {
+            match self.buckets[cur] {
+                Slot::Empty => { return Option::None; }
+                Slot::Tombstone => { () }
+                Slot::Filled(e) => {
+                    if e.hash == hash && super::ops::Eq::eq(e.key, key) {
+                        self.buckets[cur] = Slot::Tombstone;
+                        self.len = self.len - 1;
+                        self.tombstones = self.tombstones + 1;
+
+                        // Keep probe chains from degrading too badly.
+                        self.maybe_cleanup_tombstones();
+                        return Option::Some(e.value);
+                    };
+                    ()
+                }
+            }
+
+            steps = steps + 1;
+            if steps >= cap { return Option::None; };
+            cur = next_index(cur, cap);
+        };
+        Option::None
+    }
+
+    fn alloc_buckets(bucket_count: int) -> [Slot<K, V>] {
+        let n = if bucket_count < 8 { 8 } else { bucket_count };
+        let out: [Slot<K, V>] = [];
+        out.resize(n, Slot::Empty);
+        out
+    }
+
+    fn ensure_capacity(additional: int) -> unit {
+        let cap = self.buckets.len();
+
+        // Grow when (filled + tombstones + additional) crosses ~70% occupancy.
+        let occupied = self.len + self.tombstones + additional;
+        if occupied * 10 >= cap * 7 {
+            self.rehash(cap * 2);
+            return ();
+        };
+
+        // If tombstones dominate, rehash in-place to clean them up.
+        self.maybe_cleanup_tombstones();
+        ()
+    }
+
+    fn maybe_cleanup_tombstones() -> unit {
+        let cap = self.buckets.len();
+        if cap <= 8 { return (); };
+
+        // Heuristic: if tombstones are more than half of live entries, clean up.
+        if self.tombstones > self.len {
+            self.rehash(cap);
+        };
+        ()
+    }
+
+    fn rehash(new_cap: int) -> unit {
+        let old = self.buckets;
+        self.buckets = self.alloc_buckets(new_cap);
+        self.len = 0;
+        self.tombstones = 0;
+
+        for slot in old {
+            match slot {
+                Slot::Filled(e) => { self.insert_rehashed(e.hash, e.key, e.value); () }
+                _ => ()
+            }
+        };
+        ()
+    }
+
+    fn insert_rehashed(hash: int, key: K, value: V) -> unit {
+        // Like `insert_hashed`, but assumes the key doesn't already exist (used during rehash).
+        let cap = self.buckets.len();
+        let idx = index_for(hash, cap);
+
+        let steps = 0;
+        let cur = idx;
+        loop {
+            match self.buckets[cur] {
+                Slot::Empty => {
+                    self.buckets[cur] = Slot::Filled(Entry { hash: hash, key: key, value: value });
+                    self.len = self.len + 1;
+                    return ();
+                }
+                Slot::Tombstone => {
+                    self.buckets[cur] = Slot::Filled(Entry { hash: hash, key: key, value: value });
+                    self.len = self.len + 1;
+                    self.tombstones = self.tombstones - 1;
+                    return ();
+                }
+                Slot::Filled(_) => { () }
+            }
+
+            steps = steps + 1;
+            if steps >= cap { panic("Map::rehash: table unexpectedly full"); };
+            cur = next_index(cur, cap);
+        };
+        ()
+    }
+
+    fn insert_hashed(hash: int, key: K, value: V) -> Option<V> {
+        let cap = self.buckets.len();
+        let idx = index_for(hash, cap);
+
+        let steps = 0;
+        let cur = idx;
+        let first_tombstone = -1;
+
+        loop {
+            match self.buckets[cur] {
+                Slot::Empty => {
+                    let target = if first_tombstone < 0 { cur } else { first_tombstone };
+                    if first_tombstone >= 0 { self.tombstones = self.tombstones - 1; };
+
+                    self.buckets[target] = Slot::Filled(Entry { hash: hash, key: key, value: value });
+                    self.len = self.len + 1;
+                    return Option::None;
+                }
+                Slot::Tombstone => {
+                    if first_tombstone < 0 { first_tombstone = cur; };
+                    ()
+                }
+                Slot::Filled(e) => {
+                    if e.hash == hash && super::ops::Eq::eq(e.key, key) {
+                        let old = e.value;
+                        e.value = value;
+                        return Option::Some(old);
+                    };
+                    ()
+                }
+            }
+
+            steps = steps + 1;
+            if steps >= cap {
+                // This should be unreachable because `ensure_capacity(1)` keeps spare room.
+                panic("Map::insert: table full");
+            };
+            cur = next_index(cur, cap);
+        };
+        Option::None
+    }
+
+}
+
+impl<K: super::hash::Hash + super::ops::Eq, V> super::len::Len for Map<K, V> {
+    readonly fn len() -> int { self.len }
+}

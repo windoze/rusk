@@ -1,0 +1,19 @@
+// expect: compile_error does not satisfy bound `MyHash`
+
+interface MyHash {
+    readonly fn hash() -> int;
+}
+
+interface MyEq {
+    readonly fn eq(other: Self) -> bool;
+}
+
+struct NoImpl { x: int }
+
+struct Box<T: MyHash + MyEq> { v: T }
+
+fn main() -> unit {
+    let _b: Box<NoImpl> = Box { v: NoImpl { x: 1 } };
+    ()
+}
+

@@ -522,8 +522,11 @@ These ops trap if operands are uninitialized or of the wrong type:
   - Otherwise identical to `Call` into bytecode.
 - `VCall { dst, obj, method, method_type_args, args }`
   - Dynamic dispatch on the receiver’s runtime type name:
-    - receiver must be a struct or enum reference
+    - receiver must be either:
+      - a struct or enum reference, or
+      - a primitive value (`unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`)
     - lookup uses `module.methods[(dyn_type_name, method)]`
+    - receiver type args are empty for primitive receivers
   - The callee is invoked with argument list:
     1. receiver type args as leading `typerep` values,
     2. `method_type_args` as additional leading `typerep` values,

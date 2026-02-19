@@ -793,12 +793,13 @@ is dynamically dispatched at runtime based on the receiver’s dynamic type.
 
 Dyn dispatch eligibility (“object safety”) is a **signature property**:
 
-- A method is **dynamically dispatchable** iff its signature does **not** mention the **bare** `Self`
-  type outside the receiver position.
+- A method is **dynamically dispatchable on interface values** iff its signature does **not**
+  mention the **bare** `Self` type outside the receiver position.
 - A method that mentions the **bare** `Self` in parameter/return position is **Self-only**:
-  - it can be called only with a concrete nominal receiver type (static dispatch),
-  - it is rejected on interface-typed receivers and interface-constrained generics, since those
-    call sites require dynamic dispatch.
+  - it can be called with a concrete nominal receiver type (static dispatch), and
+  - it can be called on interface-constrained generics (`T: I`) since `Self` is statically the same
+    type parameter at the call site (even though the call still uses runtime dispatch).
+  - it is rejected on interface-typed receivers (`I` / `I{...}`) where `Self` would be erased.
   Associated type projections like `Self::Item` do not make a method Self-only.
 
 Method-call sugar is allowed:
@@ -1201,8 +1202,9 @@ Rules:
 
 - Bounds use `+` as a separator: `T: I + J + K`.
 - Each bound element must resolve to an interface type (possibly instantiated), e.g. `Iterator<int>`.
-- Bounds are supported only on arity-0 type parameters in `fn`/method generics (bounds on HKTs and
-  on `impl`/`struct`/`enum`/`interface` generics are deferred).
+- Bounds are supported only on arity-0 type parameters (bounds on HKTs are deferred).
+- Bounds are supported in `fn`/method generics, and on `struct`/`enum` and `impl` generics.
+- Bounds on `interface` generics are deferred.
 
 Constraint satisfaction is based on the existence of an `impl` of each bound interface for the
 chosen type.

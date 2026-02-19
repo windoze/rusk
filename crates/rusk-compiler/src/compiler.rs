@@ -2665,20 +2665,6 @@ impl Compiler {
 
     fn populate_interface_dispatch_table(&mut self) -> Result<(), CompileError> {
         for ((type_name, origin_iface, method_name), impl_fn) in &self.env.interface_methods {
-            // Only dyn-dispatchable interface methods participate in the runtime dispatch table.
-            //
-            // Methods that mention `Self` in non-receiver positions are compile-time-only
-            // (statically dispatched on concrete receiver types).
-            let dyn_dispatchable = self
-                .env
-                .interfaces
-                .get(origin_iface)
-                .and_then(|iface| iface.all_methods.get(method_name))
-                .is_some_and(|m| typeck::interface_method_sig_is_dyn_dispatchable(&m.sig));
-            if !dyn_dispatchable {
-                continue;
-            }
-
             let method_id = format!("{origin_iface}::{method_name}");
             let key = (type_name.clone(), method_id);
             let Some(impl_id) = self.module.function_id(impl_fn.as_str()) else {

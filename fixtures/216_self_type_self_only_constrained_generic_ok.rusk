@@ -1,4 +1,4 @@
-// expect: compile_error not dynamically dispatchable
+// expect: ok int 0
 
 interface Clone {
     fn clone() -> Self;
@@ -18,4 +18,3 @@ fn call_clone<T: Clone>(x: T) -> int {
 fn main() -> int {
     call_clone(S {})
 }
-

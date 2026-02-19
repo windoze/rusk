@@ -1,0 +1,19 @@
+// expect: compile_error does not implement `MyHash`
+
+interface MyHash {
+    readonly fn hash() -> int;
+}
+
+struct NoImpl { x: int }
+
+struct Wrap<T> { v: T }
+
+impl<T: MyHash> Wrap<T> {
+    fn h() -> int { MyHash::hash(self.v) }
+}
+
+fn main() -> int {
+    let w = Wrap { v: NoImpl { x: 1 } };
+    w.h()
+}
+

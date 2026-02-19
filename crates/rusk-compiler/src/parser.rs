@@ -1238,11 +1238,8 @@ impl<'a> Parser<'a> {
                     // - `foo(a, b) |x| { ... }`  ==>  `foo(a, b, |x| { ... })`
                     // - `foo |x| { ... }`       ==>  `foo(|x| { ... })`
                     let closure = self.parse_lambda()?;
-                    lhs = self.apply_trailing_closure_sugar(
-                        lhs,
-                        &mut pending_type_args,
-                        closure,
-                    )?;
+                    lhs =
+                        self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
                     continue;
                 }
                 TokenKind::LBrace => {
@@ -1265,7 +1262,8 @@ impl<'a> Parser<'a> {
                         body,
                         span: closure_span,
                     };
-                    lhs = self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
+                    lhs =
+                        self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
                     continue;
                 }
                 TokenKind::Dot => {
@@ -1474,7 +1472,10 @@ impl<'a> Parser<'a> {
                     for (name, init) in bind_pairs {
                         if !seen.insert(name.name.clone()) {
                             return Err(ParseError {
-                                message: format!("duplicate trailing-closure binding `{}`", name.name),
+                                message: format!(
+                                    "duplicate trailing-closure binding `{}`",
+                                    name.name
+                                ),
                                 span: name.span,
                             });
                         }
@@ -1576,11 +1577,8 @@ impl<'a> Parser<'a> {
                     }
 
                     let closure = self.parse_lambda()?;
-                    lhs = self.apply_trailing_closure_sugar(
-                        lhs,
-                        &mut pending_type_args,
-                        closure,
-                    )?;
+                    lhs =
+                        self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
                     continue;
                 }
                 TokenKind::Dot => {

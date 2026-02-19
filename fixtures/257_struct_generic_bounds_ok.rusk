@@ -1,0 +1,31 @@
+// expect: ok int 7
+
+interface MyHash {
+    readonly fn hash() -> int;
+}
+
+interface MyEq {
+    readonly fn eq(other: Self) -> bool;
+}
+
+struct Key { x: int }
+
+impl MyHash for Key {
+    readonly fn hash() -> int { 7 }
+}
+
+impl MyEq for Key {
+    readonly fn eq(other: Self) -> bool { self.x == other.x }
+}
+
+struct Box<T: MyHash + MyEq> { v: T }
+
+impl<T: MyHash + MyEq> Box<T> {
+    fn v_hash() -> int { MyHash::hash(self.v) }
+}
+
+fn main() -> int {
+    let b = Box { v: Key { x: 1 } };
+    b.v_hash()
+}
+

@@ -452,19 +452,28 @@ pub(crate) fn build_env(
     add_prelude(&mut env);
     add_host_modules(&mut env, options)?;
 
-    // First pass: declare nominal types.
+    // First pass: declare interfaces (so later passes can validate bounds against them).
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
+            Item::Interface(i) => declare_interface(&mut env, module, i),
+            _ => Ok(()),
+        },
+    )?;
+
+    // Second pass: declare structs/enums (including their generic bounds).
     walk_module_items(
         &program.items,
         &ModulePath::root(),
         &mut |module, item| match item {
             Item::Struct(s) => declare_struct(&mut env, module, s),
             Item::Enum(e) => declare_enum(&mut env, module, e),
-            Item::Interface(i) => declare_interface(&mut env, module, i),
             _ => Ok(()),
         },
     )?;
 
-    // Second pass: fill interface members (methods + associated types).
+    // Third pass: fill interface members (methods + associated types).
     walk_module_items(
         &program.items,
         &ModulePath::root(),
@@ -478,7 +487,7 @@ pub(crate) fn build_env(
     compute_interface_inheritance(&mut env)?;
     validate_interfaces_after_inheritance(&env)?;
 
-    // Third pass: declare top-level function signatures.
+    // Fourth pass: declare top-level function signatures.
     walk_module_items(
         &program.items,
         &ModulePath::root(),
@@ -500,7 +509,7 @@ pub(crate) fn build_env(
         },
     )?;
 
-    // Fourth pass: fill struct/enum members (fields/variants).
+    // Fifth pass: fill struct/enum members (fields/variants).
     walk_module_items(
         &program.items,
         &ModulePath::root(),
@@ -511,7 +520,7 @@ pub(crate) fn build_env(
         },
     )?;
 
-    // Fifth pass: process impl items (declare method signatures + interface method table).
+    // Sixth pass: process impl items (declare method signatures + interface method table).
     walk_module_items(
         &program.items,
         &ModulePath::root(),
@@ -1061,7 +1070,7 @@ fn declare_struct(
             span: item.name.span,
         });
     }
-    let generics = lower_generic_params(env, module, &item.generics, false)?;
+    let generics = lower_generic_params(env, module, &item.generics, true)?;
     if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
             message: "higher-kinded generics on structs are not supported in v0.4".to_string(),
@@ -1101,7 +1110,7 @@ fn declare_enum(
             span: item.name.span,
         });
     }
-    let generics = lower_generic_params(env, module, &item.generics, false)?;
+    let generics = lower_generic_params(env, module, &item.generics, true)?;
     if generics.iter().any(|g| g.arity != 0) {
         return Err(TypeError {
             message: "higher-kinded generics on enums are not supported in v0.4".to_string(),
@@ -1194,6 +1203,7 @@ fn declare_function_sig(
         }
         validate_assoc_projs_in_ty(env, &ty, p.ty.span())?;
         validate_assoc_projs_well_formed_in_ty(env, &generics, &ty, p.ty.span())?;
+        validate_nominal_bounds_well_formed_in_ty(env, &generics, &ty, p.ty.span())?;
         validate_value_ty(env, &ty, p.ty.span())?;
         params.push(ty);
     }
@@ -1206,6 +1216,7 @@ fn declare_function_sig(
     }
     validate_assoc_projs_in_ty(env, &ret, func.ret.span())?;
     validate_assoc_projs_well_formed_in_ty(env, &generics, &ret, func.ret.span())?;
+    validate_nominal_bounds_well_formed_in_ty(env, &generics, &ret, func.ret.span())?;
     validate_value_ty(env, &ret, func.ret.span())?;
 
     env.functions.insert(
@@ -1847,6 +1858,7 @@ fn fill_struct(
                 }
                 validate_assoc_projs_in_ty(env, &ty, field.ty.span())?;
                 validate_assoc_projs_well_formed_in_ty(env, &generics, &ty, field.ty.span())?;
+                validate_nominal_bounds_well_formed_in_ty(env, &generics, &ty, field.ty.span())?;
                 validate_value_ty(env, &ty, field.ty.span())?;
                 fields.push((field_name, ty));
             }
@@ -1862,6 +1874,7 @@ fn fill_struct(
             }
             validate_assoc_projs_in_ty(env, &ty, inner.span())?;
             validate_assoc_projs_well_formed_in_ty(env, &generics, &ty, inner.span())?;
+            validate_nominal_bounds_well_formed_in_ty(env, &generics, &ty, inner.span())?;
             validate_value_ty(env, &ty, inner.span())?;
             fields.push((".0".to_string(), ty));
             true
@@ -1911,6 +1924,7 @@ fn fill_enum(env: &mut ProgramEnv, module: &ModulePath, item: &EnumItem) -> Resu
                 }
                 validate_assoc_projs_in_ty(env, &ty, t.span())?;
                 validate_assoc_projs_well_formed_in_ty(env, &generics, &ty, t.span())?;
+                validate_nominal_bounds_well_formed_in_ty(env, &generics, &ty, t.span())?;
                 validate_value_ty(env, &ty, t.span())?;
                 Ok(ty)
             })
@@ -2537,12 +2551,13 @@ fn process_impl_item(
     module: &ModulePath,
     item: &ImplItem,
 ) -> Result<(), TypeError> {
-    let impl_generics = lower_generic_params(env, module, &item.generics, false)?;
+    let impl_generics = lower_generic_params(env, module, &item.generics, true)?;
     let impl_scope = GenericScope::new(&impl_generics)?;
 
     match &item.header {
         ImplHeader::Inherent { ty, span: _ } => {
             let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            validate_nominal_bounds_well_formed_in_ty(env, &impl_generics, &ty, item.span)?;
             let (type_name, type_args) = match ty {
                 Ty::App(TyCon::Named(name), args) => (name, args),
                 Ty::Iface { iface, .. } => {
@@ -2632,6 +2647,7 @@ fn process_impl_item(
             span: _,
         } => {
             let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
+            validate_nominal_bounds_well_formed_in_ty(env, &impl_generics, &iface_ty, item.span)?;
             let (iface_name, iface_args) = match iface_ty {
                 Ty::App(TyCon::Named(name), args) => (name, args),
                 Ty::Iface { iface, .. } => {
@@ -2680,6 +2696,7 @@ fn process_impl_item(
             let iface_def_name = iface_def.name.clone();
 
             let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            validate_nominal_bounds_well_formed_in_ty(env, &impl_generics, &ty, item.span)?;
             let (type_name, type_args) = match ty {
                 Ty::App(TyCon::Named(name), args) => (name, args),
                 Ty::Iface { iface, .. } => {
@@ -2752,6 +2769,12 @@ fn process_impl_item(
                             });
                         }
                         validate_value_ty(env, &aty, def.ty.span())?;
+                        validate_nominal_bounds_well_formed_in_ty(
+                            env,
+                            &impl_generics,
+                            &aty,
+                            def.ty.span(),
+                        )?;
                         impl_assoc_by_name.insert(aname, (aty, def.span));
                     }
                     ImplMember::Method(method) => {
@@ -3274,7 +3297,7 @@ fn lower_generic_params_in_scope(
 
         if !allow_bounds && !p.bounds.is_empty() {
             return Err(TypeError {
-                message: "generic bounds are only supported on `fn`/method generics".to_string(),
+                message: "generic bounds are not supported on `interface` generics yet".to_string(),
                 span: p.span,
             });
         }
@@ -3822,10 +3845,22 @@ fn validate_interfaces_after_inheritance(env: &ProgramEnv) -> Result<(), TypeErr
                 validate_value_ty(env, p, iface_def.span)?;
                 validate_assoc_projs_in_ty(env, p, iface_def.span)?;
                 validate_assoc_projs_well_formed_in_ty(env, &combined_generics, p, iface_def.span)?;
+                validate_nominal_bounds_well_formed_in_ty(
+                    env,
+                    &combined_generics,
+                    p,
+                    iface_def.span,
+                )?;
             }
             validate_value_ty(env, &method.sig.ret, iface_def.span)?;
             validate_assoc_projs_in_ty(env, &method.sig.ret, iface_def.span)?;
             validate_assoc_projs_well_formed_in_ty(
+                env,
+                &combined_generics,
+                &method.sig.ret,
+                iface_def.span,
+            )?;
+            validate_nominal_bounds_well_formed_in_ty(
                 env,
                 &combined_generics,
                 &method.sig.ret,
@@ -3837,6 +3872,12 @@ fn validate_interfaces_after_inheritance(env: &ProgramEnv) -> Result<(), TypeErr
                     validate_assoc_bindings_in_bound(env, bound, iface_def.span)?;
                     validate_assoc_projs_in_ty(env, bound, iface_def.span)?;
                     validate_assoc_projs_well_formed_in_ty(
+                        env,
+                        &combined_generics,
+                        bound,
+                        iface_def.span,
+                    )?;
+                    validate_nominal_bounds_well_formed_in_ty(
                         env,
                         &combined_generics,
                         bound,
@@ -4085,6 +4126,232 @@ fn validate_assoc_projs_well_formed_in_ty(
         Ty::App(_con, args) => {
             for a in args {
                 validate_assoc_projs_well_formed_in_ty(env, generics, a, span)?;
+            }
+            Ok(())
+        }
+        Ty::Unit
+        | Ty::Never
+        | Ty::Bool
+        | Ty::Int
+        | Ty::Float
+        | Ty::Byte
+        | Ty::Char
+        | Ty::String
+        | Ty::Bytes
+        | Ty::SelfType
+        | Ty::Gen(_)
+        | Ty::Var(_) => Ok(()),
+    }
+}
+
+fn type_implements_interface_type_in_scope(
+    env: &ProgramEnv,
+    generics: &[GenericParamInfo],
+    ty: &Ty,
+    iface_ty: &Ty,
+) -> bool {
+    let iface_ty = strip_readonly(iface_ty);
+    let Ty::App(TyCon::Named(iface_name), iface_args) = iface_ty else {
+        return false;
+    };
+    if !env.interfaces.contains_key(iface_name) {
+        return false;
+    }
+
+    let ty = strip_readonly(ty);
+    match ty {
+        // Generic `T` implements `I<...>` iff one of its bounds implies it.
+        Ty::Gen(id) => {
+            let Some(gp) = generics.get(*id) else {
+                return false;
+            };
+            for bound in &gp.bounds {
+                let (bound_iface, bound_args) = match bound {
+                    Ty::App(TyCon::Named(bound_iface), bound_args) => (bound_iface, bound_args),
+                    Ty::Iface { iface, args, .. } => (iface, args),
+                    _ => continue,
+                };
+                let Some(args) =
+                    infer_super_interface_args(env, bound_iface, bound_args, iface_name)
+                else {
+                    continue;
+                };
+                if args == *iface_args {
+                    return true;
+                }
+            }
+            false
+        }
+
+        // Interface value `J{...}` implements `I<...>` iff `J<...>` implies that instantiation.
+        Ty::Iface {
+            iface: type_name,
+            args: type_args,
+            ..
+        } => infer_super_interface_args(env, type_name, type_args, iface_name)
+            .is_some_and(|args| args == *iface_args),
+
+        // Interface value `J<...>` implements `I<...>` iff `J<...>` implies that instantiation.
+        Ty::App(TyCon::Named(type_name), type_args) if env.interfaces.contains_key(type_name) => {
+            infer_super_interface_args(env, type_name, type_args, iface_name)
+                .is_some_and(|args| args == *iface_args)
+        }
+
+        // Concrete nominal type: initial-stage coherence => interface args are a prefix of the
+        // concrete type args.
+        Ty::App(TyCon::Named(type_name), type_args) => {
+            if !env
+                .interface_impls
+                .contains(&(type_name.clone(), iface_name.to_string()))
+            {
+                return false;
+            }
+            if iface_args.len() > type_args.len() {
+                return false;
+            }
+            type_args[..iface_args.len()] == *iface_args
+        }
+
+        // Primitive types may have built-in impls for arity-0 interfaces.
+        Ty::Unit
+        | Ty::Bool
+        | Ty::Int
+        | Ty::Float
+        | Ty::Byte
+        | Ty::Char
+        | Ty::String
+        | Ty::Bytes => {
+            if !iface_args.is_empty() {
+                return false;
+            }
+            let type_name = match ty {
+                Ty::Unit => "unit",
+                Ty::Bool => "bool",
+                Ty::Int => "int",
+                Ty::Float => "float",
+                Ty::Byte => "byte",
+                Ty::Char => "char",
+                Ty::String => "string",
+                Ty::Bytes => "bytes",
+                _ => return false,
+            };
+            env.interface_impls
+                .contains(&(type_name.to_string(), iface_name.to_string()))
+        }
+
+        // Arrays are not nominal types, but can have built-in impls (arity-0 only for now).
+        Ty::Array(_elem) => {
+            if !iface_args.is_empty() {
+                return false;
+            }
+            env.interface_impls
+                .contains(&("array".to_string(), iface_name.to_string()))
+        }
+
+        _ => false,
+    }
+}
+
+fn validate_nominal_bounds_well_formed_in_ty(
+    env: &ProgramEnv,
+    generics: &[GenericParamInfo],
+    ty: &Ty,
+    span: Span,
+) -> Result<(), TypeError> {
+    match ty {
+        Ty::Array(elem) | Ty::Readonly(elem) => {
+            validate_nominal_bounds_well_formed_in_ty(env, generics, elem, span)
+        }
+        Ty::Tuple(items) => {
+            for t in items {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, t, span)?;
+            }
+            Ok(())
+        }
+        Ty::Fn { params, ret } => {
+            for p in params {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, p, span)?;
+            }
+            validate_nominal_bounds_well_formed_in_ty(env, generics, ret, span)
+        }
+        Ty::Cont { param, ret } => {
+            validate_nominal_bounds_well_formed_in_ty(env, generics, param, span)?;
+            validate_nominal_bounds_well_formed_in_ty(env, generics, ret, span)
+        }
+        Ty::Iface {
+            args,
+            assoc_bindings,
+            ..
+        } => {
+            for a in args {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, a, span)?;
+            }
+            for t in assoc_bindings.values() {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, t, span)?;
+            }
+            Ok(())
+        }
+        Ty::AssocProj {
+            iface_args,
+            self_ty,
+            ..
+        } => {
+            for a in iface_args {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, a, span)?;
+            }
+            validate_nominal_bounds_well_formed_in_ty(env, generics, self_ty, span)
+        }
+        Ty::App(TyCon::Named(type_name), type_args) => {
+            for a in type_args {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, a, span)?;
+            }
+
+            let def_generics = if let Some(def) = env.structs.get(type_name) {
+                Some(&def.generics)
+            } else if let Some(def) = env.enums.get(type_name) {
+                Some(&def.generics)
+            } else {
+                env.interfaces.get(type_name).map(|def| &def.generics)
+            };
+
+            let Some(def_generics) = def_generics else {
+                return Ok(());
+            };
+
+            // Bounds are expressed in terms of the nominal type's own type parameters (`GenId`),
+            // so substitute those with the actual type arguments before checking.
+            let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+            let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+            for (idx, gp) in def_generics.iter().enumerate() {
+                if gp.bounds.is_empty() {
+                    continue;
+                }
+                let Some(arg) = type_args.get(idx) else {
+                    // Arity is checked elsewhere; this is a defensive fallback.
+                    continue;
+                };
+
+                for bound in &gp.bounds {
+                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
+                    if !type_implements_interface_type_in_scope(env, generics, arg, &bound) {
+                        return Err(TypeError {
+                            message: format!(
+                                "type `{arg}` does not satisfy bound `{bound}` for type parameter `{}` of `{type_name}`",
+                                gp.name
+                            ),
+                            span,
+                        });
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        Ty::App(_con, args) => {
+            // Type constructor application (`F<T>`) doesn't participate in interface bounds yet.
+            for a in args {
+                validate_nominal_bounds_well_formed_in_ty(env, generics, a, span)?;
             }
             Ok(())
         }
@@ -4697,11 +4964,12 @@ fn typecheck_impl_item(
     item: &ImplItem,
 ) -> Result<TypeInfo, TypeError> {
     let mut info = TypeInfo::default();
-    let impl_generics = lower_generic_params(env, module, &item.generics, false)?;
+    let impl_generics = lower_generic_params(env, module, &item.generics, true)?;
     let impl_scope = GenericScope::new(&impl_generics)?;
     match &item.header {
         ImplHeader::Inherent { ty, .. } => {
             let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            validate_nominal_bounds_well_formed_in_ty(env, &impl_generics, &ty, item.span)?;
             let type_name = match ty {
                 Ty::App(TyCon::Named(name), _args) => name,
                 other => {
@@ -4728,6 +4996,7 @@ fn typecheck_impl_item(
         }
         ImplHeader::InterfaceForType { interface, ty, .. } => {
             let iface_ty = lower_path_type(env, module, &impl_scope, interface)?;
+            validate_nominal_bounds_well_formed_in_ty(env, &impl_generics, &iface_ty, item.span)?;
             let iface_name = match iface_ty {
                 Ty::App(TyCon::Named(name), _args) => name,
                 other => {
@@ -4740,6 +5009,7 @@ fn typecheck_impl_item(
                 }
             };
             let ty = lower_path_type(env, module, &impl_scope, ty)?;
+            validate_nominal_bounds_well_formed_in_ty(env, &impl_generics, &ty, item.span)?;
             let type_name = match ty {
                 Ty::App(TyCon::Named(name), _args) => name,
                 other => {
@@ -5244,6 +5514,7 @@ impl<'a> FnTypechecker<'a> {
         let ty = self.resolve_self_type_in_ty(ty, ty_expr.span())?;
         validate_assoc_projs_in_ty(self.env, &ty, ty_expr.span())?;
         validate_assoc_projs_well_formed_in_ty(self.env, generics, &ty, ty_expr.span())?;
+        validate_nominal_bounds_well_formed_in_ty(self.env, generics, &ty, ty_expr.span())?;
         Ok(ty)
     }
 
@@ -5844,11 +6115,23 @@ impl<'a> FnTypechecker<'a> {
         }
 
         let mut type_args: Vec<Ty> = Vec::with_capacity(def.generics.len());
-        for _ in &def.generics {
-            type_args.push(self.infer.fresh_type_var());
-        }
-        let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+        let mut ty_subst: HashMap<GenId, Ty> = HashMap::new();
         let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+        for (idx, gp) in def.generics.iter().enumerate() {
+            let ty = self.infer.fresh_type_var();
+            let ty_for_args = ty.clone();
+
+            if let Ty::Var(var_id) = ty {
+                for bound in &gp.bounds {
+                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
+                    self.infer.add_constraint(var_id, bound);
+                }
+            }
+
+            type_args.push(ty_for_args.clone());
+            ty_subst.insert(idx, ty_for_args);
+        }
 
         let instantiated_fields = def
             .fields
@@ -5932,11 +6215,23 @@ impl<'a> FnTypechecker<'a> {
         }
 
         let mut type_args: Vec<Ty> = Vec::with_capacity(def.generics.len());
-        for _ in &def.generics {
-            type_args.push(self.infer.fresh_type_var());
-        }
-        let ty_subst: HashMap<GenId, Ty> = type_args.iter().cloned().enumerate().collect();
+        let mut ty_subst: HashMap<GenId, Ty> = HashMap::new();
         let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+        for (idx, gp) in def.generics.iter().enumerate() {
+            let ty = self.infer.fresh_type_var();
+            let ty_for_args = ty.clone();
+
+            if let Ty::Var(var_id) = ty {
+                for bound in &gp.bounds {
+                    let bound = subst_ty(bound.clone(), &ty_subst, &con_subst);
+                    self.infer.add_constraint(var_id, bound);
+                }
+            }
+
+            type_args.push(ty_for_args.clone());
+            ty_subst.insert(idx, ty_for_args);
+        }
 
         for (expr, expected) in fields.iter().zip(variant_fields.iter()) {
             let expected = subst_ty(expected.clone(), &ty_subst, &con_subst);
@@ -7776,14 +8071,14 @@ impl<'a> FnTypechecker<'a> {
             });
         }
 
-        // `Iface::m(recv, ...)` still requires dynamic dispatch when the *static* receiver type is
-        // an interface type or a constrained generic. Self-only methods are not dyn-dispatchable.
+        // For interface-typed receivers, only dyn-dispatchable methods are callable.
+        //
+        // Constrained generics (`T: I`) are also dynamically dispatched, but they can still call
+        // "Self-only" methods since `Self` is statically the same type parameter at the call site.
         let recv_for_dispatch = strip_readonly(&recv_ty_resolved);
-        let recv_requires_dyn_dispatch = matches!(recv_for_dispatch, Ty::Gen(_))
-            || matches!(recv_for_dispatch, Ty::Iface { .. })
+        let recv_is_iface_object = matches!(recv_for_dispatch, Ty::Iface { .. })
             || matches!(recv_for_dispatch, Ty::App(TyCon::Named(name), _) if self.env.interfaces.contains_key(name));
-        if recv_requires_dyn_dispatch && !interface_method_sig_is_dyn_dispatchable(&method_info.sig)
-        {
+        if recv_is_iface_object && !interface_method_sig_is_dyn_dispatchable(&method_info.sig) {
             let method_id = format!("{}::{method_name}", method_info.origin);
             return Err(TypeError {
                 message: format!(
@@ -8083,15 +8378,6 @@ impl<'a> FnTypechecker<'a> {
             let (origin, (iface_name, iface_args, sig_template)) =
                 candidates.into_iter().next().expect("len == 1");
             let iface_def = self.env.interfaces.get(&iface_name).expect("exists");
-            if !interface_method_sig_is_dyn_dispatchable(&sig_template) {
-                let method_id = format!("{origin}::{}", method.name);
-                return Err(TypeError {
-                    message: format!(
-                        "method `{method_id}` is not dynamically dispatchable because it mentions `Self` in its signature; call requires a concrete receiver type"
-                    ),
-                    span: method.span,
-                });
-            }
             let mut inst = instantiate_interface_method_sig(
                 &sig_template,
                 &iface_args,

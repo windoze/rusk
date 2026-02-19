@@ -1,0 +1,23 @@
+// expect: ok int 9
+
+interface MyHash {
+    readonly fn hash() -> int;
+}
+
+struct Key { x: int }
+
+impl MyHash for Key {
+    readonly fn hash() -> int { 9 }
+}
+
+struct Wrap<T> { v: T }
+
+impl<T: MyHash> Wrap<T> {
+    fn h() -> int { MyHash::hash(self.v) }
+}
+
+fn main() -> int {
+    let w = Wrap { v: Key { x: 0 } };
+    w.h()
+}
+

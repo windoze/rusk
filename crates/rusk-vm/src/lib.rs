@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::rc::Rc;
+use core::cell::RefCell;
 use rusk_bytecode::{AbiType, EffectId, ExecutableModule, FunctionId, HostImportId};
 use rusk_gc::{GcHeap, GcRef, ImmixHeap, Trace, Tracer};
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 const VM_GC_TRIGGER_ALLOCATIONS: usize = 50_000;
 
@@ -2334,38 +2336,49 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Ok(v) => v,
                     Err(msg) => return trap(vm, format!("vcall obj: {msg}")),
                 };
-                let Value::Ref(r) = &recv else {
-                    return trap(
-                        vm,
-                        format!(
-                            "type error in vcall: expected ref(struct|enum), got {}",
-                            recv.kind()
-                        ),
-                    );
-                };
-
-                let Some(obj) = vm.heap.get(r.handle) else {
-                    return trap(vm, "vcall: dangling reference".to_string());
-                };
-                let (type_name, type_args) = match obj {
-                    HeapValue::Struct {
-                        type_name,
-                        type_args,
-                        ..
-                    } => (type_name.clone(), type_args.clone()),
-                    HeapValue::Enum {
-                        enum_name,
-                        type_args,
-                        ..
-                    } => (enum_name.clone(), type_args.clone()),
-                    HeapValue::Array(_)
-                    | HeapValue::Tuple(_)
-                    | HeapValue::BytesBuf { .. }
-                    | HeapValue::StringBuf { .. } => {
+                let (type_name, type_args) = match &recv {
+                    Value::Unit => ("unit".to_string(), Vec::new()),
+                    Value::Bool(_) => ("bool".to_string(), Vec::new()),
+                    Value::Int(_) => ("int".to_string(), Vec::new()),
+                    Value::Float(_) => ("float".to_string(), Vec::new()),
+                    Value::Byte(_) => ("byte".to_string(), Vec::new()),
+                    Value::Char(_) => ("char".to_string(), Vec::new()),
+                    Value::String(_) => ("string".to_string(), Vec::new()),
+                    Value::Bytes(_) => ("bytes".to_string(), Vec::new()),
+                    Value::Ref(r) => {
+                        let Some(obj) = vm.heap.get(r.handle) else {
+                            return trap(vm, "vcall: dangling reference".to_string());
+                        };
+                        match obj {
+                            HeapValue::Struct {
+                                type_name,
+                                type_args,
+                                ..
+                            } => (type_name.clone(), type_args.clone()),
+                            HeapValue::Enum {
+                                enum_name,
+                                type_args,
+                                ..
+                            } => (enum_name.clone(), type_args.clone()),
+                            HeapValue::Array(_)
+                            | HeapValue::Tuple(_)
+                            | HeapValue::BytesBuf { .. }
+                            | HeapValue::StringBuf { .. } => {
+                                return trap(
+                                    vm,
+                                    format!(
+                                        "type error in vcall: expected struct|enum, got {}",
+                                        recv.kind()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Value::TypeRep(_) | Value::Function(_) | Value::Continuation(_) => {
                         return trap(
                             vm,
                             format!(
-                                "type error in vcall: expected struct|enum, got {}",
+                                "type error in vcall: expected struct|enum ref or primitive value, got {}",
                                 recv.kind()
                             ),
                         );
