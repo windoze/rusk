@@ -1,0 +1,66 @@
+// Microbenchmark for Map (core::map::Map) hot paths.
+//
+// Stresses:
+// - generic interface calls on primitives (Hash/Eq via VCall)
+// - Map insert / get / remove in tight loops
+//
+// Expected return (n=20_000): 300_040_000
+
+fn main() -> int {
+    let n = 20000;
+    let m: core::map::Map<int, int> = core::map::Map::new();
+
+    // Insert.
+    let i = 0;
+    while i < n {
+        m.insert(i, i + 1);
+        i = i + 1;
+    };
+
+    // Lookup sum.
+    let sum1 = 0;
+    let j = 0;
+    while j < n {
+        match m.get(j) {
+            Option::Some(v) => {
+                sum1 = sum1 + v;
+            }
+            Option::None => (),
+        }
+        j = j + 1;
+    };
+
+    // Update (overwrite existing keys).
+    let k = 0;
+    while k < n {
+        m.insert(k, k + 2);
+        k = k + 1;
+    };
+
+    // Remove every other key (even keys).
+    let r = 0;
+    while r < n {
+        if r % 2 == 0 {
+            let _ = m.remove(r);
+        } else {
+            ()
+        };
+        r = r + 1;
+    };
+
+    // Lookup sum after removals.
+    let sum2 = 0;
+    let t = 0;
+    while t < n {
+        match m.get(t) {
+            Option::Some(v) => {
+                sum2 = sum2 + v;
+            }
+            Option::None => (),
+        }
+        t = t + 1;
+    };
+
+    sum1 + sum2 + m.len()
+}
+

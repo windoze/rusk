@@ -37,6 +37,7 @@ For consistent comparisons:
 - `phase4_call_dispatch.rusk`: call dispatch / call-heavy loop
 - `phase5_gc_epoch.rusk`: GC stress (large heap high-water mark + many GC cycles)
 - `phase6_effects_generator.rusk`: generator/coroutine-style yield/resume via effects
+- `phase7_map_dict.rusk`: core::map::Map insert/get/remove (int keys)
 
 Python equivalents live next to the `.rusk` benchmarks as `phase*.py` and expose `main()` plus an
 `EXPECTED` constant for validation.

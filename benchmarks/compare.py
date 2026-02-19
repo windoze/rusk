@@ -180,6 +180,15 @@ def _default_cases() -> list[BenchCase]:
             expected=49995000,
             notes="Generator-like yield/resume (Rusk effects) vs Python generator.",
         ),
+        BenchCase(
+            name="phase7_map_dict",
+            rusk_path=bdir / "phase7_map_dict.rusk",
+            python_path=bdir / "phase7_map_dict.py",
+            expected=300040000,
+            notes="core::map::Map (generic Hash/Eq dispatch) vs Python dict.",
+            warmup=0,
+            iters=1,
+        ),
     ]
 
 
