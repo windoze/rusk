@@ -1,0 +1,8 @@
+// expect: compile_error expected `!`
+
+fn main() -> unit {
+    let x: ! = 1;
+    let _ = x;
+    ()
+}
+

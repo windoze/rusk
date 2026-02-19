@@ -1,0 +1,10 @@
+// expect: runtime_error panic: boom
+
+fn f() -> int {
+    panic("boom")
+}
+
+fn main() -> int {
+    f()
+}
+

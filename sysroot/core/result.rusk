@@ -1,0 +1,39 @@
+// Result and typed-throw helpers built on effects.
+
+pub enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+pub interface Throw<E> {
+    fn throw(e: E) -> !;
+}
+
+pub fn throw<E>(e: E) -> ! {
+    @Throw.throw(e)
+}
+
+pub struct Try<T>(fn() -> T);
+
+pub fn try<T>(body: fn() -> T) -> Try<T> {
+    Try(body)
+}
+
+impl<T> Try<T> {
+    pub fn catch<E>(handler: fn(E) -> unit) -> Result<T, E> {
+        match self.0() {
+            @Throw.throw(e) => {
+                handler(e);
+                Result::Err(e)
+            }
+            v => Result::Ok(v),
+        }
+    }
+}
+
+impl<T, E> Result<T, E> {
+    pub fn finally(f: fn() -> unit) -> Result<T, E> {
+        f();
+        self
+    }
+}

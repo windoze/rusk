@@ -295,6 +295,7 @@ impl TypeExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrimType {
     Unit,
+    Never,
     Bool,
     Int,
     Float,

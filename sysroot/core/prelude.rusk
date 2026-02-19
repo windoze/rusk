@@ -1,2 +1,4 @@
 pub use super::intrinsics::panic;
-
+pub use super::result::Result;
+pub use super::result::throw;
+pub use super::result::try;

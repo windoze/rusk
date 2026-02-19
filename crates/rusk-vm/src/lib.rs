@@ -296,6 +296,7 @@ pub struct TypeRepId(pub u32);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TypeCtor {
     Unit,
+    Never,
     Bool,
     Int,
     Float,
@@ -353,6 +354,7 @@ impl TypeReps {
     fn ctor_from_lit(lit: &rusk_bytecode::TypeRepLit) -> TypeCtor {
         match lit {
             rusk_bytecode::TypeRepLit::Unit => TypeCtor::Unit,
+            rusk_bytecode::TypeRepLit::Never => TypeCtor::Never,
             rusk_bytecode::TypeRepLit::Bool => TypeCtor::Bool,
             rusk_bytecode::TypeRepLit::Int => TypeCtor::Int,
             rusk_bytecode::TypeRepLit::Float => TypeCtor::Float,
@@ -3349,6 +3351,7 @@ fn type_test(
 
     Ok(match &target.ctor {
         TypeCtor::Unit => matches!(value, Value::Unit),
+        TypeCtor::Never => false,
         TypeCtor::Bool => matches!(value, Value::Bool(_)),
         TypeCtor::Int => matches!(value, Value::Int(_)),
         TypeCtor::Float => matches!(value, Value::Float(_)),
@@ -3573,7 +3576,7 @@ fn eval_core_intrinsic(
             _ => Err(bad_args("core::intrinsics::to_string")),
         },
         I::Panic => match args.as_slice() {
-            [Value::TypeRep(_), Value::String(msg)] => Err(format!("panic: {}", msg.as_str(heap)?)),
+            [Value::String(msg)] => Err(format!("panic: {}", msg.as_str(heap)?)),
             _ => Err(bad_args("core::intrinsics::panic")),
         },
 

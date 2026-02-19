@@ -291,7 +291,7 @@ Some instructions are statement-like and produce no value.
     - evaluate `<op_args...>` to `typerep` values
     - construct and intern an applied type representation from `<base>` and its arguments
     - write the resulting `typerep` value to `%dst`
-  - Note: leaves such as `int`/`bool` and nominal type ids may be represented as `typerep` literals.
+  - Note: leaves such as `int`/`bool`/`!` and nominal type ids may be represented as `typerep` literals.
 
 - `is_type`:
   - Syntax: `%dst = is_type <op_value> <op_type_rep>`

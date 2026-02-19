@@ -31,6 +31,7 @@ impl std::error::Error for TypeError {}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Ty {
     Unit,
+    Never,
     Bool,
     Int,
     Float,
@@ -123,6 +124,7 @@ impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Ty::Unit => write!(f, "unit"),
+            Ty::Never => write!(f, "!"),
             Ty::Bool => write!(f, "bool"),
             Ty::Int => write!(f, "int"),
             Ty::Float => write!(f, "float"),
@@ -1253,9 +1255,9 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
 
         // Panic.
         "core::intrinsics::panic" => ExpectedIntrinsicSig {
-            generic_count: 1,
+            generic_count: 0,
             params: vec![Ty::String],
-            ret: Ty::Gen(0),
+            ret: Ty::Never,
         },
 
         // Boolean.
@@ -3383,6 +3385,7 @@ fn lower_type_expr_with_self_iface(
         ))),
         TypeExpr::Prim { prim, .. } => Ok(match prim {
             PrimType::Unit => Ty::Unit,
+            PrimType::Never => Ty::Never,
             PrimType::Bool => Ty::Bool,
             PrimType::Int => Ty::Int,
             PrimType::Float => Ty::Float,
@@ -3795,6 +3798,7 @@ fn validate_value_ty(env: &ProgramEnv, ty: &Ty, span: Span) -> Result<(), TypeEr
             validate_value_ty(env, self_ty, span)
         }
         Ty::Unit
+        | Ty::Never
         | Ty::Bool
         | Ty::Int
         | Ty::Float
@@ -3929,6 +3933,7 @@ fn validate_assoc_projs_in_ty(env: &ProgramEnv, ty: &Ty, span: Span) -> Result<(
             Ok(())
         }
         Ty::Unit
+        | Ty::Never
         | Ty::Bool
         | Ty::Int
         | Ty::Float
@@ -4084,6 +4089,7 @@ fn validate_assoc_projs_well_formed_in_ty(
             Ok(())
         }
         Ty::Unit
+        | Ty::Never
         | Ty::Bool
         | Ty::Int
         | Ty::Float
@@ -4959,8 +4965,7 @@ fn typecheck_function_body_with_options(
     }
 
     let body_ty = tc.typecheck_block(&func.body, ExprUse::Value)?;
-    tc.infer
-        .unify(sig.ret.clone(), body_ty, func.body.span)
+    tc.unify_expected(sig.ret.clone(), body_ty, func.body.span)
         .map_err(|e| TypeError {
             message: format!("in function `{}`: {}", sig.name, e.message),
             span: e.span,
@@ -5146,6 +5151,87 @@ impl<'a> FnTypechecker<'a> {
         }
 
         Ok(())
+    }
+
+    /// Joins two expression types.
+    ///
+    /// This is like unification, but with one extra coercion rule:
+    /// `!` (never) can join with any type `T` and yields `T`.
+    fn join_types(&mut self, a: Ty, b: Ty, span: Span) -> Result<Ty, TypeError> {
+        let a = self.infer.resolve_ty(a);
+        let b = self.infer.resolve_ty(b);
+        match (a.clone(), b.clone()) {
+            (Ty::Never, other) | (other, Ty::Never) => Ok(other),
+            (a, b) => self.infer.unify(a, b, span),
+        }
+    }
+
+    /// Checks that a value of type `got` can be used where `expected` is required.
+    ///
+    /// This is directional (unlike plain unification):
+    /// - `!` can coerce to any `expected` type.
+    /// - Non-`!` types cannot coerce to `!`.
+    /// - For `fn` types, the return type is treated covariantly with the same `!` rule so
+    ///   `fn(...) -> !` can be used where `fn(...) -> T` is expected.
+    fn unify_expected(&mut self, expected: Ty, got: Ty, span: Span) -> Result<Ty, TypeError> {
+        let expected = self.infer.resolve_ty(expected);
+        let got = self.infer.resolve_ty(got);
+
+        if got == Ty::Never {
+            // `!` can be used in any value position and should not constrain inference.
+            return Ok(expected);
+        }
+
+        if expected == Ty::Never {
+            return Err(TypeError {
+                message: format!("type mismatch: expected `!`, got `{got}`"),
+                span,
+            });
+        }
+
+        match (expected.clone(), got) {
+            (
+                Ty::Fn {
+                    params: eparams,
+                    ret: eret,
+                },
+                Ty::Fn {
+                    params: gparams,
+                    ret: gret,
+                },
+            ) => {
+                if eparams.len() != gparams.len() {
+                    return Err(TypeError {
+                        message: format!(
+                            "type mismatch: expected `fn({}) -> {}`, got `fn({}) -> {}`",
+                            eparams
+                                .iter()
+                                .map(|t| t.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            eret,
+                            gparams
+                                .iter()
+                                .map(|t| t.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            gret
+                        ),
+                        span,
+                    });
+                }
+                let mut params = Vec::with_capacity(eparams.len());
+                for (e, g) in eparams.into_iter().zip(gparams.into_iter()) {
+                    params.push(self.infer.unify(e, g, span)?);
+                }
+                let ret = self.unify_expected(*eret, *gret, span)?;
+                Ok(Ty::Fn {
+                    params,
+                    ret: Box::new(ret),
+                })
+            }
+            (expected, got) => self.infer.unify(expected, got, span),
+        }
     }
 
     fn lower_type_expr_in_fn(&self, ty_expr: &TypeExpr) -> Result<Ty, TypeError> {
@@ -5433,7 +5519,7 @@ impl<'a> FnTypechecker<'a> {
                 let init_expr = init.as_ref().expect("init checked above");
                 let init_ty = self.typecheck_expr(init_expr, ExprUse::Value)?;
                 let scrutinee_ty = if let Some(decl) = declared {
-                    self.infer.unify(decl, init_ty, *span)?
+                    self.unify_expected(decl, init_ty, *span)?
                 } else {
                     init_ty
                 };
@@ -5461,7 +5547,7 @@ impl<'a> FnTypechecker<'a> {
                 } else {
                     Ty::Unit
                 };
-                self.infer.unify(got, self.return_ty.clone(), *span)?;
+                let _ = self.unify_expected(self.return_ty.clone(), got, *span)?;
             }
             crate::ast::Stmt::Break { span } => {
                 if self.loop_depth == 0 {
@@ -5500,7 +5586,7 @@ impl<'a> FnTypechecker<'a> {
                 let elem_ty = self.infer.fresh_type_var();
                 for item in items {
                     let t = self.typecheck_expr(item, ExprUse::Value)?;
-                    let _ = self.infer.unify(elem_ty.clone(), t, item.span())?;
+                    let _ = self.unify_expected(elem_ty.clone(), t, item.span())?;
                 }
                 Ty::Array(Box::new(self.infer.resolve_ty(elem_ty)))
             }
@@ -5547,7 +5633,7 @@ impl<'a> FnTypechecker<'a> {
             }
             Expr::While { cond, body, span } => {
                 let cond_ty = self.typecheck_expr(cond, ExprUse::Value)?;
-                self.infer.unify(cond_ty, Ty::Bool, *span)?;
+                let _ = self.unify_expected(Ty::Bool, cond_ty, *span)?;
                 self.loop_depth += 1;
                 let _ = self.typecheck_block(body, ExprUse::Stmt)?;
                 self.loop_depth -= 1;
@@ -5788,7 +5874,7 @@ impl<'a> FnTypechecker<'a> {
                 });
             };
             let got = self.typecheck_expr(value_expr, ExprUse::Value)?;
-            self.infer.unify(expected.clone(), got, value_expr.span())?;
+            let _ = self.unify_expected(expected.clone(), got, value_expr.span())?;
         }
 
         // Require all fields to be provided (Rust-like literal).
@@ -5855,7 +5941,7 @@ impl<'a> FnTypechecker<'a> {
         for (expr, expected) in fields.iter().zip(variant_fields.iter()) {
             let expected = subst_ty(expected.clone(), &ty_subst, &con_subst);
             let got = self.typecheck_expr(expr, ExprUse::Value)?;
-            self.infer.unify(expected, got, expr.span())?;
+            let _ = self.unify_expected(expected, got, expr.span())?;
         }
 
         Ok(Ty::App(TyCon::Named(def.name.clone()), type_args))
@@ -5980,7 +6066,7 @@ impl<'a> FnTypechecker<'a> {
         }
         for (arg, expected) in args.iter().zip(sig.params.iter()) {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
-            self.infer.unify(expected.clone(), got, arg.span())?;
+            let _ = self.unify_expected(expected.clone(), got, arg.span())?;
         }
 
         // If interface args were omitted, require inference to fully determine them.
@@ -6072,7 +6158,7 @@ impl<'a> FnTypechecker<'a> {
         span: Span,
     ) -> Result<Ty, TypeError> {
         let cond_ty = self.typecheck_expr(cond, ExprUse::Value)?;
-        self.infer.unify(cond_ty, Ty::Bool, cond.span())?;
+        let _ = self.unify_expected(Ty::Bool, cond_ty, cond.span())?;
         let then_ty = self.typecheck_block(then_block, ExprUse::Value)?;
         let Some(else_expr) = else_branch else {
             if use_kind == ExprUse::Value {
@@ -6084,7 +6170,7 @@ impl<'a> FnTypechecker<'a> {
             return Ok(Ty::Unit);
         };
         let else_ty = self.typecheck_expr(else_expr, ExprUse::Value)?;
-        self.infer.unify(then_ty, else_ty, span)
+        self.join_types(then_ty, else_ty, span)
     }
 
     fn typecheck_match(
@@ -6122,7 +6208,7 @@ impl<'a> FnTypechecker<'a> {
                         )?;
                     }
                     let body_ty = self.typecheck_expr(&arm.body, ExprUse::Value)?;
-                    self.infer.unify(result_ty.clone(), body_ty, arm.span)?;
+                    let _ = self.unify_expected(result_ty.clone(), body_ty, arm.span)?;
                     self.pop_scope();
                 }
                 MatchPat::Effect(effect_pat) => {
@@ -6303,7 +6389,7 @@ impl<'a> FnTypechecker<'a> {
                     }
 
                     let body_ty = self.typecheck_expr(&arm.body, ExprUse::Value)?;
-                    self.infer.unify(result_ty.clone(), body_ty, arm.span)?;
+                    let _ = self.unify_expected(result_ty.clone(), body_ty, arm.span)?;
                     self.pop_scope();
 
                     // If interface args were omitted, allow the handler body to constrain them
@@ -6388,6 +6474,9 @@ impl<'a> FnTypechecker<'a> {
         };
 
         match inner_scrutinee {
+            // `match` on a diverging expression is unreachable, so treat it as vacuously
+            // exhaustive (the value arms will never run).
+            Ty::Never => Ok(()),
             // 5.3: Finite coverage check (unit / bool / enum).
             Ty::Unit => {
                 let has_unit = value_pats.iter().any(|pat| {
@@ -6785,6 +6874,73 @@ impl<'a> FnTypechecker<'a> {
         pat: &Pattern,
         expected: Ty,
     ) -> Result<Vec<(Ident, Ty)>, TypeError> {
+        // `!` is uninhabited, so value-pattern matching is unreachable when the scrutinee type is
+        // `!`. Still accept the pattern (for ergonomics and to allow `match panic(...) { ... }`),
+        // and conservatively type all binds as `!`.
+        if self.infer.resolve_ty(expected.clone()) == Ty::Never {
+            fn collect_binds(pat: &Pattern, out: &mut Vec<Ident>) {
+                match pat {
+                    Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+                    Pattern::Bind { name, .. } => out.push(name.clone()),
+                    Pattern::Tuple {
+                        prefix,
+                        rest,
+                        suffix,
+                        ..
+                    } => {
+                        for p in prefix {
+                            collect_binds(p, out);
+                        }
+                        if let Some(rest) = rest
+                            && let Some(binding) = &rest.binding
+                        {
+                            out.push(binding.clone());
+                        }
+                        for p in suffix {
+                            collect_binds(p, out);
+                        }
+                    }
+                    Pattern::Enum { fields, .. } => {
+                        for p in fields {
+                            collect_binds(p, out);
+                        }
+                    }
+                    Pattern::Ctor { args, .. } => {
+                        for p in args {
+                            collect_binds(p, out);
+                        }
+                    }
+                    Pattern::Struct { fields, .. } => {
+                        for (_name, p) in fields {
+                            collect_binds(p, out);
+                        }
+                    }
+                    Pattern::Array {
+                        prefix,
+                        rest,
+                        suffix,
+                        ..
+                    } => {
+                        for p in prefix {
+                            collect_binds(p, out);
+                        }
+                        if let Some(rest) = rest
+                            && let Some(binding) = &rest.binding
+                        {
+                            out.push(binding.clone());
+                        }
+                        for p in suffix {
+                            collect_binds(p, out);
+                        }
+                    }
+                }
+            }
+
+            let mut binds = Vec::new();
+            collect_binds(pat, &mut binds);
+            return Ok(binds.into_iter().map(|id| (id, Ty::Never)).collect());
+        }
+
         match pat {
             Pattern::Wildcard { .. } => Ok(Vec::new()),
             Pattern::Bind { name, .. } => Ok(vec![(name.clone(), expected)]),
@@ -7241,7 +7397,7 @@ impl<'a> FnTypechecker<'a> {
         callee: &Expr,
         explicit_type_args: &[TypeExpr],
         args: &[Expr],
-        use_kind: ExprUse,
+        _use_kind: ExprUse,
         span: Span,
     ) -> Result<Ty, TypeError> {
         // Direct call by path.
@@ -7397,17 +7553,7 @@ impl<'a> FnTypechecker<'a> {
             }
             for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                self.infer.unify(expected.clone(), got, arg.span())?;
-            }
-
-            // `panic<T>(...)` is diverging, so in statement position we can safely pick `T := unit`
-            // to avoid unconstrained inference variables that would otherwise block runtime `TypeRep`
-            // passing.
-            if explicit_type_args.is_empty()
-                && use_kind == ExprUse::Stmt
-                && sig.name == "core::intrinsics::panic"
-            {
-                let _ = self.infer.unify(inst.ret.clone(), Ty::Unit, span)?;
+                let _ = self.unify_expected(expected.clone(), got, arg.span())?;
             }
 
             if !inst.reified_type_args.is_empty() {
@@ -7531,7 +7677,7 @@ impl<'a> FnTypechecker<'a> {
         let con_subst: HashMap<GenId, TyCon> = HashMap::new();
         let expected_field = subst_ty(field_ty_template.clone(), &ty_subst, &con_subst);
         let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
-        self.infer.unify(expected_field, got, args[0].span())?;
+        let _ = self.unify_expected(expected_field, got, args[0].span())?;
 
         Ok(Ty::App(TyCon::Named(def.name.clone()), type_args))
     }
@@ -7557,7 +7703,7 @@ impl<'a> FnTypechecker<'a> {
                 }
                 for (arg, expected) in args.iter().zip(params.iter()) {
                     let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                    self.infer.unify(expected.clone(), got, arg.span())?;
+                    let _ = self.unify_expected(expected.clone(), got, arg.span())?;
                 }
                 Ok(*ret)
             }
@@ -7569,7 +7715,7 @@ impl<'a> FnTypechecker<'a> {
                     });
                 }
                 let got = self.typecheck_expr(&args[0], ExprUse::Value)?;
-                self.infer.unify(*param, got, args[0].span())?;
+                let _ = self.unify_expected(*param, got, args[0].span())?;
                 Ok(*ret)
             }
             other => Err(TypeError {
@@ -7696,7 +7842,7 @@ impl<'a> FnTypechecker<'a> {
 
         for (arg, expected) in args[1..].iter().zip(inst.params.iter()) {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
-            self.infer.unify(expected.clone(), got, arg.span())?;
+            let _ = self.unify_expected(expected.clone(), got, arg.span())?;
         }
         if !inst.reified_type_args.is_empty() {
             let method_id = format!("{}::{method_name}", method_info.origin);
@@ -7782,7 +7928,7 @@ impl<'a> FnTypechecker<'a> {
             }
             for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                self.infer.unify(expected.clone(), got, arg.span())?;
+                let _ = self.unify_expected(expected.clone(), got, arg.span())?;
             }
             if !inst.reified_type_args.is_empty() {
                 let method_id = format!("{}::{}", info.origin, method.name);
@@ -7836,11 +7982,10 @@ impl<'a> FnTypechecker<'a> {
                 if readonly_receiver {
                     let expected = strip_readonly(&inst.params[0]).clone();
                     let got = strip_readonly(&recv_ty_resolved).clone();
-                    self.infer.unify(expected, got, receiver.span())?;
+                    let _ = self.unify_expected(expected, got, receiver.span())?;
                 } else {
                     let receiver_expected = inst.params[0].clone();
-                    self.infer
-                        .unify(receiver_expected, recv_ty, receiver.span())?;
+                    let _ = self.unify_expected(receiver_expected, recv_ty, receiver.span())?;
                 }
                 if args.len() != inst.params.len() - 1 {
                     return Err(TypeError {
@@ -7854,7 +7999,7 @@ impl<'a> FnTypechecker<'a> {
                 }
                 for (arg, expected) in args.iter().zip(inst.params[1..].iter()) {
                     let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                    self.infer.unify(expected.clone(), got, arg.span())?;
+                    let _ = self.unify_expected(expected.clone(), got, arg.span())?;
                 }
                 if !inst.reified_type_args.is_empty() {
                     self.call_type_args.insert(
@@ -7982,7 +8127,7 @@ impl<'a> FnTypechecker<'a> {
             }
             for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                self.infer.unify(expected.clone(), got, arg.span())?;
+                let _ = self.unify_expected(expected.clone(), got, arg.span())?;
             }
             if !inst.reified_type_args.is_empty() {
                 let method_id = format!("{origin}::{}", method.name);
@@ -8061,7 +8206,7 @@ impl<'a> FnTypechecker<'a> {
             }
             for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                self.infer.unify(expected.clone(), got, arg.span())?;
+                let _ = self.unify_expected(expected.clone(), got, arg.span())?;
             }
             if !inst.reified_type_args.is_empty() {
                 let method_id = format!("{}::{}", info.origin, method.name);
@@ -8127,7 +8272,7 @@ impl<'a> FnTypechecker<'a> {
             }
             for (arg, expected) in args.iter().zip(inst.params.iter()) {
                 let got = self.typecheck_expr(arg, ExprUse::Value)?;
-                self.infer.unify(expected.clone(), got, arg.span())?;
+                let _ = self.unify_expected(expected.clone(), got, arg.span())?;
             }
             if !inst.reified_type_args.is_empty() {
                 let method_id = format!("{}::{}", info.origin, method.name);
@@ -8248,7 +8393,7 @@ impl<'a> FnTypechecker<'a> {
         }
         for (arg, expected) in args.iter().zip(inst.params.iter()) {
             let got = self.typecheck_expr(arg, ExprUse::Value)?;
-            self.infer.unify(expected.clone(), got, arg.span())?;
+            let _ = self.unify_expected(expected.clone(), got, arg.span())?;
         }
         if !inst.reified_type_args.is_empty() {
             let method_id = format!("{}::{}", info.origin, method.name);
@@ -8391,7 +8536,7 @@ impl<'a> FnTypechecker<'a> {
     fn typecheck_index(&mut self, base: &Expr, index: &Expr, span: Span) -> Result<Ty, TypeError> {
         let base_ty = self.typecheck_expr(base, ExprUse::Value)?;
         let idx_ty = self.typecheck_expr(index, ExprUse::Value)?;
-        self.infer.unify(idx_ty, Ty::Int, index.span())?;
+        let _ = self.unify_expected(Ty::Int, idx_ty, index.span())?;
 
         let base_ty = self.infer.resolve_ty(base_ty);
         let (is_readonly, inner) = match base_ty {
@@ -8420,8 +8565,8 @@ impl<'a> FnTypechecker<'a> {
         match op {
             UnaryOp::Not => {
                 let t_resolved = self.infer.resolve_ty(t.clone());
-                if strip_readonly(&t_resolved) == &Ty::Bool {
-                    self.infer.unify(t, Ty::Bool, span)?;
+                if matches!(strip_readonly(&t_resolved), Ty::Bool | Ty::Never) {
+                    let _ = self.unify_expected(Ty::Bool, t, span)?;
                     return Ok(Ty::Bool);
                 }
 
@@ -8495,8 +8640,8 @@ impl<'a> FnTypechecker<'a> {
             BinaryOp::And | BinaryOp::Or => {
                 let lt = self.typecheck_expr(left, ExprUse::Value)?;
                 let rt = self.typecheck_expr(right, ExprUse::Value)?;
-                self.infer.unify(lt, Ty::Bool, left.span())?;
-                self.infer.unify(rt, Ty::Bool, right.span())?;
+                let _ = self.unify_expected(Ty::Bool, lt, left.span())?;
+                let _ = self.unify_expected(Ty::Bool, rt, right.span())?;
                 Ok(Ty::Bool)
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
@@ -8506,7 +8651,7 @@ impl<'a> FnTypechecker<'a> {
                 let rt = self.infer.resolve_ty(rt);
                 let lt_base = strip_readonly(&lt).clone();
                 let rt_base = strip_readonly(&rt).clone();
-                let base = self.infer.unify(lt_base, rt_base, span)?;
+                let base = self.join_types(lt_base, rt_base, span)?;
                 let base = self.infer.resolve_ty(base);
 
                 match base {
@@ -8559,7 +8704,7 @@ impl<'a> FnTypechecker<'a> {
                 let rt = self.infer.resolve_ty(rt);
                 let lt_base = strip_readonly(&lt).clone();
                 let rt_base = strip_readonly(&rt).clone();
-                let base = self.infer.unify(lt_base, rt_base, span)?;
+                let base = self.join_types(lt_base, rt_base, span)?;
                 let base = self.infer.resolve_ty(base);
 
                 let prim_ok = match op {
@@ -8650,7 +8795,7 @@ impl<'a> FnTypechecker<'a> {
                     });
                 }
                 let rhs = self.typecheck_expr(value, ExprUse::Value)?;
-                self.infer.unify(dst_ty, rhs, value.span())?;
+                let _ = self.unify_expected(dst_ty, rhs, value.span())?;
                 Ok(Ty::Unit)
             }
             Expr::Field { base, name, .. } => {
@@ -8703,7 +8848,7 @@ impl<'a> FnTypechecker<'a> {
                         let con_subst: HashMap<GenId, TyCon> = HashMap::new();
                         let expected = subst_ty(field_ty.clone(), &ty_subst, &con_subst);
                         let rhs = self.typecheck_expr(value, ExprUse::Value)?;
-                        self.infer.unify(expected, rhs, value.span())?;
+                        let _ = self.unify_expected(expected, rhs, value.span())?;
                         Ok(Ty::Unit)
                     }
                     FieldName::Index {
@@ -8765,7 +8910,7 @@ impl<'a> FnTypechecker<'a> {
                             }
                         };
                         let rhs = self.typecheck_expr(value, ExprUse::Value)?;
-                        self.infer.unify(expected, rhs, value.span())?;
+                        let _ = self.unify_expected(expected, rhs, value.span())?;
                         Ok(Ty::Unit)
                     }
                 }
@@ -8773,7 +8918,7 @@ impl<'a> FnTypechecker<'a> {
             Expr::Index { base, index, .. } => {
                 let base_ty = self.typecheck_expr(base, ExprUse::Value)?;
                 let idx_ty = self.typecheck_expr(index, ExprUse::Value)?;
-                self.infer.unify(idx_ty, Ty::Int, index.span())?;
+                let _ = self.unify_expected(Ty::Int, idx_ty, index.span())?;
                 let base_ty = self.infer.resolve_ty(base_ty);
                 let inner = match base_ty {
                     Ty::Readonly(_) => {
@@ -8791,7 +8936,7 @@ impl<'a> FnTypechecker<'a> {
                     });
                 };
                 let rhs = self.typecheck_expr(value, ExprUse::Value)?;
-                self.infer.unify(*elem, rhs, value.span())?;
+                let _ = self.unify_expected(*elem, rhs, value.span())?;
                 Ok(Ty::Unit)
             }
             _ => Err(TypeError {
@@ -9355,6 +9500,7 @@ pub(crate) fn contains_self_type(ty: &Ty) -> bool {
         Ty::Gen(_)
         | Ty::Var(_)
         | Ty::Unit
+        | Ty::Never
         | Ty::Bool
         | Ty::Int
         | Ty::Float
@@ -9399,6 +9545,7 @@ fn contains_naked_self_type(ty: &Ty) -> bool {
         Ty::Gen(_)
         | Ty::Var(_)
         | Ty::Unit
+        | Ty::Never
         | Ty::Bool
         | Ty::Int
         | Ty::Float
@@ -9430,6 +9577,7 @@ fn contains_assoc_proj(ty: &Ty) -> bool {
         | Ty::Gen(_)
         | Ty::Var(_)
         | Ty::Unit
+        | Ty::Never
         | Ty::Bool
         | Ty::Int
         | Ty::Float

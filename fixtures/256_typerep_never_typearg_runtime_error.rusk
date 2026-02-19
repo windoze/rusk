@@ -1,0 +1,5 @@
+// expect: runtime_error panic: boom
+
+fn main() -> string {
+    core::intrinsics::to_string::<!>(panic("boom"))
+}

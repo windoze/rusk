@@ -644,6 +644,13 @@ impl<'a> Parser<'a> {
         }
 
         match self.lookahead.kind {
+            TokenKind::Bang => {
+                let tok = self.bump()?;
+                Ok(TypeExpr::Prim {
+                    prim: PrimType::Never,
+                    span: tok.span,
+                })
+            }
             TokenKind::Ident(ref name) => {
                 let prim = match name.as_str() {
                     "unit" => Some(PrimType::Unit),
@@ -712,6 +719,13 @@ impl<'a> Parser<'a> {
         }
 
         match self.lookahead.kind {
+            TokenKind::Bang => {
+                let tok = self.bump()?;
+                Ok(TypeExpr::Prim {
+                    prim: PrimType::Never,
+                    span: tok.span,
+                })
+            }
             TokenKind::Ident(ref name) => {
                 let prim = match name.as_str() {
                     "unit" => Some(PrimType::Unit),
@@ -758,6 +772,13 @@ impl<'a> Parser<'a> {
         }
 
         match self.lookahead.kind {
+            TokenKind::Bang => {
+                let tok = self.bump()?;
+                Ok(TypeExpr::Prim {
+                    prim: PrimType::Never,
+                    span: tok.span,
+                })
+            }
             TokenKind::Ident(ref name) => {
                 let prim = match name.as_str() {
                     "unit" => Some(PrimType::Unit),

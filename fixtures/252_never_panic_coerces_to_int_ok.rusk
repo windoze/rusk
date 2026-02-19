@@ -1,0 +1,6 @@
+// expect: ok int 1
+
+fn main() -> int {
+    if true { 1 } else { panic("no") }
+}
+

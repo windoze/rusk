@@ -284,7 +284,7 @@ TypeAtom       := PrimType
                | "(" Type "," TypeList? ")"        // tuple type (comma required)
                | PathType ;
 
-PrimType       := "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes" ;
+PrimType       := "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes" | "!" ;
 
 PathType       := Ident GenericArgs? ("::" Ident GenericArgs?)* ;
               | Ident GenericArgs? ("::" Ident GenericArgs?)* AssocBindings ;
@@ -303,6 +303,8 @@ Notes:
   `TypeRep` for operations that require type-precise behavior (notably `is` / `as?` and effect
   identity). `readonly` remains a compile-time view and is not a distinct runtime type.
 - `readonly T` is a *view type* for reference-like values (arrays/structs/enums/tuples). Writing through a `readonly` view is a compile-time error and also traps at runtime.
+- `!` is the never / bottom type (uninhabited). Expressions of type `!` may appear in any value
+  position via a compile-time coercion to the expected type.
 - Tuples use Rust-like comma disambiguation: `(T)` is a parenthesized type, `(T,)` is a 1-tuple type, and `()` is `unit`.
 
 ### 3.5 Statements and Blocks
@@ -1456,7 +1458,7 @@ Library wrappers:
 
 Rusk provides a minimal panic surface as an intrinsic host function:
 
-- `core::intrinsics::panic<T>(msg: string) -> T` traps with a panic message.
+- `core::intrinsics::panic(msg: string) -> !` traps with a panic message.
 
 `core::prelude` is automatically imported into every module and (in v0.4) re-exports `panic`,
 so `panic("...")` is available unqualified.

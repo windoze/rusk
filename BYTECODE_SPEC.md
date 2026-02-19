@@ -727,6 +727,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 | 12 | `Cont` | — |
 | 13 | `Byte` | — |
 | 14 | `Char` | — |
+| 15 | `Never` | — |
 
 #### Patterns (`u8`)
 

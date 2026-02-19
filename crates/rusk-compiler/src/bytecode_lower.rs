@@ -66,6 +66,7 @@ fn abi_sig_from_host_sig(sig: &rusk_mir::HostFnSig) -> Option<HostFnSig> {
 fn lower_type_rep_lit(lit: &rusk_mir::TypeRepLit) -> TypeRepLit {
     match lit {
         rusk_mir::TypeRepLit::Unit => TypeRepLit::Unit,
+        rusk_mir::TypeRepLit::Never => TypeRepLit::Never,
         rusk_mir::TypeRepLit::Bool => TypeRepLit::Bool,
         rusk_mir::TypeRepLit::Int => TypeRepLit::Int,
         rusk_mir::TypeRepLit::Float => TypeRepLit::Float,

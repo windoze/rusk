@@ -1,0 +1,19 @@
+// expect: ok int 6
+
+fn main() -> int {
+    let state = [0];
+
+    let _r: Result<int, int> =
+        try {
+            throw(5)
+        }
+        .catch |e| {
+            state[0] = e;
+        }
+        .finally {
+            state[0] = state[0] + 1;
+        };
+
+    state[0]
+}
+

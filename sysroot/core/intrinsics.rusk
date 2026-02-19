@@ -12,7 +12,7 @@ pub intrinsic fn string_concat(a: string, b: string) -> string;
 pub intrinsic fn to_string<T>(value: T) -> string;
 
 // Panic.
-pub intrinsic fn panic<T>(msg: string) -> T;
+pub intrinsic fn panic(msg: string) -> !;
 
 // Boolean.
 pub intrinsic fn bool_not(v: bool) -> bool;

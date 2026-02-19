@@ -180,6 +180,7 @@ pub enum Mutability {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Type {
     Unit,
+    Never,
     Bool,
     Int,
     Float,
@@ -241,6 +242,7 @@ pub enum HostType {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TypeRepLit {
     Unit,
+    Never,
     Bool,
     Int,
     Float,

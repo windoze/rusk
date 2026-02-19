@@ -1279,10 +1279,7 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             HostType::String,
         )),
         // Panic.
-        "core::intrinsics::panic" => Some(sig(
-            vec![HostType::TypeRep, HostType::String],
-            HostType::Any,
-        )),
+        "core::intrinsics::panic" => Some(sig(vec![HostType::String], HostType::Any)),
         // Boolean.
         "core::intrinsics::bool_not" => Some(sig(vec![HostType::Bool], HostType::Bool)),
         "core::intrinsics::bool_eq" | "core::intrinsics::bool_ne" => {
@@ -5212,6 +5209,7 @@ impl<'a> FunctionLowerer<'a> {
                 ));
             }
             Ty::Unit => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Unit)),
+            Ty::Never => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Never)),
             Ty::Bool => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Bool)),
             Ty::Int => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Int)),
             Ty::Float => Operand::Literal(ConstValue::TypeRep(TypeRepLit::Float)),
@@ -5365,6 +5363,7 @@ impl<'a> FunctionLowerer<'a> {
             TypeExpr::Prim { prim, span: _ } => {
                 Ok(Operand::Literal(ConstValue::TypeRep(match prim {
                     crate::ast::PrimType::Unit => TypeRepLit::Unit,
+                    crate::ast::PrimType::Never => TypeRepLit::Never,
                     crate::ast::PrimType::Bool => TypeRepLit::Bool,
                     crate::ast::PrimType::Int => TypeRepLit::Int,
                     crate::ast::PrimType::Float => TypeRepLit::Float,
@@ -8310,6 +8309,7 @@ fn type_implements_interface(env: &ProgramEnv, type_name: &str, iface: &str) -> 
 fn mir_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Option<Type> {
     match ty {
         Ty::Unit => Some(Type::Unit),
+        Ty::Never => Some(Type::Never),
         Ty::Bool => Some(Type::Bool),
         Ty::Int => Some(Type::Int),
         Ty::Float => Some(Type::Float),

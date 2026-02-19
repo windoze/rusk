@@ -1,5 +1,5 @@
 use crate::compiler::compile_to_mir;
-use rusk_mir::Instruction;
+use rusk_mir::{CallTarget, Instruction};
 
 fn count_index_gets(func: &rusk_mir::Function) -> usize {
     func.blocks
@@ -75,14 +75,44 @@ fn match_helpers_do_not_capture_unused_bindings() {
     "#;
 
     let module = compile_to_mir(src).expect("compile");
-    let helpers: Vec<&rusk_mir::Function> = module
+    let main_id = module.function_id("main").expect("main id");
+    let main = module.function(main_id).expect("main function");
+
+    let mut helper_names = Vec::<String>::new();
+    for block in &main.blocks {
+        for instr in &block.instructions {
+            match instr {
+                Instruction::Call { func, .. } => {
+                    if func.starts_with("$match::") {
+                        helper_names.push(func.clone());
+                    }
+                }
+                Instruction::CallId {
+                    func: CallTarget::Mir(id),
+                    ..
+                }
+                | Instruction::CallIdMulti {
+                    func: CallTarget::Mir(id),
+                    ..
+                } => {
+                    let callee = module.function(*id).expect("callee function");
+                    if callee.name.starts_with("$match::") {
+                        helper_names.push(callee.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(helper_names.len(), 1, "expected exactly one match helper");
+
+    let helper = module
         .functions
         .iter()
-        .filter(|f| f.name.starts_with("$match::"))
-        .collect();
-    assert_eq!(helpers.len(), 1, "expected exactly one match helper");
+        .find(|f| f.name == helper_names[0])
+        .expect("match helper function");
     assert!(
-        helpers[0].params.is_empty(),
+        helper.params.is_empty(),
         "capture-free match helper should take no captured params"
     );
 }

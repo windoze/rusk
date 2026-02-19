@@ -308,6 +308,7 @@ impl Encoder {
     fn write_type_rep_lit(&mut self, lit: &TypeRepLit) -> Result<(), EncodeError> {
         match lit {
             TypeRepLit::Unit => self.write_u8(0),
+            TypeRepLit::Never => self.write_u8(15),
             TypeRepLit::Bool => self.write_u8(1),
             TypeRepLit::Int => self.write_u8(2),
             TypeRepLit::Float => self.write_u8(3),
@@ -1181,6 +1182,7 @@ impl<'a> Decoder<'a> {
     fn read_type_rep_lit(&mut self) -> Result<TypeRepLit, DecodeError> {
         match self.read_u8()? {
             0 => Ok(TypeRepLit::Unit),
+            15 => Ok(TypeRepLit::Never),
             1 => Ok(TypeRepLit::Bool),
             2 => Ok(TypeRepLit::Int),
             3 => Ok(TypeRepLit::Float),

@@ -18,6 +18,17 @@ fn count_push_handler_clauses(
     out
 }
 
+fn handler_clauses_for_effect<'m>(
+    module: &'m rusk_bytecode::ExecutableModule,
+    interface: &str,
+    method: &str,
+) -> Vec<&'m rusk_bytecode::HandlerClause> {
+    count_push_handler_clauses(module)
+        .into_iter()
+        .filter(|clause| clause.effect.interface == interface && clause.effect.method == method)
+        .collect()
+}
+
 #[test]
 fn abortive_handler_omits_continuation_param_in_bytecode() {
     let src = r#"
@@ -32,7 +43,7 @@ fn abortive_handler_omits_continuation_param_in_bytecode() {
     "#;
 
     let module = compile_to_bytecode(src).expect("compile");
-    let clauses = count_push_handler_clauses(&module);
+    let clauses = handler_clauses_for_effect(&module, "Tick", "tick");
     assert_eq!(clauses.len(), 1, "expected exactly one handler clause");
     assert_eq!(
         clauses[0].param_regs.len(),
@@ -61,7 +72,7 @@ fn continuation_is_kept_when_stored_in_bytecode() {
     "#;
 
     let module = compile_to_bytecode(src).expect("compile");
-    let clauses = count_push_handler_clauses(&module);
+    let clauses = handler_clauses_for_effect(&module, "E", "boom");
     assert_eq!(clauses.len(), 1, "expected exactly one handler clause");
     assert_eq!(
         clauses[0].param_regs.len(),

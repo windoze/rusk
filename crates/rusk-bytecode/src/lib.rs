@@ -65,6 +65,7 @@ pub struct ExternalEffectDecl {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TypeRepLit {
     Unit,
+    Never,
     Bool,
     Int,
     Float,
