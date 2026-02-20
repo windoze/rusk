@@ -1,6 +1,13 @@
-// 07 - Enums and pattern matching
+// 07 - 枚举与模式匹配（以及 Option）
 //
-// Enums are tagged unions. `match` destructures values with patterns.
+// 枚举（`enum`）是带 tag 的联合类型；`match` 可以用模式把值“拆开”。
+//
+// 本示例顺便引入 `Option<T>`：
+// - `Option::Some(v)` 表示“有值”
+// - `Option::None` 表示“缺失/失败”
+//
+// 对比（Rust）：
+//   enum Option<T> { Some(T), None }
 
 enum Color {
     Rgb(int, int, int),
@@ -14,9 +21,26 @@ fn describe(c: Color) -> string {
     }
 }
 
+fn parse_color(name: string) -> Option<Color> {
+    match name {
+        "red" => Option::Some(Color::Rgb(255, 0, 0))
+        "blue" => Option::Some(Color::Named("blue"))
+        _ => Option::None
+    }
+}
+
 fn main() {
     std::println(describe(Color::Rgb(255, 0, 0)));
     std::println(describe(Color::Named("blue")));
+
+    match parse_color("red") {
+        Option::Some(c) => std::println(f"parse_color(\"red\") = {describe(c)}")
+        Option::None => std::println("parse_color(\"red\") 失败（不应发生）")
+    };
+
+    match parse_color("unknown") {
+        Option::Some(c) => std::println(f"parse_color(\"unknown\") = {describe(c)}")
+        Option::None => std::println("parse_color(\"unknown\") = None（符合预期）")
+    };
     ()
 }
-

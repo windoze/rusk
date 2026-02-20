@@ -1,6 +1,12 @@
-// 02 - Values and functions
+// 02 - 值与函数
 //
-// A small program that computes a value, prints it, and returns it from `main`.
+// 这个示例覆盖：
+// - `let` 绑定与（可选的）类型标注
+// - 函数定义 `fn ...`、参数/返回类型
+// - `main` 的返回值（`rusk` CLI 会在返回值非 `unit` 时把它打印出来，方便调试）
+//
+// 对比（TypeScript）：
+//   function add(a: number, b: number): number { return a + b }
 
 fn add(a: int, b: int) -> int { a + b }
 
@@ -11,4 +17,3 @@ fn main() -> int {
     std::println(f"{a} + {b} = {c}");
     c
 }
-

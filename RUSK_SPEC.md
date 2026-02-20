@@ -1,17 +1,17 @@
 # Rusk Language Specification (v0.4)
 
-本文件是 **Rusk 语言规范**（Rusk Language Spec）。
+This document is the **Rusk Language Specification** (Rusk Language Spec).
 
-Rusk 的目标是：在语法上接近 Rust（块表达式、`match`、显式可变性控制），在工程体验上接近 TypeScript（类型推断、泛型、接口驱动的抽象），并以 **代数效果（Algebraic Effects）** 作为一等机制统一异常/异步/生成器等控制流扩展。
+Rusk's goal is to be syntactically similar to Rust (block expressions, `match`, explicit mutability control), engineering-wise similar to TypeScript (type inference, generics, interface-driven abstraction), and to use **Algebraic Effects** as a first-class mechanism to unify control flow extensions such as exceptions/async/generators.
 
-本仓库的实现是一个“源代码 → MIR → 字节码 → VM 执行”的参考实现：
+The implementation in this repository is a reference implementation with the pipeline “source code → MIR → bytecode → VM execution”:
 
-- `RUSK_SPEC.md` 定义源语言（本文件）。
-- `MIR_SPEC.md` 定义编译器内部 IR：MIR。
-- `BYTECODE_SPEC.md` 定义字节码指令集与 `.rbc` 序列化格式。
-- `crates/rusk-vm` 执行字节码，并通过宿主函数（host functions）提供平台 I/O 等能力。
+- `RUSK_SPEC.md` defines the source language (this document).
+- `MIR_SPEC.md` defines the compiler's internal IR: MIR.
+- `BYTECODE_SPEC.md` defines the bytecode instruction set and `.rbc` serialization format.
+- `crates/rusk-vm` executes bytecode and provides platform I/O and other capabilities through host functions.
 
-本规范以 **可实现** 为前提：规范中出现的语法与语义都必须能完整编译到当前版本的 MIR，并进一步降级到当前版本的字节码，在参考 VM 中执行（不允许“未来再实现”的占位条款）。
+This specification is based on **implementability**: all syntax and semantics in this specification must be fully compilable to the current version of MIR, and further lowered to the current version of bytecode, and executable in the reference VM (placeholder clauses for “to be implemented in the future” are not allowed).
 
 ---
 
@@ -1623,19 +1623,28 @@ Lowering targets (canonical intrinsics):
 
 #### 9.7.3 `string` slice views
 
-Zero-copy slicing is supported for `string` by **byte offsets**:
+Zero-copy slicing is supported for `string` by Unicode scalar indices (codepoints):
 
 - `readonly fn string::slice(from: int, to: Option<int>) -> string`
   - half-open `[from, to)`; `to = None` means “to the end”
-  - `from` / `to` are **byte offsets** into UTF-8, not “character indices”
+  - `from` / `to` are **codepoint indices**, not UTF-8 byte offsets
+  - computing the slice boundary is O(n) in the length of the string (it must count codepoints)
   - traps if:
     - `from < 0`, or `to < 0` (when `to = Some(_)`),
-    - `from > to` or `to > len_bytes(string)`,
-    - `from` or `to` is not a UTF-8 character boundary
+    - `from > to`,
+    - `from` or `to` is out of bounds (greater than the number of codepoints)
+
+Byte slicing is supported for `string` via `bytes` views:
+
+- `readonly fn string::byte_slice(from: int, to: Option<int>) -> bytes`
+  - half-open `[from, to)`; `to = None` means “to the end”
+  - `from` / `to` are **byte offsets** into UTF-8
+  - traps if `from < 0`, `to < 0` (when `to = Some(_)`), `from > to`, or `to > len_bytes(string)`
 
 Lowering target (canonical intrinsic):
 
 - `core::intrinsics::string_slice(s: string, from: int, to: Option<int>) -> string`
+- `core::intrinsics::string_byte_slice(s: string, from: int, to: Option<int>) -> bytes`
 
 ### 9.8 Length (`core::len`)
 
@@ -1656,7 +1665,7 @@ Built-in implementations:
 
 `string` does not implement `Len` in v0.4 because the choice of “length in bytes” vs “length in
 Unicode scalar values” is user-visible. Use `"s".chars().count()` to count Unicode scalar values,
-or `string::slice` byte offsets for byte-level operations.
+or `string::byte_slice` for byte-level operations.
 
 ## 10. Compilation Pipeline (Normative)
 

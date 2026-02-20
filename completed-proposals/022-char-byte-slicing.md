@@ -4,6 +4,10 @@ Date: 2026-02-17
 
 Status: Draft
 
+Note (2026-02-20): The implemented `string` slicing API has since changed — `string::slice` now
+slices by Unicode scalar indices (codepoints) and `string::byte_slice` slices by UTF-8 byte offsets
+and returns `bytes`. See `RUSK_SPEC.md` §9.7.3 for the current behavior.
+
 This proposal introduces two new primitive types (`byte`, `char`), adds a small set of explicit
 conversion APIs, and defines efficient (“view”, zero-copy) slicing for `bytes` and `string`.
 

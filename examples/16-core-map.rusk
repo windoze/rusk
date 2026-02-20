@@ -1,0 +1,80 @@
+// 16 - `core::map::Map`（哈希表）
+//
+// `core::map::Map<K, V>` 是一个纯 Rusk 实现的 HashMap 风格数据结构：
+// - 支持 `insert/get/remove/contains_key`
+// - 采用开放寻址（open addressing）+ 线性探测（linear probing）
+// - key 的约束：`K` 必须实现 `core::hash::Hash` 与 `core::ops::Eq`
+//
+// 对比（Rust）：
+//   use std::collections::HashMap;
+//   let mut m: HashMap<K, V> = HashMap::new();
+
+use core::hash::Hash;
+use core::map::Map;
+use core::ops::Eq;
+
+// 自定义 key：实现 Hash + Eq 后即可作为 Map 的键类型。
+struct Key { x: int, y: int }
+
+impl Hash for Key {
+    readonly fn hash() -> int {
+        // 组合两个字段的 hash（这里仅做演示；真实场景可使用更好的分布策略）
+        core::hash::combine(self.x.hash(), self.y.hash())
+    }
+}
+
+impl Eq for Key {
+    readonly fn eq(other: Key) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+
+fn main() -> int {
+    let m: Map<Key, string> = Map::new();
+    std::println(f"初始：len={m.len()}, is_empty={m.is_empty()}, cap={m.capacity()}");
+
+    // insert：如果 key 不存在，返回 None
+    match m.insert(Key { x: 1, y: 2 }, "a") {
+        Option::Some(old) => std::println(f"插入 (1,2) 时竟然有旧值：{old}")
+        Option::None => std::println("插入 (1,2) -> None（首次插入）")
+    };
+    m.insert(Key { x: 3, y: 4 }, "b");
+
+    std::println(f"插入后：len={m.len()}, cap={m.capacity()}");
+
+    // get：返回 Option<readonly V>
+    match m.get(Key { x: 1, y: 2 }) {
+        Option::Some(v) => std::println(f"get(1,2) = {v}")
+        Option::None => std::println("get(1,2) = None（不应发生）")
+    };
+
+    // 覆盖写：insert 会返回旧值
+    match m.insert(Key { x: 1, y: 2 }, "a2") {
+        Option::Some(old) => std::println(f"覆盖写 (1,2)：旧值 = {old}")
+        Option::None => std::println("覆盖写 (1,2) 返回 None（不应发生）")
+    };
+    match m.get(Key { x: 1, y: 2 }) {
+        Option::Some(v) => std::println(f"现在 get(1,2) = {v}")
+        Option::None => std::println("现在 get(1,2) = None（不应发生）")
+    };
+
+    std::println(f"contains_key(3,4) = {m.contains_key(Key { x: 3, y: 4 })}");
+    std::println(f"contains_key(9,9) = {m.contains_key(Key { x: 9, y: 9 })}");
+
+    // remove：删除并返回被删的值
+    match m.remove(Key { x: 3, y: 4 }) {
+        Option::Some(v) => std::println(f"remove(3,4) = {v}")
+        Option::None => std::println("remove(3,4) = None（不应发生）")
+    };
+    std::println(f"删除后：len={m.len()}, contains_key(3,4)={m.contains_key(Key { x: 3, y: 4 })}");
+
+    // reserve：提前预留空间（减少后续扩容/rehash）
+    m.reserve(10);
+    std::println(f"reserve(10) 后 cap={m.capacity()}（实现细节：内部 bucket 数会按阈值扩容）");
+
+    // clear：清空
+    m.clear();
+    std::println(f"clear 后：len={m.len()}, is_empty={m.is_empty()}");
+
+    0
+}

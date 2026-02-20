@@ -1,29 +1,32 @@
-// 16 - Fixed-point combinator (Y/Z-combinator concept)
+// 19 - 不动点组合子（Fixed-point Combinator / Y/Z 组合子思想）
 //
-// This example demonstrates the Y-combinator concept using generics and higher-order functions.
-// The Y-combinator allows defining recursive functions without explicit self-reference.
+// 目标：用“高阶函数 + 泛型”表达递归，而不在函数体里直接写函数名。
 //
-// In typed languages, we use a practical approximation that captures the essence of fixed-point recursion.
+// 核心思路：
+// - 把“递归调用点”抽象成一个参数 `self`
+// - 再用 `fix` 把 `self` 回填成“它自己”
+//
+// 备注：
+// - 经典的 Y 组合子在严格求值 + 静态类型下会遇到一些限制，这里用一个更实用的近似形式来展示“思想”。
+//
+// 对比（JavaScript，伪代码）：
+//   const fix = f => x => f(fix(f), x)
 
-// A function that takes itself as an argument
-// This is the key insight of the Y-combinator: passing the function to itself for recursion
-
-// Generic fixed-point combinator for functions of type (T) -> R
-// In practice, we use a wrapper approach since true Y-combinator needs recursive types
+// `(T) -> R` 形式的一元不动点组合子
 fn fix<T, R>(f: fn(fn(T) -> R, T) -> R) -> fn(T) -> R {
     |x| { f(fix(f), x) }
 }
 
-// Generic fixed-point combinator for functions with two parameters
+// `(T1, T2) -> R` 形式的二元不动点组合子
 fn fix2<T1, T2, R>(f: fn(fn(T1, T2) -> R, T1, T2) -> R) -> fn(T1, T2) -> R {
     |x, y| { f(fix2(f), x, y) }
 }
 
 fn main() {
-    std::println("=== Fixed-Point Combinator Examples ===\n");
+    std::println("=== 不动点组合子示例 ===\n");
 
-    // Example 1: Factorial using fix combinator
-    std::println("1. Factorial function (generic over recursion):");
+    // 示例 1：阶乘
+    std::println("1) 阶乘（factorial）：");
 
     let factorial_step = |self: fn(int) -> int, n: int| {
         if n <= 1 {
@@ -37,8 +40,8 @@ fn main() {
     std::println(f"  factorial(5) = {factorial(5)}");
     std::println(f"  factorial(10) = {factorial(10)}");
 
-    // Example 2: Fibonacci using fix combinator
-    std::println("\n2. Fibonacci function:");
+    // 示例 2：斐波那契
+    std::println("\n2) 斐波那契（fibonacci）：");
 
     let fib_step = |self: fn(int) -> int, n: int| {
         if n <= 1 {
@@ -54,8 +57,8 @@ fn main() {
     std::println(f"  fib(7) = {fib(7)}");
     std::println(f"  fib(10) = {fib(10)}");
 
-    // Example 3: Sum of integers from 1 to n
-    std::println("\n3. Sum function using fix combinator:");
+    // 示例 3：1..n 求和
+    std::println("\n3) 1..n 求和：");
 
     let sum_step = |self: fn(int) -> int, n: int| {
         if n <= 0 {
@@ -70,8 +73,8 @@ fn main() {
     std::println(f"  sum(1..10) = {sum(10)}");
     std::println(f"  sum(1..100) = {sum(100)}");
 
-    // Example 4: GCD (greatest common divisor) using fix2 (two parameters)
-    std::println("\n4. GCD function with two parameters:");
+    // 示例 4：最大公约数（两参数，用 fix2）
+    std::println("\n4) 最大公约数（GCD）：");
 
     let gcd_step = |self: fn(int, int) -> int, a: int, b: int| {
         if b == 0 {
@@ -86,7 +89,7 @@ fn main() {
     std::println(f"  gcd(100, 35) = {gcd(100, 35)}");
     std::println(f"  gcd(17, 19) = {gcd(17, 19)}");
 
-    std::println("\n=== Key Insight ===");
-    std::println("The fix combinator abstracts recursion into a higher-order function,");
-    std::println("demonstrating how generic functions can capture powerful programming patterns.");
+    std::println("\n=== 关键点 ===");
+    std::println("`fix` 把“递归”抽象成一个高阶函数参数，");
+    std::println("展示了泛型 + 高阶函数可以表达很强的编程模式。");
 }

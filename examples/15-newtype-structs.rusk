@@ -1,0 +1,97 @@
+// 15 - Newtype（单字段名义包装器）
+//
+// Newtype 结构体是“只有一个字段”的名义类型包装：
+// - 运行时通常没有额外开销（就是包一层）
+// - 但在类型系统里它们是不同的类型，可以防止把不同语义的值混用
+//
+// 对比（Rust）：
+//   struct UserId(i64);
+
+use core::ops::Add;
+
+// 为领域概念定义 newtype
+struct UserId(int);
+struct FileFd(int);
+struct Meters(int);
+struct Seconds(float);
+
+// Generic new-type struct
+struct Box<T>(T);
+
+// 运算符重载也是通过 core::ops 接口实现的：
+// - `a + b` 会降低为 `core::ops::Add::add(a, b)`
+// - 对自定义类型来说，只要实现对应接口即可
+impl Add for Meters {
+    readonly fn add(other: Meters) -> Meters {
+        Meters(self.0 + other.0)
+    }
+}
+
+// Newtype 可以防止“误把 A 当 B 用”
+fn process_user(id: UserId) -> int {
+    std::println(f"Processing user {id.0}");
+    id.0
+}
+
+fn process_file(fd: FileFd) -> int {
+    std::println(f"Processing file {fd.0}");
+    fd.0
+}
+
+// newtype 也可以参与模式匹配/解构
+fn extract_user_id(id: UserId) -> int {
+    match id {
+        UserId(n) => n
+    }
+}
+
+// newtype 同样可以放进更复杂的数据结构里
+struct UserRecord {
+    id: UserId,
+    name: string,
+}
+
+fn main() -> int {
+    // 调用语法构造：`UserId(42)`
+    let user_id = UserId(42);
+    let file_fd = FileFd(3);
+
+    // 用 `.0` 访问包装的字段
+    std::println(f"User ID: {user_id.0}");
+    std::println(f"File FD: {file_fd.0}");
+
+    // 类型安全：不同 newtype 不能混用
+    // process_user(file_fd);  // 错误：类型不匹配
+
+    let result = process_user(user_id);
+
+    // 模式解构
+    let UserId(raw_id) = UserId(100);
+    std::println(f"Extracted ID: {raw_id}");
+
+    // 泛型 newtype
+    let boxed_int = Box(123);
+    let boxed_str = Box::<string>("hello");
+    std::println(f"Boxed int: {boxed_int.0}");
+    std::println(f"Boxed str: {boxed_str.0}");
+
+    // newtype 放在 record 里
+    let user = UserRecord {
+        id: UserId(999),
+        name: "Alice",
+    };
+    std::println(f"User: {user.name} (ID: {user.id.0})");
+
+    // 用单位类型防止“米/秒搞混”
+    let distance = Meters(1000);
+    let time = Seconds(60.0);
+    std::println(f"Distance: {distance.0}m in {time.0}s");
+
+    // 同时我们还可以让单位类型支持运算：
+    let d1 = Meters(400);
+    let d2 = Meters(600);
+    let d = d1 + d2;
+    std::println(f"d1 + d2 = {d.0}m");
+
+    result
+}

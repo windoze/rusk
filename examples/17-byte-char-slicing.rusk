@@ -1,0 +1,195 @@
+// 17 - `byte` / `char` 与 `bytes` / `string` 切片
+//
+// 覆盖点：
+// - `byte`：无符号 8-bit，支持位运算与索引（常用于二进制数据）
+// - `char`：Unicode scalar value（排除 surrogate 区间）
+// - `bytes`：
+//   - 支持 O(1) 索引 `bs[i]`
+//   - 支持安全访问 `bs.get(i) -> Option<byte>`
+//   - 支持零拷贝切片 `bs.slice(from, to)`
+// - `string`：
+//   - 不支持索引（避免“按字节还是按字符”的歧义）
+//   - `slice(from, to)`：按 Unicode scalar 下标（codepoint index）做零拷贝切片
+//   - `byte_slice(from, to)`：按 UTF-8 **字节偏移**切片，返回 `bytes` 视图
+//   - `for c in s { ... }` 会按 Unicode 字符（`char`）迭代
+//
+// 对比（Rust）：
+// - `u8` / `char`
+// - `&[u8]` / `&str`
+// - `&str` 的切片要求 UTF-8 边界；Rusk 把“按字符切片”和“按字节切片”拆成了两个 API
+
+use core::len::Len;
+
+fn main() -> int {
+    // ===== byte =====
+
+    // int -> byte：截断（保留低 8 位）
+    let b1 = 65.to_byte(); // ASCII 'A'
+    std::println(f"byte value: {b1.to_int()}");
+
+    // 截断示例：256 -> 0，257 -> 1
+    let b2 = 256.to_byte();
+    let b3 = 257.to_byte();
+    std::println(f"256 as byte: {b2.to_int()}, 257 as byte: {b3.to_int()}");
+
+    // try_byte：范围检查
+    match 65.try_byte() {
+        Option::Some(b) => {
+            std::println(f"65 是合法 byte：{b.to_int()}");
+        }
+        Option::None => {
+            std::println("非法 byte");
+        }
+    }
+
+    match (-1).try_byte() {
+        Option::Some(b) => {
+            std::println(f"Got byte: {b.to_int()}");
+        }
+        Option::None => {
+            std::println("-1 不是合法 byte（越界）");
+        }
+    }
+
+    // ===== char =====
+
+    // int -> char（按 Unicode code point）
+    let c1 = 65.to_char(); // 'A'
+    std::println(f"char value: U+{c1.to_int()}");
+
+    // 中文字符：'中'
+    let c2 = 0x4E2D.to_char();
+    std::println(f"Chinese char: U+{c2.to_int()}");
+
+    // try_char：排除 surrogate 区间 + 0x10FFFF 上界
+    match 0x1F600.try_char() {
+        Option::Some(c) => {
+            std::println(f"Emoji codepoint: U+{c.to_int()}");
+        }
+        Option::None => {
+            std::println("非法字符");
+        }
+    }
+
+    // surrogate 值无效
+    match 0xD800.try_char() {
+        Option::Some(c) => {
+            std::println(f"Got char: U+{c.to_int()}");
+        }
+        Option::None => {
+            std::println("0xD800 不是合法 char（surrogate 区间）");
+        }
+    }
+
+    // ===== bytes =====
+
+    // `bytes` 字面量：二进制数据（这里是 ASCII 的 "Hello"）
+    let data: bytes = b"\x48\x65\x6C\x6C\x6F";
+    std::println(f"data.len() = {data.len()}");
+
+    // bytes 支持 O(1) 索引（越界会 trap）
+    let first_byte = data[0];
+    std::println(f"First byte: {first_byte.to_int()}");
+
+    // get：安全访问（越界返回 None）
+    match data.get(0) {
+        Option::Some(b) => {
+            std::println(f"Byte at index 0: {b.to_int()}");
+        }
+        Option::None => {
+            std::println("越界");
+        }
+    }
+
+    match data.get(100) {
+        Option::Some(b) => {
+            std::println(f"Byte: {b.to_int()}");
+        }
+        Option::None => {
+            std::println("Index 100 越界（符合预期）");
+        }
+    }
+
+    // 零拷贝切片：`slice(from, to)`，半开区间 [from, to)
+    let slice1 = data.slice(0, Option::Some(2));
+    std::println(f"slice [0, 2) len = {slice1.len()}");
+
+    let slice2 = data.slice(1, Option::None);
+    std::println(f"slice [1, end) len = {slice2.len()}");
+
+    // bytes <-> [byte] 转换（会拷贝）
+    //
+    // - `data.to_array()`：拷贝出一个新的可变数组
+    // - `bytes::from_array(arr)`：拷贝数组内容，生成新的 bytes
+    readonly byte_array = data.to_array();
+    std::println(f"data.to_array(): byte_array.len() = {byte_array.len()}");
+
+    let new_bytes = bytes::from_array(byte_array);
+    std::println(f"bytes::from_array: new_bytes.len() = {new_bytes.len()}");
+
+    // ===== string =====
+
+    let text = "Hello, 世界!";
+    std::println(f"Original string: {text}");
+
+    // `for c in text` 会按 Unicode 字符迭代（yield `char`）
+    //
+    // 注意：`string` 在当前版本不提供 `.len()`：
+    // - “字节长度”和“字符长度（codepoints）”是两种不同概念
+    // - 本仓库选择让：
+    //   - `string::slice` 用 codepoint 下标
+    //   - `string::byte_slice` 用字节偏移并返回 `bytes`
+    //   这样可以显式表达你想要的语义
+    std::println("Characters (Unicode code points):");
+    let char_count = 0;
+    for c in text {
+        char_count = char_count + 1;
+        std::println(f"  U+{c.to_int()}");
+    };
+    std::println(f"char_count = {char_count}");
+
+    // 零拷贝 string 切片：按 codepoint 下标（“第几个字符”，不是 UTF-8 字节偏移）
+    // "Hello, 世界!" 的 codepoints 依次是：
+    //   H e l l o , (space) 世 界 !
+    let hello_slice = text.slice(0, Option::Some(5));
+    std::println(f"Slice [0, 5): {hello_slice}");
+
+    let from_7 = text.slice(7, Option::None);
+    std::println(f"Slice from codepoint 7: {from_7}");
+
+    // 如果你确实需要按 UTF-8 字节偏移切片（并且允许切在非 UTF-8 边界上），用 `byte_slice`：
+    // - 返回类型是 `bytes`，因此结果可索引
+    // - 偏移单位是“字节”，不是“字符”
+    //
+    // 例如："é" 是 1 个 codepoint，但在 UTF-8 里是 2 个字节。
+    let e = "é";
+    std::println(f"e.slice(0, Some(1)) = {e.slice(0, Option::Some(1))}");
+    let e_first_byte = e.byte_slice(0, Option::Some(1));
+    std::println(f"e.byte_slice(0, Some(1))[0] = {e_first_byte[0].to_int()}");
+    // 注意：`e.slice(0, Some(2))` 会因为 codepoint 越界而 trap（示例里不执行）。
+
+    // ===== UTF-8 解码：lossy vs strict =====
+
+    // `string::from_utf8`：遇到非法字节序列会用替换字符 U+FFFD（�）
+    readonly invalid_arr = [240.to_byte(), 40.to_byte(), 140.to_byte(), 40.to_byte()];
+    let invalid = bytes::from_array(invalid_arr);
+    let lossy = string::from_utf8(invalid);
+    std::println(f"lossy utf8 = {lossy}");
+
+    // `string::from_utf8_strict`：遇到非法序列返回 None
+    match string::from_utf8_strict(invalid) {
+        Option::Some(s) => std::println(f"strict utf8 = {s}（不应发生）")
+        Option::None => std::println("strict utf8 = None（符合预期）")
+    };
+
+    // ===== [byte] 可变数组 =====
+
+    let mut_bytes = [72.to_byte(), 105.to_byte()]; // "Hi"
+    std::println(f"mut_bytes.len() = {mut_bytes.len()}");
+
+    // 直接索引写入
+    mut_bytes[0] = 66.to_byte(); // 'H' -> 'B'
+    std::println(f"Modified first byte to {mut_bytes[0].to_int()}");
+
+    0
+}

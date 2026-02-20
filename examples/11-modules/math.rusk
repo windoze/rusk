@@ -1,4 +1,4 @@
-// A file module loaded by `mod math;` from `main.rusk`.
+// 这是一个“文件模块”，由 `main.rusk` 里的 `mod math;` 加载。
 
 pub fn fib(n: int) -> int {
     if n <= 0 {
@@ -16,4 +16,3 @@ pub fn fib(n: int) -> int {
         b
     }
 }
-

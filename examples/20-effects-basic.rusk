@@ -1,0 +1,26 @@
+// 20 - 代数效应（Algebraic Effects，基础）
+//
+// 覆盖点：
+// - effect 调用语法：`@Interface.method(...)`
+// - `match <scrutinee> { ... }` 在求值 scrutinee 的过程中可以“拦截/处理” effect
+// - 处理器里可以用 `resume(v)` 把值送回到被捕获的 continuation，继续计算
+//
+// 对比（异常/回调）：
+// - 你可以把它理解成“可组合的、可恢复的控制流拦截点”
+
+interface Logger { fn log(msg: string); }
+
+fn compute(x: int) -> int {
+    @Logger.log(f"compute: x = {x}");
+    x + 1
+}
+
+fn main() -> int {
+    match compute(41) {
+        @Logger.log(msg) => {
+            std::println(f"[log] {msg}");
+            resume(())
+        }
+        v => v
+    }
+}

@@ -1,0 +1,76 @@
+// 24 - `core::result`：`try` / `throw` / `catch` / `finally`
+//
+// `core::result` 提供了一套“可恢复的错误处理”工具，底层用的是代数效应：
+// - `throw(e)`：发出一个 `Throw<E>` effect，并以 `!`（never）类型结束当前控制流
+// - `try { ... }.catch(|e: E| { ... })`：在作用域内捕获 `throw(e)`，返回 `Result<T, E>`
+// - `Result::finally { ... }`：无论 Ok/Err 都执行收尾逻辑（类似 finally）
+//
+// 对比（Rust）：
+//   fn f() -> Result<T, E> { ...? ... }
+//
+// 对比（JavaScript）：
+//   try { ... } catch (e) { ... } finally { ... }
+
+// 这里直接使用 core::prelude 自动导入的 `Result` / `try` / `throw` / `panic`。
+
+fn parse_int(s: string) -> int {
+    // 一个非常简化的解析器：只认 "42" / "7"
+    if s == "42" {
+        42
+    } else if s == "7" {
+        7
+    } else {
+        // `throw` 的返回类型是 `!`，可以出现在任何需要返回 `int` 的位置
+        throw(f"不是合法 int：{s}")
+    }
+}
+
+fn divide(a: int, b: int) -> int {
+    if b == 0 {
+        throw("除数不能为 0")
+    } else {
+        a / b
+    }
+}
+
+fn main() -> int {
+    std::println("=== core::result：try/throw/catch/finally ===");
+
+    // ===== 1) 成功路径：catch 不会触发 =====
+    let ok = try {
+        let n = parse_int("42");
+        divide(n, 2)
+    }
+    .catch(|e: string| {
+        std::println(f"[catch] 捕获到错误：{e}")
+    })
+    .finally {
+        std::println("[finally] ok 路径也会执行这里");
+        ()
+    };
+
+    match ok {
+        Result::Ok(v) => std::println(f"ok = Ok({v})")
+        Result::Err(e) => std::println(f"ok = Err({e})（不应发生）")
+    };
+
+    // ===== 2) 失败路径：throw 会被 catch 捕获，并返回 Result::Err =====
+    let err = try {
+        let n = parse_int("nope");
+        divide(n, 0)
+    }
+    .catch(|e: string| {
+        std::println(f"[catch] 捕获到错误：{e}")
+    })
+    .finally {
+        std::println("[finally] err 路径也会执行这里");
+        ()
+    };
+
+    match err {
+        Result::Ok(v) => std::println(f"err = Ok({v})（不应发生）")
+        Result::Err(e) => std::println(f"err = Err({e})")
+    };
+
+    0
+}

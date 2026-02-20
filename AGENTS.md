@@ -17,7 +17,7 @@
 - `crates/rusk-gc/`: GC primitives used by the VM (entry point: `crates/rusk-gc/src/lib.rs`).
 - `tests/`: Integration tests for the workspace.
 - `fixtures/`: Test fixtures and sample inputs.
-- `RUSK_SPEC.md`, `MIR_SPEC.md`: Design/spec notes—update these when behavior changes.
+- `RUSK_SPEC.md`, `MIR_SPEC.md`, `BYTECODE_SPEC.md`: Design/spec notes—update these when behavior changes.
 - `target/`: Build artifacts (gitignored; do not commit).
 - `proposals/`: RFC-style design proposals for major features/changes.
 - `completed-proposals/`: Proposals that have been accepted and implemented; these are now part of the project history and can be read for context on design decisions.

@@ -1,45 +1,59 @@
-# Rusk Examples
+# Rusk 示例
 
-This directory contains small, step-by-step Rusk programs, ordered from basic to advanced.
+本目录包含一组由浅入深的小程序，覆盖 Rusk 的主要语言特性与 `core`/`std` 核心库能力。
 
-## Running
+## 运行方式
 
-From the repository root:
+从仓库根目录执行：
 
 ```sh
+# 直接运行 .rusk 源码（会在运行前编译）
 cargo run --bin rusk -- examples/01-hello-world.rusk
-cargo run --bin rusk -- examples/10-modules/main.rusk
+
+# 运行多文件模块示例
+cargo run --bin rusk -- examples/11-modules/main.rusk
+
+# 直接运行已编译的 .rbc 字节码模块
+# 注意：仓库默认会忽略 `*.rbc`（它们通常是编译产物），如果你本地没有该文件可以先生成：
+#   cargo run --bin ruskc -- examples/01-hello-world.rusk
+cargo run --bin rusk -- examples/01-hello-world.rbc
 ```
 
-Notes:
+注意事项：
 
-- Many examples use `std::print` / `std::println`. In this repo, those functions are **host
-  functions** registered by the `rusk` CLI binary (not part of `core`), so they may not exist in
-  other embedding environments unless you register them.
-- The language spec is in `RUSK_SPEC.md` and the MIR spec is in `MIR_SPEC.md`.
+- 大多数示例会使用 `std::print` / `std::println`。在本仓库中它们是由 `rusk` CLI 注册的**宿主函数**
+  （不属于 `core`），并且 `std` 只是一个对宿主模块的源码包装层。
+  - 默认情况下，`rusk` 会加载 `std` 并安装标准 I/O 宿主函数。
+  - 使用 `--no-std` 运行时将不会加载 `std`，这些函数也就不可用。
+- 语言规范见 `RUSK_SPEC.md`，MIR 规范见 `MIR_SPEC.md`，字节码规范见 `BYTECODE_SPEC.md`。
+- `25-host-stored-continuations.rusk` 需要额外的宿主模块 `host`（默认 CLI 不提供），用于演示更底层的
+  VM/宿主交互；其余示例默认都可以直接运行。
 
-## Index
+## 索引（由易到难）
 
-- `01-hello-world.rusk`: printing via `std::print` / `std::println`
-- `02-values-and-functions.rusk`: values, function definitions, return values
-- `03-control-flow-if-match.rusk`: `if` and `match` as expressions
-- `04-arrays-and-for-loops.rusk`: arrays, indexing, `for` loops
-- `05-strings-and-fmt.rusk`: strings and `f"..."` formatted strings
-- `06-structs-and-methods.rusk`: structs + inherent methods (`impl Type { ... }`)
-- `07-enums-and-patterns.rusk`: enums and pattern matching
-- `08-closures-and-functions-as-values.rusk`: lambdas/closures and `fn(...) -> ...` values
-- `09-generics.rusk`: generic structs + generic functions
-- `10-modules/`: a multi-file example using `mod` and `use`
-- `11-interfaces-and-dynamic-dispatch.rusk`: interfaces, `as Interface`, dynamic dispatch
-- `12-effects-basic.rusk`: algebraic effects + `match` effect handlers
-- `13-effects-typed.rusk`: typed (generic) effects
-- `14-type-tests-is-asq.rusk`: runtime type tests with `is` and `as?`
-- `15-effects-generator.rusk`: implementing generators using algebraic effects with `yield` and `resume`
-- `16-fixed-point-combinator.rusk`: Y-combinator and fixed-point recursion using generics and higher-order functions
-- `17-effects-state-management.rusk`: React-like state management, demonstrating how effects overcome `useEffect` limitations
-- `18-newtype-structs.rusk`: new-type structs (nominal wrappers) for type safety
-- `19-destructuring-patterns.rusk`: destructuring in `let`/`const`/`readonly` statements
-- `20-associated-types.rusk`: associated types in interfaces with `Self::Item` and qualified projections
-- `21-byte-char-slicing.rusk`: `byte` and `char` primitives, zero-copy string/bytes slicing
-- `22-option-methods.rusk`: `Option` methods (`map`, `and_then`, `unwrap_or`, etc.)
-- `23-host-stored-continuations.rusk`: passing continuations to the host as opaque handles
+- `01-hello-world.rusk`：最小程序、调用宿主 I/O（`std::print` / `std::println`）
+- `01-hello-world.rbc`：与上面等价的字节码模块（展示 `.rbc` 运行入口；可用 `ruskc` 生成）
+- `02-values-and-functions.rusk`：基本值、函数定义、返回值、类型标注
+- `03-control-flow-if-match.rusk`：`if` / `match` 作为表达式（有值的控制流）
+- `04-arrays-and-for-loops.rusk`：数组、索引、`for` / `while`、`break` / `continue`
+- `05-strings-and-fmt.rusk`：字符串、`f"..."` 格式化、`core::fmt::ToString`
+- `06-structs-and-methods.rusk`：结构体与固有方法（`impl Type { ... }`）
+- `07-enums-and-patterns.rusk`：枚举、模式匹配、用 `Option` 表达“可能缺失”
+- `08-destructuring-patterns.rusk`：`let`/`const`/`readonly` 解构、rest 模式
+- `09-closures-and-functions-as-values.rusk`：闭包/函数值、高阶函数、捕获变量
+- `10-generics.rusk`：泛型结构体 + 泛型函数（参数化多态）
+- `11-modules/`：多文件程序：`mod` / `use` / 别名
+- `12-interfaces-and-dynamic-dispatch.rusk`：接口（`interface`）、实现（`impl`）、动态分发（`as Interface`）
+- `13-associated-types.rusk`：关联类型（`Self::Item` / 限定投影）、迭代器接口示例
+- `14-type-tests-is-asq.rusk`：运行时类型测试：`is` 与安全向下转型 `as?`
+- `15-newtype-structs.rusk`：newtype（名义包装器）与类型安全
+- `16-core-map.rusk`：`core::map::Map`：插入/查找/删除、哈希与相等性约束
+- `17-byte-char-slicing.rusk`：`byte`/`char`、`bytes`/`string` 的零拷贝切片
+- `18-option-methods.rusk`：`Option` 的常用组合子（`map` / `and_then` / `unwrap_or` 等）
+- `19-fixed-point-combinator.rusk`：不动点/“Y 组合子”思想：用高阶函数实现递归
+- `20-effects-basic.rusk`：代数效应：`@Interface.method(...)` + `match` 处理器 + `resume`
+- `21-effects-typed.rusk`：类型化（泛型）效应与显式类型实参
+- `22-effects-generator.rusk`：用效应实现生成器：`yield` / `resume`
+- `23-effects-state-management.rusk`：更大示例：用效应建模状态与清理（类 React）
+- `24-result-try-throw.rusk`：`core::result`：基于效应的 `try`/`throw`/`catch`/`finally`
+- `25-host-stored-continuations.rusk`：高级：把 continuation 句柄交给宿主保存与恢复

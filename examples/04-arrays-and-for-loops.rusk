@@ -1,18 +1,63 @@
-// 04 - Arrays and `for` loops
+// 04 - 数组与循环（`for` / `while`）
 //
-// Arrays are dynamic and support indexing (`xs[i]`) and mutation (`xs[i] = v`).
-// `for` loops iterate over arrays via the iterator protocol.
+// 覆盖点：
+// - 数组是堆上动态数组：支持索引 `xs[i]` 与原地修改 `xs[i] = v`
+// - `for x in xs { ... }`：对数组做内建迭代（不是构造一个显式迭代器对象）
+// - `while` / `break` / `continue`：更底层的循环控制
+// - 改变长度的操作在语法层面表现为数组方法（`push/pop/insert/remove/resize/...`），底层会降低到
+//   `core::intrinsics` 里的 VM/宿主内建实现
+//
+// 对比（Rust）：
+// - Rusk 的 `[T]` 更接近 `Vec<T>`（可增长），不是固定长度的 `[T; N]`。
+
+use core::len::Len;
 
 fn main() -> int {
     let xs = [1, 2, 3, 4, 5];
-    xs[2] = 30;
+
+    // 读长度：数组实现了 `core::len::Len`，所以可以直接写 `xs.len()`
+    std::println(f"初始 xs.len() = {xs.len()}");
+
+    // 索引修改（左值可以是数组槽位）
+    xs[2] = 30; // [1, 2, 30, 4, 5]
 
     let total = 0;
     for x in xs {
+        // 跳过某些元素（演示 continue）
+        if x == 4 {
+            continue;
+        };
         total = total + x;
     };
 
-    std::println(f"sum = {total}");
+    std::println(f"for 累加（跳过 4）= {total}");
+
+    // 改变数组长度：数组有内建方法（语法糖）
+    xs.push(99);
+    std::println(f"push 后 xs.len() = {xs.len()}");
+
+    // pop 返回 Option
+    match xs.pop() {
+        Option::Some(v) => std::println(f"pop 得到 {v}")
+        Option::None => std::println("pop：数组为空")
+    };
+
+    // while + break：找到第一个 > 50 的元素
+    let i = 0;
+    let found: Option<int> = Option::None;
+    while i < xs.len() {
+        let v = xs[i];
+        if v > 50 {
+            found = Option::Some(v);
+            break;
+        };
+        i = i + 1;
+    };
+
+    match found {
+        Option::Some(v) => std::println(f"第一个 > 50 的元素是 {v}")
+        Option::None => std::println("没有找到 > 50 的元素")
+    };
+
     total
 }
-

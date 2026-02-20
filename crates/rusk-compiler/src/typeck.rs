@@ -803,6 +803,21 @@ fn add_prelude(env: &mut ProgramEnv) {
         InherentMethodKind::Instance { readonly: true },
     );
 
+    add_fn(
+        "string::byte_slice",
+        Vec::new(),
+        vec![
+            Ty::Readonly(Box::new(Ty::String)),
+            Ty::Int,
+            Ty::App(TyCon::Named("Option".to_string()), vec![Ty::Int]),
+        ],
+        Ty::Bytes,
+    );
+    env.inherent_method_kinds.insert(
+        "string::byte_slice".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
     // `string` construction/decoding helpers (static methods).
     add_fn(
         "string::from_chars",
@@ -1426,6 +1441,11 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
             generic_count: 0,
             params: vec![Ty::String, Ty::Int, option(Ty::Int)],
             ret: Ty::String,
+        },
+        "core::intrinsics::string_byte_slice" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String, Ty::Int, option(Ty::Int)],
+            ret: Ty::Bytes,
         },
         "core::intrinsics::string_from_chars" => ExpectedIntrinsicSig {
             generic_count: 0,

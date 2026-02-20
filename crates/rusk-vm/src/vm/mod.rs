@@ -320,8 +320,10 @@ impl BytesView {
         let Some(obj) = heap.get(self.buf) else {
             return Err("bytes view: dangling buffer".to_string());
         };
-        let HeapValue::BytesBuf { data } = obj else {
-            return Err("bytes view: expected bytes buffer".to_string());
+        let bytes: &[u8] = match obj {
+            HeapValue::BytesBuf { data } => data.as_ref(),
+            HeapValue::StringBuf { data } => data.as_bytes(),
+            _ => return Err("bytes view: expected bytes or string buffer".to_string()),
         };
 
         let start: usize = self.start as usize;
@@ -329,7 +331,8 @@ impl BytesView {
         let end = start
             .checked_add(len)
             .ok_or_else(|| "bytes view: index overflow".to_string())?;
-        data.get(start..end)
+        bytes
+            .get(start..end)
             .ok_or_else(|| "bytes view: out of bounds".to_string())
     }
 
@@ -1904,41 +1907,87 @@ fn eval_core_intrinsic(
 
         I::StringSlice => match args.as_slice() {
             [Value::String(s), Value::Int(from), to] => {
-                let len_i64: i64 = s
-                    .len_usize()
-                    .try_into()
-                    .map_err(|_| "core::intrinsics::string_slice: len overflow".to_string())?;
-                let to = read_option_int(module, heap, to)?.unwrap_or(len_i64);
+                let to_opt = read_option_int(module, heap, to)?;
                 let s_str = s.as_str(heap)?;
 
                 if *from < 0 {
                     return Err("core::intrinsics::string_slice: from must be >= 0".to_string());
                 }
-                if to < 0 {
-                    return Err("core::intrinsics::string_slice: to must be >= 0".to_string());
-                }
-                if *from > to {
-                    return Err("core::intrinsics::string_slice: from > to".to_string());
-                }
-                if to > len_i64 {
-                    return Err("core::intrinsics::string_slice: to out of bounds".to_string());
+                if let Some(to) = to_opt {
+                    if to < 0 {
+                        return Err("core::intrinsics::string_slice: to must be >= 0".to_string());
+                    }
                 }
 
-                let from_usize: usize = (*from)
+                let from_cp: usize = (*from)
                     .try_into()
                     .map_err(|_| "core::intrinsics::string_slice: from overflow".to_string())?;
-                let to_usize: usize = to
-                    .try_into()
-                    .map_err(|_| "core::intrinsics::string_slice: to overflow".to_string())?;
-                if !s_str.is_char_boundary(from_usize) || !s_str.is_char_boundary(to_usize) {
-                    return Err(
-                        "core::intrinsics::string_slice: invalid UTF-8 boundary".to_string()
-                    );
+                let to_cp: Option<usize> = to_opt
+                    .map(|to| {
+                        to.try_into()
+                            .map_err(|_| "core::intrinsics::string_slice: to overflow".to_string())
+                    })
+                    .transpose()?;
+
+                if let Some(to_cp) = to_cp {
+                    if from_cp > to_cp {
+                        return Err("core::intrinsics::string_slice: from > to".to_string());
+                    }
                 }
-                let from_u32: u32 = (*from)
+
+                // Convert Unicode scalar indices (codepoints) into UTF-8 byte offsets.
+                let mut cp_idx: usize = 0;
+                let mut from_byte: Option<usize> = (from_cp == 0).then_some(0);
+                let mut to_byte: Option<usize> = match to_cp {
+                    Some(0) => Some(0),
+                    _ => None,
+                };
+
+                for (byte_idx, _) in s_str.char_indices() {
+                    if cp_idx == from_cp {
+                        from_byte = Some(byte_idx);
+                    }
+                    if let Some(to_cp) = to_cp {
+                        if cp_idx == to_cp {
+                            to_byte = Some(byte_idx);
+                        }
+                    }
+                    cp_idx += 1;
+                }
+                let cp_len = cp_idx;
+
+                let from_byte = match from_byte {
+                    Some(b) => b,
+                    None => {
+                        if from_cp == cp_len {
+                            s_str.len()
+                        } else {
+                            return Err(
+                                "core::intrinsics::string_slice: from out of bounds".to_string()
+                            );
+                        }
+                    }
+                };
+                let to_byte = match to_cp {
+                    Some(to_cp) => match to_byte {
+                        Some(b) => b,
+                        None => {
+                            if to_cp == cp_len {
+                                s_str.len()
+                            } else {
+                                return Err(
+                                    "core::intrinsics::string_slice: to out of bounds".to_string()
+                                );
+                            }
+                        }
+                    },
+                    None => s_str.len(),
+                };
+
+                let from_u32: u32 = from_byte
                     .try_into()
                     .map_err(|_| "core::intrinsics::string_slice: from overflow".to_string())?;
-                let to_u32: u32 = to
+                let to_u32: u32 = to_byte
                     .try_into()
                     .map_err(|_| "core::intrinsics::string_slice: to overflow".to_string())?;
                 let len_u32 = to_u32
@@ -1954,6 +2003,49 @@ fn eval_core_intrinsic(
                 }))
             }
             _ => Err(bad_args("core::intrinsics::string_slice")),
+        },
+        I::StringByteSlice => match args.as_slice() {
+            [Value::String(s), Value::Int(from), to] => {
+                let len_i64: i64 = s
+                    .len_usize()
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_byte_slice: len overflow".to_string())?;
+                let to = read_option_int(module, heap, to)?.unwrap_or(len_i64);
+
+                if *from < 0 {
+                    return Err(
+                        "core::intrinsics::string_byte_slice: from must be >= 0".to_string()
+                    );
+                }
+                if to < 0 {
+                    return Err("core::intrinsics::string_byte_slice: to must be >= 0".to_string());
+                }
+                if *from > to {
+                    return Err("core::intrinsics::string_byte_slice: from > to".to_string());
+                }
+                if to > len_i64 {
+                    return Err("core::intrinsics::string_byte_slice: to out of bounds".to_string());
+                }
+
+                let from_u32: u32 = (*from).try_into().map_err(|_| {
+                    "core::intrinsics::string_byte_slice: from overflow".to_string()
+                })?;
+                let to_u32: u32 = to
+                    .try_into()
+                    .map_err(|_| "core::intrinsics::string_byte_slice: to overflow".to_string())?;
+                let len_u32 = to_u32
+                    .checked_sub(from_u32)
+                    .ok_or_else(|| "core::intrinsics::string_byte_slice: from > to".to_string())?;
+                let start = s.start.checked_add(from_u32).ok_or_else(|| {
+                    "core::intrinsics::string_byte_slice: bytes view index overflow".to_string()
+                })?;
+                Ok(Value::Bytes(BytesView {
+                    buf: s.buf,
+                    start,
+                    len: len_u32,
+                }))
+            }
+            _ => Err(bad_args("core::intrinsics::string_byte_slice")),
         },
         I::StringNextIndex => match args.as_slice() {
             [Value::String(s), Value::Int(idx)] => {

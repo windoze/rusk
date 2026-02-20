@@ -1,8 +1,11 @@
-// 11 - Interfaces and dynamic dispatch
+// 12 - 接口（interface）与动态分发
 //
-// Casting a concrete value to an `interface` enables dynamic dispatch:
+// 把具体类型的值转换成接口值（`as Interface`）后，就会走动态分发：
 //   let x = (Concrete {} as Interface);
 //   x.method()
+//
+// 对比（Rust）：
+//   let x: Box<dyn Trait> = Box::new(Concrete {});
 
 interface Shape { fn area() -> int; }
 
@@ -31,4 +34,3 @@ fn main() -> int {
     std::println(f"total area = {total}");
     total
 }
-

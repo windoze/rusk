@@ -1,7 +1,14 @@
-// 22 - Option Methods
+// 18 - `Option` 常用方法（组合子）
 //
-// Rusk's Option type provides many useful methods for working with
-// optional values in a functional style.
+// `Option<T>` 用来表达“可能有值 / 可能没有值”，并提供了一组非常实用的方法：
+// - `map`：只在 `Some(v)` 时变换 `v`
+// - `and_then`：把返回 `Option` 的步骤串起来（避免层层 match）
+// - `unwrap_or` / `unwrap_or_else`：提供默认值（后者惰性计算）
+//
+// 对比（Rust）：
+//   option.map(...).and_then(...).unwrap_or(...)
+
+use core::len::Len;
 
 fn divide(a: int, b: int) -> Option<int> {
     if b == 0 {
@@ -12,7 +19,7 @@ fn divide(a: int, b: int) -> Option<int> {
 }
 
 fn parse_positive(s: string) -> Option<int> {
-    // Simplified parser (just returns a hardcoded value for demo)
+    // 简化版解析器：这里只用硬编码值演示 Option 的用法
     if s == "42" {
         Option::Some(42)
     } else if s == "100" {
@@ -22,9 +29,9 @@ fn parse_positive(s: string) -> Option<int> {
     }
 }
 
-// Safe access helper
+// 安全访问：把“可能越界”变成 `Option`
 fn safe_get(arr: [int], idx: int) -> Option<int> {
-    let len = core::intrinsics::array_len(arr);
+    let len = arr.len();
     if idx >= 0 && idx < len {
         Option::Some(arr[idx])
     } else {
@@ -43,7 +50,7 @@ fn main() -> int {
     std::println(f"none_value.is_some() = {none_value.is_some()}");
     std::println(f"none_value.is_none() = {none_value.is_none()}");
 
-    // ===== map: transform the value inside Some =====
+    // ===== map：只变换 Some 内部的值 =====
 
     let doubled = Option::Some(21).map(|x: int| { x * 2 });
     match doubled {
@@ -55,11 +62,11 @@ fn main() -> int {
         }
     }
 
-    // map on None returns None
+    // 对 None 做 map 仍然是 None
     let none_mapped = none_value.map(|x: int| { x * 2 });
     std::println(f"None mapped is_none: {none_mapped.is_none()}");
 
-    // ===== and_then: chain operations that return Option =====
+    // ===== and_then：串联“返回 Option 的步骤” =====
 
     let result1 = divide(20, 2).and_then(|x: int| {
         divide(x, 5)
@@ -73,21 +80,21 @@ fn main() -> int {
         }
     }
 
-    // and_then with failure
+    // and_then：遇到 None 会短路
     let result2 = divide(20, 0).and_then(|x: int| {
         divide(x, 5)
     });
     std::println(f"20 / 0 / 5 failed: {result2.is_none()}");
 
-    // ===== unwrap: extract value or panic =====
+    // ===== unwrap：取出 Some 的值，否则 panic =====
 
     let safe_unwrap = Option::Some(99).unwrap();
     std::println(f"Unwrapped: {safe_unwrap}");
 
-    // This would panic:
+    // 下面这行会 panic（示例里注释掉）：
     // let panic_unwrap = Option::None.unwrap();
 
-    // ===== unwrap_or: provide default value =====
+    // ===== unwrap_or：提供默认值 =====
 
     let with_default = Option::Some(42).unwrap_or(100);
     std::println(f"Some with default: {with_default}");
@@ -95,7 +102,7 @@ fn main() -> int {
     let none_with_default = none_value.unwrap_or(100);
     std::println(f"None with default: {none_with_default}");
 
-    // ===== unwrap_or_else: compute default lazily =====
+    // ===== unwrap_or_else：惰性计算默认值 =====
 
     let lazy_default = Option::Some(42).unwrap_or_else {
         std::println("Computing default (not called for Some)");
@@ -109,7 +116,7 @@ fn main() -> int {
     };
     std::println(f"None with lazy default: {none_lazy_default}");
 
-    // ===== Chaining multiple operations =====
+    // ===== 组合：把多个步骤串起来 =====
 
     let chain_result = parse_positive("42")
         .map(|x: int| { x * 2 })
@@ -118,10 +125,10 @@ fn main() -> int {
 
     std::println(f"Chained operations result: {chain_result}");
 
-    // ===== Practical example: safe array access =====
+    // ===== 小例子：安全数组访问 =====
 
     let numbers = [10, 20, 30, 40, 50];
-    let len = core::intrinsics::array_len(numbers);
+    let len = numbers.len();
 
     match safe_get(numbers, 2) {
         Option::Some(v) => {
@@ -135,13 +142,13 @@ fn main() -> int {
     let out_of_bounds = safe_get(numbers, 100).unwrap_or(-1);
     std::println(f"Out of bounds access with default: {out_of_bounds}");
 
-    // ===== Working with multiple Options =====
+    // ===== 多个 Option 的组合 =====
 
     let a = Option::Some(10);
     let b = Option::Some(20);
     let c = Option::None;
 
-    // Combine two Some values
+    // 两个 Some：可以组合出一个 Some
     let sum = a.and_then(|x: int| {
         b.map(|y: int| { x + y })
     });
@@ -155,7 +162,7 @@ fn main() -> int {
         }
     }
 
-    // If any value is None, result is None
+    // 只要有一个是 None，结果就是 None
     let sum_with_none = a.and_then(|x: int| {
         c.map(|y: int| { x + y })
     });

@@ -1,6 +1,11 @@
-// 09 - Generics
+// 10 - 泛型（Generics）
 //
-// Rusk supports parametric polymorphism for functions and nominal types.
+// Rusk 支持“参数化多态”：
+// - 泛型结构体：`struct Pair<A, B> { ... }`
+// - 泛型函数：`fn swap<A, B>(...) -> ...`
+//
+// 对比（Rust）：
+//   struct Pair<A, B> { first: A, second: B }
 
 struct Pair<A, B> { first: A, second: B }
 
@@ -14,4 +19,3 @@ fn main() -> int {
     std::println(f"swapped = ({q.first}, {q.second})");
     q.first * 10 + q.second
 }
-

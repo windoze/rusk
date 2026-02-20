@@ -280,6 +280,7 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::bytes_from_array" => Intrinsic::BytesFromArray,
 
         "core::intrinsics::string_slice" => Intrinsic::StringSlice,
+        "core::intrinsics::string_byte_slice" => Intrinsic::StringByteSlice,
         "core::intrinsics::string_next_index" => Intrinsic::StringNextIndex,
         "core::intrinsics::string_codepoint_at" => Intrinsic::StringCodepointAt,
         "core::intrinsics::string_from_chars" => Intrinsic::StringFromChars,

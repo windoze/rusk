@@ -121,6 +121,10 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             vec![HostType::String, HostType::Int, HostType::Any],
             HostType::String,
         )),
+        "core::intrinsics::string_byte_slice" => Some(sig(
+            vec![HostType::String, HostType::Int, HostType::Any],
+            HostType::Bytes,
+        )),
         "core::intrinsics::string_next_index" | "core::intrinsics::string_codepoint_at" => {
             Some(sig(vec![HostType::String, HostType::Int], HostType::Int))
         }
@@ -1209,6 +1213,16 @@ impl Compiler {
                 Mutability::Readonly,
             ],
             "core::intrinsics::string_slice",
+        )?;
+        synthesize_prim_wrapper(
+            self,
+            "string::byte_slice",
+            &[
+                Mutability::Readonly,
+                Mutability::Readonly,
+                Mutability::Readonly,
+            ],
+            "core::intrinsics::string_byte_slice",
         )?;
         synthesize_prim_wrapper(
             self,

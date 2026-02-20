@@ -1,7 +1,11 @@
-// 14 - Runtime type tests: `is` and `as?`
+// 14 - 运行时类型测试：`is` 与 `as?`
 //
-// - `x is T` produces a `bool`.
-// - `x as? T` produces `Option::Some(T)` or `Option::None`.
+// 当你手里拿到的是“接口值”（比如 `Animal`）时，可以在运行时做：
+// - `x is T`：得到 `bool`，判断底层具体类型是不是 `T`
+// - `x as? T`：安全向下转型，得到 `Option::Some(T)` 或 `Option::None`
+//
+// 对比（TypeScript）：
+//   if ("name" in x) { ... } // 或自定义 type guard
 
 interface Animal { fn speak() -> string; }
 
@@ -33,4 +37,3 @@ fn main() {
     std::println(a.speak());
     ()
 }
-

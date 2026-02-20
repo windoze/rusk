@@ -85,12 +85,15 @@ pub intrinsic fn unit_ne(a: unit, b: unit) -> bool;
 pub intrinsic fn bytes_to_array(b: bytes) -> [byte];
 pub intrinsic fn bytes_from_array(b: readonly [byte]) -> bytes;
 
-	// `string` operations.
-	pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
-	// String iteration primitives (UTF-8 byte indices).
-	//
-	// These are intended for compiler lowering of `for c in s { ... }` and for sysroot iterator
-	// adapters. They operate on UTF-8 byte offsets, not Unicode scalar indices.
+		// `string` operations.
+		// `string_slice` uses Unicode scalar indices (codepoints), not UTF-8 byte offsets.
+		pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
+		// `string_byte_slice` uses UTF-8 byte offsets and returns a `bytes` view.
+		pub intrinsic fn string_byte_slice(s: string, start: int, end: Option<int>) -> bytes;
+		// String iteration primitives (UTF-8 byte indices).
+		//
+		// These are intended for compiler lowering of `for c in s { ... }` and for sysroot iterator
+		// adapters. They operate on UTF-8 byte offsets, not Unicode scalar indices.
 	//
 	// - `string_next_index(s, idx)` returns the next UTF-8 byte index after the codepoint starting
 	//   at `idx`, or `-1` when `idx` is at end-of-string.

@@ -609,14 +609,16 @@ The current intrinsic set includes:
 - primitive conversions: `IntToByte`, `IntTryByte`, `ByteToInt`, `IntToChar`, `IntTryChar`,
   `CharToInt`
 - `bytes` helpers: `BytesGet`, `BytesLen`, `BytesSlice`, `BytesToArray`, `BytesFromArray`
-- `string` helpers: `StringSlice`, `StringNextIndex`, `StringCodepointAt`
+- `string` helpers: `StringSlice`, `StringByteSlice`, `StringNextIndex`, `StringCodepointAt`,
+  `StringFromChars`, `StringFromUtf8`, `StringFromUtf8Strict`, `StringFromUtf16Le`,
+  `StringFromUtf16LeStrict`, `StringFromUtf16Be`, `StringFromUtf16BeStrict`
 - array ops: `ArrayLen`, `ArrayLenRo`, `ArrayPush`, `ArrayPop`, `ArrayClear`, `ArrayResize`,
   `ArrayInsert`, `ArrayRemove`, `ArrayExtend`, `ArrayConcat`, `ArrayConcatRo`, `ArraySlice`,
   `ArraySliceRo`
 
 ---
 
-## 10. `.rbc` serialization format (v0.8)
+## 10. `.rbc` serialization format (v0.11)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -848,6 +850,21 @@ Intrinsics use `u16` tags `0..=71`:
 - `69`: `HashString`
 - `70`: `HashBytes`
 - `71`: `HashCombine`
+- `72`: `IntAnd`
+- `73`: `IntOr`
+- `74`: `IntXor`
+- `75`: `IntNot`
+- `76`: `IntShl`
+- `77`: `IntShr`
+- `78`: `IntUShr`
+- `79`: `ByteAnd`
+- `80`: `ByteOr`
+- `81`: `ByteXor`
+- `82`: `ByteNot`
+- `83`: `ByteShl`
+- `84`: `ByteShr`
+- `85`: `ByteUShr`
+- `86`: `StringByteSlice`
 
 #### Call targets (`u8`)
 
@@ -859,7 +876,7 @@ Intrinsics use `u16` tags `0..=71`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.8):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.11):
 
 - `0`: `Const`
 - `1`: `Copy`

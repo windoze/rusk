@@ -58,3 +58,18 @@ cargo run --bin ruskc -- fixtures/020_arrays_get_set.rusk
 cargo run --bin rusk -- fixtures/020_arrays_get_set.rbc
 cargo test
 ```
+
+## Documentation
+
+For comprehensive guides and tutorials, see the **[docs/guides/](docs/guides/)** directory:
+
+- [Quick Start Guide](docs/guides/quick_start.md) — get up and running with Rusk
+- [Concepts & Syntax](docs/guides/concepts_and_syntax.md) — language overview (expressions, types, interfaces, effects, core library)
+- [For TypeScript Developers](docs/guides/for_typescript_developers.md) — migration guide from TypeScript
+- [For Python Developers](docs/guides/for_python_developers.md) — migration guide from Python
+- [Host Integration](docs/guides/host_integration.md) — embedding Rusk in your application (host functions, externalizing effects, ABI, sysroot)
+
+Additional resources:
+
+- [Embedding the VM](docs/embedding-vm.md) — detailed guide for VM integration
+- [Delimited Continuations and Scoped Effects](docs/delimited-continuations-and-scoped-effects.md) — in-depth explanation of Rusk's effect system

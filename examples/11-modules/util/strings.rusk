@@ -1,0 +1,5 @@
+// 这是一个嵌套模块文件，由 `util/mod.rusk` 里的 `pub mod strings;` 加载。
+
+pub fn greet(name: string) -> string {
+    f"hello, {name} (from util::strings)"
+}
