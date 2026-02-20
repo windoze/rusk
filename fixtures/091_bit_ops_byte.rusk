@@ -1,0 +1,27 @@
+// expect: ok int 1012
+
+fn main() -> int {
+    let a = core::intrinsics::int_to_byte(170); // 0b10101010
+    let b = core::intrinsics::int_to_byte(15); // 0b00001111
+
+    let and = a & b; // 10
+    let or = a | b; // 175
+    let xor = a ^ b; // 165
+    let not = !b; // 240
+
+    // Shift amount is `int`.
+    let shl1 = a << 1; // 84
+    let shr1 = a >> 1; // 85
+    let ushr1 = a >>> 1; // 85 (same as >> for byte)
+    let shl2 = a << 1 + 1; // `a << (1 + 1)` == 168
+
+    core::intrinsics::byte_to_int(and)
+        + core::intrinsics::byte_to_int(or)
+        + core::intrinsics::byte_to_int(xor)
+        + core::intrinsics::byte_to_int(not)
+        + core::intrinsics::byte_to_int(shl1)
+        + core::intrinsics::byte_to_int(shr1)
+        + core::intrinsics::byte_to_int(ushr1)
+        + core::intrinsics::byte_to_int(shl2)
+}
+

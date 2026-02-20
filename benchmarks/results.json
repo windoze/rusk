@@ -12,68 +12,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.py",
         "runs": [
           {
-            "import_ns": 319000,
+            "import_ns": 661958,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.py",
             "iters": 3,
             "last_result_repr": "20000300000",
             "run": {
-              "avg_ns": 9365944,
-              "total_ns": 28097833
+              "avg_ns": 8629111,
+              "total_ns": 25887334
             },
             "warmup": 1
           },
           {
-            "import_ns": 151083,
+            "import_ns": 121333,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.py",
             "iters": 3,
             "last_result_repr": "20000300000",
             "run": {
-              "avg_ns": 8392180,
-              "total_ns": 25176542
+              "avg_ns": 8649916,
+              "total_ns": 25949750
             },
             "warmup": 1
           },
           {
-            "import_ns": 149917,
+            "import_ns": 119083,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.py",
             "iters": 3,
             "last_result_repr": "20000300000",
             "run": {
-              "avg_ns": 8444125,
-              "total_ns": 25332375
+              "avg_ns": 8313333,
+              "total_ns": 24940000
             },
             "warmup": 1
           },
           {
-            "import_ns": 139875,
+            "import_ns": 121542,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.py",
             "iters": 3,
             "last_result_repr": "20000300000",
             "run": {
-              "avg_ns": 8464861,
-              "total_ns": 25394584
+              "avg_ns": 8638236,
+              "total_ns": 25914708
             },
             "warmup": 1
           },
           {
-            "import_ns": 145375,
+            "import_ns": 125000,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.py",
             "iters": 3,
             "last_result_repr": "20000300000",
             "run": {
-              "avg_ns": 8400555,
-              "total_ns": 25201666
+              "avg_ns": 8301222,
+              "total_ns": 24903667
             },
             "warmup": 1
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 9365944,
-            "mean": 8613533,
-            "median": 8444125,
-            "min": 8392180,
-            "stdev": 421687
+            "max": 8649916,
+            "mean": 8506363,
+            "median": 8629111,
+            "min": 8301222,
+            "stdev": 181939
           }
         }
       },
@@ -82,20 +82,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 20108,
+              "bytes_read": 21907,
               "files_read": 13,
-              "load_ns": 2508917,
-              "lower_ns": 5839750,
-              "parse_ns": 1046166,
-              "read_ns": 425211,
-              "total_ns": 11519625,
-              "typecheck_ns": 3057083
+              "load_ns": 2173292,
+              "lower_ns": 10131376,
+              "parse_ns": 927124,
+              "read_ns": 376083,
+              "total_ns": 18183000,
+              "typecheck_ns": 5627834
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 10938722,
-              "total_ns": 32816166,
+              "avg_ns": 12865834,
+              "total_ns": 38597502,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -125,20 +125,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20108,
+              "bytes_read": 21907,
               "files_read": 13,
-              "load_ns": 849125,
-              "lower_ns": 2645584,
-              "parse_ns": 333251,
-              "read_ns": 231333,
-              "total_ns": 4403833,
-              "typecheck_ns": 859708
+              "load_ns": 741917,
+              "lower_ns": 2038707,
+              "parse_ns": 338165,
+              "read_ns": 144127,
+              "total_ns": 3699500,
+              "typecheck_ns": 867875
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 7508750,
-              "total_ns": 22526251,
+              "avg_ns": 7414403,
+              "total_ns": 22243209,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -168,20 +168,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20108,
+              "bytes_read": 21907,
               "files_read": 13,
-              "load_ns": 705708,
-              "lower_ns": 2426542,
-              "parse_ns": 304250,
-              "read_ns": 146707,
-              "total_ns": 3990000,
-              "typecheck_ns": 810666
+              "load_ns": 685708,
+              "lower_ns": 1977168,
+              "parse_ns": 314209,
+              "read_ns": 128542,
+              "total_ns": 3519833,
+              "typecheck_ns": 807958
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 7524500,
-              "total_ns": 22573500,
+              "avg_ns": 7499653,
+              "total_ns": 22498960,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -211,20 +211,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20108,
+              "bytes_read": 21907,
               "files_read": 13,
-              "load_ns": 683834,
-              "lower_ns": 2396626,
-              "parse_ns": 300375,
-              "read_ns": 136877,
-              "total_ns": 3920875,
-              "typecheck_ns": 793583
+              "load_ns": 692084,
+              "lower_ns": 1967292,
+              "parse_ns": 317333,
+              "read_ns": 130292,
+              "total_ns": 3532250,
+              "typecheck_ns": 824542
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 7497028,
-              "total_ns": 22491085,
+              "avg_ns": 7495097,
+              "total_ns": 22485292,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -254,20 +254,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20108,
+              "bytes_read": 21907,
               "files_read": 13,
-              "load_ns": 688125,
-              "lower_ns": 2381040,
-              "parse_ns": 304293,
-              "read_ns": 138333,
-              "total_ns": 3900875,
-              "typecheck_ns": 784833
+              "load_ns": 690709,
+              "lower_ns": 1958708,
+              "parse_ns": 318915,
+              "read_ns": 129791,
+              "total_ns": 3529791,
+              "typecheck_ns": 831708
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase1_var_loop.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 7569514,
-              "total_ns": 22708542,
+              "avg_ns": 7512555,
+              "total_ns": 22537666,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -298,18 +298,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 11519625,
-            "mean": 5547041,
-            "median": 3990000,
-            "min": 3900875,
-            "stdev": 3345046
+            "max": 18183000,
+            "mean": 6492874,
+            "median": 3532250,
+            "min": 3519833,
+            "stdev": 6535405
           },
           "run_avg_ns": {
-            "max": 10938722,
-            "mean": 8207702,
-            "median": 7524500,
-            "min": 7497028,
-            "stdev": 1526934
+            "max": 12865834,
+            "mean": 8557508,
+            "median": 7499653,
+            "min": 7414403,
+            "stdev": 2408737
           }
         }
       }
@@ -326,68 +326,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.py",
         "runs": [
           {
-            "import_ns": 234583,
+            "import_ns": 429875,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.py",
             "iters": 3,
             "last_result_repr": "45001350000",
             "run": {
-              "avg_ns": 20285777,
-              "total_ns": 60857333
+              "avg_ns": 20198264,
+              "total_ns": 60594792
             },
             "warmup": 1
           },
           {
-            "import_ns": 203208,
+            "import_ns": 159875,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.py",
             "iters": 3,
             "last_result_repr": "45001350000",
             "run": {
-              "avg_ns": 20407180,
-              "total_ns": 61221542
+              "avg_ns": 20724694,
+              "total_ns": 62174083
             },
             "warmup": 1
           },
           {
-            "import_ns": 207250,
+            "import_ns": 146917,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.py",
             "iters": 3,
             "last_result_repr": "45001350000",
             "run": {
-              "avg_ns": 20414486,
-              "total_ns": 61243459
+              "avg_ns": 20345555,
+              "total_ns": 61036667
             },
             "warmup": 1
           },
           {
-            "import_ns": 197584,
+            "import_ns": 158250,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.py",
             "iters": 3,
             "last_result_repr": "45001350000",
             "run": {
-              "avg_ns": 20302250,
-              "total_ns": 60906750
+              "avg_ns": 20650902,
+              "total_ns": 61952708
             },
             "warmup": 1
           },
           {
-            "import_ns": 206708,
+            "import_ns": 145083,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.py",
             "iters": 3,
             "last_result_repr": "45001350000",
             "run": {
-              "avg_ns": 20692639,
-              "total_ns": 62077917
+              "avg_ns": 20175263,
+              "total_ns": 60525791
             },
             "warmup": 1
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 20692639,
-            "mean": 20420466,
-            "median": 20407180,
-            "min": 20285777,
-            "stdev": 163100
+            "max": 20724694,
+            "mean": 20418935,
+            "median": 20345555,
+            "min": 20175263,
+            "stdev": 255320
           }
         }
       },
@@ -396,20 +396,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 20558,
+              "bytes_read": 22357,
               "files_read": 13,
-              "load_ns": 707167,
-              "lower_ns": 2487832,
-              "parse_ns": 310209,
-              "read_ns": 146332,
-              "total_ns": 4058000,
-              "typecheck_ns": 813667
+              "load_ns": 700583,
+              "lower_ns": 2015208,
+              "parse_ns": 328290,
+              "read_ns": 131917,
+              "total_ns": 3593083,
+              "typecheck_ns": 826375
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 27434084,
-              "total_ns": 82302252,
+              "avg_ns": 27058458,
+              "total_ns": 81175375,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -439,20 +439,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20558,
+              "bytes_read": 22357,
               "files_read": 13,
-              "load_ns": 724417,
-              "lower_ns": 2465749,
-              "parse_ns": 318916,
-              "read_ns": 144917,
-              "total_ns": 4059667,
-              "typecheck_ns": 820833
+              "load_ns": 730625,
+              "lower_ns": 2114000,
+              "parse_ns": 338959,
+              "read_ns": 135333,
+              "total_ns": 3765375,
+              "typecheck_ns": 868959
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 27023472,
-              "total_ns": 81070417,
+              "avg_ns": 26658722,
+              "total_ns": 79976167,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -482,20 +482,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20558,
+              "bytes_read": 22357,
               "files_read": 13,
-              "load_ns": 727834,
-              "lower_ns": 2444250,
-              "parse_ns": 319876,
-              "read_ns": 145125,
-              "total_ns": 4060208,
-              "typecheck_ns": 838625
+              "load_ns": 753625,
+              "lower_ns": 2012875,
+              "parse_ns": 351250,
+              "read_ns": 147002,
+              "total_ns": 3647209,
+              "typecheck_ns": 829834
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 27021889,
-              "total_ns": 81065667,
+              "avg_ns": 27240180,
+              "total_ns": 81720541,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -525,20 +525,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20558,
+              "bytes_read": 22357,
               "files_read": 13,
-              "load_ns": 744042,
-              "lower_ns": 2573791,
-              "parse_ns": 315457,
-              "read_ns": 166625,
-              "total_ns": 4213875,
-              "typecheck_ns": 830708
+              "load_ns": 831625,
+              "lower_ns": 2025292,
+              "parse_ns": 356000,
+              "read_ns": 163956,
+              "total_ns": 3800375,
+              "typecheck_ns": 892875
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 27372541,
-              "total_ns": 82117625,
+              "avg_ns": 26999222,
+              "total_ns": 80997667,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -568,20 +568,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20558,
+              "bytes_read": 22357,
               "files_read": 13,
-              "load_ns": 721958,
-              "lower_ns": 2513750,
-              "parse_ns": 312624,
-              "read_ns": 146877,
-              "total_ns": 4105792,
-              "typecheck_ns": 820250
+              "load_ns": 727292,
+              "lower_ns": 2051332,
+              "parse_ns": 340584,
+              "read_ns": 137000,
+              "total_ns": 3703084,
+              "typecheck_ns": 872917
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase2_object_access.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 27124986,
-              "total_ns": 81374958,
+              "avg_ns": 27161514,
+              "total_ns": 81484542,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -612,18 +612,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 4213875,
-            "mean": 4099508,
-            "median": 4060208,
-            "min": 4058000,
-            "stdev": 67033
+            "max": 3800375,
+            "mean": 3701825,
+            "median": 3703084,
+            "min": 3593083,
+            "stdev": 84498
           },
           "run_avg_ns": {
-            "max": 27434084,
-            "mean": 27195394,
-            "median": 27124986,
-            "min": 27021889,
-            "stdev": 195558
+            "max": 27240180,
+            "mean": 27023619,
+            "median": 27058458,
+            "min": 26658722,
+            "stdev": 224094
           }
         }
       }
@@ -640,68 +640,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.py",
         "runs": [
           {
-            "import_ns": 201333,
+            "import_ns": 372459,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.py",
             "iters": 3,
             "last_result_repr": "4999950063",
             "run": {
-              "avg_ns": 5013000,
-              "total_ns": 15039000
+              "avg_ns": 5054639,
+              "total_ns": 15163917
             },
             "warmup": 1
           },
           {
-            "import_ns": 175500,
+            "import_ns": 128167,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.py",
             "iters": 3,
             "last_result_repr": "4999950063",
             "run": {
-              "avg_ns": 5036152,
-              "total_ns": 15108458
+              "avg_ns": 5138791,
+              "total_ns": 15416375
             },
             "warmup": 1
           },
           {
-            "import_ns": 144833,
+            "import_ns": 126041,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.py",
             "iters": 3,
             "last_result_repr": "4999950063",
             "run": {
-              "avg_ns": 4981097,
-              "total_ns": 14943291
+              "avg_ns": 4965264,
+              "total_ns": 14895792
             },
             "warmup": 1
           },
           {
-            "import_ns": 151250,
+            "import_ns": 125083,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.py",
             "iters": 3,
             "last_result_repr": "4999950063",
             "run": {
-              "avg_ns": 5018944,
-              "total_ns": 15056834
+              "avg_ns": 4934764,
+              "total_ns": 14804292
             },
             "warmup": 1
           },
           {
-            "import_ns": 164250,
+            "import_ns": 118250,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.py",
             "iters": 3,
             "last_result_repr": "4999950063",
             "run": {
-              "avg_ns": 5109458,
-              "total_ns": 15328375
+              "avg_ns": 4998764,
+              "total_ns": 14996292
             },
             "warmup": 1
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 5109458,
-            "mean": 5031730,
-            "median": 5018944,
-            "min": 4981097,
-            "stdev": 47799
+            "max": 5138791,
+            "mean": 5018444,
+            "median": 4998764,
+            "min": 4934764,
+            "stdev": 80639
           }
         }
       },
@@ -710,20 +710,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 21826,
+              "bytes_read": 23625,
               "files_read": 13,
-              "load_ns": 795542,
-              "lower_ns": 2493709,
-              "parse_ns": 353958,
-              "read_ns": 166249,
-              "total_ns": 4204542,
-              "typecheck_ns": 862083
+              "load_ns": 783209,
+              "lower_ns": 2089792,
+              "parse_ns": 369001,
+              "read_ns": 149500,
+              "total_ns": 3843458,
+              "typecheck_ns": 914625
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 10280194,
-              "total_ns": 30840584,
+              "avg_ns": 9758458,
+              "total_ns": 29275375,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -753,20 +753,20 @@
           },
           {
             "compile": {
-              "bytes_read": 21826,
+              "bytes_read": 23625,
               "files_read": 13,
-              "load_ns": 726667,
-              "lower_ns": 2474666,
-              "parse_ns": 329917,
-              "read_ns": 140711,
-              "total_ns": 4047833,
-              "typecheck_ns": 797250
+              "load_ns": 715750,
+              "lower_ns": 2037541,
+              "parse_ns": 344374,
+              "read_ns": 130331,
+              "total_ns": 3637666,
+              "typecheck_ns": 832000
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 9794680,
-              "total_ns": 29384042,
+              "avg_ns": 9152542,
+              "total_ns": 27457626,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -796,20 +796,20 @@
           },
           {
             "compile": {
-              "bytes_read": 21826,
+              "bytes_read": 23625,
               "files_read": 13,
-              "load_ns": 706083,
-              "lower_ns": 2442167,
-              "parse_ns": 321751,
-              "read_ns": 139541,
-              "total_ns": 4015708,
-              "typecheck_ns": 812500
+              "load_ns": 711458,
+              "lower_ns": 2054709,
+              "parse_ns": 338750,
+              "read_ns": 128000,
+              "total_ns": 3645875,
+              "typecheck_ns": 829208
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 9885055,
-              "total_ns": 29655167,
+              "avg_ns": 9996069,
+              "total_ns": 29988208,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -839,20 +839,20 @@
           },
           {
             "compile": {
-              "bytes_read": 21826,
+              "bytes_read": 23625,
               "files_read": 13,
-              "load_ns": 712125,
-              "lower_ns": 2488542,
-              "parse_ns": 317500,
-              "read_ns": 136667,
-              "total_ns": 4065458,
-              "typecheck_ns": 815458
+              "load_ns": 706166,
+              "lower_ns": 2060959,
+              "parse_ns": 337582,
+              "read_ns": 127626,
+              "total_ns": 3645500,
+              "typecheck_ns": 828333
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 9472625,
-              "total_ns": 28417876,
+              "avg_ns": 9229597,
+              "total_ns": 27688791,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -882,20 +882,20 @@
           },
           {
             "compile": {
-              "bytes_read": 21826,
+              "bytes_read": 23625,
               "files_read": 13,
-              "load_ns": 705042,
-              "lower_ns": 2452584,
-              "parse_ns": 319168,
-              "read_ns": 137874,
-              "total_ns": 4013333,
-              "typecheck_ns": 807125
+              "load_ns": 716000,
+              "lower_ns": 2039500,
+              "parse_ns": 339083,
+              "read_ns": 131124,
+              "total_ns": 3658833,
+              "typecheck_ns": 852167
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase3_closure_capture.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 9302847,
-              "total_ns": 27908542,
+              "avg_ns": 9531083,
+              "total_ns": 28593250,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -926,18 +926,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 4204542,
-            "mean": 4069374,
-            "median": 4047833,
-            "min": 4013333,
-            "stdev": 78693
+            "max": 3843458,
+            "mean": 3686266,
+            "median": 3645875,
+            "min": 3637666,
+            "stdev": 88200
           },
           "run_avg_ns": {
-            "max": 10280194,
-            "mean": 9747080,
-            "median": 9794680,
-            "min": 9302847,
-            "stdev": 380191
+            "max": 9996069,
+            "mean": 9533549,
+            "median": 9531083,
+            "min": 9152542,
+            "stdev": 354283
           }
         }
       }
@@ -954,68 +954,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.py",
         "runs": [
           {
-            "import_ns": 202042,
+            "import_ns": 621500,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.py",
             "iters": 3,
             "last_result_repr": "500000",
             "run": {
-              "avg_ns": 21530291,
-              "total_ns": 64590875
+              "avg_ns": 21823069,
+              "total_ns": 65469208
             },
             "warmup": 1
           },
           {
-            "import_ns": 161625,
+            "import_ns": 116416,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.py",
             "iters": 3,
             "last_result_repr": "500000",
             "run": {
-              "avg_ns": 21409264,
-              "total_ns": 64227792
+              "avg_ns": 21695736,
+              "total_ns": 65087208
             },
             "warmup": 1
           },
           {
-            "import_ns": 162459,
+            "import_ns": 108584,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.py",
             "iters": 3,
             "last_result_repr": "500000",
             "run": {
-              "avg_ns": 21429527,
-              "total_ns": 64288583
+              "avg_ns": 21649638,
+              "total_ns": 64948916
             },
             "warmup": 1
           },
           {
-            "import_ns": 157084,
+            "import_ns": 114958,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.py",
             "iters": 3,
             "last_result_repr": "500000",
             "run": {
-              "avg_ns": 21829208,
-              "total_ns": 65487625
+              "avg_ns": 21938736,
+              "total_ns": 65816209
             },
             "warmup": 1
           },
           {
-            "import_ns": 187916,
+            "import_ns": 203417,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.py",
             "iters": 3,
             "last_result_repr": "500000",
             "run": {
-              "avg_ns": 21486694,
-              "total_ns": 64460083
+              "avg_ns": 21467500,
+              "total_ns": 64402500
             },
             "warmup": 1
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 21829208,
-            "mean": 21536996,
-            "median": 21486694,
-            "min": 21409264,
-            "stdev": 170167
+            "max": 21938736,
+            "mean": 21714935,
+            "median": 21695736,
+            "min": 21467500,
+            "stdev": 178631
           }
         }
       },
@@ -1024,20 +1024,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 20123,
+              "bytes_read": 21922,
               "files_read": 13,
-              "load_ns": 700917,
-              "lower_ns": 2401292,
-              "parse_ns": 302708,
-              "read_ns": 150208,
-              "total_ns": 3934125,
-              "typecheck_ns": 784916
+              "load_ns": 689000,
+              "lower_ns": 1970376,
+              "parse_ns": 321168,
+              "read_ns": 130875,
+              "total_ns": 3529750,
+              "typecheck_ns": 821583
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 25508000,
-              "total_ns": 76524001,
+              "avg_ns": 25574860,
+              "total_ns": 76724582,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1067,20 +1067,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20123,
+              "bytes_read": 21922,
               "files_read": 13,
-              "load_ns": 739792,
-              "lower_ns": 2410708,
-              "parse_ns": 306127,
-              "read_ns": 163749,
-              "total_ns": 4012834,
-              "typecheck_ns": 815458
+              "load_ns": 691667,
+              "lower_ns": 1995167,
+              "parse_ns": 319293,
+              "read_ns": 128914,
+              "total_ns": 3551917,
+              "typecheck_ns": 816541
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 25514014,
-              "total_ns": 76542042,
+              "avg_ns": 25564624,
+              "total_ns": 76693874,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1110,20 +1110,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20123,
+              "bytes_read": 21922,
               "files_read": 13,
-              "load_ns": 730959,
-              "lower_ns": 2412918,
-              "parse_ns": 307082,
-              "read_ns": 160539,
-              "total_ns": 3993791,
-              "typecheck_ns": 802584
+              "load_ns": 737167,
+              "lower_ns": 1980750,
+              "parse_ns": 344625,
+              "read_ns": 139041,
+              "total_ns": 3647250,
+              "typecheck_ns": 881000
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 25538528,
-              "total_ns": 76615584,
+              "avg_ns": 25573402,
+              "total_ns": 76720208,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1153,20 +1153,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20123,
+              "bytes_read": 21922,
               "files_read": 13,
-              "load_ns": 723750,
-              "lower_ns": 2460125,
-              "parse_ns": 307209,
-              "read_ns": 146584,
-              "total_ns": 4037791,
-              "typecheck_ns": 807542
+              "load_ns": 690459,
+              "lower_ns": 1998874,
+              "parse_ns": 319375,
+              "read_ns": 131540,
+              "total_ns": 3570083,
+              "typecheck_ns": 832125
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 25588180,
-              "total_ns": 76764542,
+              "avg_ns": 25577722,
+              "total_ns": 76733166,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1196,20 +1196,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20123,
+              "bytes_read": 21922,
               "files_read": 13,
-              "load_ns": 709458,
-              "lower_ns": 2412541,
-              "parse_ns": 304206,
-              "read_ns": 145124,
-              "total_ns": 3960125,
-              "typecheck_ns": 791167
+              "load_ns": 762209,
+              "lower_ns": 1981083,
+              "parse_ns": 347291,
+              "read_ns": 145833,
+              "total_ns": 3656000,
+              "typecheck_ns": 863666
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase4_call_dispatch.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 25455917,
-              "total_ns": 76367751,
+              "avg_ns": 26411944,
+              "total_ns": 79235834,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1240,18 +1240,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 4037791,
-            "mean": 3987733,
-            "median": 3993791,
-            "min": 3934125,
-            "stdev": 41257
+            "max": 3656000,
+            "mean": 3591000,
+            "median": 3570083,
+            "min": 3529750,
+            "stdev": 57239
           },
           "run_avg_ns": {
-            "max": 25588180,
-            "mean": 25520927,
-            "median": 25514014,
-            "min": 25455917,
-            "stdev": 48150
+            "max": 26411944,
+            "mean": 25740510,
+            "median": 25574860,
+            "min": 25564624,
+            "stdev": 375374
           }
         }
       }
@@ -1268,68 +1268,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.py",
         "runs": [
           {
-            "import_ns": 249417,
+            "import_ns": 467500,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.py",
             "iters": 1,
             "last_result_repr": "200001",
             "run": {
-              "avg_ns": 92030875,
-              "total_ns": 92030875
+              "avg_ns": 91453708,
+              "total_ns": 91453708
             },
             "warmup": 0
           },
           {
-            "import_ns": 198666,
+            "import_ns": 169875,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.py",
             "iters": 1,
             "last_result_repr": "200001",
             "run": {
-              "avg_ns": 92957208,
-              "total_ns": 92957208
+              "avg_ns": 90756916,
+              "total_ns": 90756916
             },
             "warmup": 0
           },
           {
-            "import_ns": 216375,
+            "import_ns": 156542,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.py",
             "iters": 1,
             "last_result_repr": "200001",
             "run": {
-              "avg_ns": 91113166,
-              "total_ns": 91113166
+              "avg_ns": 89680292,
+              "total_ns": 89680292
             },
             "warmup": 0
           },
           {
-            "import_ns": 206958,
+            "import_ns": 144167,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.py",
             "iters": 1,
             "last_result_repr": "200001",
             "run": {
-              "avg_ns": 91297958,
-              "total_ns": 91297958
+              "avg_ns": 89329917,
+              "total_ns": 89329917
             },
             "warmup": 0
           },
           {
-            "import_ns": 202667,
+            "import_ns": 172791,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.py",
             "iters": 1,
             "last_result_repr": "200001",
             "run": {
-              "avg_ns": 90643125,
-              "total_ns": 90643125
+              "avg_ns": 93103375,
+              "total_ns": 93103375
             },
             "warmup": 0
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 92957208,
-            "mean": 91608466,
-            "median": 91297958,
-            "min": 90643125,
-            "stdev": 904316
+            "max": 93103375,
+            "mean": 90864841,
+            "median": 90756916,
+            "min": 89329917,
+            "stdev": 1510678
           }
         }
       },
@@ -1338,20 +1338,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 20674,
+              "bytes_read": 22473,
               "files_read": 13,
-              "load_ns": 762500,
-              "lower_ns": 2436207,
-              "parse_ns": 340874,
-              "read_ns": 157499,
-              "total_ns": 4051417,
-              "typecheck_ns": 804208
+              "load_ns": 737834,
+              "lower_ns": 2040375,
+              "parse_ns": 330333,
+              "read_ns": 145999,
+              "total_ns": 3712250,
+              "typecheck_ns": 884083
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 232506041,
-              "total_ns": 232506041,
+              "avg_ns": 226021667,
+              "total_ns": 226021667,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1381,20 +1381,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20674,
+              "bytes_read": 22473,
               "files_read": 13,
-              "load_ns": 748833,
-              "lower_ns": 2453958,
-              "parse_ns": 319081,
-              "read_ns": 157709,
-              "total_ns": 4096042,
-              "typecheck_ns": 844208
+              "load_ns": 726750,
+              "lower_ns": 2046625,
+              "parse_ns": 331668,
+              "read_ns": 139374,
+              "total_ns": 3669542,
+              "typecheck_ns": 846125
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 230972458,
-              "total_ns": 230972458,
+              "avg_ns": 226577375,
+              "total_ns": 226577375,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1424,20 +1424,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20674,
+              "bytes_read": 22473,
               "files_read": 13,
-              "load_ns": 748584,
-              "lower_ns": 2482041,
-              "parse_ns": 317374,
-              "read_ns": 156957,
-              "total_ns": 4106541,
-              "typecheck_ns": 828125
+              "load_ns": 744333,
+              "lower_ns": 2029542,
+              "parse_ns": 332584,
+              "read_ns": 144209,
+              "total_ns": 3674667,
+              "typecheck_ns": 851500
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 232581000,
-              "total_ns": 232581000,
+              "avg_ns": 226150834,
+              "total_ns": 226150834,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1467,20 +1467,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20674,
+              "bytes_read": 22473,
               "files_read": 13,
-              "load_ns": 752542,
-              "lower_ns": 2501458,
-              "parse_ns": 322666,
-              "read_ns": 158082,
-              "total_ns": 4216209,
-              "typecheck_ns": 901375
+              "load_ns": 732875,
+              "lower_ns": 2012832,
+              "parse_ns": 331667,
+              "read_ns": 143500,
+              "total_ns": 3671875,
+              "typecheck_ns": 877292
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 231973458,
-              "total_ns": 231973458,
+              "avg_ns": 225769250,
+              "total_ns": 225769250,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1510,20 +1510,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20674,
+              "bytes_read": 22473,
               "files_read": 13,
-              "load_ns": 744084,
-              "lower_ns": 2518499,
-              "parse_ns": 316123,
-              "read_ns": 158418,
-              "total_ns": 4135584,
-              "typecheck_ns": 825625
+              "load_ns": 736041,
+              "lower_ns": 2045375,
+              "parse_ns": 330249,
+              "read_ns": 146417,
+              "total_ns": 3687416,
+              "typecheck_ns": 855417
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase5_gc_epoch.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 231066375,
-              "total_ns": 231066375,
+              "avg_ns": 228425041,
+              "total_ns": 228425041,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1554,18 +1554,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 4216209,
-            "mean": 4121158,
-            "median": 4106541,
-            "min": 4051417,
-            "stdev": 61137
+            "max": 3712250,
+            "mean": 3683150,
+            "median": 3674667,
+            "min": 3669542,
+            "stdev": 17672
           },
           "run_avg_ns": {
-            "max": 232581000,
-            "mean": 231819866,
-            "median": 231973458,
-            "min": 230972458,
-            "stdev": 768049
+            "max": 228425041,
+            "mean": 226588833,
+            "median": 226150834,
+            "min": 225769250,
+            "stdev": 1067359
           }
         }
       }
@@ -1582,68 +1582,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.py",
         "runs": [
           {
-            "import_ns": 177000,
+            "import_ns": 492000,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.py",
             "iters": 3,
             "last_result_repr": "49995000",
             "run": {
-              "avg_ns": 442861,
-              "total_ns": 1328583
+              "avg_ns": 426125,
+              "total_ns": 1278375
             },
             "warmup": 1
           },
           {
-            "import_ns": 124167,
+            "import_ns": 118042,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.py",
             "iters": 3,
             "last_result_repr": "49995000",
             "run": {
-              "avg_ns": 438014,
-              "total_ns": 1314042
+              "avg_ns": 402180,
+              "total_ns": 1206541
             },
             "warmup": 1
           },
           {
-            "import_ns": 128541,
+            "import_ns": 112458,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.py",
             "iters": 3,
             "last_result_repr": "49995000",
             "run": {
-              "avg_ns": 456486,
-              "total_ns": 1369459
+              "avg_ns": 449458,
+              "total_ns": 1348375
             },
             "warmup": 1
           },
           {
-            "import_ns": 138416,
+            "import_ns": 115792,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.py",
             "iters": 3,
             "last_result_repr": "49995000",
             "run": {
-              "avg_ns": 430055,
-              "total_ns": 1290167
+              "avg_ns": 412014,
+              "total_ns": 1236042
             },
             "warmup": 1
           },
           {
-            "import_ns": 109167,
+            "import_ns": 115917,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.py",
             "iters": 3,
             "last_result_repr": "49995000",
             "run": {
-              "avg_ns": 449277,
-              "total_ns": 1347833
+              "avg_ns": 447291,
+              "total_ns": 1341875
             },
             "warmup": 1
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 456486,
-            "mean": 443338,
-            "median": 442861,
-            "min": 430055,
-            "stdev": 10163
+            "max": 449458,
+            "mean": 427413,
+            "median": 426125,
+            "min": 402180,
+            "stdev": 20955
           }
         }
       },
@@ -1652,20 +1652,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 20375,
+              "bytes_read": 22174,
               "files_read": 13,
-              "load_ns": 751458,
-              "lower_ns": 2458834,
-              "parse_ns": 317333,
-              "read_ns": 163789,
-              "total_ns": 4101000,
-              "typecheck_ns": 841625
+              "load_ns": 738916,
+              "lower_ns": 1990833,
+              "parse_ns": 331500,
+              "read_ns": 143917,
+              "total_ns": 3615667,
+              "typecheck_ns": 836666
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 5185458,
-              "total_ns": 15556375,
+              "avg_ns": 4991361,
+              "total_ns": 14974083,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1695,20 +1695,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20375,
+              "bytes_read": 22174,
               "files_read": 13,
-              "load_ns": 680833,
-              "lower_ns": 2433666,
-              "parse_ns": 301834,
-              "read_ns": 133919,
-              "total_ns": 3956375,
-              "typecheck_ns": 794083
+              "load_ns": 699667,
+              "lower_ns": 2026208,
+              "parse_ns": 321583,
+              "read_ns": 130960,
+              "total_ns": 3587958,
+              "typecheck_ns": 811584
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 5197805,
-              "total_ns": 15593416,
+              "avg_ns": 4984277,
+              "total_ns": 14952833,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1738,20 +1738,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20375,
+              "bytes_read": 22174,
               "files_read": 13,
-              "load_ns": 687250,
-              "lower_ns": 2449250,
-              "parse_ns": 310170,
-              "read_ns": 134793,
-              "total_ns": 3977834,
-              "typecheck_ns": 792958
+              "load_ns": 733333,
+              "lower_ns": 2005168,
+              "parse_ns": 349458,
+              "read_ns": 131999,
+              "total_ns": 3614333,
+              "typecheck_ns": 825625
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 5141138,
-              "total_ns": 15423416,
+              "avg_ns": 5099027,
+              "total_ns": 15297083,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1781,20 +1781,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20375,
+              "bytes_read": 22174,
               "files_read": 13,
-              "load_ns": 701916,
-              "lower_ns": 2466124,
-              "parse_ns": 307663,
-              "read_ns": 146292,
-              "total_ns": 4026208,
-              "typecheck_ns": 809625
+              "load_ns": 690209,
+              "lower_ns": 1991334,
+              "parse_ns": 321999,
+              "read_ns": 128876,
+              "total_ns": 3558833,
+              "typecheck_ns": 827500
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 5059375,
-              "total_ns": 15178126,
+              "avg_ns": 5097305,
+              "total_ns": 15291917,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1824,20 +1824,20 @@
           },
           {
             "compile": {
-              "bytes_read": 20375,
+              "bytes_read": 22174,
               "files_read": 13,
-              "load_ns": 682500,
-              "lower_ns": 2433459,
-              "parse_ns": 306834,
-              "read_ns": 134294,
-              "total_ns": 3943958,
-              "typecheck_ns": 780334
+              "load_ns": 683333,
+              "lower_ns": 2006790,
+              "parse_ns": 318208,
+              "read_ns": 127293,
+              "total_ns": 3558625,
+              "typecheck_ns": 818875
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase6_effects_generator.rusk",
             "iters": 3,
             "run": {
-              "avg_ns": 5084624,
-              "total_ns": 15253874,
+              "avg_ns": 5176139,
+              "total_ns": 15528417,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -1868,18 +1868,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 4101000,
-            "mean": 4001075,
-            "median": 3977834,
-            "min": 3943958,
-            "stdev": 64064
+            "max": 3615667,
+            "mean": 3587083,
+            "median": 3587958,
+            "min": 3558625,
+            "stdev": 28143
           },
           "run_avg_ns": {
-            "max": 5197805,
-            "mean": 5133680,
-            "median": 5141138,
-            "min": 5059375,
-            "stdev": 60778
+            "max": 5176139,
+            "mean": 5069621,
+            "median": 5097305,
+            "min": 4984277,
+            "stdev": 81217
           }
         }
       }
@@ -1896,68 +1896,68 @@
         "path": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.py",
         "runs": [
           {
-            "import_ns": 223375,
+            "import_ns": 528666,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.py",
             "iters": 1,
             "last_result_repr": "300040000",
             "run": {
-              "avg_ns": 4673750,
-              "total_ns": 4673750
+              "avg_ns": 4621375,
+              "total_ns": 4621375
             },
             "warmup": 0
           },
           {
-            "import_ns": 189750,
+            "import_ns": 164625,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.py",
             "iters": 1,
             "last_result_repr": "300040000",
             "run": {
-              "avg_ns": 4648500,
-              "total_ns": 4648500
+              "avg_ns": 4611417,
+              "total_ns": 4611417
             },
             "warmup": 0
           },
           {
-            "import_ns": 209541,
+            "import_ns": 161958,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.py",
             "iters": 1,
             "last_result_repr": "300040000",
             "run": {
-              "avg_ns": 4859292,
-              "total_ns": 4859292
+              "avg_ns": 4686375,
+              "total_ns": 4686375
             },
             "warmup": 0
           },
           {
-            "import_ns": 193458,
+            "import_ns": 149000,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.py",
             "iters": 1,
             "last_result_repr": "300040000",
             "run": {
-              "avg_ns": 4702625,
-              "total_ns": 4702625
+              "avg_ns": 4653375,
+              "total_ns": 4653375
             },
             "warmup": 0
           },
           {
-            "import_ns": 211792,
+            "import_ns": 153042,
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.py",
             "iters": 1,
             "last_result_repr": "300040000",
             "run": {
-              "avg_ns": 4789750,
-              "total_ns": 4789750
+              "avg_ns": 4603250,
+              "total_ns": 4603250
             },
             "warmup": 0
           }
         ],
         "stats": {
           "run_avg_ns": {
-            "max": 4859292,
-            "mean": 4734783,
-            "median": 4702625,
-            "min": 4648500,
-            "stdev": 87646
+            "max": 4686375,
+            "mean": 4635158,
+            "median": 4621375,
+            "min": 4603250,
+            "stdev": 34375
           }
         }
       },
@@ -1966,20 +1966,20 @@
         "runs": [
           {
             "compile": {
-              "bytes_read": 21007,
+              "bytes_read": 22806,
               "files_read": 13,
-              "load_ns": 726250,
-              "lower_ns": 2563208,
-              "parse_ns": 316085,
-              "read_ns": 155583,
-              "total_ns": 4167167,
-              "typecheck_ns": 828959
+              "load_ns": 725917,
+              "lower_ns": 2168916,
+              "parse_ns": 338957,
+              "read_ns": 135959,
+              "total_ns": 3789917,
+              "typecheck_ns": 844000
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 179447375,
-              "total_ns": 179447375,
+              "avg_ns": 162712833,
+              "total_ns": 162712833,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -2009,106 +2009,20 @@
           },
           {
             "compile": {
-              "bytes_read": 21007,
-              "files_read": 13,
-              "load_ns": 736708,
-              "lower_ns": 2592792,
-              "parse_ns": 321042,
-              "read_ns": 154250,
-              "total_ns": 4235291,
-              "typecheck_ns": 856833
-            },
-            "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
-            "iters": 1,
-            "run": {
-              "avg_ns": 178306542,
-              "total_ns": 178306542,
-              "vm_metrics": {
-                "as_readonly_instructions": 0,
-                "bool_op_instructions": 0,
-                "call_instructions": 0,
-                "const_instructions": 0,
-                "copy_instructions": 0,
-                "executed_instructions": 0,
-                "icall_instructions": 0,
-                "int_binop_instructions": 0,
-                "int_cmp_instructions": 0,
-                "jump_instructions": 0,
-                "jumpif_instructions": 0,
-                "move_instructions": 0,
-                "other_instructions": 0,
-                "perform_instructions": 0,
-                "pop_handler_instructions": 0,
-                "push_handler_instructions": 0,
-                "resume_instructions": 0,
-                "return_instructions": 0,
-                "switch_instructions": 0,
-                "trap_instructions": 0,
-                "vcall_fast_path_hits": 0,
-                "vcall_instructions": 0
-              }
-            },
-            "warmup": 0
-          },
-          {
-            "compile": {
-              "bytes_read": 21007,
-              "files_read": 13,
-              "load_ns": 760084,
-              "lower_ns": 2622125,
-              "parse_ns": 338416,
-              "read_ns": 154544,
-              "total_ns": 4281834,
-              "typecheck_ns": 850583
-            },
-            "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
-            "iters": 1,
-            "run": {
-              "avg_ns": 179332250,
-              "total_ns": 179332250,
-              "vm_metrics": {
-                "as_readonly_instructions": 0,
-                "bool_op_instructions": 0,
-                "call_instructions": 0,
-                "const_instructions": 0,
-                "copy_instructions": 0,
-                "executed_instructions": 0,
-                "icall_instructions": 0,
-                "int_binop_instructions": 0,
-                "int_cmp_instructions": 0,
-                "jump_instructions": 0,
-                "jumpif_instructions": 0,
-                "move_instructions": 0,
-                "other_instructions": 0,
-                "perform_instructions": 0,
-                "pop_handler_instructions": 0,
-                "push_handler_instructions": 0,
-                "resume_instructions": 0,
-                "return_instructions": 0,
-                "switch_instructions": 0,
-                "trap_instructions": 0,
-                "vcall_fast_path_hits": 0,
-                "vcall_instructions": 0
-              }
-            },
-            "warmup": 0
-          },
-          {
-            "compile": {
-              "bytes_read": 21007,
+              "bytes_read": 22806,
               "files_read": 13,
               "load_ns": 739250,
-              "lower_ns": 2583791,
-              "parse_ns": 314955,
-              "read_ns": 157375,
-              "total_ns": 4242167,
-              "typecheck_ns": 870000
+              "lower_ns": 2167582,
+              "parse_ns": 344291,
+              "read_ns": 136874,
+              "total_ns": 3830292,
+              "typecheck_ns": 872291
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 176047708,
-              "total_ns": 176047708,
+              "avg_ns": 161243625,
+              "total_ns": 161243625,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -2138,20 +2052,106 @@
           },
           {
             "compile": {
-              "bytes_read": 21007,
+              "bytes_read": 22806,
               "files_read": 13,
-              "load_ns": 748583,
-              "lower_ns": 2605583,
-              "parse_ns": 329791,
-              "read_ns": 152168,
-              "total_ns": 4278459,
-              "typecheck_ns": 875125
+              "load_ns": 736667,
+              "lower_ns": 2158499,
+              "parse_ns": 336750,
+              "read_ns": 139627,
+              "total_ns": 3801208,
+              "typecheck_ns": 854250
             },
             "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
             "iters": 1,
             "run": {
-              "avg_ns": 182070750,
-              "total_ns": 182070750,
+              "avg_ns": 160499542,
+              "total_ns": 160499542,
+              "vm_metrics": {
+                "as_readonly_instructions": 0,
+                "bool_op_instructions": 0,
+                "call_instructions": 0,
+                "const_instructions": 0,
+                "copy_instructions": 0,
+                "executed_instructions": 0,
+                "icall_instructions": 0,
+                "int_binop_instructions": 0,
+                "int_cmp_instructions": 0,
+                "jump_instructions": 0,
+                "jumpif_instructions": 0,
+                "move_instructions": 0,
+                "other_instructions": 0,
+                "perform_instructions": 0,
+                "pop_handler_instructions": 0,
+                "push_handler_instructions": 0,
+                "resume_instructions": 0,
+                "return_instructions": 0,
+                "switch_instructions": 0,
+                "trap_instructions": 0,
+                "vcall_fast_path_hits": 0,
+                "vcall_instructions": 0
+              }
+            },
+            "warmup": 0
+          },
+          {
+            "compile": {
+              "bytes_read": 22806,
+              "files_read": 13,
+              "load_ns": 726458,
+              "lower_ns": 2187710,
+              "parse_ns": 335668,
+              "read_ns": 136290,
+              "total_ns": 3847750,
+              "typecheck_ns": 882250
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 162294542,
+              "total_ns": 162294542,
+              "vm_metrics": {
+                "as_readonly_instructions": 0,
+                "bool_op_instructions": 0,
+                "call_instructions": 0,
+                "const_instructions": 0,
+                "copy_instructions": 0,
+                "executed_instructions": 0,
+                "icall_instructions": 0,
+                "int_binop_instructions": 0,
+                "int_cmp_instructions": 0,
+                "jump_instructions": 0,
+                "jumpif_instructions": 0,
+                "move_instructions": 0,
+                "other_instructions": 0,
+                "perform_instructions": 0,
+                "pop_handler_instructions": 0,
+                "push_handler_instructions": 0,
+                "resume_instructions": 0,
+                "return_instructions": 0,
+                "switch_instructions": 0,
+                "trap_instructions": 0,
+                "vcall_fast_path_hits": 0,
+                "vcall_instructions": 0
+              }
+            },
+            "warmup": 0
+          },
+          {
+            "compile": {
+              "bytes_read": 22806,
+              "files_read": 13,
+              "load_ns": 726584,
+              "lower_ns": 2162250,
+              "parse_ns": 343290,
+              "read_ns": 134667,
+              "total_ns": 3813166,
+              "typecheck_ns": 871958
+            },
+            "input": "/Volumes/Data/home/chenxu/repos/rusk/benchmarks/phase7_map_dict.rusk",
+            "iters": 1,
+            "run": {
+              "avg_ns": 160545291,
+              "total_ns": 160545291,
               "vm_metrics": {
                 "as_readonly_instructions": 0,
                 "bool_op_instructions": 0,
@@ -2182,18 +2182,18 @@
         ],
         "stats": {
           "compile_total_ns": {
-            "max": 4281834,
-            "mean": 4240983,
-            "median": 4242167,
-            "min": 4167167,
-            "stdev": 46248
+            "max": 3847750,
+            "mean": 3816466,
+            "median": 3813166,
+            "min": 3789917,
+            "stdev": 23013
           },
           "run_avg_ns": {
-            "max": 182070750,
-            "mean": 179040925,
-            "median": 179332250,
-            "min": 176047708,
-            "stdev": 2175349
+            "max": 162712833,
+            "mean": 161459166,
+            "median": 161243625,
+            "min": 160499542,
+            "stdev": 1008964
           }
         }
       }
@@ -2201,7 +2201,7 @@
   ],
   "env": {
     "cargo": "cargo 1.93.0 (083ac5135 2025-12-15)",
-    "git_commit": "e99f3697d9f381ee79b717a96119a66102728c77",
+    "git_commit": "9af8e00e8a9814522aa312928124d678d420c04c",
     "git_dirty": true,
     "machine": "arm64",
     "platform": "macOS-26.3-arm64-arm-64bit-Mach-O",
@@ -2210,7 +2210,7 @@
       "version": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]"
     },
     "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
-    "timestamp_utc": "2026-02-19T19:15:13Z"
+    "timestamp_utc": "2026-02-19T21:58:11Z"
   },
   "params": {
     "iters": 3,

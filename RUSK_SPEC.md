@@ -1299,6 +1299,14 @@ interface Mul { readonly fn mul(other: Self) -> Self; }
 interface Div { readonly fn div(other: Self) -> Self; }
 interface Rem { readonly fn rem(other: Self) -> Self; }
 
+interface BitAnd { readonly fn bitand(other: Self) -> Self; }
+interface BitOr { readonly fn bitor(other: Self) -> Self; }
+interface BitXor { readonly fn bitxor(other: Self) -> Self; }
+
+interface Shl { readonly fn shl(other: int) -> Self; }
+interface Shr { readonly fn shr(other: int) -> Self; }
+interface UShr { readonly fn ushr(other: int) -> Self; }
+
 interface Neg { readonly fn neg() -> Self; }
 interface Not { readonly fn not() -> Self; }
 
@@ -1320,10 +1328,27 @@ For `int`:
 - `a * b` lowers to `core::intrinsics::int_mul(a, b)`
 - `a / b` lowers to `core::intrinsics::int_div(a, b)`
 - `a % b` lowers to `core::intrinsics::int_mod(a, b)`
+- `a & b` lowers to `core::intrinsics::int_and(a, b)`
+- `a | b` lowers to `core::intrinsics::int_or(a, b)`
+- `a ^ b` lowers to `core::intrinsics::int_xor(a, b)`
+- `a << b` lowers to `core::intrinsics::int_shl(a, b)`
+- `a >> b` lowers to `core::intrinsics::int_shr(a, b)`
+- `a >>> b` lowers to `core::intrinsics::int_ushr(a, b)`
+
+Shift semantics:
+
+- The shift amount (`b`) is an `int` (enforced by the typechecker).
+- At runtime, the shift amount must be in range:
+  - `int`: `0 <= b < 64`
+  - `byte`: `0 <= b < 8`
+  Out-of-range shift amounts trap (runtime error), similar to Rust's "panicking shift" operators.
+- For `int`, `>>` is arithmetic (sign-extending) and `>>>` is logical (zero-filling).
+- For `byte`, both `>>` and `>>>` are logical (zero-filling).
 
 Unary negation:
 
 - `-x` lowers to `core::intrinsics::int_sub(0, x)` (or an equivalent fast path)
+- `!x` lowers to `core::intrinsics::int_not(x)` (bitwise not)
 
 Comparisons:
 
@@ -1346,6 +1371,16 @@ Other primitive equality:
 - `bytes`: `core::intrinsics::bytes_eq`, `core::intrinsics::bytes_ne`
 - `unit`: `core::intrinsics::unit_eq`, `core::intrinsics::unit_ne`
 
+Primitive bit ops on `byte`:
+
+- `a & b` lowers to `core::intrinsics::byte_and(a, b)`
+- `a | b` lowers to `core::intrinsics::byte_or(a, b)`
+- `a ^ b` lowers to `core::intrinsics::byte_xor(a, b)`
+- `a << b` lowers to `core::intrinsics::byte_shl(a, b)`
+- `a >> b` lowers to `core::intrinsics::byte_shr(a, b)`
+- `a >>> b` lowers to `core::intrinsics::byte_ushr(a, b)`
+- `!x` lowers to `core::intrinsics::byte_not(x)` (bitwise not)
+
 #### 9.1.2 Non-primitive operators (interface calls)
 
 For non-primitive types `T`, operator syntax lowers to explicit interface calls
@@ -1358,6 +1393,12 @@ using fully-qualified `core::ops::*` names:
 | `a * b` | `core::ops::Mul::mul(a, b)` |
 | `a / b` | `core::ops::Div::div(a, b)` |
 | `a % b` | `core::ops::Rem::rem(a, b)` |
+| `a & b` | `core::ops::BitAnd::bitand(a, b)` |
+| `a \| b` | `core::ops::BitOr::bitor(a, b)` |
+| `a ^ b` | `core::ops::BitXor::bitxor(a, b)` |
+| `a << b` | `core::ops::Shl::shl(a, b)` |
+| `a >> b` | `core::ops::Shr::shr(a, b)` |
+| `a >>> b` | `core::ops::UShr::ushr(a, b)` |
 | `-x` | `core::ops::Neg::neg(x)` |
 | `!x` | `core::ops::Not::not(x)` |
 | `a < b` | `core::ops::Lt::lt(a, b)` |
@@ -1370,6 +1411,8 @@ using fully-qualified `core::ops::*` names:
 ### 9.2 Short-circuiting Boolean Operators
 
 - For `bool`, `!x` lowers to `core::intrinsics::bool_not(x)`.
+- For `int`, `!x` lowers to `core::intrinsics::int_not(x)`.
+- For `byte`, `!x` lowers to `core::intrinsics::byte_not(x)`.
 - Otherwise, `!x` lowers to `core::ops::Not::not(x)`.
 - `a && b` lowers to short-circuiting `if a { b } else { false }`
 - `a || b` lowers to short-circuiting `if a { true } else { b }`

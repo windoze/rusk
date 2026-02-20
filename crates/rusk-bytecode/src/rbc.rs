@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 8;
+const VERSION_MINOR: u16 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -495,6 +495,13 @@ impl Encoder {
             Intrinsic::IntMul => 8,
             Intrinsic::IntDiv => 9,
             Intrinsic::IntMod => 10,
+            Intrinsic::IntAnd => 72,
+            Intrinsic::IntOr => 73,
+            Intrinsic::IntXor => 74,
+            Intrinsic::IntNot => 75,
+            Intrinsic::IntShl => 76,
+            Intrinsic::IntShr => 77,
+            Intrinsic::IntUShr => 78,
             Intrinsic::IntEq => 11,
             Intrinsic::IntNe => 12,
             Intrinsic::IntLt => 13,
@@ -534,6 +541,13 @@ impl Encoder {
             Intrinsic::IntToByte => 47,
             Intrinsic::IntTryByte => 48,
             Intrinsic::ByteToInt => 49,
+            Intrinsic::ByteAnd => 79,
+            Intrinsic::ByteOr => 80,
+            Intrinsic::ByteXor => 81,
+            Intrinsic::ByteNot => 82,
+            Intrinsic::ByteShl => 83,
+            Intrinsic::ByteShr => 84,
+            Intrinsic::ByteUShr => 85,
             Intrinsic::IntToChar => 50,
             Intrinsic::IntTryChar => 51,
             Intrinsic::CharToInt => 52,
@@ -747,6 +761,47 @@ impl Encoder {
                 self.write_u32(*a);
                 self.write_u32(*b);
             }
+            Instruction::IntAnd { dst, a, b } => {
+                self.write_u8(48);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::IntOr { dst, a, b } => {
+                self.write_u8(49);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::IntXor { dst, a, b } => {
+                self.write_u8(50);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::IntShl { dst, a, b } => {
+                self.write_u8(51);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::IntShr { dst, a, b } => {
+                self.write_u8(52);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::IntUShr { dst, a, b } => {
+                self.write_u8(53);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::IntNot { dst, v } => {
+                self.write_u8(54);
+                self.write_u32(*dst);
+                self.write_u32(*v);
+            }
             Instruction::IntLt { dst, a, b } => {
                 self.write_u8(24);
                 self.write_u32(*dst);
@@ -782,6 +837,47 @@ impl Encoder {
                 self.write_u32(*dst);
                 self.write_u32(*a);
                 self.write_u32(*b);
+            }
+            Instruction::ByteAnd { dst, a, b } => {
+                self.write_u8(55);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::ByteOr { dst, a, b } => {
+                self.write_u8(56);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::ByteXor { dst, a, b } => {
+                self.write_u8(57);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::ByteShl { dst, a, b } => {
+                self.write_u8(58);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::ByteShr { dst, a, b } => {
+                self.write_u8(59);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::ByteUShr { dst, a, b } => {
+                self.write_u8(60);
+                self.write_u32(*dst);
+                self.write_u32(*a);
+                self.write_u32(*b);
+            }
+            Instruction::ByteNot { dst, v } => {
+                self.write_u8(61);
+                self.write_u32(*dst);
+                self.write_u32(*v);
             }
             Instruction::BoolNot { dst, v } => {
                 self.write_u8(30);
@@ -1487,6 +1583,20 @@ impl<'a> Decoder<'a> {
             69 => Intrinsic::HashString,
             70 => Intrinsic::HashBytes,
             71 => Intrinsic::HashCombine,
+            72 => Intrinsic::IntAnd,
+            73 => Intrinsic::IntOr,
+            74 => Intrinsic::IntXor,
+            75 => Intrinsic::IntNot,
+            76 => Intrinsic::IntShl,
+            77 => Intrinsic::IntShr,
+            78 => Intrinsic::IntUShr,
+            79 => Intrinsic::ByteAnd,
+            80 => Intrinsic::ByteOr,
+            81 => Intrinsic::ByteXor,
+            82 => Intrinsic::ByteNot,
+            83 => Intrinsic::ByteShl,
+            84 => Intrinsic::ByteShr,
+            85 => Intrinsic::ByteUShr,
             other => return Err(self.err(format!("invalid Intrinsic tag {other}"))),
         };
         Ok(intr)
@@ -1639,6 +1749,40 @@ impl<'a> Decoder<'a> {
                 a: self.read_u32()?,
                 b: self.read_u32()?,
             }),
+            48 => Ok(Instruction::IntAnd {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            49 => Ok(Instruction::IntOr {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            50 => Ok(Instruction::IntXor {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            51 => Ok(Instruction::IntShl {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            52 => Ok(Instruction::IntShr {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            53 => Ok(Instruction::IntUShr {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            54 => Ok(Instruction::IntNot {
+                dst: self.read_u32()?,
+                v: self.read_u32()?,
+            }),
             24 => Ok(Instruction::IntLt {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
@@ -1668,6 +1812,40 @@ impl<'a> Decoder<'a> {
                 dst: self.read_u32()?,
                 a: self.read_u32()?,
                 b: self.read_u32()?,
+            }),
+            55 => Ok(Instruction::ByteAnd {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            56 => Ok(Instruction::ByteOr {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            57 => Ok(Instruction::ByteXor {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            58 => Ok(Instruction::ByteShl {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            59 => Ok(Instruction::ByteShr {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            60 => Ok(Instruction::ByteUShr {
+                dst: self.read_u32()?,
+                a: self.read_u32()?,
+                b: self.read_u32()?,
+            }),
+            61 => Ok(Instruction::ByteNot {
+                dst: self.read_u32()?,
+                v: self.read_u32()?,
             }),
             30 => Ok(Instruction::BoolNot {
                 dst: self.read_u32()?,

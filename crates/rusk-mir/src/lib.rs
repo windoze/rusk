@@ -508,6 +508,79 @@ pub enum Instruction {
         b: Operand,
     },
 
+    IntAnd {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntOr {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntXor {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntShl {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntShr {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntUShr {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    IntNot {
+        dst: Local,
+        v: Operand,
+    },
+
+    ByteAnd {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    ByteOr {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    ByteXor {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    /// Shift left. `b` is an `int` shift amount.
+    ByteShl {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    /// Shift right (logical for `byte`). `b` is an `int` shift amount.
+    ByteShr {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    /// Shift right with zero fill. `b` is an `int` shift amount.
+    ByteUShr {
+        dst: Local,
+        a: Operand,
+        b: Operand,
+    },
+    ByteNot {
+        dst: Local,
+        v: Operand,
+    },
+
     IntLt {
         dst: Local,
         a: Operand,

@@ -689,6 +689,18 @@ fn count_local_uses(func: &Function) -> Vec<usize> {
                 | Instruction::IntMul { a, b, .. }
                 | Instruction::IntDiv { a, b, .. }
                 | Instruction::IntMod { a, b, .. }
+                | Instruction::IntAnd { a, b, .. }
+                | Instruction::IntOr { a, b, .. }
+                | Instruction::IntXor { a, b, .. }
+                | Instruction::IntShl { a, b, .. }
+                | Instruction::IntShr { a, b, .. }
+                | Instruction::IntUShr { a, b, .. }
+                | Instruction::ByteAnd { a, b, .. }
+                | Instruction::ByteOr { a, b, .. }
+                | Instruction::ByteXor { a, b, .. }
+                | Instruction::ByteShl { a, b, .. }
+                | Instruction::ByteShr { a, b, .. }
+                | Instruction::ByteUShr { a, b, .. }
                 | Instruction::IntLt { a, b, .. }
                 | Instruction::IntLe { a, b, .. }
                 | Instruction::IntGt { a, b, .. }
@@ -700,7 +712,9 @@ fn count_local_uses(func: &Function) -> Vec<usize> {
                     bump_operand(&mut counts, a);
                     bump_operand(&mut counts, b);
                 }
-                Instruction::BoolNot { v, .. } => bump_operand(&mut counts, v),
+                Instruction::BoolNot { v, .. }
+                | Instruction::IntNot { v, .. }
+                | Instruction::ByteNot { v, .. } => bump_operand(&mut counts, v),
 
                 Instruction::Call { args, .. }
                 | Instruction::CallId { args, .. }

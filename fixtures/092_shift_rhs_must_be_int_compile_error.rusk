@@ -1,0 +1,9 @@
+// expect: compile_error expected `int`
+
+fn main() -> int {
+    let b = core::intrinsics::int_to_byte(1);
+    // Shift RHS is required to be `int`.
+    let _ = b << b;
+    0
+}
+

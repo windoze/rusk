@@ -527,12 +527,26 @@ fn instr_def_reg(instr: &Instruction) -> Option<Reg> {
         | Instruction::IntMul { dst, .. }
         | Instruction::IntDiv { dst, .. }
         | Instruction::IntMod { dst, .. }
+        | Instruction::IntAnd { dst, .. }
+        | Instruction::IntOr { dst, .. }
+        | Instruction::IntXor { dst, .. }
+        | Instruction::IntShl { dst, .. }
+        | Instruction::IntShr { dst, .. }
+        | Instruction::IntUShr { dst, .. }
+        | Instruction::IntNot { dst, .. }
         | Instruction::IntLt { dst, .. }
         | Instruction::IntLe { dst, .. }
         | Instruction::IntGt { dst, .. }
         | Instruction::IntGe { dst, .. }
         | Instruction::IntEq { dst, .. }
         | Instruction::IntNe { dst, .. }
+        | Instruction::ByteAnd { dst, .. }
+        | Instruction::ByteOr { dst, .. }
+        | Instruction::ByteXor { dst, .. }
+        | Instruction::ByteShl { dst, .. }
+        | Instruction::ByteShr { dst, .. }
+        | Instruction::ByteUShr { dst, .. }
+        | Instruction::ByteNot { dst, .. }
         | Instruction::BoolNot { dst, .. }
         | Instruction::BoolEq { dst, .. }
         | Instruction::BoolNe { dst, .. } => Some(*dst),
@@ -569,12 +583,26 @@ fn set_instr_dst(instr: &mut Instruction, new_dst: Reg) -> bool {
         | Instruction::IntMul { dst, .. }
         | Instruction::IntDiv { dst, .. }
         | Instruction::IntMod { dst, .. }
+        | Instruction::IntAnd { dst, .. }
+        | Instruction::IntOr { dst, .. }
+        | Instruction::IntXor { dst, .. }
+        | Instruction::IntShl { dst, .. }
+        | Instruction::IntShr { dst, .. }
+        | Instruction::IntUShr { dst, .. }
+        | Instruction::IntNot { dst, .. }
         | Instruction::IntLt { dst, .. }
         | Instruction::IntLe { dst, .. }
         | Instruction::IntGt { dst, .. }
         | Instruction::IntGe { dst, .. }
         | Instruction::IntEq { dst, .. }
         | Instruction::IntNe { dst, .. }
+        | Instruction::ByteAnd { dst, .. }
+        | Instruction::ByteOr { dst, .. }
+        | Instruction::ByteXor { dst, .. }
+        | Instruction::ByteShl { dst, .. }
+        | Instruction::ByteShr { dst, .. }
+        | Instruction::ByteUShr { dst, .. }
+        | Instruction::ByteNot { dst, .. }
         | Instruction::BoolNot { dst, .. }
         | Instruction::BoolEq { dst, .. }
         | Instruction::BoolNe { dst, .. } => {
@@ -640,16 +668,30 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
         | Instruction::IntMul { a, b, .. }
         | Instruction::IntDiv { a, b, .. }
         | Instruction::IntMod { a, b, .. }
+        | Instruction::IntAnd { a, b, .. }
+        | Instruction::IntOr { a, b, .. }
+        | Instruction::IntXor { a, b, .. }
+        | Instruction::IntShl { a, b, .. }
+        | Instruction::IntShr { a, b, .. }
+        | Instruction::IntUShr { a, b, .. }
         | Instruction::IntLt { a, b, .. }
         | Instruction::IntLe { a, b, .. }
         | Instruction::IntGt { a, b, .. }
         | Instruction::IntGe { a, b, .. }
         | Instruction::IntEq { a, b, .. }
         | Instruction::IntNe { a, b, .. }
+        | Instruction::ByteAnd { a, b, .. }
+        | Instruction::ByteOr { a, b, .. }
+        | Instruction::ByteXor { a, b, .. }
+        | Instruction::ByteShl { a, b, .. }
+        | Instruction::ByteShr { a, b, .. }
+        | Instruction::ByteUShr { a, b, .. }
         | Instruction::BoolEq { a, b, .. }
         | Instruction::BoolNe { a, b, .. } => vec![*a, *b],
 
-        Instruction::BoolNot { v, .. } => vec![*v],
+        Instruction::BoolNot { v, .. }
+        | Instruction::IntNot { v, .. }
+        | Instruction::ByteNot { v, .. } => vec![*v],
 
         Instruction::Call { args, .. } => args.clone(),
         Instruction::CallMulti { args, .. } => args.clone(),
@@ -717,12 +759,26 @@ fn instr_write_regs(instr: &Instruction) -> Vec<Reg> {
         | Instruction::IntMul { dst, .. }
         | Instruction::IntDiv { dst, .. }
         | Instruction::IntMod { dst, .. }
+        | Instruction::IntAnd { dst, .. }
+        | Instruction::IntOr { dst, .. }
+        | Instruction::IntXor { dst, .. }
+        | Instruction::IntShl { dst, .. }
+        | Instruction::IntShr { dst, .. }
+        | Instruction::IntUShr { dst, .. }
+        | Instruction::IntNot { dst, .. }
         | Instruction::IntLt { dst, .. }
         | Instruction::IntLe { dst, .. }
         | Instruction::IntGt { dst, .. }
         | Instruction::IntGe { dst, .. }
         | Instruction::IntEq { dst, .. }
         | Instruction::IntNe { dst, .. }
+        | Instruction::ByteAnd { dst, .. }
+        | Instruction::ByteOr { dst, .. }
+        | Instruction::ByteXor { dst, .. }
+        | Instruction::ByteShl { dst, .. }
+        | Instruction::ByteShr { dst, .. }
+        | Instruction::ByteUShr { dst, .. }
+        | Instruction::ByteNot { dst, .. }
         | Instruction::BoolNot { dst, .. }
         | Instruction::BoolEq { dst, .. }
         | Instruction::BoolNe { dst, .. } => vec![*dst],
@@ -827,18 +883,32 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
         | Instruction::IntMul { a, b, .. }
         | Instruction::IntDiv { a, b, .. }
         | Instruction::IntMod { a, b, .. }
+        | Instruction::IntAnd { a, b, .. }
+        | Instruction::IntOr { a, b, .. }
+        | Instruction::IntXor { a, b, .. }
+        | Instruction::IntShl { a, b, .. }
+        | Instruction::IntShr { a, b, .. }
+        | Instruction::IntUShr { a, b, .. }
         | Instruction::IntLt { a, b, .. }
         | Instruction::IntLe { a, b, .. }
         | Instruction::IntGt { a, b, .. }
         | Instruction::IntGe { a, b, .. }
         | Instruction::IntEq { a, b, .. }
         | Instruction::IntNe { a, b, .. }
+        | Instruction::ByteAnd { a, b, .. }
+        | Instruction::ByteOr { a, b, .. }
+        | Instruction::ByteXor { a, b, .. }
+        | Instruction::ByteShl { a, b, .. }
+        | Instruction::ByteShr { a, b, .. }
+        | Instruction::ByteUShr { a, b, .. }
         | Instruction::BoolEq { a, b, .. }
         | Instruction::BoolNe { a, b, .. } => {
             *a = f(*a);
             *b = f(*b);
         }
-        Instruction::BoolNot { v, .. } => *v = f(*v),
+        Instruction::BoolNot { v, .. }
+        | Instruction::IntNot { v, .. }
+        | Instruction::ByteNot { v, .. } => *v = f(*v),
 
         Instruction::Call { args, .. } => {
             for r in args {
@@ -1200,6 +1270,55 @@ fn fold_const(instr: &Instruction, env: &BTreeMap<Reg, ScalarConst>) -> Option<I
                 value: ConstValue::Int(v),
             })
         }
+        Instruction::IntAnd { dst, a, b } => Some(Instruction::Const {
+            dst: *dst,
+            value: ConstValue::Int(read_int(env, *a)? & read_int(env, *b)?),
+        }),
+        Instruction::IntOr { dst, a, b } => Some(Instruction::Const {
+            dst: *dst,
+            value: ConstValue::Int(read_int(env, *a)? | read_int(env, *b)?),
+        }),
+        Instruction::IntXor { dst, a, b } => Some(Instruction::Const {
+            dst: *dst,
+            value: ConstValue::Int(read_int(env, *a)? ^ read_int(env, *b)?),
+        }),
+        Instruction::IntNot { dst, v } => Some(Instruction::Const {
+            dst: *dst,
+            value: ConstValue::Int(!read_int(env, *v)?),
+        }),
+        Instruction::IntShl { dst, a, b } => {
+            let (a, b) = (read_int(env, *a)?, read_int(env, *b)?);
+            let sh: u32 = b.try_into().ok()?;
+            if sh >= 64 {
+                return None;
+            }
+            Some(Instruction::Const {
+                dst: *dst,
+                value: ConstValue::Int(a.wrapping_shl(sh)),
+            })
+        }
+        Instruction::IntShr { dst, a, b } => {
+            let (a, b) = (read_int(env, *a)?, read_int(env, *b)?);
+            let sh: u32 = b.try_into().ok()?;
+            if sh >= 64 {
+                return None;
+            }
+            Some(Instruction::Const {
+                dst: *dst,
+                value: ConstValue::Int(a >> sh),
+            })
+        }
+        Instruction::IntUShr { dst, a, b } => {
+            let (a, b) = (read_int(env, *a)?, read_int(env, *b)?);
+            let sh: u32 = b.try_into().ok()?;
+            if sh >= 64 {
+                return None;
+            }
+            Some(Instruction::Const {
+                dst: *dst,
+                value: ConstValue::Int(((a as u64) >> sh) as i64),
+            })
+        }
 
         Instruction::IntLt { dst, a, b } => Some(Instruction::Const {
             dst: *dst,
@@ -1291,12 +1410,26 @@ fn update_const_env(env: &mut BTreeMap<Reg, ScalarConst>, instr: &Instruction) {
         | Instruction::IntMul { dst, .. }
         | Instruction::IntDiv { dst, .. }
         | Instruction::IntMod { dst, .. }
+        | Instruction::IntAnd { dst, .. }
+        | Instruction::IntOr { dst, .. }
+        | Instruction::IntXor { dst, .. }
+        | Instruction::IntShl { dst, .. }
+        | Instruction::IntShr { dst, .. }
+        | Instruction::IntUShr { dst, .. }
+        | Instruction::IntNot { dst, .. }
         | Instruction::IntLt { dst, .. }
         | Instruction::IntLe { dst, .. }
         | Instruction::IntGt { dst, .. }
         | Instruction::IntGe { dst, .. }
         | Instruction::IntEq { dst, .. }
         | Instruction::IntNe { dst, .. }
+        | Instruction::ByteAnd { dst, .. }
+        | Instruction::ByteOr { dst, .. }
+        | Instruction::ByteXor { dst, .. }
+        | Instruction::ByteShl { dst, .. }
+        | Instruction::ByteShr { dst, .. }
+        | Instruction::ByteUShr { dst, .. }
+        | Instruction::ByteNot { dst, .. }
         | Instruction::BoolNot { dst, .. }
         | Instruction::BoolEq { dst, .. }
         | Instruction::BoolNe { dst, .. }

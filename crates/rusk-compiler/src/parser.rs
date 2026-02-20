@@ -65,6 +65,44 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    fn peek_token(&self) -> Result<Token, ParseError> {
+        let mut lexer = self.lexer.clone();
+        Ok(lexer.next_token()?)
+    }
+
+    fn peek2_tokens(&self) -> Result<(Token, Token), ParseError> {
+        let mut lexer = self.lexer.clone();
+        let first = lexer.next_token()?;
+        let second = lexer.next_token()?;
+        Ok((first, second))
+    }
+
+    fn adjacent(&self, a: &Token, b: &Token) -> bool {
+        a.span.end == b.span.start
+    }
+
+    fn pipe_starts_lambda(&self) -> Result<bool, ParseError> {
+        // Disambiguate trailing closure sugar from bitwise `|`.
+        //
+        // Trailing closure syntax requires a lambda expression:
+        //   `| ... | { ... }`
+        // or `|| { ... }`.
+        //
+        // If we don't see a closing `|` followed by `{`, treat this as an infix `|` operator.
+        let mut lexer = self.lexer.clone();
+        loop {
+            let tok = lexer.next_token()?;
+            match tok.kind {
+                TokenKind::Pipe => {
+                    let after = lexer.next_token()?;
+                    return Ok(matches!(after.kind, TokenKind::LBrace));
+                }
+                TokenKind::LBrace | TokenKind::Semi | TokenKind::Eof => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         let vis = self.parse_visibility()?;
         match self.lookahead.kind {
@@ -1230,17 +1268,20 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 TokenKind::Pipe => {
-                    if !Self::is_trailing_closure_callee(&lhs) {
-                        break;
+                    if Self::is_trailing_closure_callee(&lhs) && self.pipe_starts_lambda()? {
+                        // Trailing closure syntax sugar:
+                        // - `foo(a, b) |x| { ... }`  ==>  `foo(a, b, |x| { ... })`
+                        // - `foo |x| { ... }`       ==>  `foo(|x| { ... })`
+                        let closure = self.parse_lambda()?;
+                        lhs = self.apply_trailing_closure_sugar(
+                            lhs,
+                            &mut pending_type_args,
+                            closure,
+                        )?;
+                        continue;
                     }
 
-                    // Trailing closure syntax sugar:
-                    // - `foo(a, b) |x| { ... }`  ==>  `foo(a, b, |x| { ... })`
-                    // - `foo |x| { ... }`       ==>  `foo(|x| { ... })`
-                    let closure = self.parse_lambda()?;
-                    lhs =
-                        self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
-                    continue;
+                    // Otherwise: bitwise `|` (or syntax error), handled by infix parsing below.
                 }
                 TokenKind::LBrace => {
                     if !Self::is_trailing_closure_callee(&lhs) {
@@ -1317,7 +1358,7 @@ impl<'a> Parser<'a> {
             // - `expr as Type`   (interface upcast; chainable)
             // - `expr as? Type`  (checked cast; returns `Option<T>`)
             if matches!(self.lookahead.kind, TokenKind::KwAs) {
-                let l_bp = 15;
+                let l_bp = 21;
                 if l_bp < min_bp {
                     break;
                 }
@@ -1348,7 +1389,7 @@ impl<'a> Parser<'a> {
 
             // Infix type test: `expr is Type`
             if matches!(self.lookahead.kind, TokenKind::KwIs) {
-                let l_bp = 9;
+                let l_bp = 7;
                 if l_bp < min_bp {
                     break;
                 }
@@ -1365,21 +1406,56 @@ impl<'a> Parser<'a> {
             }
 
             // Infix / assignment.
+            let mut extra_op_tokens: usize = 0;
             let (l_bp, r_bp, op) = match self.lookahead.kind {
                 TokenKind::Assign => (1, 0, Infix::Assign),
                 TokenKind::OrOr => (3, 4, Infix::Binary(BinaryOp::Or)),
                 TokenKind::AndAnd => (5, 6, Infix::Binary(BinaryOp::And)),
+
+                // Comparison operators (same precedence group).
                 TokenKind::EqEq => (7, 8, Infix::Binary(BinaryOp::Eq)),
                 TokenKind::NotEq => (7, 8, Infix::Binary(BinaryOp::Ne)),
-                TokenKind::Lt => (9, 10, Infix::Binary(BinaryOp::Lt)),
-                TokenKind::LtEq => (9, 10, Infix::Binary(BinaryOp::Le)),
-                TokenKind::Gt => (9, 10, Infix::Binary(BinaryOp::Gt)),
-                TokenKind::GtEq => (9, 10, Infix::Binary(BinaryOp::Ge)),
-                TokenKind::Plus => (11, 12, Infix::Binary(BinaryOp::Add)),
-                TokenKind::Minus => (11, 12, Infix::Binary(BinaryOp::Sub)),
-                TokenKind::Star => (13, 14, Infix::Binary(BinaryOp::Mul)),
-                TokenKind::Slash => (13, 14, Infix::Binary(BinaryOp::Div)),
-                TokenKind::Percent => (13, 14, Infix::Binary(BinaryOp::Mod)),
+                TokenKind::LtEq => (7, 8, Infix::Binary(BinaryOp::Le)),
+                TokenKind::GtEq => (7, 8, Infix::Binary(BinaryOp::Ge)),
+
+                // Shift operators (multi-token): `<<`, `>>`, `>>>`.
+                TokenKind::Lt => {
+                    let next = self.peek_token()?;
+                    if matches!(next.kind, TokenKind::Lt) && self.adjacent(&self.lookahead, &next)
+                    {
+                        extra_op_tokens = 1;
+                        (15, 16, Infix::Binary(BinaryOp::Shl))
+                    } else {
+                        (7, 8, Infix::Binary(BinaryOp::Lt))
+                    }
+                }
+                TokenKind::Gt => {
+                    let (next, next2) = self.peek2_tokens()?;
+                    if matches!(next.kind, TokenKind::Gt) && self.adjacent(&self.lookahead, &next)
+                    {
+                        if matches!(next2.kind, TokenKind::Gt) && self.adjacent(&next, &next2) {
+                            extra_op_tokens = 2;
+                            (15, 16, Infix::Binary(BinaryOp::UShr))
+                        } else {
+                            extra_op_tokens = 1;
+                            (15, 16, Infix::Binary(BinaryOp::Shr))
+                        }
+                    } else {
+                        (7, 8, Infix::Binary(BinaryOp::Gt))
+                    }
+                }
+
+                // Bitwise ops.
+                TokenKind::Pipe => (9, 10, Infix::Binary(BinaryOp::BitOr)),
+                TokenKind::Caret => (11, 12, Infix::Binary(BinaryOp::BitXor)),
+                TokenKind::Amp => (13, 14, Infix::Binary(BinaryOp::BitAnd)),
+
+                // Arithmetic.
+                TokenKind::Plus => (17, 18, Infix::Binary(BinaryOp::Add)),
+                TokenKind::Minus => (17, 18, Infix::Binary(BinaryOp::Sub)),
+                TokenKind::Star => (19, 20, Infix::Binary(BinaryOp::Mul)),
+                TokenKind::Slash => (19, 20, Infix::Binary(BinaryOp::Div)),
+                TokenKind::Percent => (19, 20, Infix::Binary(BinaryOp::Mod)),
                 _ => break,
             };
 
@@ -1388,6 +1464,9 @@ impl<'a> Parser<'a> {
             }
 
             let op_tok = self.bump()?;
+            for _ in 0..extra_op_tokens {
+                let _ = self.bump()?;
+            }
             let rhs = self.parse_expr_bp(r_bp)?;
             let span = Span::new(lhs.span().start, rhs.span().end);
             lhs = match op {
@@ -1572,14 +1651,17 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 TokenKind::Pipe => {
-                    if !Self::is_trailing_closure_callee(&lhs) {
-                        break;
+                    if Self::is_trailing_closure_callee(&lhs) && self.pipe_starts_lambda()? {
+                        let closure = self.parse_lambda()?;
+                        lhs = self.apply_trailing_closure_sugar(
+                            lhs,
+                            &mut pending_type_args,
+                            closure,
+                        )?;
+                        continue;
                     }
 
-                    let closure = self.parse_lambda()?;
-                    lhs =
-                        self.apply_trailing_closure_sugar(lhs, &mut pending_type_args, closure)?;
-                    continue;
+                    // Otherwise: bitwise `|` (or syntax error), handled by infix parsing below.
                 }
                 TokenKind::Dot => {
                     let start = lhs.span().start;
@@ -1632,7 +1714,7 @@ impl<'a> Parser<'a> {
             // - `expr as Type`   (interface upcast; chainable)
             // - `expr as? Type`  (checked cast; returns `Option<T>`)
             if matches!(self.lookahead.kind, TokenKind::KwAs) {
-                let l_bp = 15;
+                let l_bp = 21;
                 if l_bp < min_bp {
                     break;
                 }
@@ -1662,7 +1744,7 @@ impl<'a> Parser<'a> {
 
             // Infix type test: `expr is Type`
             if matches!(self.lookahead.kind, TokenKind::KwIs) {
-                let l_bp = 9;
+                let l_bp = 7;
                 if l_bp < min_bp {
                     break;
                 }
@@ -1679,21 +1761,52 @@ impl<'a> Parser<'a> {
             }
 
             // Infix / assignment.
+            let mut extra_op_tokens: usize = 0;
             let (l_bp, r_bp, op) = match self.lookahead.kind {
                 TokenKind::Assign => (1, 0, Infix::Assign),
                 TokenKind::OrOr => (3, 4, Infix::Binary(BinaryOp::Or)),
                 TokenKind::AndAnd => (5, 6, Infix::Binary(BinaryOp::And)),
+
                 TokenKind::EqEq => (7, 8, Infix::Binary(BinaryOp::Eq)),
                 TokenKind::NotEq => (7, 8, Infix::Binary(BinaryOp::Ne)),
-                TokenKind::Lt => (9, 10, Infix::Binary(BinaryOp::Lt)),
-                TokenKind::LtEq => (9, 10, Infix::Binary(BinaryOp::Le)),
-                TokenKind::Gt => (9, 10, Infix::Binary(BinaryOp::Gt)),
-                TokenKind::GtEq => (9, 10, Infix::Binary(BinaryOp::Ge)),
-                TokenKind::Plus => (11, 12, Infix::Binary(BinaryOp::Add)),
-                TokenKind::Minus => (11, 12, Infix::Binary(BinaryOp::Sub)),
-                TokenKind::Star => (13, 14, Infix::Binary(BinaryOp::Mul)),
-                TokenKind::Slash => (13, 14, Infix::Binary(BinaryOp::Div)),
-                TokenKind::Percent => (13, 14, Infix::Binary(BinaryOp::Mod)),
+                TokenKind::LtEq => (7, 8, Infix::Binary(BinaryOp::Le)),
+                TokenKind::GtEq => (7, 8, Infix::Binary(BinaryOp::Ge)),
+
+                TokenKind::Lt => {
+                    let next = self.peek_token()?;
+                    if matches!(next.kind, TokenKind::Lt) && self.adjacent(&self.lookahead, &next)
+                    {
+                        extra_op_tokens = 1;
+                        (15, 16, Infix::Binary(BinaryOp::Shl))
+                    } else {
+                        (7, 8, Infix::Binary(BinaryOp::Lt))
+                    }
+                }
+                TokenKind::Gt => {
+                    let (next, next2) = self.peek2_tokens()?;
+                    if matches!(next.kind, TokenKind::Gt) && self.adjacent(&self.lookahead, &next)
+                    {
+                        if matches!(next2.kind, TokenKind::Gt) && self.adjacent(&next, &next2) {
+                            extra_op_tokens = 2;
+                            (15, 16, Infix::Binary(BinaryOp::UShr))
+                        } else {
+                            extra_op_tokens = 1;
+                            (15, 16, Infix::Binary(BinaryOp::Shr))
+                        }
+                    } else {
+                        (7, 8, Infix::Binary(BinaryOp::Gt))
+                    }
+                }
+
+                TokenKind::Pipe => (9, 10, Infix::Binary(BinaryOp::BitOr)),
+                TokenKind::Caret => (11, 12, Infix::Binary(BinaryOp::BitXor)),
+                TokenKind::Amp => (13, 14, Infix::Binary(BinaryOp::BitAnd)),
+
+                TokenKind::Plus => (17, 18, Infix::Binary(BinaryOp::Add)),
+                TokenKind::Minus => (17, 18, Infix::Binary(BinaryOp::Sub)),
+                TokenKind::Star => (19, 20, Infix::Binary(BinaryOp::Mul)),
+                TokenKind::Slash => (19, 20, Infix::Binary(BinaryOp::Div)),
+                TokenKind::Percent => (19, 20, Infix::Binary(BinaryOp::Mod)),
                 _ => break,
             };
 
@@ -1702,6 +1815,9 @@ impl<'a> Parser<'a> {
             }
 
             let op_tok = self.bump()?;
+            for _ in 0..extra_op_tokens {
+                let _ = self.bump()?;
+            }
             let rhs = self.parse_expr_bp_no_struct_lit(r_bp)?;
             let span = Span::new(lhs.span().start, rhs.span().end);
             lhs = match op {
@@ -1726,7 +1842,7 @@ impl<'a> Parser<'a> {
         match self.lookahead.kind.clone() {
             TokenKind::Bang => {
                 let start = self.bump()?.span.start;
-                let expr = self.parse_expr_bp(15)?;
+                let expr = self.parse_expr_bp(21)?;
                 Ok(Expr::Unary {
                     op: UnaryOp::Not,
                     span: Span::new(start, expr.span().end),
@@ -1735,7 +1851,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Minus => {
                 let start = self.bump()?.span.start;
-                let expr = self.parse_expr_bp(15)?;
+                let expr = self.parse_expr_bp(21)?;
                 Ok(Expr::Unary {
                     op: UnaryOp::Neg,
                     span: Span::new(start, expr.span().end),
@@ -1750,7 +1866,7 @@ impl<'a> Parser<'a> {
         match self.lookahead.kind.clone() {
             TokenKind::Bang => {
                 let start = self.bump()?.span.start;
-                let expr = self.parse_expr_bp_no_struct_lit(15)?;
+                let expr = self.parse_expr_bp_no_struct_lit(21)?;
                 Ok(Expr::Unary {
                     op: UnaryOp::Not,
                     span: Span::new(start, expr.span().end),
@@ -1759,7 +1875,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Minus => {
                 let start = self.bump()?.span.start;
-                let expr = self.parse_expr_bp_no_struct_lit(15)?;
+                let expr = self.parse_expr_bp_no_struct_lit(21)?;
                 Ok(Expr::Unary {
                     op: UnaryOp::Neg,
                     span: Span::new(start, expr.span().end),

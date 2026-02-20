@@ -1,0 +1,7 @@
+// expect: runtime_error shift amount out of range
+
+fn main() -> int {
+    // Shifting by 64 is out of range for 64-bit `int` and should trap.
+    1 << 64
+}
+

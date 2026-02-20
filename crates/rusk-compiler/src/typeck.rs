@@ -1275,6 +1275,21 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
             params: vec![Ty::Int, Ty::Int],
             ret: Ty::Int,
         },
+        "core::intrinsics::int_and"
+        | "core::intrinsics::int_or"
+        | "core::intrinsics::int_xor"
+        | "core::intrinsics::int_shl"
+        | "core::intrinsics::int_shr"
+        | "core::intrinsics::int_ushr" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int, Ty::Int],
+            ret: Ty::Int,
+        },
+        "core::intrinsics::int_not" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Int],
+            ret: Ty::Int,
+        },
         "core::intrinsics::int_eq"
         | "core::intrinsics::int_ne"
         | "core::intrinsics::int_lt"
@@ -1339,6 +1354,25 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
             generic_count: 0,
             params: vec![Ty::Byte],
             ret: Ty::Int,
+        },
+        "core::intrinsics::byte_and"
+        | "core::intrinsics::byte_or"
+        | "core::intrinsics::byte_xor" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Byte, Ty::Byte],
+            ret: Ty::Byte,
+        },
+        "core::intrinsics::byte_not" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Byte],
+            ret: Ty::Byte,
+        },
+        "core::intrinsics::byte_shl"
+        | "core::intrinsics::byte_shr"
+        | "core::intrinsics::byte_ushr" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::Byte, Ty::Int],
+            ret: Ty::Byte,
         },
         "core::intrinsics::int_to_char" => ExpectedIntrinsicSig {
             generic_count: 0,
@@ -8810,9 +8844,20 @@ impl<'a> FnTypechecker<'a> {
         match op {
             UnaryOp::Not => {
                 let t_resolved = self.infer.resolve_ty(t.clone());
-                if matches!(strip_readonly(&t_resolved), Ty::Bool | Ty::Never) {
-                    let _ = self.unify_expected(Ty::Bool, t, span)?;
-                    return Ok(Ty::Bool);
+                match strip_readonly(&t_resolved) {
+                    Ty::Bool | Ty::Never => {
+                        let _ = self.unify_expected(Ty::Bool, t, span)?;
+                        return Ok(Ty::Bool);
+                    }
+                    Ty::Int => {
+                        let _ = self.unify_expected(Ty::Int, t, span)?;
+                        return Ok(Ty::Int);
+                    }
+                    Ty::Byte => {
+                        let _ = self.unify_expected(Ty::Byte, t, span)?;
+                        return Ok(Ty::Byte);
+                    }
+                    _ => {}
                 }
 
                 let recv_for_dispatch = strip_readonly(&t_resolved);
@@ -8936,6 +8981,95 @@ impl<'a> FnTypechecker<'a> {
                         Ok(base)
                     }
                 }
+            }
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                let lt = self.typecheck_expr(left, ExprUse::Value)?;
+                let rt = self.typecheck_expr(right, ExprUse::Value)?;
+                let lt = self.infer.resolve_ty(lt);
+                let rt = self.infer.resolve_ty(rt);
+                let lt_base = strip_readonly(&lt).clone();
+                let rt_base = strip_readonly(&rt).clone();
+                let base = self.join_types(lt_base, rt_base, span)?;
+                let base = self.infer.resolve_ty(base);
+
+                match base {
+                    Ty::Int | Ty::Byte => Ok(base),
+                    _ => {
+                        let iface = match op {
+                            BinaryOp::BitAnd => "core::ops::BitAnd",
+                            BinaryOp::BitOr => "core::ops::BitOr",
+                            BinaryOp::BitXor => "core::ops::BitXor",
+                            _ => unreachable!("covered by match arm"),
+                        };
+
+                        let Some(type_name) = nominal_type_name(&base) else {
+                            return Err(TypeError {
+                                message: format!(
+                                    "operator `{op:?}` requires a concrete nominal type receiver in this stage, got `{base}`"
+                                ),
+                                span,
+                            });
+                        };
+                        if self.env.interfaces.contains_key(type_name) {
+                            return Err(TypeError {
+                                message: format!(
+                                    "operator `{op:?}` is not supported on interface-typed receivers in this stage (method is Self-only)"
+                                ),
+                                span,
+                            });
+                        }
+
+                        self.ensure_implements_interface_type(
+                            &base,
+                            &Ty::App(TyCon::Named(iface.to_string()), vec![]),
+                            span,
+                        )?;
+                        Ok(base)
+                    }
+                }
+            }
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => {
+                let lt = self.typecheck_expr(left, ExprUse::Value)?;
+                let rt = self.typecheck_expr(right, ExprUse::Value)?;
+                let _ = self.unify_expected(Ty::Int, rt, right.span())?;
+
+                let lt = self.infer.resolve_ty(lt);
+                let base = strip_readonly(&lt).clone();
+
+                if matches!(base, Ty::Int | Ty::Byte) {
+                    return Ok(base);
+                }
+
+                let iface = match op {
+                    BinaryOp::Shl => "core::ops::Shl",
+                    BinaryOp::Shr => "core::ops::Shr",
+                    BinaryOp::UShr => "core::ops::UShr",
+                    _ => unreachable!("covered by match arm"),
+                };
+
+                let Ty::App(TyCon::Named(type_name), _) = &base else {
+                    return Err(TypeError {
+                        message: format!(
+                            "operator `{op:?}` requires a concrete nominal type receiver in this stage, got `{base}`"
+                        ),
+                        span,
+                    });
+                };
+                if self.env.interfaces.contains_key(type_name) {
+                    return Err(TypeError {
+                        message: format!(
+                            "operator `{op:?}` is not supported on interface-typed receivers in this stage (method is Self-only)"
+                        ),
+                        span,
+                    });
+                }
+
+                self.ensure_implements_interface_type(
+                    &base,
+                    &Ty::App(TyCon::Named(iface.to_string()), vec![]),
+                    span,
+                )?;
+                Ok(base)
             }
             BinaryOp::Eq
             | BinaryOp::Ne

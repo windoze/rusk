@@ -1,0 +1,30 @@
+// expect: ok int 937
+
+fn main() -> int {
+    // Basic bit operations.
+    let a = 42 & 15; // 10
+    let b = 42 | 15; // 47
+    let c = 42 ^ 15; // 37
+    let d = !0; // -1 (bitwise not)
+
+    // Shifts + precedence:
+    // - `+` binds tighter than `<<`, so this is `1 << (2 + 1)` == 8.
+    let e = 1 << 2 + 1;
+    // - `+` binds tighter than `<<`, so this is `(1 + 2) << 3` == 24.
+    let f = 1 + 2 << 3;
+
+    // Right shifts:
+    // - arithmetic shift keeps the sign bit
+    let g = -1 >> 1; // -1
+    // - logical shift fills with zero
+    let h = -1 >>> 1; // i64::MAX
+    let hm = h % 1000; // keep the expected value small
+
+    // `|` must still parse lambdas, and `|` in the body is bitwise-or.
+    let or1 = |x: int| { x | 1 };
+    let p = or1(2); // 3
+    let q = 1 | 2; // 3
+
+    a + b + c + d + e + f + g + hm + p + q
+}
+

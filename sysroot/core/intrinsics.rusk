@@ -22,6 +22,15 @@ pub intrinsic fn int_mul(a: int, b: int) -> int;
 pub intrinsic fn int_div(a: int, b: int) -> int;
 pub intrinsic fn int_mod(a: int, b: int) -> int;
 
+// Integer bit operations.
+pub intrinsic fn int_and(a: int, b: int) -> int;
+pub intrinsic fn int_or(a: int, b: int) -> int;
+pub intrinsic fn int_xor(a: int, b: int) -> int;
+pub intrinsic fn int_not(v: int) -> int;
+pub intrinsic fn int_shl(a: int, b: int) -> int;
+pub intrinsic fn int_shr(a: int, b: int) -> int;
+pub intrinsic fn int_ushr(a: int, b: int) -> int;
+
 pub intrinsic fn int_eq(a: int, b: int) -> bool;
 pub intrinsic fn int_ne(a: int, b: int) -> bool;
 pub intrinsic fn int_lt(a: int, b: int) -> bool;
@@ -33,6 +42,15 @@ pub intrinsic fn int_ge(a: int, b: int) -> bool;
 pub intrinsic fn int_to_byte(v: int) -> byte;
 pub intrinsic fn int_try_byte(v: int) -> Option<byte>;
 pub intrinsic fn byte_to_int(v: byte) -> int;
+
+// `byte` bit operations.
+pub intrinsic fn byte_and(a: byte, b: byte) -> byte;
+pub intrinsic fn byte_or(a: byte, b: byte) -> byte;
+pub intrinsic fn byte_xor(a: byte, b: byte) -> byte;
+pub intrinsic fn byte_not(v: byte) -> byte;
+pub intrinsic fn byte_shl(a: byte, b: int) -> byte;
+pub intrinsic fn byte_shr(a: byte, b: int) -> byte;
+pub intrinsic fn byte_ushr(a: byte, b: int) -> byte;
 
 pub intrinsic fn int_to_char(v: int) -> char;
 pub intrinsic fn int_try_char(v: int) -> Option<char>;

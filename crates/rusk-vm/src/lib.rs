@@ -124,7 +124,14 @@ impl VmMetrics {
             | I::IntSub { .. }
             | I::IntMul { .. }
             | I::IntDiv { .. }
-            | I::IntMod { .. } => self.int_binop_instructions += 1,
+            | I::IntMod { .. }
+            | I::IntAnd { .. }
+            | I::IntOr { .. }
+            | I::IntXor { .. }
+            | I::IntShl { .. }
+            | I::IntShr { .. }
+            | I::IntUShr { .. }
+            | I::IntNot { .. } => self.int_binop_instructions += 1,
 
             I::IntLt { .. }
             | I::IntLe { .. }
@@ -2065,6 +2072,95 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
             }
 
+            rusk_bytecode::Instruction::IntAnd { dst, a, b } => {
+                let a = match read_int(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_and a: {msg}")),
+                };
+                let b = match read_int(frame, *b) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_and b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a & b)) {
+                    return trap(vm, format!("int_and dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IntOr { dst, a, b } => {
+                let a = match read_int(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_or a: {msg}")),
+                };
+                let b = match read_int(frame, *b) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_or b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a | b)) {
+                    return trap(vm, format!("int_or dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IntXor { dst, a, b } => {
+                let a = match read_int(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_xor a: {msg}")),
+                };
+                let b = match read_int(frame, *b) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_xor b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a ^ b)) {
+                    return trap(vm, format!("int_xor dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IntShl { dst, a, b } => {
+                let a = match read_int(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_shl a: {msg}")),
+                };
+                let sh = match read_shift_amount(frame, *b, 64) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_shl b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_shl(sh))) {
+                    return trap(vm, format!("int_shl dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IntShr { dst, a, b } => {
+                let a = match read_int(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_shr a: {msg}")),
+                };
+                let sh = match read_shift_amount(frame, *b, 64) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_shr b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(a.wrapping_shr(sh))) {
+                    return trap(vm, format!("int_shr dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IntUShr { dst, a, b } => {
+                let a = match read_int(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_ushr a: {msg}")),
+                };
+                let sh = match read_shift_amount(frame, *b, 64) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_ushr b: {msg}")),
+                };
+                let out = ((a as u64) >> sh) as i64;
+                if let Err(msg) = write_value(frame, *dst, Value::Int(out)) {
+                    return trap(vm, format!("int_ushr dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::IntNot { dst, v } => {
+                let v = match read_int(frame, *v) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("int_not v: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Int(!v)) {
+                    return trap(vm, format!("int_not dst: {msg}"));
+                }
+            }
+
             rusk_bytecode::Instruction::IntLt { dst, a, b } => {
                 let a = match read_int(frame, *a) {
                     Ok(v) => v,
@@ -2141,6 +2237,94 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 };
                 if let Err(msg) = write_value(frame, *dst, Value::Bool(a != b)) {
                     return trap(vm, format!("int_ne dst: {msg}"));
+                }
+            }
+
+            rusk_bytecode::Instruction::ByteAnd { dst, a, b } => {
+                let a = match read_byte(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_and a: {msg}")),
+                };
+                let b = match read_byte(frame, *b) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_and b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(a & b)) {
+                    return trap(vm, format!("byte_and dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::ByteOr { dst, a, b } => {
+                let a = match read_byte(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_or a: {msg}")),
+                };
+                let b = match read_byte(frame, *b) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_or b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(a | b)) {
+                    return trap(vm, format!("byte_or dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::ByteXor { dst, a, b } => {
+                let a = match read_byte(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_xor a: {msg}")),
+                };
+                let b = match read_byte(frame, *b) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_xor b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(a ^ b)) {
+                    return trap(vm, format!("byte_xor dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::ByteShl { dst, a, b } => {
+                let a = match read_byte(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_shl a: {msg}")),
+                };
+                let sh = match read_shift_amount(frame, *b, 8) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_shl b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(a.wrapping_shl(sh))) {
+                    return trap(vm, format!("byte_shl dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::ByteShr { dst, a, b } => {
+                let a = match read_byte(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_shr a: {msg}")),
+                };
+                let sh = match read_shift_amount(frame, *b, 8) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_shr b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(a.wrapping_shr(sh))) {
+                    return trap(vm, format!("byte_shr dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::ByteUShr { dst, a, b } => {
+                let a = match read_byte(frame, *a) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_ushr a: {msg}")),
+                };
+                let sh = match read_shift_amount(frame, *b, 8) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_ushr b: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(a.wrapping_shr(sh))) {
+                    return trap(vm, format!("byte_ushr dst: {msg}"));
+                }
+            }
+            rusk_bytecode::Instruction::ByteNot { dst, v } => {
+                let v = match read_byte(frame, *v) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, format!("byte_not v: {msg}")),
+                };
+                if let Err(msg) = write_value(frame, *dst, Value::Byte(!v)) {
+                    return trap(vm, format!("byte_not dst: {msg}"));
                 }
             }
 
@@ -4038,6 +4222,62 @@ fn eval_core_intrinsic(
             [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a % b)),
             _ => Err(bad_args("core::intrinsics::int_mod")),
         },
+        I::IntAnd => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a & b)),
+            _ => Err(bad_args("core::intrinsics::int_and")),
+        },
+        I::IntOr => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a | b)),
+            _ => Err(bad_args("core::intrinsics::int_or")),
+        },
+        I::IntXor => match args.as_slice() {
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a ^ b)),
+            _ => Err(bad_args("core::intrinsics::int_xor")),
+        },
+        I::IntNot => match args.as_slice() {
+            [Value::Int(v)] => Ok(Value::Int(!v)),
+            _ => Err(bad_args("core::intrinsics::int_not")),
+        },
+        I::IntShl => match args.as_slice() {
+            [Value::Int(a), Value::Int(sh)] => {
+                let Ok(sh) = u32::try_from(*sh) else {
+                    return Err("core::intrinsics::int_shl: shift amount out of range".to_string());
+                };
+                if sh >= 64 {
+                    return Err("core::intrinsics::int_shl: shift amount out of range".to_string());
+                }
+                Ok(Value::Int(a.wrapping_shl(sh)))
+            }
+            _ => Err(bad_args("core::intrinsics::int_shl")),
+        },
+        I::IntShr => match args.as_slice() {
+            [Value::Int(a), Value::Int(sh)] => {
+                let Ok(sh) = u32::try_from(*sh) else {
+                    return Err("core::intrinsics::int_shr: shift amount out of range".to_string());
+                };
+                if sh >= 64 {
+                    return Err("core::intrinsics::int_shr: shift amount out of range".to_string());
+                }
+                Ok(Value::Int(a.wrapping_shr(sh)))
+            }
+            _ => Err(bad_args("core::intrinsics::int_shr")),
+        },
+        I::IntUShr => match args.as_slice() {
+            [Value::Int(a), Value::Int(sh)] => {
+                let Ok(sh) = u32::try_from(*sh) else {
+                    return Err(
+                        "core::intrinsics::int_ushr: shift amount out of range".to_string(),
+                    );
+                };
+                if sh >= 64 {
+                    return Err(
+                        "core::intrinsics::int_ushr: shift amount out of range".to_string(),
+                    );
+                }
+                Ok(Value::Int(((*a as u64) >> sh) as i64))
+            }
+            _ => Err(bad_args("core::intrinsics::int_ushr")),
+        },
         I::IntEq => match args.as_slice() {
             [Value::Int(a), Value::Int(b)] => Ok(Value::Bool(a == b)),
             _ => Err(bad_args("core::intrinsics::int_eq")),
@@ -4177,6 +4417,70 @@ fn eval_core_intrinsic(
         I::ByteToInt => match args.as_slice() {
             [Value::Byte(v)] => Ok(Value::Int((*v).into())),
             _ => Err(bad_args("core::intrinsics::byte_to_int")),
+        },
+        I::ByteAnd => match args.as_slice() {
+            [Value::Byte(a), Value::Byte(b)] => Ok(Value::Byte(a & b)),
+            _ => Err(bad_args("core::intrinsics::byte_and")),
+        },
+        I::ByteOr => match args.as_slice() {
+            [Value::Byte(a), Value::Byte(b)] => Ok(Value::Byte(a | b)),
+            _ => Err(bad_args("core::intrinsics::byte_or")),
+        },
+        I::ByteXor => match args.as_slice() {
+            [Value::Byte(a), Value::Byte(b)] => Ok(Value::Byte(a ^ b)),
+            _ => Err(bad_args("core::intrinsics::byte_xor")),
+        },
+        I::ByteNot => match args.as_slice() {
+            [Value::Byte(v)] => Ok(Value::Byte(!v)),
+            _ => Err(bad_args("core::intrinsics::byte_not")),
+        },
+        I::ByteShl => match args.as_slice() {
+            [Value::Byte(a), Value::Int(sh)] => {
+                let Ok(sh) = u32::try_from(*sh) else {
+                    return Err(
+                        "core::intrinsics::byte_shl: shift amount out of range".to_string(),
+                    );
+                };
+                if sh >= 8 {
+                    return Err(
+                        "core::intrinsics::byte_shl: shift amount out of range".to_string(),
+                    );
+                }
+                Ok(Value::Byte(a.wrapping_shl(sh)))
+            }
+            _ => Err(bad_args("core::intrinsics::byte_shl")),
+        },
+        I::ByteShr => match args.as_slice() {
+            [Value::Byte(a), Value::Int(sh)] => {
+                let Ok(sh) = u32::try_from(*sh) else {
+                    return Err(
+                        "core::intrinsics::byte_shr: shift amount out of range".to_string(),
+                    );
+                };
+                if sh >= 8 {
+                    return Err(
+                        "core::intrinsics::byte_shr: shift amount out of range".to_string(),
+                    );
+                }
+                Ok(Value::Byte(a.wrapping_shr(sh)))
+            }
+            _ => Err(bad_args("core::intrinsics::byte_shr")),
+        },
+        I::ByteUShr => match args.as_slice() {
+            [Value::Byte(a), Value::Int(sh)] => {
+                let Ok(sh) = u32::try_from(*sh) else {
+                    return Err(
+                        "core::intrinsics::byte_ushr: shift amount out of range".to_string(),
+                    );
+                };
+                if sh >= 8 {
+                    return Err(
+                        "core::intrinsics::byte_ushr: shift amount out of range".to_string(),
+                    );
+                }
+                Ok(Value::Byte(a.wrapping_shr(sh)))
+            }
+            _ => Err(bad_args("core::intrinsics::byte_ushr")),
         },
 
         I::IntToChar => match args.as_slice() {
@@ -5421,6 +5725,28 @@ fn read_int(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<i64, String> {
         Value::Int(n) => Ok(*n),
         other => Err(format!("expected int, got {other:?}")),
     }
+}
+
+fn read_byte(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<u8, String> {
+    let idx: usize = reg.try_into().unwrap_or(usize::MAX);
+    let Some(v) = frame.regs.get(idx).and_then(|v| v.as_ref()) else {
+        return Err(format!("read from uninitialized reg {reg}"));
+    };
+    match v {
+        Value::Byte(n) => Ok(*n),
+        other => Err(format!("expected byte, got {other:?}")),
+    }
+}
+
+fn read_shift_amount(frame: &Frame, reg: rusk_bytecode::Reg, width: u32) -> Result<u32, String> {
+    let shift = read_int(frame, reg)?;
+    let Ok(shift) = u32::try_from(shift) else {
+        return Err(format!("shift amount out of range: {shift}"));
+    };
+    if shift >= width {
+        return Err(format!("shift amount out of range: {shift}"));
+    }
+    Ok(shift)
 }
 
 fn read_bool(frame: &Frame, reg: rusk_bytecode::Reg) -> Result<bool, String> {

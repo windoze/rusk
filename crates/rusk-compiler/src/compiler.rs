@@ -1145,39 +1145,81 @@ fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
     // Note: the language currently does not support source-authored impls for primitive types,
     // so these checks focus on the interface shapes used by the compiler.
     {
-        type OpsLangItemCheck = (&'static str, &'static str, bool, usize, fn(&Ty) -> bool);
+        #[derive(Clone, Copy, Debug)]
+        enum OpsParamKind {
+            SelfType,
+            Int,
+        }
+
+        type OpsLangItemCheck = (
+            &'static str,
+            &'static str,
+            bool,
+            Option<OpsParamKind>,
+            fn(&Ty) -> bool,
+        );
 
         let checks: &[OpsLangItemCheck] = &[
-            ("core::ops::Add", "add", true, 1, |t| {
+            ("core::ops::Add", "add", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Sub", "sub", true, 1, |t| {
+            ("core::ops::Sub", "sub", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Mul", "mul", true, 1, |t| {
+            ("core::ops::Mul", "mul", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Div", "div", true, 1, |t| {
+            ("core::ops::Div", "div", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Rem", "rem", true, 1, |t| {
+            ("core::ops::Rem", "rem", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Neg", "neg", true, 0, |t| {
+            ("core::ops::BitAnd", "bitand", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Not", "not", true, 0, |t| {
+            ("core::ops::BitOr", "bitor", true, Some(OpsParamKind::SelfType), |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Lt", "lt", true, 1, |t| matches!(t, Ty::Bool)),
-            ("core::ops::Le", "le", true, 1, |t| matches!(t, Ty::Bool)),
-            ("core::ops::Gt", "gt", true, 1, |t| matches!(t, Ty::Bool)),
-            ("core::ops::Ge", "ge", true, 1, |t| matches!(t, Ty::Bool)),
-            ("core::ops::Eq", "eq", true, 1, |t| matches!(t, Ty::Bool)),
-            ("core::ops::Ne", "ne", true, 1, |t| matches!(t, Ty::Bool)),
+            ("core::ops::BitXor", "bitxor", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Shl", "shl", true, Some(OpsParamKind::Int), |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Shr", "shr", true, Some(OpsParamKind::Int), |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::UShr", "ushr", true, Some(OpsParamKind::Int), |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Neg", "neg", true, None, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Not", "not", true, None, |t| {
+                matches!(t, Ty::SelfType)
+            }),
+            ("core::ops::Lt", "lt", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::Bool)
+            }),
+            ("core::ops::Le", "le", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::Bool)
+            }),
+            ("core::ops::Gt", "gt", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::Bool)
+            }),
+            ("core::ops::Ge", "ge", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::Bool)
+            }),
+            ("core::ops::Eq", "eq", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::Bool)
+            }),
+            ("core::ops::Ne", "ne", true, Some(OpsParamKind::SelfType), |t| {
+                matches!(t, Ty::Bool)
+            }),
         ];
 
-        for (iface_name, method_name, receiver_readonly, param_count, ret_ok) in checks {
+        for (iface_name, method_name, receiver_readonly, param_kind, ret_ok) in checks {
             let iface_def = require_iface(env, iface_name)?;
             ensure(
                 iface_def.generics.is_empty(),
@@ -1204,16 +1246,26 @@ fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
                 iface_def.span,
             )?;
             ensure(
-                method.sig.params.len() == *param_count,
-                format!("`{iface_name}::{method_name}` must take {param_count} parameter(s)"),
+                method.sig.params.len() == if param_kind.is_some() { 1 } else { 0 },
+                format!(
+                    "`{iface_name}::{method_name}` must take {} parameter(s)",
+                    if param_kind.is_some() { 1 } else { 0 }
+                ),
                 iface_def.span,
             )?;
-            if *param_count == 1 {
-                ensure(
-                    matches!(method.sig.params.first(), Some(Ty::SelfType)),
-                    format!("`{iface_name}::{method_name}` parameter must be `Self`"),
-                    iface_def.span,
-                )?;
+            if let Some(kind) = param_kind {
+                match kind {
+                    OpsParamKind::SelfType => ensure(
+                        matches!(method.sig.params.first(), Some(Ty::SelfType)),
+                        format!("`{iface_name}::{method_name}` parameter must be `Self`"),
+                        iface_def.span,
+                    )?,
+                    OpsParamKind::Int => ensure(
+                        matches!(method.sig.params.first(), Some(Ty::Int)),
+                        format!("`{iface_name}::{method_name}` parameter must be `int`"),
+                        iface_def.span,
+                    )?,
+                }
             }
             ensure(
                 ret_ok(&method.sig.ret),
@@ -1293,6 +1345,15 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         | "core::intrinsics::int_mod" => {
             Some(sig(vec![HostType::Int, HostType::Int], HostType::Int))
         }
+        "core::intrinsics::int_and"
+        | "core::intrinsics::int_or"
+        | "core::intrinsics::int_xor"
+        | "core::intrinsics::int_shl"
+        | "core::intrinsics::int_shr"
+        | "core::intrinsics::int_ushr" => {
+            Some(sig(vec![HostType::Int, HostType::Int], HostType::Int))
+        }
+        "core::intrinsics::int_not" => Some(sig(vec![HostType::Int], HostType::Int)),
         "core::intrinsics::int_eq"
         | "core::intrinsics::int_ne"
         | "core::intrinsics::int_lt"
@@ -1332,6 +1393,15 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         "core::intrinsics::int_to_byte" => Some(sig(vec![HostType::Int], HostType::Any)),
         "core::intrinsics::int_try_byte" => Some(sig(vec![HostType::Int], HostType::Any)),
         "core::intrinsics::byte_to_int" => Some(sig(vec![HostType::Any], HostType::Int)),
+
+        // `byte` bit operations.
+        "core::intrinsics::byte_and"
+        | "core::intrinsics::byte_or"
+        | "core::intrinsics::byte_xor" => Some(sig(vec![HostType::Any, HostType::Any], HostType::Any)),
+        "core::intrinsics::byte_not" => Some(sig(vec![HostType::Any], HostType::Any)),
+        "core::intrinsics::byte_shl"
+        | "core::intrinsics::byte_shr"
+        | "core::intrinsics::byte_ushr" => Some(sig(vec![HostType::Any, HostType::Int], HostType::Any)),
 
         "core::intrinsics::int_to_char" => Some(sig(vec![HostType::Int], HostType::Any)),
         "core::intrinsics::int_try_char" => Some(sig(vec![HostType::Int], HostType::Any)),
@@ -1674,6 +1744,44 @@ impl Compiler {
                     self,
                     &format!("impl::core::ops::{iface}::for::{prim}::{method}"),
                     ro2,
+                    &format!("core::intrinsics::{prefix}_{suffix}"),
+                )?;
+            }
+        }
+
+        // Bitwise ops + shifts: int/byte.
+        for (prim, prefix) in [("int", "int"), ("byte", "byte")] {
+            let ro1 = &[Mutability::Readonly];
+            let ro2 = &[Mutability::Readonly, Mutability::Readonly];
+
+            // `!x` / `Not::not`
+            let _ = synthesize_ops_wrapper(
+                self,
+                &format!("impl::core::ops::Not::for::{prim}::not"),
+                ro1,
+                &format!("core::intrinsics::{prefix}_not"),
+            )?;
+
+            // `a & b`, `a | b`, `a ^ b`
+            for (iface, method, suffix) in [
+                ("BitAnd", "bitand", "and"),
+                ("BitOr", "bitor", "or"),
+                ("BitXor", "bitxor", "xor"),
+            ] {
+                let _ = synthesize_ops_wrapper(
+                    self,
+                    &format!("impl::core::ops::{iface}::for::{prim}::{method}"),
+                    ro2,
+                    &format!("core::intrinsics::{prefix}_{suffix}"),
+                )?;
+            }
+
+            // Shifts (`<<`, `>>`, `>>>`) take an `int` shift amount.
+            for (iface, method, suffix) in [("Shl", "shl", "shl"), ("Shr", "shr", "shr"), ("UShr", "ushr", "ushr")] {
+                let _ = synthesize_ops_wrapper(
+                    self,
+                    &format!("impl::core::ops::{iface}::for::{prim}::{method}"),
+                    &[Mutability::Readonly, Mutability::Readonly],
                     &format!("core::intrinsics::{prefix}_{suffix}"),
                 )?;
             }
@@ -2809,6 +2917,40 @@ impl Compiler {
                     a: remap_operand(map, &a),
                     b: remap_operand(map, &b),
                 },
+                Instruction::IntAnd { dst, a, b } => Instruction::IntAnd {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntOr { dst, a, b } => Instruction::IntOr {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntXor { dst, a, b } => Instruction::IntXor {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntShl { dst, a, b } => Instruction::IntShl {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntShr { dst, a, b } => Instruction::IntShr {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntUShr { dst, a, b } => Instruction::IntUShr {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::IntNot { dst, v } => Instruction::IntNot {
+                    dst: remap_local(map, dst),
+                    v: remap_operand(map, &v),
+                },
                 Instruction::IntLt { dst, a, b } => Instruction::IntLt {
                     dst: remap_local(map, dst),
                     a: remap_operand(map, &a),
@@ -2838,6 +2980,40 @@ impl Compiler {
                     dst: remap_local(map, dst),
                     a: remap_operand(map, &a),
                     b: remap_operand(map, &b),
+                },
+                Instruction::ByteAnd { dst, a, b } => Instruction::ByteAnd {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::ByteOr { dst, a, b } => Instruction::ByteOr {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::ByteXor { dst, a, b } => Instruction::ByteXor {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::ByteShl { dst, a, b } => Instruction::ByteShl {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::ByteShr { dst, a, b } => Instruction::ByteShr {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::ByteUShr { dst, a, b } => Instruction::ByteUShr {
+                    dst: remap_local(map, dst),
+                    a: remap_operand(map, &a),
+                    b: remap_operand(map, &b),
+                },
+                Instruction::ByteNot { dst, v } => Instruction::ByteNot {
+                    dst: remap_local(map, dst),
+                    v: remap_operand(map, &v),
                 },
                 Instruction::BoolNot { dst, v } => Instruction::BoolNot {
                     dst: remap_local(map, dst),
@@ -3350,18 +3526,32 @@ impl Compiler {
                 | Instruction::IntMul { a, b, .. }
                 | Instruction::IntDiv { a, b, .. }
                 | Instruction::IntMod { a, b, .. }
+                | Instruction::IntAnd { a, b, .. }
+                | Instruction::IntOr { a, b, .. }
+                | Instruction::IntXor { a, b, .. }
+                | Instruction::IntShl { a, b, .. }
+                | Instruction::IntShr { a, b, .. }
+                | Instruction::IntUShr { a, b, .. }
                 | Instruction::IntLt { a, b, .. }
                 | Instruction::IntLe { a, b, .. }
                 | Instruction::IntGt { a, b, .. }
                 | Instruction::IntGe { a, b, .. }
                 | Instruction::IntEq { a, b, .. }
                 | Instruction::IntNe { a, b, .. }
+                | Instruction::ByteAnd { a, b, .. }
+                | Instruction::ByteOr { a, b, .. }
+                | Instruction::ByteXor { a, b, .. }
+                | Instruction::ByteShl { a, b, .. }
+                | Instruction::ByteShr { a, b, .. }
+                | Instruction::ByteUShr { a, b, .. }
                 | Instruction::BoolEq { a, b, .. }
                 | Instruction::BoolNe { a, b, .. } => {
                     resolve_operand(function_ids, a)?;
                     resolve_operand(function_ids, b)
                 }
-                Instruction::BoolNot { v, .. } => resolve_operand(function_ids, v),
+                Instruction::BoolNot { v, .. }
+                | Instruction::IntNot { v, .. }
+                | Instruction::ByteNot { v, .. } => resolve_operand(function_ids, v),
                 Instruction::Call { args, .. } => {
                     for op in args {
                         resolve_operand(function_ids, op)?;
@@ -6658,14 +6848,35 @@ impl<'a> FunctionLowerer<'a> {
                     })?
                     .clone();
 
-                if matches!(self.strip_readonly_ty(&ty), Ty::Bool) {
-                    let v = self.lower_expr(expr)?;
-                    let dst = self.alloc_local();
-                    self.emit(Instruction::BoolNot {
-                        dst,
-                        v: Operand::Local(v),
-                    });
-                    return Ok(dst);
+                match self.strip_readonly_ty(&ty) {
+                    Ty::Bool => {
+                        let v = self.lower_expr(expr)?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::BoolNot {
+                            dst,
+                            v: Operand::Local(v),
+                        });
+                        return Ok(dst);
+                    }
+                    Ty::Int => {
+                        let v = self.lower_expr(expr)?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntNot {
+                            dst,
+                            v: Operand::Local(v),
+                        });
+                        return Ok(dst);
+                    }
+                    Ty::Byte => {
+                        let v = self.lower_expr(expr)?;
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteNot {
+                            dst,
+                            v: Operand::Local(v),
+                        });
+                        return Ok(dst);
+                    }
+                    _ => {}
                 }
 
                 let args = vec![expr.clone()];
@@ -6861,6 +7072,60 @@ impl<'a> FunctionLowerer<'a> {
                         });
                         Ok(dst)
                     }
+                    (BinaryOp::BitAnd, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntAnd {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::BitOr, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntOr {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::BitXor, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntXor {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Shl, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntShl {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Shr, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntShr {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::UShr, Ty::Int) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::IntUShr {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
                     (BinaryOp::Eq, Ty::Int) => {
                         let dst = self.alloc_local();
                         self.emit(Instruction::IntEq {
@@ -6933,6 +7198,60 @@ impl<'a> FunctionLowerer<'a> {
                         });
                         Ok(dst)
                     }
+                    (BinaryOp::BitAnd, Ty::Byte) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteAnd {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::BitOr, Ty::Byte) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteOr {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::BitXor, Ty::Byte) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteXor {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Shl, Ty::Byte) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteShl {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::Shr, Ty::Byte) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteShr {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
+                    (BinaryOp::UShr, Ty::Byte) => {
+                        let dst = self.alloc_local();
+                        self.emit(Instruction::ByteUShr {
+                            dst,
+                            a: Operand::Local(l),
+                            b: Operand::Local(r),
+                        });
+                        Ok(dst)
+                    }
                     (BinaryOp::Eq, Ty::Byte) | (BinaryOp::Ne, Ty::Byte) => {
                         let l_int = self.lower_named_call(
                             "core::intrinsics::byte_to_int",
@@ -6997,6 +7316,12 @@ impl<'a> FunctionLowerer<'a> {
                             BinaryOp::Mul => ("core::ops::Mul", "mul"),
                             BinaryOp::Div => ("core::ops::Div", "div"),
                             BinaryOp::Mod => ("core::ops::Rem", "rem"),
+                            BinaryOp::BitAnd => ("core::ops::BitAnd", "bitand"),
+                            BinaryOp::BitOr => ("core::ops::BitOr", "bitor"),
+                            BinaryOp::BitXor => ("core::ops::BitXor", "bitxor"),
+                            BinaryOp::Shl => ("core::ops::Shl", "shl"),
+                            BinaryOp::Shr => ("core::ops::Shr", "shr"),
+                            BinaryOp::UShr => ("core::ops::UShr", "ushr"),
                             BinaryOp::Eq => ("core::ops::Eq", "eq"),
                             BinaryOp::Ne => ("core::ops::Ne", "ne"),
                             BinaryOp::Lt => ("core::ops::Lt", "lt"),

@@ -32,16 +32,23 @@ fn buckets_for_elems(elem_capacity: int) -> int {
     (elem_capacity * 10) / 7 + 1
 }
 
-fn index_for(hash: int, cap: int) -> int {
-    // Rusk's `%` follows integer remainder rules; for negative hashes, make the index positive.
-    let m = hash % cap;
-    if m < 0 { m + cap } else { m }
+fn next_pow2(n: int) -> int {
+    // Smallest power-of-two >= n (for n >= 1).
+    //
+    // This uses the classic bit-smearing trick with logical right shifts.
+    if n <= 1 { return 1; };
+
+    let v = n - 1;
+    v = v | (v >>> 1);
+    v = v | (v >>> 2);
+    v = v | (v >>> 4);
+    v = v | (v >>> 8);
+    v = v | (v >>> 16);
+    v = v | (v >>> 32);
+    v + 1
 }
 
-fn next_index(idx: int, cap: int) -> int {
-    let n = idx + 1;
-    if n == cap { 0 } else { n }
-}
+// Indexing helpers assume `cap` is a power-of-two.
 
 impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     pub static fn new() -> Map<K, V> {
@@ -53,7 +60,9 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
         if capacity < 0 { panic("Map::with_capacity: negative capacity"); };
 
         let bucket_count = buckets_for_elems(capacity);
-        let n = if bucket_count < 8 { 8 } else { bucket_count };
+        // Round to a power-of-two bucket count so we can use `& (cap - 1)` indexing.
+        let n0 = if bucket_count < 8 { 8 } else { bucket_count };
+        let n = next_pow2(n0);
         let buckets: [Slot<K, V>] = [];
         buckets.resize(n, Slot::Empty);
         Map {
@@ -88,9 +97,10 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         let cap = self.buckets.len();
         if cap == 0 { return Option::None; };
+        let mask = cap - 1;
 
         let hash = super::hash::Hash::hash(key);
-        let idx = index_for(hash, cap);
+        let idx = hash & mask;
 
         let steps = 0;
         let cur = idx;
@@ -108,7 +118,7 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
             steps = steps + 1;
             if steps >= cap { return Option::None; };
-            cur = next_index(cur, cap);
+            cur = (cur + 1) & mask;
         };
         Option::None
     }
@@ -133,9 +143,10 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         let cap = self.buckets.len();
         if cap == 0 { return Option::None; };
+        let mask = cap - 1;
 
         let hash = super::hash::Hash::hash(key);
-        let idx = index_for(hash, cap);
+        let idx = hash & mask;
 
         let steps = 0;
         let cur = idx;
@@ -159,13 +170,16 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
             steps = steps + 1;
             if steps >= cap { return Option::None; };
-            cur = next_index(cur, cap);
+            cur = (cur + 1) & mask;
         };
         Option::None
     }
 
     fn alloc_buckets(bucket_count: int) -> [Slot<K, V>] {
-        let n = if bucket_count < 8 { 8 } else { bucket_count };
+        // Use a power-of-two bucket count so we can compute indices with `& (cap - 1)`
+        // instead of `% cap`.
+        let n0 = if bucket_count < 8 { 8 } else { bucket_count };
+        let n = next_pow2(n0);
         let out: [Slot<K, V>] = [];
         out.resize(n, Slot::Empty);
         out
@@ -174,10 +188,13 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     fn ensure_capacity(additional: int) -> unit {
         let cap = self.buckets.len();
 
-        // Grow when (filled + tombstones + additional) crosses ~70% occupancy.
+        // Grow when (filled + tombstones + additional) crosses ~75% occupancy.
+        //
+        // Using a power-of-two table allows a cheap threshold computation via shifts.
         let occupied = self.len + self.tombstones + additional;
-        if occupied * 10 >= cap * 7 {
-            self.rehash(cap * 2);
+        let threshold = cap - (cap >>> 2); // cap * 3/4
+        if occupied >= threshold {
+            self.rehash(cap << 1);
             return ();
         };
 
@@ -215,7 +232,8 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     fn insert_rehashed(hash: int, key: K, value: V) -> unit {
         // Like `insert_hashed`, but assumes the key doesn't already exist (used during rehash).
         let cap = self.buckets.len();
-        let idx = index_for(hash, cap);
+        let mask = cap - 1;
+        let idx = hash & mask;
 
         let steps = 0;
         let cur = idx;
@@ -237,14 +255,15 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
             steps = steps + 1;
             if steps >= cap { panic("Map::rehash: table unexpectedly full"); };
-            cur = next_index(cur, cap);
+            cur = (cur + 1) & mask;
         };
         ()
     }
 
     fn insert_hashed(hash: int, key: K, value: V) -> Option<V> {
         let cap = self.buckets.len();
-        let idx = index_for(hash, cap);
+        let mask = cap - 1;
+        let idx = hash & mask;
 
         let steps = 0;
         let cur = idx;
@@ -279,7 +298,7 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
                 // This should be unreachable because `ensure_capacity(1)` keeps spare room.
                 panic("Map::insert: table full");
             };
-            cur = next_index(cur, cap);
+            cur = (cur + 1) & mask;
         };
         Option::None
     }

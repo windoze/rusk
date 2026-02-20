@@ -125,6 +125,13 @@ pub enum Intrinsic {
     IntMul,
     IntDiv,
     IntMod,
+    IntAnd,
+    IntOr,
+    IntXor,
+    IntNot,
+    IntShl,
+    IntShr,
+    IntUShr,
     IntEq,
     IntNe,
     IntLt,
@@ -172,6 +179,13 @@ pub enum Intrinsic {
     IntToByte,
     IntTryByte,
     ByteToInt,
+    ByteAnd,
+    ByteOr,
+    ByteXor,
+    ByteNot,
+    ByteShl,
+    ByteShr,
+    ByteUShr,
     IntToChar,
     IntTryChar,
     CharToInt,
@@ -415,6 +429,40 @@ pub enum Instruction {
         a: Reg,
         b: Reg,
     },
+    IntAnd {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntOr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntXor {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntShl {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntShr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntUShr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntNot {
+        dst: Reg,
+        v: Reg,
+    },
 
     IntLt {
         dst: Reg,
@@ -445,6 +493,44 @@ pub enum Instruction {
         dst: Reg,
         a: Reg,
         b: Reg,
+    },
+
+    ByteAnd {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    ByteOr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    ByteXor {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// Shift left. `b` is an `int` shift amount.
+    ByteShl {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// Shift right (logical for `byte`). `b` is an `int` shift amount.
+    ByteShr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// Shift right with zero fill. `b` is an `int` shift amount.
+    ByteUShr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    ByteNot {
+        dst: Reg,
+        v: Reg,
     },
 
     BoolNot {

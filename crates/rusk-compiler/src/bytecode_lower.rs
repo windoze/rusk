@@ -210,6 +210,13 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::int_mul" => Intrinsic::IntMul,
         "core::intrinsics::int_div" => Intrinsic::IntDiv,
         "core::intrinsics::int_mod" => Intrinsic::IntMod,
+        "core::intrinsics::int_and" => Intrinsic::IntAnd,
+        "core::intrinsics::int_or" => Intrinsic::IntOr,
+        "core::intrinsics::int_xor" => Intrinsic::IntXor,
+        "core::intrinsics::int_not" => Intrinsic::IntNot,
+        "core::intrinsics::int_shl" => Intrinsic::IntShl,
+        "core::intrinsics::int_shr" => Intrinsic::IntShr,
+        "core::intrinsics::int_ushr" => Intrinsic::IntUShr,
         "core::intrinsics::int_eq" => Intrinsic::IntEq,
         "core::intrinsics::int_ne" => Intrinsic::IntNe,
         "core::intrinsics::int_lt" => Intrinsic::IntLt,
@@ -253,6 +260,13 @@ fn core_intrinsic(name: &str) -> Option<Intrinsic> {
         "core::intrinsics::int_to_byte" => Intrinsic::IntToByte,
         "core::intrinsics::int_try_byte" => Intrinsic::IntTryByte,
         "core::intrinsics::byte_to_int" => Intrinsic::ByteToInt,
+        "core::intrinsics::byte_and" => Intrinsic::ByteAnd,
+        "core::intrinsics::byte_or" => Intrinsic::ByteOr,
+        "core::intrinsics::byte_xor" => Intrinsic::ByteXor,
+        "core::intrinsics::byte_not" => Intrinsic::ByteNot,
+        "core::intrinsics::byte_shl" => Intrinsic::ByteShl,
+        "core::intrinsics::byte_shr" => Intrinsic::ByteShr,
+        "core::intrinsics::byte_ushr" => Intrinsic::ByteUShr,
 
         "core::intrinsics::int_to_char" => Intrinsic::IntToChar,
         "core::intrinsics::int_try_char" => Intrinsic::IntTryChar,
@@ -839,6 +853,128 @@ fn lower_mir_instruction(
                 dst: local(*dst),
                 a,
                 b,
+            });
+        }
+        I::IntAnd { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::IntAnd {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::IntOr { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::IntOr {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::IntXor { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::IntXor {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::IntShl { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::IntShl {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::IntShr { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::IntShr {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::IntUShr { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::IntUShr {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::IntNot { dst, v } => {
+            let v = op_reg(out, v, code, temps)?;
+            code.push(Instruction::IntNot {
+                dst: local(*dst),
+                v,
+            });
+        }
+        I::ByteAnd { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::ByteAnd {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::ByteOr { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::ByteOr {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::ByteXor { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::ByteXor {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::ByteShl { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::ByteShl {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::ByteShr { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::ByteShr {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::ByteUShr { dst, a, b } => {
+            let a = op_reg(out, a, code, temps)?;
+            let b = op_reg(out, b, code, temps)?;
+            code.push(Instruction::ByteUShr {
+                dst: local(*dst),
+                a,
+                b,
+            });
+        }
+        I::ByteNot { dst, v } => {
+            let v = op_reg(out, v, code, temps)?;
+            code.push(Instruction::ByteNot {
+                dst: local(*dst),
+                v,
             });
         }
 

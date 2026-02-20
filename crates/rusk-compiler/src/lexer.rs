@@ -80,6 +80,8 @@ pub enum TokenKind {
     GtEq,
     AndAnd,
     OrOr,
+    Amp,
+    Caret,
     Bang,
     Question,
     At,
@@ -306,7 +308,7 @@ impl<'a> Lexer<'a> {
                     self.bump_char();
                     TokenKind::AndAnd
                 } else {
-                    return Err(self.error_here("unexpected `&` (expected `&&`)"));
+                    TokenKind::Amp
                 }
             }
             '|' => {
@@ -317,6 +319,10 @@ impl<'a> Lexer<'a> {
                 } else {
                     TokenKind::Pipe
                 }
+            }
+            '^' => {
+                self.bump_char();
+                TokenKind::Caret
             }
             '@' => {
                 self.bump_char();

@@ -18,6 +18,31 @@ pub interface Rem {
     readonly fn rem(other: Self) -> Self;
 }
 
+pub interface BitAnd {
+    readonly fn bitand(other: Self) -> Self;
+}
+
+pub interface BitOr {
+    readonly fn bitor(other: Self) -> Self;
+}
+
+pub interface BitXor {
+    readonly fn bitxor(other: Self) -> Self;
+}
+
+pub interface Shl {
+    readonly fn shl(other: int) -> Self;
+}
+
+pub interface Shr {
+    readonly fn shr(other: int) -> Self;
+}
+
+// Shift right with zero fill (logical right shift).
+pub interface UShr {
+    readonly fn ushr(other: int) -> Self;
+}
+
 pub interface Neg {
     readonly fn neg() -> Self;
 }
@@ -49,4 +74,3 @@ pub interface Eq {
 pub interface Ne {
     readonly fn ne(other: Self) -> bool;
 }
-

@@ -671,19 +671,33 @@ fn verify_instruction(
         | Instruction::IntMul { dst, a, b }
         | Instruction::IntDiv { dst, a, b }
         | Instruction::IntMod { dst, a, b }
+        | Instruction::IntAnd { dst, a, b }
+        | Instruction::IntOr { dst, a, b }
+        | Instruction::IntXor { dst, a, b }
+        | Instruction::IntShl { dst, a, b }
+        | Instruction::IntShr { dst, a, b }
+        | Instruction::IntUShr { dst, a, b }
         | Instruction::IntLt { dst, a, b }
         | Instruction::IntLe { dst, a, b }
         | Instruction::IntGt { dst, a, b }
         | Instruction::IntGe { dst, a, b }
         | Instruction::IntEq { dst, a, b }
         | Instruction::IntNe { dst, a, b }
+        | Instruction::ByteAnd { dst, a, b }
+        | Instruction::ByteOr { dst, a, b }
+        | Instruction::ByteXor { dst, a, b }
+        | Instruction::ByteShl { dst, a, b }
+        | Instruction::ByteShr { dst, a, b }
+        | Instruction::ByteUShr { dst, a, b }
         | Instruction::BoolEq { dst, a, b }
         | Instruction::BoolNe { dst, a, b } => {
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             verify_reg(reg_count, *a, &format!("{}: a", here()))?;
             verify_reg(reg_count, *b, &format!("{}: b", here()))?;
         }
-        Instruction::BoolNot { dst, v } => {
+        Instruction::BoolNot { dst, v }
+        | Instruction::IntNot { dst, v }
+        | Instruction::ByteNot { dst, v } => {
             verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             verify_reg(reg_count, *v, &format!("{}: v", here()))?;
         }

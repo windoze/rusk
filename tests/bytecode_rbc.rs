@@ -3,6 +3,7 @@ use rusk_compiler::compile_to_bytecode;
 
 fn sample_module_bytes() -> Vec<u8> {
     // Include effects + pattern matching to exercise a larger subset of the bytecode format.
+    // Also include int/byte bitwise + shift ops to exercise newer instruction tags.
     let src = r#"
 struct Pair { x: int, y: int }
 interface Tick { fn tick(n: int) -> int; }
@@ -16,12 +17,21 @@ fn maybe_add_one(x: int) -> Option<int> {
 fn main() -> int {
     let p = Pair { x: 1, y: 2 };
     let base = sum_pair(p) + [1, 2, 3][0];
+
+    // Bitwise ops on runtime values (should not be constant-folded away).
+    let int_bits = (!base) ^ (base & 7) | (base << 1) | (base >> 2) | (base >>> 3);
+
+    let byte_a = core::intrinsics::int_to_byte(base);
+    let byte_b = core::intrinsics::int_to_byte(15);
+    let byte_bits =
+        core::intrinsics::byte_to_int((byte_a & byte_b) ^ (!byte_b) ^ (byte_a << 1) ^ (byte_a >>> 1));
+
     let maybe = match maybe_add_one(base) {
         Option::Some(v) => v,
         Option::None => base,
     };
     match @Tick.tick(maybe) {
-        @Tick.tick(n) => resume(n * 10)
+        @Tick.tick(n) => resume(n * 10 + int_bits + byte_bits)
         v => v
     }
 }
