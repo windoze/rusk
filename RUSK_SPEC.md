@@ -1623,19 +1623,28 @@ Lowering targets (canonical intrinsics):
 
 #### 9.7.3 `string` slice views
 
-Zero-copy slicing is supported for `string` by **byte offsets**:
+Zero-copy slicing is supported for `string` by Unicode scalar indices (codepoints):
 
 - `readonly fn string::slice(from: int, to: Option<int>) -> string`
   - half-open `[from, to)`; `to = None` means “to the end”
-  - `from` / `to` are **byte offsets** into UTF-8, not “character indices”
+  - `from` / `to` are **codepoint indices**, not UTF-8 byte offsets
+  - computing the slice boundary is O(n) in the length of the string (it must count codepoints)
   - traps if:
     - `from < 0`, or `to < 0` (when `to = Some(_)`),
-    - `from > to` or `to > len_bytes(string)`,
-    - `from` or `to` is not a UTF-8 character boundary
+    - `from > to`,
+    - `from` or `to` is out of bounds (greater than the number of codepoints)
+
+Byte slicing is supported for `string` via `bytes` views:
+
+- `readonly fn string::byte_slice(from: int, to: Option<int>) -> bytes`
+  - half-open `[from, to)`; `to = None` means “to the end”
+  - `from` / `to` are **byte offsets** into UTF-8
+  - traps if `from < 0`, `to < 0` (when `to = Some(_)`), `from > to`, or `to > len_bytes(string)`
 
 Lowering target (canonical intrinsic):
 
 - `core::intrinsics::string_slice(s: string, from: int, to: Option<int>) -> string`
+- `core::intrinsics::string_byte_slice(s: string, from: int, to: Option<int>) -> bytes`
 
 ### 9.8 Length (`core::len`)
 
@@ -1656,7 +1665,7 @@ Built-in implementations:
 
 `string` does not implement `Len` in v0.4 because the choice of “length in bytes” vs “length in
 Unicode scalar values” is user-visible. Use `"s".chars().count()` to count Unicode scalar values,
-or `string::slice` byte offsets for byte-level operations.
+or `string::byte_slice` for byte-level operations.
 
 ## 10. Compilation Pipeline (Normative)
 

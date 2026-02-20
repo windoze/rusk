@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 10;
+const VERSION_MINOR: u16 = 11;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -571,6 +571,7 @@ impl Encoder {
             Intrinsic::HashString => 69,
             Intrinsic::HashBytes => 70,
             Intrinsic::HashCombine => 71,
+            Intrinsic::StringByteSlice => 86,
         };
         self.write_u16(tag);
     }
@@ -1585,6 +1586,7 @@ impl<'a> Decoder<'a> {
             69 => Intrinsic::HashString,
             70 => Intrinsic::HashBytes,
             71 => Intrinsic::HashCombine,
+            86 => Intrinsic::StringByteSlice,
             72 => Intrinsic::IntAnd,
             73 => Intrinsic::IntOr,
             74 => Intrinsic::IntXor,

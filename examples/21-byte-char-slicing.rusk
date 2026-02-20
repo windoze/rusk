@@ -117,17 +117,27 @@ fn main() -> int {
         std::println(f"  U+{codepoint}");
     }
 
-    // Zero-copy string slicing (by byte offsets!)
-    // "Hello" is 5 bytes, ", " is 2 bytes = 7 total before Chinese chars
-    let hello_slice = core::intrinsics::string_slice(text, 0, Option::Some(5));
-    std::println(f"Slice [0, 5): {hello_slice}");
+    // Zero-copy string slicing (by Unicode scalar indices / codepoints)
+    //
+    // "Hello, 世界!" has 10 codepoints:
+    // - "Hello, " = 7 codepoints
+    // - "世"      = 1 codepoint
+    // - "界"      = 1 codepoint
+    // - "!"       = 1 codepoint
+    let hello_slice = text.slice(0, Option::Some(5));
+    std::println(f"Slice [0, 5) codepoints: {hello_slice}");
 
-    let from_7 = core::intrinsics::string_slice(text, 7, Option::None);
-    std::println(f"Slice from byte 7: {from_7}");
+    let world_slice = text.slice(7, Option::Some(9));
+    std::println(f"Slice [7, 9) codepoints: {world_slice}");
 
-    // Note: string slicing uses BYTE offsets, not character indices
-    // Each Chinese character is typically 3 bytes in UTF-8
-    // "世" starts at byte 7, "界" starts at byte 10
+    let from_7 = text.slice(7, Option::None);
+    std::println(f"Slice from codepoint 7: {from_7}");
+
+    // Byte-level slicing returns `bytes` and uses UTF-8 offsets.
+    // Each Chinese character is typically 3 bytes in UTF-8.
+    // "世" starts at byte 7 and spans bytes [7, 10).
+    let shi_bytes = text.byte_slice(7, Option::Some(10));
+    std::println(f"UTF-8 bytes for '世' have length {shi_bytes.len()}");
 
     // ===== Working with byte arrays =====
 

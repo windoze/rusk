@@ -204,6 +204,7 @@ pub enum Intrinsic {
 
     // `string` operations.
     StringSlice,
+    StringByteSlice,
     StringNextIndex,
     StringCodepointAt,
     StringFromChars,

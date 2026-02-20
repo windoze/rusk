@@ -298,18 +298,25 @@ fn bytes_array_conversions_are_copying() {
 }
 
 #[test]
-fn string_slice_uses_byte_offsets_and_checks_utf8_boundaries() {
+fn string_slice_uses_codepoint_offsets_and_byte_slice_uses_byte_offsets() {
     let src = r#"
         fn slice_ok() -> bool {
-            "é".slice(0, Option::Some(2)) == "é"
+            "é".slice(0, Option::Some(1)) == "é"
         }
 
         fn slice_to_end_ok() -> bool {
             "hello".slice(2, Option::None) == "llo"
         }
 
-        fn slice_non_boundary_traps() -> string {
-            "é".slice(0, Option::Some(1))
+        fn slice_oob_traps() -> string {
+            // "é" is 1 codepoint but 2 bytes in UTF-8.
+            "é".slice(0, Option::Some(2))
+        }
+
+        fn byte_slice_non_boundary_is_ok() -> int {
+            // Returns raw bytes; does not require UTF-8 boundaries.
+            let bs = "é".byte_slice(0, Option::Some(1));
+            bs[0].to_int()
         }
     "#;
 
@@ -319,8 +326,13 @@ fn string_slice_uses_byte_offsets_and_checks_utf8_boundaries() {
         AbiValue::Bool(true)
     );
 
-    let err = run0(src, "slice_non_boundary_traps").expect_err("should trap");
-    assert!(err.contains("UTF-8 boundary"), "{err}");
+    let err = run0(src, "slice_oob_traps").expect_err("should trap");
+    assert!(err.contains("out of bounds"), "{err}");
+
+    assert_eq!(
+        run0(src, "byte_slice_non_boundary_is_ok").expect("run"),
+        AbiValue::Int(195)
+    );
 }
 
 #[test]
@@ -332,7 +344,8 @@ fn slice_views_keep_backing_buffers_alive_across_gc() {
             bs = b"Z";
 
             let s = "hé";
-            let ssl = s.slice(1, Option::Some(3));
+            let ssl = s.slice(1, Option::Some(2));
+            let sbs = s.byte_slice(1, Option::Some(3));
             s = "";
 
             let i = 0;
@@ -342,9 +355,13 @@ fn slice_views_keep_backing_buffers_alive_across_gc() {
             };
 
             let ok = if ssl == "é" { 1 } else { 0 };
-            bsl[0].to_int() + ok * 1000
+            let ok_bytes = if sbs[0].to_int() == 195 { 1 } else { 0 };
+            bsl[0].to_int() + ok * 1000 + ok_bytes * 10000
         }
     "#;
 
-    assert_eq!(run0(src, "gc_test").expect("run"), AbiValue::Int(66 + 1000));
+    assert_eq!(
+        run0(src, "gc_test").expect("run"),
+        AbiValue::Int(66 + 1000 + 10000)
+    );
 }
