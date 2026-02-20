@@ -1,17 +1,17 @@
 # Rusk Language Specification (v0.4)
 
-本文件是 **Rusk 语言规范**（Rusk Language Spec）。
+This document is the **Rusk Language Specification** (Rusk Language Spec).
 
-Rusk 的目标是：在语法上接近 Rust（块表达式、`match`、显式可变性控制），在工程体验上接近 TypeScript（类型推断、泛型、接口驱动的抽象），并以 **代数效果（Algebraic Effects）** 作为一等机制统一异常/异步/生成器等控制流扩展。
+Rusk's goal is to be syntactically similar to Rust (block expressions, `match`, explicit mutability control), engineering-wise similar to TypeScript (type inference, generics, interface-driven abstraction), and to use **Algebraic Effects** as a first-class mechanism to unify control flow extensions such as exceptions/async/generators.
 
-本仓库的实现是一个“源代码 → MIR → 字节码 → VM 执行”的参考实现：
+The implementation in this repository is a reference implementation with the pipeline “source code → MIR → bytecode → VM execution”:
 
-- `RUSK_SPEC.md` 定义源语言（本文件）。
-- `MIR_SPEC.md` 定义编译器内部 IR：MIR。
-- `BYTECODE_SPEC.md` 定义字节码指令集与 `.rbc` 序列化格式。
-- `crates/rusk-vm` 执行字节码，并通过宿主函数（host functions）提供平台 I/O 等能力。
+- `RUSK_SPEC.md` defines the source language (this document).
+- `MIR_SPEC.md` defines the compiler's internal IR: MIR.
+- `BYTECODE_SPEC.md` defines the bytecode instruction set and `.rbc` serialization format.
+- `crates/rusk-vm` executes bytecode and provides platform I/O and other capabilities through host functions.
 
-本规范以 **可实现** 为前提：规范中出现的语法与语义都必须能完整编译到当前版本的 MIR，并进一步降级到当前版本的字节码，在参考 VM 中执行（不允许“未来再实现”的占位条款）。
+This specification is based on **implementability**: all syntax and semantics in this specification must be fully compilable to the current version of MIR, and further lowered to the current version of bytecode, and executable in the reference VM (placeholder clauses for “to be implemented in the future” are not allowed).
 
 ---
 
