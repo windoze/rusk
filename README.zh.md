@@ -48,3 +48,18 @@ cargo run --bin ruskc -- fixtures/020_arrays_get_set.rusk
 cargo run --bin rusk -- fixtures/020_arrays_get_set.rbc
 cargo test
 ```
+
+## 文档
+
+完整的指南和教程请参阅 **[docs/guides/](docs/guides/)** 目录：
+
+- [快速上手指南](docs/guides/quick_start.md) — 快速上手，跑通示例与常用命令
+- [概念与语法](docs/guides/concepts_and_syntax.md) — 语言概念与语法总览（表达式、类型、接口、effects、core 库）
+- [TypeScript 开发者指南](docs/guides/for_typescript_developers.md) — 从 TypeScript 迁移到 Rusk
+- [Python 开发者指南](docs/guides/for_python_developers.md) — 从 Python 迁移到 Rusk
+- [宿主集成](docs/guides/host_integration.md) — 把 Rusk 嵌入到你的应用里（宿主函数、外部化 effects、ABI、sysroot）
+
+更多资源：
+
+- [嵌入 VM](docs/embedding-vm.zh.md) — VM 集成的详细指南
+- [限定延续与作用域效应](docs/delimited-continuations-and-scoped-effects.zh.md) — 深入解释 Rusk 的效应系统
