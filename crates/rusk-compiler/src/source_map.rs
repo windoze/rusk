@@ -5,7 +5,9 @@ use std::sync::Arc;
 /// A display name for a source (either a filesystem path or a virtual label like "<string>").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceName {
+    /// A filesystem-backed source.
     Path(PathBuf),
+    /// A virtual source (e.g. `"<string>"`).
     Virtual(String),
 }
 
@@ -61,15 +63,21 @@ impl SourceFile {
 }
 
 #[derive(Clone, Debug, Default)]
+/// A mapping from global byte offsets to source files and line/column locations.
 pub struct SourceMap {
     files: Vec<SourceFile>,
 }
 
 impl SourceMap {
+    /// Creates an empty [`SourceMap`].
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a source file to the map at `base_offset`.
+    ///
+    /// Callers are expected to ensure that `(base_offset..base_offset+src.len())` does not overlap
+    /// with previously added sources.
     pub fn add_source(&mut self, name: SourceName, src: Arc<str>, base_offset: usize) {
         let line_starts = compute_line_starts(&src);
         if let Some(prev) = self.files.last() {
@@ -86,6 +94,7 @@ impl SourceMap {
         });
     }
 
+    /// Resolves a global [`Span`] to a source file + line/column range.
     pub fn lookup_span(&self, span: Span) -> Option<SourceRange> {
         if self.files.is_empty() {
             return None;
@@ -116,6 +125,7 @@ impl SourceMap {
         })
     }
 
+    /// Renders a span into a human-readable `"file: <l:c> - <l:c>"` location string.
     pub fn render_span_location(&self, span: Span) -> Option<String> {
         let range = self.lookup_span(span)?;
         Some(range.render_location())
@@ -123,19 +133,27 @@ impl SourceMap {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A 1-based line/column position within a source file.
 pub struct LineCol {
+    /// 1-based line number.
     pub line: usize,
+    /// 1-based column number (Unicode scalar count within the line prefix).
     pub col: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A resolved source range for a [`Span`], including file name and line/column endpoints.
 pub struct SourceRange {
+    /// Source file identity.
     pub name: SourceName,
+    /// Start position (inclusive).
     pub start: LineCol,
+    /// End position (exclusive).
     pub end: LineCol,
 }
 
 impl SourceRange {
+    /// Formats a source range location suitable for diagnostics display.
     pub fn render_location(&self) -> String {
         format!(
             "{}: <{}:{}> - <{}:{}>",

@@ -6,6 +6,7 @@ pub struct Span {
 }
 
 impl Span {
+    /// Creates a new [`Span`] from byte offsets.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
