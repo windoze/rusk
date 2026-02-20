@@ -14,5 +14,4 @@
 fn main() {
     std::print("Hello, ");
     std::println("world!");
-    ()
 }
