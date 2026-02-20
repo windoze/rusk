@@ -37,7 +37,6 @@ cargo run --bin rusk -- examples/01-hello-world.rusk
 ```rusk
 fn main() {
     std::println("hello from rusk");
-    ()
 }
 ```
 
