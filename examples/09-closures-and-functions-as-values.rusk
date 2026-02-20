@@ -1,7 +1,12 @@
-// 08 - Closures and `fn(...) -> ...` function values
+// 09 - 闭包与函数值（`fn(...) -> ...`）
 //
-// - Named functions and non-capturing lambdas can be passed as `fn(...) -> ...`.
-// - Lambdas can also capture locals.
+// 覆盖点：
+// - 命名函数与“不捕获”的 lambda 都可以当作 `fn(...) -> ...` 传递
+// - lambda 也可以捕获外部局部变量（形成闭包），用于构建更高阶的抽象
+//
+// 对比（JavaScript）：
+//   const add1 = (n) => n + 1
+//   function apply(f, x) { return f(x) }
 
 fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
 
@@ -22,4 +27,3 @@ fn main() -> int {
 
     v + total
 }
-

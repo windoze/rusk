@@ -1,0 +1,186 @@
+// 13 - 关联类型（Associated Types）与迭代器
+//
+// 关联类型允许接口把“输出类型”交给实现者决定，而不需要让接口本身变成泛型。
+//
+// 一个最常见的例子就是迭代器：
+//   interface Iterator {
+//       type Item;
+//       fn next() -> Option<Self::Item>;
+//       // 还可以有默认方法：nth/count/find/any/all/...
+//   }
+//
+// 对比（Rust）：
+//   trait Iterator { type Item; fn next(&mut self) -> Option<Self::Item>; }
+
+use core::iter::Iterator;
+use core::len::Len;
+
+// Range 迭代器：产出 int
+struct Range {
+    current: int,
+    end: int,
+}
+
+impl Iterator for Range {
+    type Item = int;
+
+    fn next() -> Option<int> {
+        if self.current < self.end {
+            let value = self.current;
+            self.current = self.current + 1;
+            Option::Some(value)
+        } else {
+            Option::None
+        }
+    }
+}
+
+// Lines 迭代器：产出 string
+struct Lines {
+    remaining: [string],
+    index: int,
+}
+
+impl Iterator for Lines {
+    type Item = string;
+
+    fn next() -> Option<string> {
+        let len = self.remaining.len();
+        if self.index < len {
+            let item = self.remaining[self.index];
+            self.index = self.index + 1;
+            Option::Some(item)
+        } else {
+            Option::None
+        }
+    }
+}
+
+// ===== 在泛型函数里使用关联类型 =====
+
+// 这个函数对任何 `T: Iterator` 都适用。
+// 返回值类型里用到了“限定投影”：`Iterator::Item<T>`
+fn first<T: Iterator>(it: T) -> Option<Iterator::Item<T>> {
+    it.next()
+}
+
+// ===== 带关联类型绑定的“接口值” =====
+
+fn consume_int_iterator(iter: Iterator{Item = int}) -> int {
+    let sum = 0;
+    loop {
+        match iter.next() {
+            Option::Some(val) => {
+                sum = sum + val;
+            }
+            Option::None => {
+                break;
+            }
+        }
+    }
+    sum
+}
+
+// ===== 关联类型 + Self（以及 dyn-safe 的默认方法） =====
+
+interface Clone {
+    fn clone() -> Self;
+}
+
+interface CloneEq: Clone {
+    fn eq(other: Self) -> bool;
+
+    // 默认方法可以复用其它接口方法（这里 clone/eq 都是 “Self-only” 方法）。
+    // 但 `is_clone_equal` 的签名不暴露裸 `Self`，因此它是 dyn-safe 的：
+    // 你可以在“接口值”上调用它（动态分发）。
+    fn is_clone_equal() -> bool {
+        self.clone().eq(self)
+    }
+}
+
+struct Counter { count: int }
+
+impl CloneEq for Counter {
+    fn clone() -> Self {
+        Counter { count: self.count }
+    }
+    fn eq(other: Self) -> bool {
+        self.count == other.count
+    }
+}
+
+fn main() -> int {
+    std::println("=== 关联类型 / Iterator 示例 ===");
+
+    // ===== 1) `for` 可以直接迭代实现了 `Iterator` 的类型 =====
+    //
+    // 说明：`for` 不是“只能遍历数组”，它会按规范（RUSK_SPEC.md §9.4）：
+    // - 如果迭代对象类型实现了 `core::iter::Iterator`，就直接调用 `next()`
+    let range = Range { current: 0, end: 5 };
+    std::println("Range（for）：");
+    for v in range {
+        std::println(f"  {v}");
+    };
+
+    let lines = Lines {
+        remaining: ["first", "second", "third"],
+        index: 0,
+    };
+    std::println("Lines（for）：");
+    for line in lines {
+        std::println(f"  {line}");
+    };
+
+    // ===== 2) 接口默认方法：nth / count / find / any / all =====
+
+    let r = Range { current: 0, end: 10 };
+    // 说明：当前实现阶段，`Iterator::Item<T>` 这类“关联类型投影”还不支持直接参与格式化打印。
+    // 所以这里用 `.is_some()` 这种“不依赖 Item 具体类型”的方式来演示返回值形状。
+    let nth_is_some = r.nth(3).is_some();
+    std::println(f"r.nth(3).is_some() = {nth_is_some}");
+    std::println(f"调用 nth 后，r.count()（剩余元素数）= {r.count()}");
+
+    let r2 = Range { current: 10, end: 20 };
+    let found = r2.find(|x: int| { x % 7 == 0 });
+    std::println(f"find(x%7==0).is_some() = {found.is_some()}");
+
+    let r3 = Range { current: 0, end: 5 };
+    std::println(f"r3.any(x%2==0) = {r3.any(|x: int| { x % 2 == 0 })}");
+    let r4 = Range { current: 0, end: 5 };
+    std::println(f"r4.all(x<5) = {r4.all(|x: int| { x < 5 })}");
+
+    // ===== 3) 泛型函数 + 关联类型投影 =====
+
+    let range2 = Range { current: 10, end: 15 };
+    let first_v = first(range2);
+    // 说明：对 `Option<Iterator::Item<T>>` 直接调用 `Option` 的泛型方法（如 is_some）
+    // 在当前实现阶段可能触发“投影类型无法 reify”的限制；用 match 直接判断更稳妥。
+    let first_is_some = match first_v {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    std::println(f"first(range2) is_some = {first_is_some}");
+
+    // ===== 4) 接口值 + 关联类型绑定 =====
+
+    let range4 = Range { current: 1, end: 4 };
+    let iter_obj: Iterator{Item = int} = range4 as Iterator{Item = int};
+    let sum = consume_int_iterator(iter_obj);
+    std::println(f"consume_int_iterator(iter_obj) = {sum}");
+
+    // ===== 5) dyn-safe 默认方法 =====
+
+    let c1 = Counter { count: 42 };
+    let c2 = c1.clone();
+    std::println(f"Counter cloned: {c2.count}");
+    std::println(f"Are equal: {c1.eq(c2)}");
+    std::println(f"c1.is_clone_equal() = {c1.is_clone_equal()}");
+
+    // 把具体类型变成接口值后，仍然可以调用 dyn-safe 的方法
+    let ci: CloneEq = c1 as CloneEq;
+    std::println(f"(c1 as CloneEq).is_clone_equal() = {ci.is_clone_equal()}");
+
+    // 但 Self-only 的方法（clone/eq）不能在接口值上调用（类型擦除后无法表达返回/参数里的裸 Self）。
+
+    0
+}

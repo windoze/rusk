@@ -1,0 +1,21 @@
+// 11 - 模块与 `use`
+//
+// 这是一个多文件示例，演示：
+// - `mod xxx;`：从同目录加载 `xxx.rusk` 或 `xxx/mod.rusk`
+// - `use path::to::item`：把名字引入当前作用域（可用 `as` 起别名）
+//
+// 运行方式：
+//   cargo run --bin rusk -- examples/11-modules/main.rusk
+
+mod math;
+mod util;
+
+use math::fib as fibonacci;
+use util::strings::greet;
+
+fn main() -> unit {
+    let n = 10;
+    std::println(f"fib({n}) = {fibonacci(n)}");
+    std::println(greet("modules"));
+    ()
+}

@@ -1,0 +1,28 @@
+// 25 - 宿主保存的 continuation（host-stored continuations）
+//
+// 这个示例演示如何把捕获到的 continuation（`cont(int) -> int`）跨 VM/宿主边界传递，
+// 让宿主把它当作“不透明句柄”保存起来，之后再取回来继续执行。
+//
+// 运行前提：
+// - 你需要一个自定义嵌入宿主（默认 `rusk` CLI 不提供），并暴露一个 `host` 模块，包含两个宿主导入：
+//
+//   host::store_cont(k: cont(int) -> int) -> unit
+//   host::take_cont() -> cont(int) -> int
+//
+// 宿主可以同时保存多个未完成的 continuation，并在任意时机返回其中一个。
+//
+// 备注：宿主也可以选择不把句柄交回 Rusk，而是直接用 VM API 恢复它（例如 `vm_resume_pinned_continuation_tail`）。
+
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    // 捕获 continuation `k`，并交给宿主保存（不放在 Rusk 的局部/堆里）。
+    match @E.boom() {
+        @E.boom() -> k => { host::store_cont(k); 0 }
+        x => x
+    };
+
+    // 之后：向宿主要回句柄并恢复执行。
+    let k = host::take_cont();
+    k(42)
+}

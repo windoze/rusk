@@ -1,6 +1,13 @@
-// 06 - Structs and inherent methods
+// 06 - 结构体与固有方法（inherent methods）
 //
-// Structs are heap-allocated objects with named fields. `impl Type { ... }` adds methods.
+// 覆盖点：
+// - `struct`：具名字段的堆对象
+// - `impl Type { ... }`：给某个名义类型添加“固有方法”
+//   - `static fn ...`：静态方法（无接收者），用 `Type::method(...)` 调用
+//   - `fn ...`：实例方法（隐式接收者 `self`），用 `value.method(...)` 调用
+//
+// 对比（Rust）：
+//   impl Counter { fn inc(&mut self) { ... } }
 
 struct Counter { n: int }
 
@@ -27,4 +34,3 @@ fn main() -> int {
     std::println(f"counter = {out}");
     out
 }
-

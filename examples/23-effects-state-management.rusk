@@ -1,0 +1,191 @@
+// 23 - 用代数效应做“类 React”状态管理
+//
+// 这个示例演示如何用代数效应（effects）来表达“状态读取/更新 + 订阅 + 清理”的组合逻辑。
+//
+// React 的 `useEffect` 常见痛点（经验总结）：
+// 1) 依赖数组容易漏写 → stale closure / 状态不同步
+// 2) 清理逻辑必须 return cleanup → 复杂时容易写错
+// 3) 异步流程表达不自然（时序分散）
+// 4) effect 在 render 后触发 → 时序更间接
+// 5) 多个 effect 容易出现竞态（race）
+//
+// 用 effects 的思路：
+// 1) 不需要依赖数组：effect 调用捕获的是“当前值”
+// 2) 清理由处理器统一登记并在合适时机执行
+// 3) 控制流是直接的（顺序就是顺序），组合起来也更可预测
+// 4) 通过泛型让副作用类型化（例如 Subscribe<T>）
+//
+// 对比（React/JS，简化示意）：
+//   useEffect(() => {
+//     const sub = subscribe(source)
+//     return () => sub.unsubscribe()
+//   }, [source])
+
+// Effect interfaces
+interface State<T> {
+    fn get() -> T;
+    fn set(value: T);
+}
+
+interface Subscribe<T> {
+    fn subscribe(source: string) -> T;
+}
+
+interface Cleanup {
+    fn on_cleanup(cleanup_fn: fn());
+}
+
+// Helper functions for cleaner syntax
+fn get_state<T>() -> T {
+    @State<T>.get()
+}
+
+fn set_state<T>(value: T) {
+    @State<T>.set(value)
+}
+
+fn subscribe<T>(source: string) -> T {
+    @Subscribe<T>.subscribe(source)
+}
+
+fn on_cleanup(cleanup_fn: fn()) {
+    @Cleanup.on_cleanup(cleanup_fn)
+}
+
+// React-like effect handlers, corresponding to useState and useEffect behavior
+
+// 状态处理器：对应 useState
+fn with_state<T>(initial: T, component: fn()) {
+    let state = initial;
+
+    match component() {
+        @State<T>.get() => {
+            resume(state)
+        }
+        @State<T>.set(new_value) => {
+            state = new_value;
+            resume(())
+        }
+        _ => {}
+    }
+}
+
+// 订阅处理器：对应“订阅 + 清理登记”
+//
+// 注意：在 Rusk 中，`match` 安装的处理器作用域只覆盖 scrutinee（被 match 的表达式）的求值过程。
+// 当处理器 `resume(...)` 恢复 continuation 时，外层 handler 不会自动重新激活。
+// 因此：如果 `subscribe(...)` 之后还会触发 `on_cleanup(...)`，就必须在同一个 handler 里处理。
+fn with_subscriptions<T>(source: fn(string) -> T, component: fn()) {
+    let cleanups: [fn()] = [];
+
+    match component() {
+        @Subscribe<T>.subscribe(source_name) => {
+            // 模拟：从 source 获取数据
+            let data = source(source_name);
+            std::println(f"  [订阅] Fetching: {source_name}");
+            resume(data)
+        }
+        @Cleanup.on_cleanup(cleanup_fn) => {
+            cleanups.push(cleanup_fn);
+            resume(())
+        }
+        _ => {}
+    };
+
+    // 统一执行清理回调
+    std::println("  [处理器] 执行 cleanup 回调...");
+    for cleanup in cleanups {
+        cleanup()
+    }
+}
+
+// ===== 组件示例 =====
+
+// 示例 1：简单计数器（演示 State effect）
+fn counter_component() {
+    let count: int = get_state();
+    std::println(f"Counter render: count = {count}");
+
+    set_state(count + 1);
+
+    count = get_state();
+    std::println(f"  更新后 count: {count}");
+}
+
+// 示例 2：订阅 + 自动清理（演示 Subscribe + Cleanup effects）
+fn subscription_component() {
+    std::println("\nSubscription component:");
+
+    // 订阅数据源
+    let data: string = subscribe("user-data");
+    std::println(f"  收到数据: {data}");
+
+    // 登记清理逻辑：由 handler 统一执行
+    on_cleanup {
+        std::println("  [Cleanup] Unsubscribe user-data")
+    };
+
+    std::println(f"  处理数据: {data}")
+}
+
+// 示例 3：多个 effect 的顺序组合（更接近“写脚本”的直觉）
+fn complex_component() {
+    std::println("\nComplex component with multiple effects:");
+
+    let user_id: int = get_state();
+    std::println(f"  User ID: {user_id}");
+
+    // Effect 1：拉取用户数据
+    let user_name: string = subscribe(f"user/{user_id}");
+    on_cleanup {
+        std::println(f"  [Cleanup 1] Cancel user/{user_id} subscription")
+    };
+
+    // Effect 2：拉取用户 posts（依赖 user_name）
+    // 在 effects 里可以直接顺序写，依赖关系天然正确。
+    let posts: string = subscribe(f"posts/{user_name}");
+    on_cleanup {
+        std::println(f"  [Cleanup 2] Cancel posts/{user_name} subscription")
+    };
+
+    std::println(f"  Loaded user: {user_name}");
+    std::println(f"  Loaded posts: {posts}");
+}
+
+// 模拟数据源函数
+fn sample_string_source(source_name: string) -> string {
+    std::println(f"    (Simulated fetch from {source_name})");
+    f"data-from-{source_name}"
+}
+
+fn main() {
+    std::println("=== 用 Effects 做类 React 状态管理 ===\n");
+
+    std::println("示例 1：Counter（不需要依赖数组）");
+    with_state(0) {
+        counter_component()
+    };
+
+    std::println("\n==================================================");
+
+    std::println("\n示例 2：订阅 + 自动 cleanup");
+    with_subscriptions(sample_string_source) {
+        subscription_component()
+    };
+
+    std::println("\n==================================================");
+
+    std::println("\n示例 3：多个 effect 的组合（顺序明确）");
+    with_state(123) {
+        with_subscriptions(sample_string_source) {
+            complex_component()
+        }
+    };
+
+    std::println("\n=== 小结 ===");
+    std::println("1) 不需要依赖数组：当前值自然被捕获");
+    std::println("2) cleanup 统一登记与执行：不容易忘");
+    std::println("3) 执行顺序更直观：减少“隐式时序”");
+    std::println("4) 泛型让副作用类型化：更安全");
+    std::println("5) handler 可组合：更容易分层抽象");
+}

@@ -1,6 +1,10 @@
-// 13 - Typed effects
+// 21 - 类型化（泛型）效应
 //
-// Effects can be generic and include explicit type arguments at the call site.
+// 效应接口也可以是泛型的，并且允许在调用点显式写出类型实参：
+//   @Yield<int>.yield(10)
+//
+// 对比（Rust 的泛型函数）：
+//   yield::<i32>(10)
 
 interface Yield<T> { fn yield(value: T) -> int; }
 
@@ -13,4 +17,3 @@ fn main() -> int {
     std::println(f"yield result = {r}");
     r
 }
-

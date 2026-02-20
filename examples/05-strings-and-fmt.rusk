@@ -1,11 +1,33 @@
-// 05 - Strings and `f"..."` formatted strings
+// 05 - 字符串与 `f"..."` 格式化字符串
 //
-// `f"..."` expressions format embedded values by converting them to strings.
+// `f"..."` 会把 `{ expr }` 里的值转换成 `string` 再拼接起来。
+//
+// 重要：转换规则不是“魔法”，而是调用 `core::fmt::ToString::to_string`：
+// - `int`/`bool`/`float`/`char`/`bytes` 等基础类型在 core 里有内建实现
+// - 你也可以为自定义类型实现 `ToString`，让它可以被插值到 f-string 中
+//
+// 对比（Rust）：
+//   format!("p = {:?}", p)
 
-fn main() -> string {
+use core::fmt::ToString;
+
+struct Point { x: int, y: int }
+
+impl ToString for Point {
+    readonly fn to_string() -> string {
+        f"Point(x={self.x}, y={self.y})"
+    }
+}
+
+fn main() -> unit {
     let name = "Rusk";
     let msg = f"Hello from {name}! 2 + 3 = {2 + 3}.";
     std::println(msg);
-    msg
-}
 
+    let p = Point { x: 3, y: 4 };
+    std::println(f"p = {p}");
+
+    // 方法调用糖：如果 `ToString` 在作用域内且不歧义，可以写 `p.to_string()`
+    std::println(f"p.to_string() = {p.to_string()}");
+    ()
+}

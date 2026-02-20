@@ -1,0 +1,109 @@
+// 08 - 解构模式（Destructuring Patterns）
+//
+// Rusk 支持在 `let` / `const` / `readonly` 绑定里使用模式进行解构，
+// 让你在“一次声明”里同时拆出多个值。
+//
+// 这类语法在很多语言里都很常见：
+// - Rust：`let (a, b) = (1, 2);`
+// - JavaScript：`const {x, y} = point;`
+
+use core::len::Len;
+
+struct Point { x: int, y: int }
+struct Person { name: string, age: int, city: string }
+struct Wrapper<T>(T);
+struct UserId(int);
+
+enum MiniResult<T, E> { Ok(T), Err(E) }
+
+struct Container {
+    data: (int, int),
+    meta: string,
+}
+
+fn main() -> int {
+    // ===== 元组解构 =====
+
+    // 基础元组解构
+    let (a, b) = (10, 20);
+    std::println(f"a = {a}, b = {b}");
+
+    // 嵌套元组
+    let ((tx, ty), z) = ((1, 2), 3);
+    std::println(f"tx = {tx}, ty = {ty}, z = {z}");
+
+    // rest 模式：忽略中间元素
+    let (first, .., last) = (1, 2, 3, 4, 5);
+    std::println(f"first = {first}, last = {last}");
+
+    // rest 模式：捕获中间片段（对“元组”来说，捕获的是一个更短的元组）
+    let (head, ..tail) = (10, 20, 30, 40);
+    std::println(f"head = {head}, tail = ({tail.0}, {tail.1}, {tail.2})");
+
+    // ===== 数组解构 =====
+
+    let [first_el, ..rest_els] = [1, 2, 3, 4, 5];
+    std::println(f"first element = {first_el}, rest.len() = {rest_els.len()}");
+
+    let [.., last_el] = [10, 20, 30];
+    std::println(f"last element = {last_el}");
+
+    // ===== 结构体解构 =====
+
+    // 字段重命名：把 `Point.x` 绑定到局部变量 `px`
+    let Point { x: px, y: py } = Point { x: 100, y: 200 };
+    std::println(f"point: ({px}, {py})");
+
+    // 简写：变量名与字段名相同
+    let Point { x, y } = Point { x: 5, y: 10 };
+    std::println(f"x = {x}, y = {y}");
+
+    // 部分解构：`..` 忽略其它字段
+    let Person { name, .. } = Person {
+        name: "Alice",
+        age: 30,
+        city: "Beijing",
+    };
+    std::println(f"name = {name}");
+
+    // ===== newtype 解构 =====
+
+    let UserId(id) = UserId(42);
+    std::println(f"user id = {id}");
+
+    let Wrapper(value) = Wrapper(999);
+    std::println(f"wrapped value = {value}");
+
+    // ===== 枚举解构 =====
+
+    // 这里需要类型标注：`MiniResult::Ok(123)` 本身无法推导出错误类型 `E`
+    let r: MiniResult<int, string> = MiniResult::Ok(123);
+    let MiniResult::Ok(val) = r;
+    std::println(f"MiniResult value = {val}");
+
+    // ===== const / readonly 解构 =====
+
+    // const：绑定不可重新赋值
+    const (ca, cb) = (100, 200);
+    std::println(f"const: ca = {ca}, cb = {cb}");
+    // ca = 999;  // 错误：不能给 const 绑定重新赋值
+
+    // readonly：绑定不可重新赋值 + 禁止经由该视图做可变操作（例如数组写入）
+    readonly (arr1, arr2) = ([1, 2, 3], [4, 5, 6]);
+    std::println(f"readonly arrays created: arr1.len()={arr1.len()}, arr2.len()={arr2.len()}");
+    // arr1[0] = 999;  // 错误：不能通过 readonly 视图修改
+
+    // ===== 复杂嵌套解构 =====
+
+    let Container { data: (d1, d2), meta } = Container {
+        data: (111, 222),
+        meta: "example",
+    };
+    std::println(f"data: ({d1}, {d2}), meta: {meta}");
+
+    // 组合数组与元组
+    let [(ax, ay), (bx, by)] = [(1, 2), (3, 4)];
+    std::println(f"points: ({ax},{ay}), ({bx},{by})");
+
+    0
+}

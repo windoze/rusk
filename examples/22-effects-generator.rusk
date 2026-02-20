@@ -1,7 +1,14 @@
-// 15 - Generator using effects
+// 22 - 用效应实现生成器（generator）
 //
-// This example demonstrates how to implement a simple generator using algebraic effects.
-// A generator can yield multiple values, and handlers can collect or process them.
+// 这个示例展示如何用代数效应实现“可 yield 多次”的生成器：
+// - 生成器函数内部通过 `@Yield<T>.yield(value)` 把值交给处理器
+// - 处理器可以选择：
+//   - 立刻 `resume(())`：继续生成下一个值
+//   - 不 resume：中止/截断生成器
+//
+// 对比（Python）：
+//   def gen(): yield 1; yield 2
+//   for x in gen(): ...
 
 interface Yield<T> { fn yield(value: T); }
 
@@ -9,7 +16,7 @@ fn yield<T>(value: T) {
     @Yield<T>.yield(value);
 }
 
-// Generator function that yields numbers from start to end
+// 生成器：产出 [start, end) 的整数
 fn range(start: int, end: int) {
     let i = start;
     while i < end {
@@ -18,7 +25,7 @@ fn range(start: int, end: int) {
     }
 }
 
-// Generator function that yields Fibonacci numbers
+// 生成器：产出前 count 个斐波那契数
 fn fibonacci(count: int) {
     let a = 0;
     let b = 1;
@@ -34,7 +41,7 @@ fn fibonacci(count: int) {
 }
 
 fn main() {
-    std::println("=== Range Generator (0 to 5) ===");
+    std::println("=== Range 生成器（0..5）===");
     match range(0, 5) {
         @Yield<int>.yield(value) => {
             std::println(f"  yielded: {value}");
@@ -43,7 +50,7 @@ fn main() {
         result => result
     };
 
-    std::println("\n=== Fibonacci Generator (first 10 numbers) ===");
+    std::println("\n=== Fibonacci 生成器（前 10 个）===");
     match fibonacci(10) {
         @Yield<int>.yield(value) => {
             std::println(f"  fib: {value}");
@@ -52,7 +59,7 @@ fn main() {
         result => result
     };
 
-    std::println("\n=== Using Generator with Custom Logic ===");
+    std::println("\n=== 在处理器里写自定义逻辑（边消费边累加）===");
     let sum = 0;
     match range(1, 6) {
         @Yield<int>.yield(value) => {
@@ -62,5 +69,5 @@ fn main() {
         }
         _ => {}
     };
-    std::println(f"Final sum: {sum}");
+    std::println(f"最终 sum = {sum}");
 }

@@ -1,12 +1,18 @@
 // 01 - Hello, world!
 //
-// Demonstrates calling host-provided I/O functions:
+// 这个最小示例演示如何调用宿主（host）提供的 I/O 函数：
 // - std::print(string)   -> unit
 // - std::println(string) -> unit
+//
+// 说明：
+// - 在本仓库里，`std::print/std::println` 不是 `core` 的一部分，而是 `rusk` CLI 在启动 VM 时注册的宿主函数。
+// - 如果你在别的嵌入环境里运行（自定义 host），需要自行注册这些函数，否则会报“外部 effect 请求/缺少宿主导入”。
+//
+// 对比（Rust）：
+//   println!("Hello, world!");
 
 fn main() {
     std::print("Hello, ");
     std::println("world!");
     ()
 }
-

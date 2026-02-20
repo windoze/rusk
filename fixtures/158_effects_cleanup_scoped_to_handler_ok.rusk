@@ -9,9 +9,6 @@
 // This fixture ensures `Cleanup.on_cleanup` is handled in the same `match` that handles
 // `Subscribe.subscribe`, and that cleanup callbacks run after the handled computation finishes.
 
-use core::intrinsics::array_len;
-use core::intrinsics::array_push;
-
 interface Subscribe<T> {
     fn subscribe(source: string) -> T;
 }
@@ -37,14 +34,14 @@ fn with_subscriptions<T>(component: fn() -> T) -> T {
             resume(42)
         }
         @Cleanup.on_cleanup(cleanup_fn) => {
-            array_push(cleanups, cleanup_fn);
+            cleanups.push(cleanup_fn);
             resume(())
         }
         v => v
     };
 
     let i = 0;
-    while i < array_len(cleanups) {
+    while i < cleanups.len() {
         cleanups[i]();
         i = i + 1;
     };

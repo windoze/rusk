@@ -115,7 +115,7 @@ fn with_subscriptions<T>(component: fn() -> T) -> T {
             resume(42)
         }
         @Cleanup.on_cleanup(cleanup_fn) => {
-            array_push(cleanups, cleanup_fn);
+            cleanups.push(cleanup_fn);
             resume(())
         }
         v => v
@@ -123,7 +123,7 @@ fn with_subscriptions<T>(component: fn() -> T) -> T {
 
     // component() 完成后，运行所有清理函数
     let i = 0;
-    while i < array_len(cleanups) {
+    while i < cleanups.len() {
         cleanups[i]();
         i = i + 1;
     };

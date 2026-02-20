@@ -1,6 +1,11 @@
-// 03 - Control flow: `if` and `match`
+// 03 - 控制流：`if` 与 `match`
 //
-// In Rusk, `if` and `match` are expressions, so they produce values.
+// 在 Rusk 里，`if` 和 `match` 都是“表达式”（expression），所以它们本身会产生一个值：
+// - 你可以把 `if ... { ... } else { ... }` 直接当成一个值赋给变量
+// - `match` 的每个分支也会产生一个值（类似 Rust / ML 的模式匹配）
+//
+// 对比（Rust）：
+//   let x = if n < 0 { -n } else { n };
 
 fn abs(n: int) -> int {
     if n < 0 { 0 - n } else { n }
@@ -22,4 +27,3 @@ fn main() -> int {
     std::println(f"classify({a}) = {label}");
     a
 }
-
