@@ -14,6 +14,7 @@ pub enum TokenKind {
     Ident(String),
     Int(i64),
     Float(f64),
+    Char(char),
     String(String),
     Bytes(Vec<u8>),
     FString(Vec<FStringPart>),
@@ -173,6 +174,11 @@ impl<'a> Lexer<'a> {
         // String literal.
         if ch == '"' {
             return self.lex_string();
+        }
+
+        // Char literal.
+        if ch == '\'' {
+            return self.lex_char();
         }
 
         // Punctuation / operators.
@@ -514,6 +520,15 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    fn lex_char(&mut self) -> Result<Token, LexError> {
+        let start = self.pos;
+        let value = self.scan_char()?;
+        Ok(Token {
+            kind: TokenKind::Char(value),
+            span: self.span(start, self.pos),
+        })
+    }
+
     fn lex_bytes(&mut self) -> Result<Token, LexError> {
         let start = self.pos;
         // Consume the `b`.
@@ -612,6 +627,113 @@ impl<'a> Lexer<'a> {
         }
 
         Ok(out)
+    }
+
+    fn scan_char(&mut self) -> Result<char, LexError> {
+        // Assumes the current char is `'`.
+        let quote_start = self.pos;
+        let Some('\'') = self.peek_char() else {
+            return Err(self.error_here("expected `'`"));
+        };
+        self.bump_char();
+
+        let Some(ch) = self.peek_char() else {
+            return Err(LexError {
+                message: "unterminated char literal".to_string(),
+                span: self.span(quote_start, self.pos),
+            });
+        };
+
+        if ch == '\'' {
+            return Err(self.error_here("empty char literal"));
+        }
+
+        let value = if ch == '\\' {
+            self.bump_char();
+            let Some(esc) = self.peek_char() else {
+                return Err(self.error_here("unterminated escape"));
+            };
+            self.bump_char();
+            match esc {
+                '\\' => '\\',
+                '\'' => '\'',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '0' => '\0',
+                'x' => {
+                    let hi = self
+                        .peek_char()
+                        .ok_or_else(|| self.error_here("unterminated \\x escape"))?;
+                    let lo = self
+                        .peek_nth_char(1)
+                        .ok_or_else(|| self.error_here("unterminated \\x escape"))?;
+                    if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+                        return Err(self.error_here("invalid \\xHH escape"));
+                    }
+                    self.bump_char();
+                    self.bump_char();
+                    let mut buf = [0u8; 2];
+                    buf[0] = hi as u8;
+                    buf[1] = lo as u8;
+                    let byte =
+                        u8::from_str_radix(std::str::from_utf8(&buf).expect("ascii hex"), 16)
+                            .map_err(|_| self.error_here("invalid \\xHH escape"))?;
+                    char::from_u32(byte as u32).expect("byte is valid unicode scalar")
+                }
+                'u' => {
+                    if self.peek_char() != Some('{') {
+                        return Err(self.error_here("expected `u{...}` escape"));
+                    }
+                    self.bump_char();
+                    let hex_start = self.pos;
+                    while let Some(h) = self.peek_char() {
+                        if h == '}' {
+                            break;
+                        }
+                        if h.is_ascii_hexdigit() {
+                            self.bump_char();
+                        } else {
+                            return Err(self.error_here("invalid unicode escape"));
+                        }
+                    }
+                    if self.peek_char() != Some('}') {
+                        return Err(self.error_here("unterminated unicode escape"));
+                    }
+                    let hex = &self.src[hex_start..self.pos];
+                    self.bump_char();
+                    let code = u32::from_str_radix(hex, 16)
+                        .map_err(|_| self.error_here("invalid unicode escape"))?;
+                    let Some(scalar) = char::from_u32(code) else {
+                        return Err(self.error_here("invalid unicode code point"));
+                    };
+                    scalar
+                }
+                _ => {
+                    return Err(LexError {
+                        message: format!("unknown escape `\\{esc}`"),
+                        span: self.span(self.pos.saturating_sub(2), self.pos),
+                    });
+                }
+            }
+        } else {
+            self.bump_char();
+            ch
+        };
+
+        match self.peek_char() {
+            Some('\'') => {
+                self.bump_char();
+                Ok(value)
+            }
+            Some(_) => {
+                Err(self.error_here("char literal must contain exactly one Unicode scalar value"))
+            }
+            None => Err(LexError {
+                message: "unterminated char literal".to_string(),
+                span: self.span(quote_start, self.pos),
+            }),
+        }
     }
 
     fn scan_bytes(&mut self) -> Result<Vec<u8>, LexError> {

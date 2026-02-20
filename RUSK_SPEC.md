@@ -437,7 +437,7 @@ The target type `T` for `is` / `as?` must be a **runtime-checkable nominal type*
 #### 3.6.1 Literals
 
 ```
-Literal        := "()" | BoolLit | IntLit | FloatLit | StringLit | BytesLit | FStringLit ;
+Literal        := "()" | BoolLit | IntLit | FloatLit | CharLit | StringLit | BytesLit | FStringLit ;
 BoolLit        := "true" | "false" ;
 IntLit         := DecIntLit | HexIntLit | OctIntLit | BinIntLit ;
 DecIntLit      := Digit (Digit | "_")* ;
@@ -448,7 +448,9 @@ BinIntLit      := "0b" BinDigit (BinDigit | "_")* ;
 FloatLit       := DecIntLit "." DecIntLit (ExponentPart)? | DecIntLit ExponentPart ;
 ExponentPart   := ("e" | "E") ("+" | "-")? DecIntLit ;
 
-// StringLit / BytesLit / FStringLit are lexical tokens with escapes (see below).
+CharLit        := /* lexical token */ ;
+
+// CharLit / StringLit / BytesLit / FStringLit are lexical tokens with escapes (see below).
 
 Digit          := "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 HexDigit       := Digit | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" ;
@@ -479,6 +481,19 @@ Formatted strings:
 - `f"..."` supports interpolation via `{ Expr }` segments.
 - `{{` and `}}` encode literal `{` and `}` respectively.
 - Desugaring is defined in §9.3.
+
+Char literals (`CharLit`):
+
+- Written as `'...'`.
+- Represent a single Unicode scalar value (`char`).
+- The literal must contain exactly one Unicode scalar value after escape processing.
+  - The compiler does **not** perform Unicode normalization as part of compilation.
+  - This means visually-similar sequences such as `'\u{0065}\u{0301}'` are rejected (two code points).
+- Support escapes:
+  - `\\`, `\'`
+  - `\n`, `\r`, `\t`, `\0`
+  - `\xHH` (exactly two hex digits; produces a code point in `U+0000..=U+00FF`)
+  - `\u{...}` (1+ hex digits, Unicode scalar value; surrogates and out-of-range values are rejected)
 
 #### 3.6.2 Array, Tuple, Struct, Enum literals
 
@@ -1178,6 +1193,10 @@ This is sufficient to express common HKTs such as `Functor<F<_>>` and `Monad<M<_
 Rusk uses a deliberately implementable form of local type inference:
 
 - Each expression is assigned a type, using unification-based constraints.
+- Integer literals may be inferred to `byte` from context; otherwise they default to `int`.
+  - Example: `let b: byte = 42;` infers the literal as `byte`.
+  - Example: `let x = 42; foo(x)` can infer `x` as `byte` if `foo` expects a `byte`.
+  - An integer literal inferred as `byte` must be in `0..=255`; otherwise it is a compile error.
 - Local `let` bindings are **monomorphic** (they do not implicitly introduce `forall`).
   Polymorphism is introduced only by explicit generic parameters on items (`fn`, `struct`,
   `enum`, `interface`).

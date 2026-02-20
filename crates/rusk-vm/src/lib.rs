@@ -4,7 +4,9 @@ extern crate alloc;
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use rusk_bytecode::{AbiType, EffectId, ExecutableModule, FunctionId, HostImportId, MethodId, TypeId};
+use rusk_bytecode::{
+    AbiType, EffectId, ExecutableModule, FunctionId, HostImportId, MethodId, TypeId,
+};
 use rusk_gc::{GcHeap, GcRef, ImmixHeap, Trace, Tracer};
 use std::collections::HashMap;
 
@@ -761,7 +763,9 @@ impl PrimitiveTypeIds {
     fn from_module(module: &ExecutableModule) -> Result<Self, VmError> {
         let lookup = |name: &str| {
             module.type_id(name).ok_or_else(|| VmError::InvalidState {
-                message: format!("missing required primitive type name `{name}` in module type table"),
+                message: format!(
+                    "missing required primitive type name `{name}` in module type table"
+                ),
             })
         };
 
@@ -1547,11 +1551,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     HeapValue::Struct {
                         type_id, fields, ..
                     } => {
-                        let idx = match struct_field_index(
-                            &vm.module,
-                            *type_id,
-                            field.as_str(),
-                        ) {
+                        let idx = match struct_field_index(&vm.module, *type_id, field.as_str()) {
                             Ok(i) => i,
                             Err(msg) => return trap(vm, msg),
                         };
@@ -1619,11 +1619,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     HeapValue::Struct {
                         type_id, fields, ..
                     } => {
-                        let idx = match struct_field_index(
-                            &vm.module,
-                            *type_id,
-                            field.as_str(),
-                        ) {
+                        let idx = match struct_field_index(&vm.module, *type_id, field.as_str()) {
                             Ok(i) => i,
                             Err(msg) => return trap(vm, msg),
                         };
@@ -2602,283 +2598,258 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 // even when the runtime receiver is a known primitive (e.g. `Hash::hash` on
                 // `int` keys in `core::map::Map`).
                 if method_type_args.is_empty() {
-                    let fast_out: Option<Value> =
-                        if vm.vcall_fast_path_ids.hash == Some(*method) {
-                            match (&recv, args.as_slice()) {
-                                (Value::Unit, []) => Some(Value::Int(0)),
-                                (Value::Bool(b), []) => {
-                                    Some(Value::Int(hash_int_fnv(if *b { 1 } else { 0 })))
-                                }
-                                (Value::Int(v), []) => Some(Value::Int(hash_int_fnv(*v))),
-                                (Value::Byte(v), []) => Some(Value::Int(hash_int_fnv(*v as i64))),
-                                (Value::Char(v), []) => {
-                                    Some(Value::Int(hash_int_fnv(*v as u32 as i64)))
-                                }
-                                (Value::String(s), []) => {
-                                    let bytes = match s.as_str(&vm.heap) {
-                                        Ok(s) => s.as_bytes(),
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall hash_string: {msg}"));
-                                        }
-                                    };
-                                    Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
-                                }
-                                (Value::Bytes(b), []) => {
-                                    let bytes = match b.as_slice(&vm.heap) {
-                                        Ok(b) => b,
-                                        Err(msg) => {
-                                            return trap(vm, format!("vcall hash_bytes: {msg}"));
-                                        }
-                                    };
-                                    Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
-                                }
-                                _ => None,
+                    let fast_out: Option<Value> = if vm.vcall_fast_path_ids.hash == Some(*method) {
+                        match (&recv, args.as_slice()) {
+                            (Value::Unit, []) => Some(Value::Int(0)),
+                            (Value::Bool(b), []) => {
+                                Some(Value::Int(hash_int_fnv(if *b { 1 } else { 0 })))
                             }
-                        } else if vm.vcall_fast_path_ids.eq == Some(*method) {
-                            match (&recv, args.as_slice()) {
-                                (Value::Unit, [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    matches!(other, Value::Unit).then_some(Value::Bool(true))
-                                }
-                                (Value::Bool(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Bool(b) => Some(Value::Bool(*a == b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Int(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Int(b) => Some(Value::Bool(*a == b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Float(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Float(b) => Some(Value::Bool(*a == b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Byte(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Byte(b) => Some(Value::Bool(*a == b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Char(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Char(b) => Some(Value::Bool(*a == b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::String(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::String(b) => {
-                                            let a_str = match a.as_str(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall string_eq: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            let b_str = match b.as_str(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall string_eq: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            Some(Value::Bool(a_str == b_str))
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Bytes(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Bytes(b) => {
-                                            let a_bytes = match a.as_slice(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall bytes_eq: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            let b_bytes = match b.as_slice(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall bytes_eq: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            Some(Value::Bool(a_bytes == b_bytes))
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                                _ => None,
+                            (Value::Int(v), []) => Some(Value::Int(hash_int_fnv(*v))),
+                            (Value::Byte(v), []) => Some(Value::Int(hash_int_fnv(*v as i64))),
+                            (Value::Char(v), []) => {
+                                Some(Value::Int(hash_int_fnv(*v as u32 as i64)))
                             }
-                        } else if vm.vcall_fast_path_ids.ne == Some(*method) {
-                            match (&recv, args.as_slice()) {
-                                (Value::Unit, [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    matches!(other, Value::Unit).then_some(Value::Bool(false))
-                                }
-                                (Value::Bool(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Bool(b) => Some(Value::Bool(*a != b)),
-                                        _ => None,
+                            (Value::String(s), []) => {
+                                let bytes = match s.as_str(&vm.heap) {
+                                    Ok(s) => s.as_bytes(),
+                                    Err(msg) => {
+                                        return trap(vm, format!("vcall hash_string: {msg}"));
                                     }
-                                }
-                                (Value::Int(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Int(b) => Some(Value::Bool(*a != b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Float(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Float(b) => Some(Value::Bool(*a != b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Byte(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Byte(b) => Some(Value::Bool(*a != b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Char(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Char(b) => Some(Value::Bool(*a != b)),
-                                        _ => None,
-                                    }
-                                }
-                                (Value::String(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::String(b) => {
-                                            let a_str = match a.as_str(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall string_ne: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            let b_str = match b.as_str(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall string_ne: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            Some(Value::Bool(a_str != b_str))
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                                (Value::Bytes(a), [other]) => {
-                                    let other = match read_value(frame, *other) {
-                                        Ok(v) => v,
-                                        Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
-                                    };
-                                    match other {
-                                        Value::Bytes(b) => {
-                                            let a_bytes = match a.as_slice(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall bytes_ne: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            let b_bytes = match b.as_slice(&vm.heap) {
-                                                Ok(s) => s,
-                                                Err(msg) => {
-                                                    return trap(
-                                                        vm,
-                                                        format!("vcall bytes_ne: {msg}"),
-                                                    );
-                                                }
-                                            };
-                                            Some(Value::Bool(a_bytes != b_bytes))
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                                _ => None,
+                                };
+                                Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
                             }
-                        } else {
-                            None
-                        };
+                            (Value::Bytes(b), []) => {
+                                let bytes = match b.as_slice(&vm.heap) {
+                                    Ok(b) => b,
+                                    Err(msg) => {
+                                        return trap(vm, format!("vcall hash_bytes: {msg}"));
+                                    }
+                                };
+                                Some(Value::Int(fnv1a_hash(bytes.iter().copied())))
+                            }
+                            _ => None,
+                        }
+                    } else if vm.vcall_fast_path_ids.eq == Some(*method) {
+                        match (&recv, args.as_slice()) {
+                            (Value::Unit, [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                matches!(other, Value::Unit).then_some(Value::Bool(true))
+                            }
+                            (Value::Bool(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Bool(b) => Some(Value::Bool(*a == b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Int(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Int(b) => Some(Value::Bool(*a == b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Float(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Float(b) => Some(Value::Bool(*a == b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Byte(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Byte(b) => Some(Value::Bool(*a == b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Char(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Char(b) => Some(Value::Bool(*a == b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::String(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::String(b) => {
+                                        let a_str = match a.as_str(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall string_eq: {msg}"));
+                                            }
+                                        };
+                                        let b_str = match b.as_str(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall string_eq: {msg}"));
+                                            }
+                                        };
+                                        Some(Value::Bool(a_str == b_str))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            (Value::Bytes(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Bytes(b) => {
+                                        let a_bytes = match a.as_slice(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall bytes_eq: {msg}"));
+                                            }
+                                        };
+                                        let b_bytes = match b.as_slice(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall bytes_eq: {msg}"));
+                                            }
+                                        };
+                                        Some(Value::Bool(a_bytes == b_bytes))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else if vm.vcall_fast_path_ids.ne == Some(*method) {
+                        match (&recv, args.as_slice()) {
+                            (Value::Unit, [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                matches!(other, Value::Unit).then_some(Value::Bool(false))
+                            }
+                            (Value::Bool(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Bool(b) => Some(Value::Bool(*a != b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Int(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Int(b) => Some(Value::Bool(*a != b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Float(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Float(b) => Some(Value::Bool(*a != b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Byte(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Byte(b) => Some(Value::Bool(*a != b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::Char(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Char(b) => Some(Value::Bool(*a != b)),
+                                    _ => None,
+                                }
+                            }
+                            (Value::String(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::String(b) => {
+                                        let a_str = match a.as_str(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall string_ne: {msg}"));
+                                            }
+                                        };
+                                        let b_str = match b.as_str(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall string_ne: {msg}"));
+                                            }
+                                        };
+                                        Some(Value::Bool(a_str != b_str))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            (Value::Bytes(a), [other]) => {
+                                let other = match read_value(frame, *other) {
+                                    Ok(v) => v,
+                                    Err(msg) => return trap(vm, format!("vcall arg: {msg}")),
+                                };
+                                match other {
+                                    Value::Bytes(b) => {
+                                        let a_bytes = match a.as_slice(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall bytes_ne: {msg}"));
+                                            }
+                                        };
+                                        let b_bytes = match b.as_slice(&vm.heap) {
+                                            Ok(s) => s,
+                                            Err(msg) => {
+                                                return trap(vm, format!("vcall bytes_ne: {msg}"));
+                                            }
+                                        };
+                                        Some(Value::Bool(a_bytes != b_bytes))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     if let Some(out) = fast_out {
                         if vm.collect_metrics {
@@ -2908,14 +2879,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         };
                         match obj {
                             HeapValue::Struct {
-                                type_id,
-                                type_args,
-                                ..
+                                type_id, type_args, ..
                             } => (*type_id, type_args.clone()),
                             HeapValue::Enum {
-                                type_id,
-                                type_args,
-                                ..
+                                type_id, type_args, ..
                             } => (*type_id, type_args.clone()),
                             HeapValue::Array(_)
                             | HeapValue::Tuple(_)
@@ -2945,7 +2912,10 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 let Some(fn_id) = vm.module.vcall_target(type_id, *method) else {
                     let type_name = vm.module.type_name(type_id).unwrap_or("<unknown>");
                     let method_name = vm.module.method_name(*method).unwrap_or("<unknown>");
-                    return trap(vm, format!("unresolved vcall method: {method_name} on {type_name}"));
+                    return trap(
+                        vm,
+                        format!("unresolved vcall method: {method_name} on {type_name}"),
+                    );
                 };
 
                 let Some(callee) = vm.module.function(fn_id) else {
@@ -3990,19 +3960,17 @@ fn type_test(
                     };
                     match obj {
                         HeapValue::Struct {
-                            type_id,
-                            type_args,
-                            ..
+                            type_id, type_args, ..
                         } => (*type_id, type_args.as_slice()),
                         HeapValue::Enum {
-                            type_id,
-                            type_args,
-                            ..
+                            type_id, type_args, ..
                         } => (*type_id, type_args.as_slice()),
                         _ => return Ok(false),
                     }
                 }
-                Value::TypeRep(_) | Value::Function(_) | Value::Continuation(_) => return Ok(false),
+                Value::TypeRep(_) | Value::Function(_) | Value::Continuation(_) => {
+                    return Ok(false);
+                }
             };
 
             let Some(ifaces) = module.interface_impls.get(dyn_type_id.0 as usize) else {
@@ -4265,14 +4233,10 @@ fn eval_core_intrinsic(
         I::IntUShr => match args.as_slice() {
             [Value::Int(a), Value::Int(sh)] => {
                 let Ok(sh) = u32::try_from(*sh) else {
-                    return Err(
-                        "core::intrinsics::int_ushr: shift amount out of range".to_string(),
-                    );
+                    return Err("core::intrinsics::int_ushr: shift amount out of range".to_string());
                 };
                 if sh >= 64 {
-                    return Err(
-                        "core::intrinsics::int_ushr: shift amount out of range".to_string(),
-                    );
+                    return Err("core::intrinsics::int_ushr: shift amount out of range".to_string());
                 }
                 Ok(Value::Int(((*a as u64) >> sh) as i64))
             }
@@ -4437,14 +4401,10 @@ fn eval_core_intrinsic(
         I::ByteShl => match args.as_slice() {
             [Value::Byte(a), Value::Int(sh)] => {
                 let Ok(sh) = u32::try_from(*sh) else {
-                    return Err(
-                        "core::intrinsics::byte_shl: shift amount out of range".to_string(),
-                    );
+                    return Err("core::intrinsics::byte_shl: shift amount out of range".to_string());
                 };
                 if sh >= 8 {
-                    return Err(
-                        "core::intrinsics::byte_shl: shift amount out of range".to_string(),
-                    );
+                    return Err("core::intrinsics::byte_shl: shift amount out of range".to_string());
                 }
                 Ok(Value::Byte(a.wrapping_shl(sh)))
             }
@@ -4453,14 +4413,10 @@ fn eval_core_intrinsic(
         I::ByteShr => match args.as_slice() {
             [Value::Byte(a), Value::Int(sh)] => {
                 let Ok(sh) = u32::try_from(*sh) else {
-                    return Err(
-                        "core::intrinsics::byte_shr: shift amount out of range".to_string(),
-                    );
+                    return Err("core::intrinsics::byte_shr: shift amount out of range".to_string());
                 };
                 if sh >= 8 {
-                    return Err(
-                        "core::intrinsics::byte_shr: shift amount out of range".to_string(),
-                    );
+                    return Err("core::intrinsics::byte_shr: shift amount out of range".to_string());
                 }
                 Ok(Value::Byte(a.wrapping_shr(sh)))
             }
@@ -4470,12 +4426,12 @@ fn eval_core_intrinsic(
             [Value::Byte(a), Value::Int(sh)] => {
                 let Ok(sh) = u32::try_from(*sh) else {
                     return Err(
-                        "core::intrinsics::byte_ushr: shift amount out of range".to_string(),
+                        "core::intrinsics::byte_ushr: shift amount out of range".to_string()
                     );
                 };
                 if sh >= 8 {
                     return Err(
-                        "core::intrinsics::byte_ushr: shift amount out of range".to_string(),
+                        "core::intrinsics::byte_ushr: shift amount out of range".to_string()
                     );
                 }
                 Ok(Value::Byte(a.wrapping_shr(sh)))
@@ -4724,9 +4680,7 @@ fn eval_core_intrinsic(
         I::StringNextIndex => match args.as_slice() {
             [Value::String(s), Value::Int(idx)] => {
                 if *idx < 0 {
-                    return Err(
-                        "core::intrinsics::string_next_index: idx must be >= 0".to_string()
-                    );
+                    return Err("core::intrinsics::string_next_index: idx must be >= 0".to_string());
                 }
                 let idx_usize: usize = (*idx)
                     .try_into()
@@ -4734,20 +4688,21 @@ fn eval_core_intrinsic(
 
                 let s_str = s.as_str(heap)?;
                 if idx_usize > s_str.len() {
-                    return Err("core::intrinsics::string_next_index: idx out of bounds".to_string());
+                    return Err(
+                        "core::intrinsics::string_next_index: idx out of bounds".to_string()
+                    );
                 }
                 if idx_usize == s_str.len() {
                     return Ok(Value::Int(-1));
                 }
                 if !s_str.is_char_boundary(idx_usize) {
                     return Err(
-                        "core::intrinsics::string_next_index: invalid UTF-8 boundary".to_string()
+                        "core::intrinsics::string_next_index: invalid UTF-8 boundary".to_string(),
                     );
                 }
-                let ch = s_str[idx_usize..]
-                    .chars()
-                    .next()
-                    .ok_or_else(|| "core::intrinsics::string_next_index: invalid UTF-8".to_string())?;
+                let ch = s_str[idx_usize..].chars().next().ok_or_else(|| {
+                    "core::intrinsics::string_next_index: invalid UTF-8".to_string()
+                })?;
                 let next_idx = idx_usize.checked_add(ch.len_utf8()).ok_or_else(|| {
                     "core::intrinsics::string_next_index: index overflow".to_string()
                 })?;
@@ -4774,7 +4729,7 @@ fn eval_core_intrinsic(
                 }
                 if !s_str.is_char_boundary(idx_usize) {
                     return Err(
-                        "core::intrinsics::string_codepoint_at: invalid UTF-8 boundary".to_string()
+                        "core::intrinsics::string_codepoint_at: invalid UTF-8 boundary".to_string(),
                     );
                 }
                 let ch = s_str[idx_usize..].chars().next().ok_or_else(|| {
@@ -5407,7 +5362,6 @@ fn eval_core_intrinsic(
             }
             _ => Err(bad_args("core::intrinsics::array_slice_ro")),
         },
-
     }
 }
 

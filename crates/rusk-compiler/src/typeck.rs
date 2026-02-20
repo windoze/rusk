@@ -4369,6 +4369,30 @@ enum ExprUse {
     Stmt,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct IntLitInfo {
+    min: i64,
+    max: i64,
+}
+
+impl IntLitInfo {
+    fn new(value: i64) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    fn merge(&mut self, other: IntLitInfo) {
+        self.min = self.min.min(other.min);
+        self.max = self.max.max(other.max);
+    }
+
+    fn fits_byte(&self) -> bool {
+        self.min >= 0 && self.max <= 255
+    }
+}
+
 #[derive(Clone, Debug)]
 struct InferCtx {
     next_type_var: TypeVarId,
@@ -4377,6 +4401,7 @@ struct InferCtx {
     con_bindings: HashMap<ConVarId, TyCon>,
     con_arities: HashMap<ConVarId, usize>,
     type_constraints: HashMap<TypeVarId, Vec<Ty>>,
+    int_lit_vars: HashMap<TypeVarId, IntLitInfo>,
 }
 
 impl InferCtx {
@@ -4388,12 +4413,22 @@ impl InferCtx {
             con_bindings: HashMap::new(),
             con_arities: HashMap::new(),
             type_constraints: HashMap::new(),
+            int_lit_vars: HashMap::new(),
         }
     }
 
     fn fresh_type_var(&mut self) -> Ty {
         let id = self.next_type_var;
         self.next_type_var = self.next_type_var.wrapping_add(1);
+        Ty::Var(id)
+    }
+
+    fn fresh_int_lit_var(&mut self, value: i64) -> Ty {
+        let ty = self.fresh_type_var();
+        let Ty::Var(id) = ty else {
+            return ty;
+        };
+        self.int_lit_vars.insert(id, IntLitInfo::new(value));
         Ty::Var(id)
     }
 
@@ -4406,6 +4441,140 @@ impl InferCtx {
 
     fn add_constraint(&mut self, var: TypeVarId, bound: Ty) {
         self.type_constraints.entry(var).or_default().push(bound);
+    }
+
+    fn default_unbound_int_literals(&mut self) {
+        // Integer literals can be inferred to `byte` by context, but fall back to `int` when
+        // otherwise unconstrained.
+        //
+        // This restores the pre-inference behavior for cases like:
+        // - `let xs = [1, 2, 3];`
+        // - `let n = 1 + 2;`
+        let vars: Vec<(TypeVarId, IntLitInfo)> = self
+            .int_lit_vars
+            .iter()
+            .map(|(id, info)| (*id, *info))
+            .collect();
+
+        for (id, info) in vars {
+            let resolved = self.resolve_ty(Ty::Var(id));
+            match resolved {
+                Ty::Var(rep) if rep == id => {
+                    if !self.type_bindings.contains_key(&id) {
+                        self.type_bindings.insert(id, Ty::Int);
+                    }
+                }
+                Ty::Var(rep) => {
+                    self.int_lit_vars
+                        .entry(rep)
+                        .and_modify(|existing| existing.merge(info))
+                        .or_insert(info);
+                    self.int_lit_vars.remove(&id);
+                }
+                _ => {
+                    self.int_lit_vars.remove(&id);
+                }
+            }
+        }
+    }
+
+    fn ty_for_error(&mut self, ty: Ty) -> Ty {
+        let ty = self.resolve_ty(ty);
+        match ty {
+            Ty::Var(id) if self.int_lit_vars.contains_key(&id) => Ty::Int,
+            Ty::Array(elem) => Ty::Array(Box::new(self.ty_for_error(*elem))),
+            Ty::Tuple(items) => {
+                Ty::Tuple(items.into_iter().map(|t| self.ty_for_error(t)).collect())
+            }
+            Ty::Fn { params, ret } => Ty::Fn {
+                params: params.into_iter().map(|p| self.ty_for_error(p)).collect(),
+                ret: Box::new(self.ty_for_error(*ret)),
+            },
+            Ty::Cont { param, ret } => Ty::Cont {
+                param: Box::new(self.ty_for_error(*param)),
+                ret: Box::new(self.ty_for_error(*ret)),
+            },
+            Ty::Readonly(inner) => Ty::Readonly(Box::new(self.ty_for_error(*inner))),
+            Ty::App(con, args) => Ty::App(
+                self.resolve_con(con),
+                args.into_iter().map(|a| self.ty_for_error(a)).collect(),
+            ),
+            Ty::Iface {
+                iface,
+                args,
+                assoc_bindings,
+            } => Ty::Iface {
+                iface,
+                args: args.into_iter().map(|a| self.ty_for_error(a)).collect(),
+                assoc_bindings: assoc_bindings
+                    .into_iter()
+                    .map(|(name, ty)| (name, self.ty_for_error(ty)))
+                    .collect(),
+            },
+            Ty::AssocProj {
+                iface,
+                iface_args,
+                assoc,
+                self_ty,
+            } => Ty::AssocProj {
+                iface,
+                iface_args: iface_args
+                    .into_iter()
+                    .map(|a| self.ty_for_error(a))
+                    .collect(),
+                assoc,
+                self_ty: Box::new(self.ty_for_error(*self_ty)),
+            },
+            other => other,
+        }
+    }
+
+    fn contains_infer_vars_except_int_lits(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(id) => !self.int_lit_vars.contains_key(id),
+            Ty::Array(elem) | Ty::Readonly(elem) => self.contains_infer_vars_except_int_lits(elem),
+            Ty::Tuple(items) => items
+                .iter()
+                .any(|item| self.contains_infer_vars_except_int_lits(item)),
+            Ty::Fn { params, ret } => {
+                params
+                    .iter()
+                    .any(|p| self.contains_infer_vars_except_int_lits(p))
+                    || self.contains_infer_vars_except_int_lits(ret)
+            }
+            Ty::Cont { param, ret } => {
+                self.contains_infer_vars_except_int_lits(param)
+                    || self.contains_infer_vars_except_int_lits(ret)
+            }
+            Ty::App(con, args) => {
+                matches!(con, TyCon::Var(_))
+                    || args
+                        .iter()
+                        .any(|a| self.contains_infer_vars_except_int_lits(a))
+            }
+            Ty::Iface {
+                args,
+                assoc_bindings,
+                ..
+            } => {
+                args.iter()
+                    .any(|a| self.contains_infer_vars_except_int_lits(a))
+                    || assoc_bindings
+                        .values()
+                        .any(|t| self.contains_infer_vars_except_int_lits(t))
+            }
+            Ty::AssocProj {
+                iface_args,
+                self_ty,
+                ..
+            } => {
+                iface_args
+                    .iter()
+                    .any(|a| self.contains_infer_vars_except_int_lits(a))
+                    || self.contains_infer_vars_except_int_lits(self_ty)
+            }
+            _ => false,
+        }
     }
 
     fn resolve_ty(&mut self, ty: Ty) -> Ty {
@@ -4530,6 +4699,52 @@ impl InferCtx {
                         span,
                     });
                 }
+
+                if let Some(info) = self.int_lit_vars.get(&id).copied() {
+                    match &other {
+                        Ty::Var(other_id) => {
+                            self.int_lit_vars
+                                .entry(*other_id)
+                                .and_modify(|existing| existing.merge(info))
+                                .or_insert(info);
+                            self.int_lit_vars.remove(&id);
+                            self.type_bindings.insert(id, other.clone());
+                            return Ok(other);
+                        }
+                        Ty::Int => {
+                            self.int_lit_vars.remove(&id);
+                            self.type_bindings.insert(id, other.clone());
+                            return Ok(other);
+                        }
+                        Ty::Byte => {
+                            if !info.fits_byte() {
+                                let desc = if info.min == info.max {
+                                    format!("integer literal `{}`", info.min)
+                                } else {
+                                    format!("integer literal range `{}..={}`", info.min, info.max)
+                                };
+                                return Err(TypeError {
+                                    message: format!(
+                                        "{desc} does not fit into `byte` (expected 0..=255)"
+                                    ),
+                                    span,
+                                });
+                            }
+                            self.int_lit_vars.remove(&id);
+                            self.type_bindings.insert(id, other.clone());
+                            return Ok(other);
+                        }
+                        _ => {
+                            return Err(TypeError {
+                                message: format!(
+                                    "type mismatch: integer literals can only be `int` or `byte`, got `{other}`"
+                                ),
+                                span,
+                            });
+                        }
+                    }
+                }
+
                 self.type_bindings.insert(id, other.clone());
                 Ok(other)
             }
@@ -4708,7 +4923,11 @@ impl InferCtx {
                 })
             }
             (a, b) => Err(TypeError {
-                message: format!("type mismatch: expected `{a}`, got `{b}`"),
+                message: {
+                    let a = self.ty_for_error(a);
+                    let b = self.ty_for_error(b);
+                    format!("type mismatch: expected `{a}`, got `{b}`")
+                },
                 span,
             }),
         }
@@ -5329,6 +5548,8 @@ impl<'a> FnTypechecker<'a> {
     }
 
     fn finish(&mut self) -> Result<(), TypeError> {
+        self.infer.default_unbound_int_literals();
+
         // Ensure constraints are satisfied.
         for (&var, ifaces) in self.infer.type_constraints.clone().iter() {
             let resolved = self.infer.resolve_ty(Ty::Var(var));
@@ -5840,8 +6061,9 @@ impl<'a> FnTypechecker<'a> {
         let ty = match expr {
             Expr::Unit { .. } => Ty::Unit,
             Expr::Bool { .. } => Ty::Bool,
-            Expr::Int { .. } => Ty::Int,
+            Expr::Int { value, .. } => self.infer.fresh_int_lit_var(*value),
             Expr::Float { .. } => Ty::Float,
+            Expr::Char { .. } => Ty::Char,
             Expr::String { .. } => Ty::String,
             Expr::Bytes { .. } => Ty::Bytes,
 
@@ -6361,7 +6583,7 @@ impl<'a> FnTypechecker<'a> {
         if !explicit_iface_args {
             for arg in &mut iface_args {
                 *arg = self.infer.resolve_ty(arg.clone());
-                if contains_infer_vars(arg) {
+                if self.infer.contains_infer_vars_except_int_lits(arg) {
                     return Err(TypeError {
                         message: format!(
                             "cannot infer interface type arguments for effect call `@{iface_name}.{}(...)`; use `@{iface_name}<...>.{}(...)`",
@@ -8054,7 +8276,16 @@ impl<'a> FnTypechecker<'a> {
         }
 
         let recv_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
-        let recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        let mut recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        if let Ty::Var(id) = strip_readonly(&recv_ty_resolved)
+            && self.infer.int_lit_vars.contains_key(&id)
+        {
+            // We don't support deferring interface-impl selection on an unconstrained receiver in
+            // this stage. Integer literals can be either `int` or `byte`, so apply the standard
+            // fallback to `int` when they need to act as an interface receiver (e.g. f-strings).
+            let _ = self.infer.unify(Ty::Var(*id), Ty::Int, args[0].span())?;
+            recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        }
         if !method_info.receiver_readonly && matches!(recv_ty_resolved, Ty::Readonly(_)) {
             return Err(TypeError {
                 message: format!(
@@ -8149,7 +8380,29 @@ impl<'a> FnTypechecker<'a> {
         span: Span,
     ) -> Result<Ty, TypeError> {
         let recv_ty = self.typecheck_expr(receiver, ExprUse::Value)?;
-        let recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        let mut recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        if let Ty::Var(id) = strip_readonly(&recv_ty_resolved)
+            && self.infer.int_lit_vars.contains_key(&id)
+        {
+            // Integer literals can be `int` or `byte`. When a literal is used as a method-call
+            // receiver, we need a concrete receiver type to resolve inherent methods / interface
+            // impls in this stage.
+            //
+            // Prefer the unique inherent-method owner when possible (e.g. `42.to_char()` should
+            // choose `int::to_char`). Otherwise, fall back to `int`.
+            let int_inherent = format!("int::{}", method.name);
+            let byte_inherent = format!("byte::{}", method.name);
+            let choose = if self.env.functions.contains_key(&byte_inherent)
+                && !self.env.functions.contains_key(&int_inherent)
+            {
+                Ty::Byte
+            } else {
+                Ty::Int
+            };
+            let _ = self.infer.unify(Ty::Var(*id), choose, receiver.span())?;
+            recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        }
+
         let receiver_is_readonly = matches!(recv_ty_resolved, Ty::Readonly(_));
         let mut static_inherent: Option<String> = None;
 
@@ -8841,9 +9094,9 @@ impl<'a> FnTypechecker<'a> {
 
     fn typecheck_unary(&mut self, op: UnaryOp, expr: &Expr, span: Span) -> Result<Ty, TypeError> {
         let t = self.typecheck_expr(expr, ExprUse::Value)?;
+        let t_resolved = self.infer.resolve_ty(t.clone());
         match op {
             UnaryOp::Not => {
-                let t_resolved = self.infer.resolve_ty(t.clone());
                 match strip_readonly(&t_resolved) {
                     Ty::Bool | Ty::Never => {
                         let _ = self.unify_expected(Ty::Bool, t, span)?;
@@ -8856,6 +9109,9 @@ impl<'a> FnTypechecker<'a> {
                     Ty::Byte => {
                         let _ = self.unify_expected(Ty::Byte, t, span)?;
                         return Ok(Ty::Byte);
+                    }
+                    Ty::Var(id) if self.infer.int_lit_vars.contains_key(id) => {
+                        return Ok(Ty::Var(*id));
                     }
                     _ => {}
                 }
@@ -8884,38 +9140,39 @@ impl<'a> FnTypechecker<'a> {
                 )?;
                 Ok(recv_for_dispatch.clone())
             }
-            UnaryOp::Neg => {
-                let t_resolved = self.infer.resolve_ty(t);
-                match strip_readonly(&t_resolved) {
-                    Ty::Int => Ok(Ty::Int),
-                    Ty::Float => Ok(Ty::Float),
-                    _ => {
-                        let recv_for_dispatch = strip_readonly(&t_resolved);
-                        let Ty::App(TyCon::Named(type_name), _type_args) = recv_for_dispatch else {
-                            return Err(TypeError {
-                                message: format!(
-                                    "unary `-` requires `int`, `float`, or an impl of `core::ops::Neg` for a concrete type, got `{t_resolved}`"
-                                ),
-                                span,
-                            });
-                        };
-                        if self.env.interfaces.contains_key(type_name) {
-                            return Err(TypeError {
+            UnaryOp::Neg => match strip_readonly(&t_resolved) {
+                Ty::Int => Ok(Ty::Int),
+                Ty::Float => Ok(Ty::Float),
+                Ty::Var(id) if self.infer.int_lit_vars.contains_key(id) => {
+                    let _ = self.unify_expected(Ty::Int, t, span)?;
+                    Ok(Ty::Int)
+                }
+                _ => {
+                    let recv_for_dispatch = strip_readonly(&t_resolved);
+                    let Ty::App(TyCon::Named(type_name), _type_args) = recv_for_dispatch else {
+                        return Err(TypeError {
+                            message: format!(
+                                "unary `-` requires `int`, `float`, or an impl of `core::ops::Neg` for a concrete type, got `{t_resolved}`"
+                            ),
+                            span,
+                        });
+                    };
+                    if self.env.interfaces.contains_key(type_name) {
+                        return Err(TypeError {
                                 message: "unary `-` is not supported on interface-typed receivers in this stage (method is Self-only)"
                                     .to_string(),
                                 span,
                             });
-                        }
-
-                        self.ensure_implements_interface_type(
-                            recv_for_dispatch,
-                            &Ty::App(TyCon::Named("core::ops::Neg".to_string()), vec![]),
-                            span,
-                        )?;
-                        Ok(recv_for_dispatch.clone())
                     }
+
+                    self.ensure_implements_interface_type(
+                        recv_for_dispatch,
+                        &Ty::App(TyCon::Named("core::ops::Neg".to_string()), vec![]),
+                        span,
+                    )?;
+                    Ok(recv_for_dispatch.clone())
                 }
-            }
+            },
         }
     }
 
@@ -8945,6 +9202,10 @@ impl<'a> FnTypechecker<'a> {
                 let base = self.infer.resolve_ty(base);
 
                 match base {
+                    Ty::Var(id) if self.infer.int_lit_vars.contains_key(&id) => {
+                        let _ = self.infer.unify(Ty::Var(id), Ty::Int, span)?;
+                        Ok(Ty::Int)
+                    }
                     Ty::Int | Ty::Float => Ok(base),
                     _ => {
                         let iface = match op {
@@ -8993,6 +9254,7 @@ impl<'a> FnTypechecker<'a> {
                 let base = self.infer.resolve_ty(base);
 
                 match base {
+                    Ty::Var(id) if self.infer.int_lit_vars.contains_key(&id) => Ok(Ty::Var(id)),
                     Ty::Int | Ty::Byte => Ok(base),
                     _ => {
                         let iface = match op {
@@ -9036,7 +9298,9 @@ impl<'a> FnTypechecker<'a> {
                 let lt = self.infer.resolve_ty(lt);
                 let base = strip_readonly(&lt).clone();
 
-                if matches!(base, Ty::Int | Ty::Byte) {
+                if matches!(base, Ty::Int | Ty::Byte)
+                    || matches!(&base, Ty::Var(id) if self.infer.int_lit_vars.contains_key(id))
+                {
                     return Ok(base);
                 }
 
@@ -9085,6 +9349,21 @@ impl<'a> FnTypechecker<'a> {
                 let rt_base = strip_readonly(&rt).clone();
                 let base = self.join_types(lt_base, rt_base, span)?;
                 let base = self.infer.resolve_ty(base);
+
+                if let Ty::Var(id) = &base
+                    && self.infer.int_lit_vars.contains_key(id)
+                {
+                    // Integer literal comparisons fall back to `int` unless constrained by the
+                    // surrounding context. For ordering comparisons, `byte` is not supported, so
+                    // eagerly constrain to `int`.
+                    if matches!(
+                        op,
+                        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+                    ) {
+                        let _ = self.infer.unify(base.clone(), Ty::Int, span)?;
+                    }
+                    return Ok(Ty::Bool);
+                }
 
                 let prim_ok = match op {
                     BinaryOp::Eq | BinaryOp::Ne => matches!(

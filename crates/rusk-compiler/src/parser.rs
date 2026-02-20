@@ -1421,8 +1421,7 @@ impl<'a> Parser<'a> {
                 // Shift operators (multi-token): `<<`, `>>`, `>>>`.
                 TokenKind::Lt => {
                     let next = self.peek_token()?;
-                    if matches!(next.kind, TokenKind::Lt) && self.adjacent(&self.lookahead, &next)
-                    {
+                    if matches!(next.kind, TokenKind::Lt) && self.adjacent(&self.lookahead, &next) {
                         extra_op_tokens = 1;
                         (15, 16, Infix::Binary(BinaryOp::Shl))
                     } else {
@@ -1431,8 +1430,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Gt => {
                     let (next, next2) = self.peek2_tokens()?;
-                    if matches!(next.kind, TokenKind::Gt) && self.adjacent(&self.lookahead, &next)
-                    {
+                    if matches!(next.kind, TokenKind::Gt) && self.adjacent(&self.lookahead, &next) {
                         if matches!(next2.kind, TokenKind::Gt) && self.adjacent(&next, &next2) {
                             extra_op_tokens = 2;
                             (15, 16, Infix::Binary(BinaryOp::UShr))
@@ -1774,8 +1772,7 @@ impl<'a> Parser<'a> {
 
                 TokenKind::Lt => {
                     let next = self.peek_token()?;
-                    if matches!(next.kind, TokenKind::Lt) && self.adjacent(&self.lookahead, &next)
-                    {
+                    if matches!(next.kind, TokenKind::Lt) && self.adjacent(&self.lookahead, &next) {
                         extra_op_tokens = 1;
                         (15, 16, Infix::Binary(BinaryOp::Shl))
                     } else {
@@ -1784,8 +1781,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Gt => {
                     let (next, next2) = self.peek2_tokens()?;
-                    if matches!(next.kind, TokenKind::Gt) && self.adjacent(&self.lookahead, &next)
-                    {
+                    if matches!(next.kind, TokenKind::Gt) && self.adjacent(&self.lookahead, &next) {
                         if matches!(next2.kind, TokenKind::Gt) && self.adjacent(&next, &next2) {
                             extra_op_tokens = 2;
                             (15, 16, Infix::Binary(BinaryOp::UShr))
@@ -1926,6 +1922,13 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 })
             }
+            TokenKind::Char(c) => {
+                let tok = self.bump()?;
+                Ok(Expr::Char {
+                    value: c,
+                    span: tok.span,
+                })
+            }
             TokenKind::String(s) => {
                 let tok = self.bump()?;
                 Ok(Expr::String {
@@ -1993,6 +1996,13 @@ impl<'a> Parser<'a> {
                 let tok = self.bump()?;
                 Ok(Expr::Float {
                     value: v,
+                    span: tok.span,
+                })
+            }
+            TokenKind::Char(c) => {
+                let tok = self.bump()?;
+                Ok(Expr::Char {
+                    value: c,
                     span: tok.span,
                 })
             }

@@ -385,6 +385,10 @@ pub enum Expr {
         value: f64,
         span: Span,
     },
+    Char {
+        value: char,
+        span: Span,
+    },
     String {
         value: String,
         span: Span,
@@ -513,6 +517,7 @@ impl Expr {
             | Expr::Bool { span, .. }
             | Expr::Int { span, .. }
             | Expr::Float { span, .. }
+            | Expr::Char { span, .. }
             | Expr::String { span, .. }
             | Expr::Bytes { span, .. }
             | Expr::Path { span, .. }

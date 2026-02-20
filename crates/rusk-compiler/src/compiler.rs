@@ -148,6 +148,7 @@ fn free_value_vars_in_expr(expr: &Expr, bound: &BTreeSet<String>, out: &mut BTre
         | Expr::Bool { .. }
         | Expr::Int { .. }
         | Expr::Float { .. }
+        | Expr::Char { .. }
         | Expr::String { .. }
         | Expr::Bytes { .. } => {}
 
@@ -332,6 +333,7 @@ fn collect_captured_vars_in_expr(
         | Expr::Bool { .. }
         | Expr::Int { .. }
         | Expr::Float { .. }
+        | Expr::Char { .. }
         | Expr::String { .. }
         | Expr::Bytes { .. } => {}
 
@@ -1160,63 +1162,131 @@ fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
         );
 
         let checks: &[OpsLangItemCheck] = &[
-            ("core::ops::Add", "add", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::Sub", "sub", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::Mul", "mul", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::Div", "div", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::Rem", "rem", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::BitAnd", "bitand", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::BitOr", "bitor", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::BitXor", "bitxor", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::Shl", "shl", true, Some(OpsParamKind::Int), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::Shr", "shr", true, Some(OpsParamKind::Int), |t| {
-                matches!(t, Ty::SelfType)
-            }),
-            ("core::ops::UShr", "ushr", true, Some(OpsParamKind::Int), |t| {
-                matches!(t, Ty::SelfType)
-            }),
+            (
+                "core::ops::Add",
+                "add",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::Sub",
+                "sub",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::Mul",
+                "mul",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::Div",
+                "div",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::Rem",
+                "rem",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::BitAnd",
+                "bitand",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::BitOr",
+                "bitor",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::BitXor",
+                "bitxor",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::Shl",
+                "shl",
+                true,
+                Some(OpsParamKind::Int),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::Shr",
+                "shr",
+                true,
+                Some(OpsParamKind::Int),
+                |t| matches!(t, Ty::SelfType),
+            ),
+            (
+                "core::ops::UShr",
+                "ushr",
+                true,
+                Some(OpsParamKind::Int),
+                |t| matches!(t, Ty::SelfType),
+            ),
             ("core::ops::Neg", "neg", true, None, |t| {
                 matches!(t, Ty::SelfType)
             }),
             ("core::ops::Not", "not", true, None, |t| {
                 matches!(t, Ty::SelfType)
             }),
-            ("core::ops::Lt", "lt", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::Bool)
-            }),
-            ("core::ops::Le", "le", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::Bool)
-            }),
-            ("core::ops::Gt", "gt", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::Bool)
-            }),
-            ("core::ops::Ge", "ge", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::Bool)
-            }),
-            ("core::ops::Eq", "eq", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::Bool)
-            }),
-            ("core::ops::Ne", "ne", true, Some(OpsParamKind::SelfType), |t| {
-                matches!(t, Ty::Bool)
-            }),
+            (
+                "core::ops::Lt",
+                "lt",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::Bool),
+            ),
+            (
+                "core::ops::Le",
+                "le",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::Bool),
+            ),
+            (
+                "core::ops::Gt",
+                "gt",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::Bool),
+            ),
+            (
+                "core::ops::Ge",
+                "ge",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::Bool),
+            ),
+            (
+                "core::ops::Eq",
+                "eq",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::Bool),
+            ),
+            (
+                "core::ops::Ne",
+                "ne",
+                true,
+                Some(OpsParamKind::SelfType),
+                |t| matches!(t, Ty::Bool),
+            ),
         ];
 
         for (iface_name, method_name, receiver_readonly, param_kind, ret_ok) in checks {
@@ -1397,11 +1467,15 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
         // `byte` bit operations.
         "core::intrinsics::byte_and"
         | "core::intrinsics::byte_or"
-        | "core::intrinsics::byte_xor" => Some(sig(vec![HostType::Any, HostType::Any], HostType::Any)),
+        | "core::intrinsics::byte_xor" => {
+            Some(sig(vec![HostType::Any, HostType::Any], HostType::Any))
+        }
         "core::intrinsics::byte_not" => Some(sig(vec![HostType::Any], HostType::Any)),
         "core::intrinsics::byte_shl"
         | "core::intrinsics::byte_shr"
-        | "core::intrinsics::byte_ushr" => Some(sig(vec![HostType::Any, HostType::Int], HostType::Any)),
+        | "core::intrinsics::byte_ushr" => {
+            Some(sig(vec![HostType::Any, HostType::Int], HostType::Any))
+        }
 
         "core::intrinsics::int_to_char" => Some(sig(vec![HostType::Int], HostType::Any)),
         "core::intrinsics::int_try_char" => Some(sig(vec![HostType::Int], HostType::Any)),
@@ -1424,8 +1498,7 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
             vec![HostType::String, HostType::Int, HostType::Any],
             HostType::String,
         )),
-        "core::intrinsics::string_next_index"
-        | "core::intrinsics::string_codepoint_at" => {
+        "core::intrinsics::string_next_index" | "core::intrinsics::string_codepoint_at" => {
             Some(sig(vec![HostType::String, HostType::Int], HostType::Int))
         }
         "core::intrinsics::string_from_chars" => Some(sig(
@@ -1777,7 +1850,11 @@ impl Compiler {
             }
 
             // Shifts (`<<`, `>>`, `>>>`) take an `int` shift amount.
-            for (iface, method, suffix) in [("Shl", "shl", "shl"), ("Shr", "shr", "shr"), ("UShr", "ushr", "ushr")] {
+            for (iface, method, suffix) in [
+                ("Shl", "shl", "shl"),
+                ("Shr", "shr", "shr"),
+                ("UShr", "ushr", "ushr"),
+            ] {
                 let _ = synthesize_ops_wrapper(
                     self,
                     &format!("impl::core::ops::{iface}::for::{prim}::{method}"),
@@ -5777,7 +5854,24 @@ impl<'a> FunctionLowerer<'a> {
         match expr {
             Expr::Unit { .. } => Ok(self.alloc_unit()),
             Expr::Bool { value, .. } => Ok(self.alloc_bool(*value)),
-            Expr::Int { value, .. } => Ok(self.alloc_int(*value)),
+            Expr::Int { value, .. } => {
+                match self.expr_ty(expr).map(|t| self.strip_readonly_ty(t)) {
+                    Some(Ty::Byte) => {
+                        let int_local = self.alloc_int(*value);
+                        self.lower_named_call(
+                            "core::intrinsics::int_to_byte",
+                            vec![Operand::Local(int_local)],
+                        )
+                    }
+                    Some(Ty::Int) | None => Ok(self.alloc_int(*value)),
+                    Some(other) => Err(CompileError::new(
+                        format!(
+                            "internal error: integer literal lowered with unexpected type `{other}`"
+                        ),
+                        expr.span(),
+                    )),
+                }
+            }
             Expr::Float { value, .. } => {
                 let dst = self.alloc_local();
                 self.emit(Instruction::Const {
@@ -5785,6 +5879,14 @@ impl<'a> FunctionLowerer<'a> {
                     value: ConstValue::Float(*value),
                 });
                 Ok(dst)
+            }
+            Expr::Char { value, .. } => {
+                let code = *value as u32 as i64;
+                let code_local = self.alloc_int(code);
+                self.lower_named_call(
+                    "core::intrinsics::int_to_char",
+                    vec![Operand::Local(code_local)],
+                )
             }
             Expr::String { value, .. } => {
                 let dst = self.alloc_local();

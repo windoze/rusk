@@ -120,6 +120,102 @@ fn byte_and_char_support_equality_ops() {
 }
 
 #[test]
+fn infers_integer_literals_to_byte_from_context() {
+    let src = r#"
+        fn take_byte(x: byte) -> int { x.to_int() }
+
+        fn annotated_literal_is_byte() -> int {
+            let y: byte = 42;
+            y.to_int()
+        }
+
+        fn inferred_via_call_arg() -> int {
+            let x = 42;
+            take_byte(x)
+        }
+    "#;
+
+    assert_eq!(
+        run0(src, "annotated_literal_is_byte").expect("run"),
+        AbiValue::Int(42)
+    );
+    assert_eq!(
+        run0(src, "inferred_via_call_arg").expect("run"),
+        AbiValue::Int(42)
+    );
+}
+
+#[test]
+fn rejects_out_of_range_integer_literals_for_byte_inference() {
+    let src = r#"
+        fn bad() -> unit {
+            let _b: byte = 256;
+            ()
+        }
+    "#;
+
+    let err = compile(src).expect_err("should fail");
+    assert!(
+        err.message.contains("does not fit into `byte`"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn supports_char_literals_and_escapes() {
+    let src = r#"
+        fn basic() -> int { 'a'.to_int() }
+        fn hex_escape() -> int { '\x41'.to_int() }
+        fn unicode_escape() -> int { '\u{1F600}'.to_int() }
+    "#;
+
+    assert_eq!(run0(src, "basic").expect("run"), AbiValue::Int(97));
+    assert_eq!(run0(src, "hex_escape").expect("run"), AbiValue::Int(65));
+    assert_eq!(
+        run0(src, "unicode_escape").expect("run"),
+        AbiValue::Int(0x1F600)
+    );
+}
+
+#[test]
+fn rejects_invalid_unicode_code_points_in_char_literals() {
+    let src = r#"
+        fn bad() -> unit {
+            let _xs = ['\u{D800}', '\u{DFFF}', '\u{110000}'];
+            ()
+        }
+    "#;
+
+    let err = compile(src).expect_err("should fail");
+    assert!(
+        err.message.contains("invalid unicode code point"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn rejects_multi_codepoint_char_literals() {
+    let src = r#"
+        fn bad1() -> unit {
+            let _c = 'ab';
+            ()
+        }
+
+        fn bad2() -> unit {
+            let _c = '\u{0065}\u{0301}';
+            ()
+        }
+    "#;
+
+    let err = compile(src).expect_err("should fail");
+    assert!(
+        err.message
+            .contains("char literal must contain exactly one"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn bytes_index_get_and_slice() {
     let src = r#"
         fn index_ok() -> int {
