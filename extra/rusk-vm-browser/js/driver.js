@@ -6,7 +6,7 @@
  */
 
 /**
- * @typedef {undefined | boolean | bigint | number | string | Uint8Array} AbiValue
+ * @typedef {undefined | boolean | bigint | number | string | Uint8Array | ContinuationHandle} AbiValue
  *
  * @typedef {{ index: number, generation: number }} ContinuationHandle
  *
@@ -72,4 +72,3 @@ export async function runVm(vm, opts = {}) {
     }
   }
 }
-

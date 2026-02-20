@@ -11,16 +11,128 @@ const VM_GC_TRIGGER_ALLOCATIONS: usize = 50_000;
 mod resume;
 mod step;
 
-pub use resume::{vm_drop_continuation, vm_resume};
+pub use resume::vm_resume_pinned_continuation_tail;
+pub use resume::{vm_drop_continuation, vm_drop_pinned_continuation, vm_resume};
 pub use step::vm_step;
 
 /// A handle to a captured continuation produced by `perform`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContinuationHandle {
-    /// A stable handle index (currently always `0`; reserved for future use).
+    /// A stable handle index.
+    ///
+    /// - `0` is reserved for the single outstanding external effect suspension handle returned in
+    ///   [`StepResult::Request`].
+    /// - Non-zero values refer to entries in the per-VM pinned continuation table used for
+    ///   host-storable continuation values (`AbiValue::Continuation`).
     pub index: u32,
     /// A generation counter used to invalidate stale handles.
     pub generation: u32,
+}
+
+#[derive(Debug, Default)]
+struct PinnedContinuations {
+    slots: Vec<PinnedContinuationSlot>,
+    free: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct PinnedContinuationSlot {
+    generation: u32,
+    token: Option<ContinuationToken>,
+}
+
+impl PinnedContinuations {
+    fn pin(&mut self, token: ContinuationToken) -> Result<ContinuationHandle, String> {
+        let slot_index: u32 = match self.free.pop() {
+            Some(idx) => idx,
+            None => {
+                let idx: u32 = self.slots.len().try_into().map_err(|_| {
+                    "pinned continuation table overflow (too many continuations)".to_string()
+                })?;
+                self.slots.push(PinnedContinuationSlot {
+                    generation: 0,
+                    token: None,
+                });
+                idx
+            }
+        };
+        let slot_index_usize: usize = slot_index as usize;
+        let Some(slot) = self.slots.get_mut(slot_index_usize) else {
+            return Err("internal error: pinned continuation slot out of range".to_string());
+        };
+        slot.token = Some(token);
+
+        // Reserve `index == 0` for the step API suspended continuation handle.
+        let index = slot_index
+            .checked_add(1)
+            .ok_or_else(|| "pinned continuation handle overflow".to_string())?;
+
+        Ok(ContinuationHandle {
+            index,
+            generation: slot.generation,
+        })
+    }
+
+    fn resolve(&self, handle: ContinuationHandle) -> Result<ContinuationToken, String> {
+        if handle.index == 0 {
+            return Err("invalid pinned continuation handle: index 0 is reserved".to_string());
+        }
+        let slot_index = handle.index - 1;
+        let slot_index_usize: usize = slot_index as usize;
+        let Some(slot) = self.slots.get(slot_index_usize) else {
+            return Err("invalid pinned continuation handle: out of range".to_string());
+        };
+        if slot.generation != handle.generation {
+            return Err("invalid pinned continuation handle: generation mismatch".to_string());
+        }
+        let Some(token) = slot.token.as_ref() else {
+            return Err("invalid pinned continuation handle: dropped".to_string());
+        };
+        if token.state.borrow().is_none() {
+            return Err("invalid pinned continuation handle: already consumed".to_string());
+        }
+        Ok(token.clone())
+    }
+
+    fn drop_pinned(&mut self, handle: ContinuationHandle) -> Result<(), VmError> {
+        if handle.index == 0 {
+            return Err(VmError::InvalidContinuation {
+                message: "invalid pinned continuation handle: index 0 is reserved".to_string(),
+            });
+        }
+        let slot_index = handle.index - 1;
+        let slot_index_usize: usize = slot_index as usize;
+        let Some(slot) = self.slots.get_mut(slot_index_usize) else {
+            return Err(VmError::InvalidContinuation {
+                message: "invalid pinned continuation handle: out of range".to_string(),
+            });
+        };
+        if slot.generation != handle.generation {
+            return Err(VmError::InvalidContinuation {
+                message: "invalid pinned continuation handle: generation mismatch".to_string(),
+            });
+        }
+        if slot.token.is_none() {
+            return Err(VmError::InvalidContinuation {
+                message: "invalid pinned continuation handle: already dropped".to_string(),
+            });
+        }
+
+        slot.token = None;
+        slot.generation = slot.generation.wrapping_add(1);
+        self.free.push(slot_index);
+        Ok(())
+    }
+}
+
+impl Trace for PinnedContinuations {
+    fn trace(&self, tracer: &mut dyn Tracer) {
+        for slot in &self.slots {
+            if let Some(token) = &slot.token {
+                token.trace(tracer);
+            }
+        }
+    }
 }
 
 /// Result of a single VM stepping operation.
@@ -299,6 +411,7 @@ impl Value {
     fn from_abi(
         heap: &mut ImmixHeap<HeapValue>,
         gc_allocations_since_collect: &mut usize,
+        pinned_continuations: &PinnedContinuations,
         v: &AbiValue,
     ) -> Result<Self, String> {
         Ok(match v {
@@ -308,10 +421,17 @@ impl Value {
             AbiValue::Float(x) => Value::Float(*x),
             AbiValue::String(s) => alloc_string(heap, gc_allocations_since_collect, s.clone())?,
             AbiValue::Bytes(b) => alloc_bytes(heap, gc_allocations_since_collect, b.clone())?,
+            AbiValue::Continuation(h) => {
+                Value::Continuation(pinned_continuations.resolve(h.clone())?)
+            }
         })
     }
 
-    fn try_to_abi(&self, heap: &ImmixHeap<HeapValue>) -> Result<Option<AbiValue>, String> {
+    fn try_to_abi(
+        &self,
+        heap: &ImmixHeap<HeapValue>,
+        pinned_continuations: &mut PinnedContinuations,
+    ) -> Result<Option<AbiValue>, String> {
         Ok(Some(match self {
             Value::Unit => AbiValue::Unit,
             Value::Bool(b) => AbiValue::Bool(*b),
@@ -319,12 +439,12 @@ impl Value {
             Value::Float(x) => AbiValue::Float(*x),
             Value::String(s) => AbiValue::String(s.as_str(heap)?.to_string()),
             Value::Bytes(b) => AbiValue::Bytes(b.as_slice(heap)?.to_vec()),
+            Value::Continuation(k) => AbiValue::Continuation(pinned_continuations.pin(k.clone())?),
             Value::Byte(_)
             | Value::Char(_)
             | Value::TypeRep(_)
             | Value::Ref(_)
-            | Value::Function(_)
-            | Value::Continuation(_) => {
+            | Value::Function(_) => {
                 return Ok(None);
             }
         }))
@@ -552,6 +672,7 @@ pub struct Vm {
     host_fns: Vec<Option<Box<dyn HostFn>>>,
     in_host_call: bool,
     continuation_generation: u32,
+    pinned_continuations: PinnedContinuations,
     type_reps: TypeReps,
 
     metrics: VmMetrics,
@@ -633,6 +754,7 @@ impl Vm {
             generic_specializations: HashMap::new(),
             in_host_call: false,
             continuation_generation: 0,
+            pinned_continuations: PinnedContinuations::default(),
             type_reps: TypeReps::default(),
             metrics: VmMetrics::default(),
             collect_metrics: false,
@@ -822,6 +944,7 @@ impl Vm {
     pub fn collect_garbage_now(&mut self) {
         let roots = VmRoots {
             frames: &self.frames,
+            pinned_continuations: &self.pinned_continuations,
         };
         self.heap.collect(&roots);
         self.gc_allocations_since_collect = 0;
@@ -830,6 +953,7 @@ impl Vm {
 
 struct VmRoots<'a> {
     frames: &'a [Frame],
+    pinned_continuations: &'a PinnedContinuations,
 }
 
 impl Trace for VmRoots<'_> {
@@ -839,6 +963,7 @@ impl Trace for VmRoots<'_> {
                 v.trace(tracer);
             }
         }
+        self.pinned_continuations.trace(tracer);
     }
 }
 
@@ -2881,6 +3006,7 @@ fn call_host_import(
     module: &ExecutableModule,
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
+    pinned_continuations: &mut PinnedContinuations,
     host_fns: &mut Vec<Option<Box<dyn HostFn>>>,
     in_host_call: &mut bool,
     frame: &mut Frame,
@@ -2919,7 +3045,7 @@ fn call_host_import(
             ));
         };
         let Some(abi) = v
-            .try_to_abi(heap)
+            .try_to_abi(heap, pinned_continuations)
             .map_err(|msg| format!("host call `{}` arg conversion: {msg}", import.name))?
         else {
             return Err(format!(
@@ -2961,8 +3087,13 @@ fn call_host_import(
     }
 
     if let Some(dst) = dst {
-        let ret = Value::from_abi(heap, gc_allocations_since_collect, &abi_ret)
-            .map_err(|msg| format!("host call `{}` return conversion: {msg}", import.name))?;
+        let ret = Value::from_abi(
+            heap,
+            gc_allocations_since_collect,
+            pinned_continuations,
+            &abi_ret,
+        )
+        .map_err(|msg| format!("host call `{}` return conversion: {msg}", import.name))?;
         write_value(frame, dst, ret)
             .map_err(|msg| format!("host call `{}` dst: {msg}", import.name))?;
     }

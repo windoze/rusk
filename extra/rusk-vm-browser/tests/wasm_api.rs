@@ -1,4 +1,6 @@
 use js_sys::{Array, BigInt, Function, Reflect, Uint8Array};
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -115,6 +117,138 @@ fn host_import_add_int_smoke() {
     let v = done_value(&r);
     let v: BigInt = v.dyn_into().expect("done value bigint");
     assert_eq!(i64::try_from(v).unwrap(), 3);
+}
+
+#[wasm_bindgen_test]
+fn host_import_continuation_roundtrip_smoke() {
+    let rbc: &[u8] = include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/call_host_continuation_roundtrip.rbc"
+    ));
+    let mut vm = Vm::new(rbc).expect("vm init");
+
+    let host_imports = vm.list_host_imports();
+
+    let mut store_id = None;
+    let mut take_id = None;
+    for imp in host_imports.iter() {
+        let name = Reflect::get(&imp, &JsValue::from_str("name"))
+            .unwrap()
+            .as_string()
+            .unwrap();
+        let id = Reflect::get(&imp, &JsValue::from_str("id"))
+            .unwrap()
+            .as_f64()
+            .unwrap() as u32;
+        match name.as_str() {
+            "test::store_cont" => store_id = Some(id),
+            "test::take_cont" => take_id = Some(id),
+            _ => {}
+        }
+    }
+    let store_id = store_id.expect("found test::store_cont");
+    let take_id = take_id.expect("found test::take_cont");
+
+    // Store the continuation handle in JS, then return it back to the VM.
+    let saved: Rc<RefCell<Option<JsValue>>> = Rc::new(RefCell::new(None));
+
+    let saved_for_store = Rc::clone(&saved);
+    let store_impl = Closure::wrap(Box::new(move |args: JsValue| -> JsValue {
+        let args: Array = args.dyn_into().expect("args array");
+        let k = args.get(0);
+        *saved_for_store.borrow_mut() = Some(k);
+        JsValue::UNDEFINED
+    }) as Box<dyn FnMut(JsValue) -> JsValue>);
+    let f: Function = store_impl.as_ref().unchecked_ref::<Function>().clone();
+    vm.register_host_import(store_id, f)
+        .expect("register store_cont");
+    store_impl.forget();
+
+    let saved_for_take = Rc::clone(&saved);
+    let take_impl = Closure::wrap(Box::new(move |_args: JsValue| -> JsValue {
+        saved_for_take
+            .borrow()
+            .clone()
+            .expect("take_cont: missing saved continuation")
+    }) as Box<dyn FnMut(JsValue) -> JsValue>);
+    let f: Function = take_impl.as_ref().unchecked_ref::<Function>().clone();
+    vm.register_host_import(take_id, f)
+        .expect("register take_cont");
+    take_impl.forget();
+
+    let r = vm.step(None).expect("step ok");
+    assert_eq!(step_tag(&r), "done");
+    let v: BigInt = done_value(&r).dyn_into().expect("done bigint");
+    assert_eq!(i64::try_from(v).unwrap(), 42);
+}
+
+#[wasm_bindgen_test]
+fn host_can_tail_resume_pinned_continuation() {
+    let rbc: &[u8] = include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/host_tail_resume_pinned_continuation.rbc"
+    ));
+    let mut vm = Vm::new(rbc).expect("vm init");
+
+    let host_imports = vm.list_host_imports();
+
+    let mut store_id = None;
+    for imp in host_imports.iter() {
+        let name = Reflect::get(&imp, &JsValue::from_str("name"))
+            .unwrap()
+            .as_string()
+            .unwrap();
+        if name == "test::store_cont" {
+            store_id = Some(
+                Reflect::get(&imp, &JsValue::from_str("id"))
+                    .unwrap()
+                    .as_f64()
+                    .unwrap() as u32,
+            );
+        }
+    }
+    let store_id = store_id.expect("found test::store_cont");
+
+    let saved: Rc<RefCell<Option<JsValue>>> = Rc::new(RefCell::new(None));
+    let saved_for_store = Rc::clone(&saved);
+    let store_impl = Closure::wrap(Box::new(move |args: JsValue| -> JsValue {
+        let args: Array = args.dyn_into().expect("args array");
+        let k = args.get(0);
+        *saved_for_store.borrow_mut() = Some(k);
+        JsValue::UNDEFINED
+    }) as Box<dyn FnMut(JsValue) -> JsValue>);
+    let f: Function = store_impl.as_ref().unchecked_ref::<Function>().clone();
+    vm.register_host_import(store_id, f)
+        .expect("register store_cont");
+    store_impl.forget();
+
+    // First run: the program stores a pinned continuation and exits with 0.
+    let r1 = vm.step(None).expect("step ok");
+    assert_eq!(step_tag(&r1), "done");
+    let v1: BigInt = done_value(&r1).dyn_into().expect("done bigint");
+    assert_eq!(i64::try_from(v1).unwrap(), 0);
+
+    let k = saved
+        .borrow()
+        .clone()
+        .expect("missing stored continuation handle");
+    let k_index = Reflect::get(&k, &JsValue::from_str("index"))
+        .expect("k.index")
+        .as_f64()
+        .unwrap_or(0.0) as u32;
+    let k_generation = Reflect::get(&k, &JsValue::from_str("generation"))
+        .expect("k.generation")
+        .as_f64()
+        .unwrap_or(0.0) as u32;
+
+    // Host-driven tail resume of the pinned continuation with `42`.
+    vm.resume_pinned_continuation_tail(k_index, k_generation, JsValue::from(BigInt::from(42)))
+        .expect("resume pinned tail");
+
+    let r2 = vm.step(None).expect("step ok");
+    assert_eq!(step_tag(&r2), "done");
+    let v2: BigInt = done_value(&r2).dyn_into().expect("done bigint");
+    assert_eq!(i64::try_from(v2).unwrap(), 42);
 }
 
 #[wasm_bindgen_test]

@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 9;
+const VERSION_MINOR: u16 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -281,6 +281,7 @@ impl Encoder {
             AbiType::Float => 3,
             AbiType::String => 4,
             AbiType::Bytes => 5,
+            AbiType::Continuation => 6,
         };
         self.write_u8(tag);
     }
@@ -1319,6 +1320,7 @@ impl<'a> Decoder<'a> {
             3 => Ok(AbiType::Float),
             4 => Ok(AbiType::String),
             5 => Ok(AbiType::Bytes),
+            6 => Ok(AbiType::Continuation),
             other => Err(self.err(format!("invalid AbiType tag {other}"))),
         }
     }

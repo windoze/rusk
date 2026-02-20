@@ -594,6 +594,10 @@ fn ty_from_host_type(ty: &crate::host::HostType) -> Result<Ty, String> {
         crate::host::HostType::Float => Ok(Ty::Float),
         crate::host::HostType::String => Ok(Ty::String),
         crate::host::HostType::Bytes => Ok(Ty::Bytes),
+        crate::host::HostType::Cont { param, ret } => Ok(Ty::Cont {
+            param: Box::new(ty_from_host_type(param)?),
+            ret: Box::new(ty_from_host_type(ret)?),
+        }),
         crate::host::HostType::TypeRep => Err("unsupported host type: `typerep`".to_string()),
         crate::host::HostType::Array(elem) => Ok(Ty::Array(Box::new(ty_from_host_type(elem)?))),
         crate::host::HostType::Tuple(items) => Ok(Ty::Tuple(

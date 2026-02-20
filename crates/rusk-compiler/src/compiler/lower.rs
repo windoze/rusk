@@ -243,6 +243,10 @@ fn host_type_from_ty(ty: &Ty) -> Result<rusk_mir::HostType, String> {
         Ty::Float => Ok(HostType::Float),
         Ty::String => Ok(HostType::String),
         Ty::Bytes => Ok(HostType::Bytes),
+        Ty::Cont { param, ret } => Ok(HostType::Cont {
+            param: Box::new(host_type_from_ty(param)?),
+            ret: Box::new(host_type_from_ty(ret)?),
+        }),
         Ty::Readonly(inner) => host_type_from_ty(inner),
         Ty::Array(elem) => Ok(HostType::Array(Box::new(host_type_from_ty(elem)?))),
         Ty::Tuple(items) => Ok(HostType::Tuple(

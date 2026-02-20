@@ -1,9 +1,14 @@
 use rusk_compiler::{
     CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
 };
-use rusk_vm::{AbiValue, HostError, Vm};
+use rusk_vm::{AbiValue, ContinuationHandle, HostError, Vm};
 
 pub fn register_test_host_module(options: &mut CompileOptions) {
+    let cont_int_to_int = HostType::Cont {
+        param: Box::new(HostType::Int),
+        ret: Box::new(HostType::Int),
+    };
+
     let module = HostModuleDecl {
         visibility: HostVisibility::Public,
         functions: vec![
@@ -71,6 +76,22 @@ pub fn register_test_host_module(options: &mut CompileOptions) {
                     ret: HostType::Bool,
                 },
             },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "store_cont".to_string(),
+                sig: HostFnSig {
+                    params: vec![cont_int_to_int.clone()],
+                    ret: HostType::Unit,
+                },
+            },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "take_cont".to_string(),
+                sig: HostFnSig {
+                    params: vec![],
+                    ret: cont_int_to_int,
+                },
+            },
         ],
     };
 
@@ -117,6 +138,9 @@ pub fn register_test_external_effects(options: &mut CompileOptions) {
 
 #[allow(unused)]
 pub fn install_test_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &mut Vm) {
+    let stored_cont: std::rc::Rc<std::cell::RefCell<Option<ContinuationHandle>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+
     if let Some(id) = module.host_import_id("test::add_int") {
         vm.register_host_import(id, |args: &[AbiValue]| match args {
             [AbiValue::Int(a), AbiValue::Int(b)] => Ok(AbiValue::Int(a + b)),
@@ -192,6 +216,38 @@ pub fn install_test_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &m
             [AbiValue::Bytes(a), AbiValue::Bytes(b)] => Ok(AbiValue::Bool(a == b)),
             other => Err(HostError {
                 message: format!("test::bytes_eq: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+
+    if let Some(id) = module.host_import_id("test::store_cont") {
+        let stored_cont = std::rc::Rc::clone(&stored_cont);
+        vm.register_host_import(id, move |args: &[AbiValue]| match args {
+            [AbiValue::Continuation(k)] => {
+                *stored_cont.borrow_mut() = Some(k.clone());
+                Ok(AbiValue::Unit)
+            }
+            other => Err(HostError {
+                message: format!("test::store_cont: bad args: {other:?}"),
+            }),
+        })
+        .unwrap();
+    }
+
+    if let Some(id) = module.host_import_id("test::take_cont") {
+        let stored_cont = std::rc::Rc::clone(&stored_cont);
+        vm.register_host_import(id, move |args: &[AbiValue]| match args {
+            [] => {
+                let Some(k) = stored_cont.borrow().clone() else {
+                    return Err(HostError {
+                        message: "test::take_cont: missing stored continuation".to_string(),
+                    });
+                };
+                Ok(AbiValue::Continuation(k))
+            }
+            other => Err(HostError {
+                message: format!("test::take_cont: bad args: {other:?}"),
             }),
         })
         .unwrap();

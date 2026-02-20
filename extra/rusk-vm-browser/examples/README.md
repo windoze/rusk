@@ -7,6 +7,7 @@ including:
 - a host-import demo (sync JS ↔ Rusk bridge)
 - a counter demo that uses **JavaScript + external effects** as a lightweight DOM bridge (no DOM
   bindings in Rusk required)
+- a continuation demo that stores a continuation handle in JS and tail-resumes it later
 
 ## Prereqs
 
@@ -46,4 +47,4 @@ Then open:
 - `http://localhost:8000/examples/basic-run/`
 - `http://localhost:8000/examples/host-imports/`
 - `http://localhost:8000/examples/counter/`
-
+- `http://localhost:8000/examples/continuations/`

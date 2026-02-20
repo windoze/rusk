@@ -120,9 +120,9 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 );
             }
 
-            let ret = match ret.try_to_abi(&vm.heap) {
+            let ret = match ret.try_to_abi(&vm.heap, &mut vm.pinned_continuations) {
                 Ok(Some(ret)) => ret,
-                Ok(None) => return trap(vm, "non-ABI-safe return value".to_string()),
+                Ok(None) => return trap(vm, format!("non-ABI-safe return value ({})", ret.kind())),
                 Err(msg) => return trap(vm, msg),
             };
             vm.state = VmState::Done { value: ret.clone() };
@@ -1381,6 +1381,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                                     &vm.module,
                                     &mut vm.heap,
                                     &mut vm.gc_allocations_since_collect,
+                                    &mut vm.pinned_continuations,
                                     &mut vm.host_fns,
                                     &mut vm.in_host_call,
                                     frame,
@@ -1422,6 +1423,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         &vm.module,
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
+                        &mut vm.pinned_continuations,
                         &mut vm.host_fns,
                         &mut vm.in_host_call,
                         frame,
@@ -2207,7 +2209,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
 
                 let mut abi_args = Vec::with_capacity(arg_values.len());
                 for (v, expected) in arg_values.iter().zip(effect.sig.params.iter()) {
-                    let abi = match v.try_to_abi(&vm.heap) {
+                    let abi = match v.try_to_abi(&vm.heap, &mut vm.pinned_continuations) {
                         Ok(Some(abi)) => abi,
                         Ok(None) => {
                             return trap(
@@ -2488,9 +2490,16 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     );
                 }
 
-                let ret = match v.try_to_abi(&vm.heap) {
+                let v = match unwrap_control_token_at_host_boundary(vm, v) {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, msg),
+                };
+
+                let ret = match v.try_to_abi(&vm.heap, &mut vm.pinned_continuations) {
                     Ok(Some(ret)) => ret,
-                    Ok(None) => return trap(vm, "non-ABI-safe return value".to_string()),
+                    Ok(None) => {
+                        return trap(vm, format!("non-ABI-safe return value ({})", v.kind()));
+                    }
                     Err(msg) => return trap(vm, msg),
                 };
                 vm.state = VmState::Done { value: ret.clone() };
@@ -2612,4 +2621,48 @@ fn unwind_handlers_to_stack_len(handlers: &mut Vec<HandlerEntry>, stack_len: usi
         popped = true;
     }
     popped
+}
+
+fn unwrap_control_token_at_host_boundary(vm: &Vm, v: Value) -> Result<Value, String> {
+    const INTERNAL_CONTROL_ENUM: &str = "$Control";
+    const CONTROL_VARIANT_VALUE: &str = "Value";
+    const CONTROL_VARIANT_RETURN: &str = "Return";
+    const CONTROL_VARIANT_BREAK: &str = "Break";
+    const CONTROL_VARIANT_CONTINUE: &str = "Continue";
+
+    let Some(control_type_id) = vm.module.type_id(INTERNAL_CONTROL_ENUM) else {
+        return Ok(v);
+    };
+
+    let Value::Ref(r) = &v else {
+        return Ok(v);
+    };
+
+    let Some(obj) = vm.heap.get(r.handle) else {
+        return Err("invalid control flow token".to_string());
+    };
+
+    let HeapValue::Enum {
+        type_id,
+        variant,
+        fields,
+        ..
+    } = obj
+    else {
+        return Ok(v);
+    };
+
+    if *type_id != control_type_id {
+        return Ok(v);
+    }
+
+    match variant.as_str() {
+        CONTROL_VARIANT_VALUE | CONTROL_VARIANT_RETURN => fields
+            .first()
+            .cloned()
+            .ok_or_else(|| "invalid control flow token".to_string()),
+        CONTROL_VARIANT_BREAK => Err("`break` outside of a loop".to_string()),
+        CONTROL_VARIANT_CONTINUE => Err("`continue` outside of a loop".to_string()),
+        _ => Err("invalid control flow token".to_string()),
+    }
 }

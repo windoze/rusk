@@ -1,0 +1,9 @@
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    js::log("capturing a continuation and exporting it to JS...");
+    match @E.boom() {
+        @E.boom() -> k => { js::store_cont(k); 0 }
+        x => { js::log(f"resumed inside the VM with value: {x}"); x }
+    };
+}

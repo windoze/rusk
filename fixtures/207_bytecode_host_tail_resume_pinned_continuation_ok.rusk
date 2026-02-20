@@ -1,0 +1,15 @@
+// expect: ok int 0
+
+// This fixture captures a continuation and exports it to the host as an ABI-safe handle.
+// The program itself does not resume the continuation; an embedding host may later resume the
+// stored handle via `vm_resume_pinned_continuation_tail`.
+
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    match @E.boom() {
+        @E.boom() -> k => { test::store_cont(k); 0 }
+        x => x
+    }
+}
+

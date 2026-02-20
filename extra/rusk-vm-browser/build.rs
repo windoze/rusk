@@ -12,8 +12,12 @@ fn main() {
         "cargo:rerun-if-changed=../../fixtures/213_bytecode_external_effect_echo_bytes_ok.rusk"
     );
     println!(
-        "cargo:rerun-if-changed=../../fixtures/256_typerep_never_typearg_runtime_error.rusk"
+        "cargo:rerun-if-changed=../../fixtures/206_bytecode_call_host_continuation_roundtrip_ok.rusk"
     );
+    println!(
+        "cargo:rerun-if-changed=../../fixtures/207_bytecode_host_tail_resume_pinned_continuation_ok.rusk"
+    );
+    println!("cargo:rerun-if-changed=../../fixtures/256_typerep_never_typearg_runtime_error.rusk");
 
     let mut options = CompileOptions::default();
 
@@ -37,6 +41,28 @@ fn main() {
                         sig: HostFnSig {
                             params: vec![HostType::Bytes, HostType::Bytes],
                             ret: HostType::Bool,
+                        },
+                    },
+                    rusk_compiler::HostFunctionDecl {
+                        visibility: HostVisibility::Public,
+                        name: "store_cont".to_string(),
+                        sig: HostFnSig {
+                            params: vec![HostType::Cont {
+                                param: Box::new(HostType::Int),
+                                ret: Box::new(HostType::Int),
+                            }],
+                            ret: HostType::Unit,
+                        },
+                    },
+                    rusk_compiler::HostFunctionDecl {
+                        visibility: HostVisibility::Public,
+                        name: "take_cont".to_string(),
+                        sig: HostFnSig {
+                            params: Vec::new(),
+                            ret: HostType::Cont {
+                                param: Box::new(HostType::Int),
+                                ret: Box::new(HostType::Int),
+                            },
                         },
                     },
                 ],
@@ -81,6 +107,16 @@ fn main() {
         "../../fixtures/200_bytecode_call_host_add_int_ok.rusk",
         &options,
         out_dir.join("call_host_add_int.rbc"),
+    );
+    compile_fixture(
+        "../../fixtures/206_bytecode_call_host_continuation_roundtrip_ok.rusk",
+        &options,
+        out_dir.join("call_host_continuation_roundtrip.rbc"),
+    );
+    compile_fixture(
+        "../../fixtures/207_bytecode_host_tail_resume_pinned_continuation_ok.rusk",
+        &options,
+        out_dir.join("host_tail_resume_pinned_continuation.rbc"),
     );
     compile_fixture(
         "../../fixtures/210_bytecode_external_effect_add_int_ok.rusk",

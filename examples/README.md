@@ -42,3 +42,4 @@ Notes:
 - `20-associated-types.rusk`: associated types in interfaces with `Self::Item` and qualified projections
 - `21-byte-char-slicing.rusk`: `byte` and `char` primitives, zero-copy string/bytes slicing
 - `22-option-methods.rusk`: `Option` methods (`map`, `and_then`, `unwrap_or`, etc.)
+- `23-host-stored-continuations.rusk`: passing continuations to the host as opaque handles

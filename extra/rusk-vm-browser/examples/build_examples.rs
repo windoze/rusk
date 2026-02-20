@@ -13,6 +13,7 @@ fn main() {
     build_basic_run(&examples_dir);
     build_host_imports(&examples_dir);
     build_counter(&examples_dir);
+    build_continuations(&examples_dir);
 
     eprintln!("ok: examples compiled");
 }
@@ -109,3 +110,43 @@ fn build_counter(examples_dir: &Path) {
     write_bytes(&out, compile_example(&src, &options));
 }
 
+fn build_continuations(examples_dir: &Path) {
+    let dir = examples_dir.join("continuations");
+    let src = dir.join("program.rusk");
+    let out = dir.join("program.rbc");
+
+    let cont_int_to_int = HostType::Cont {
+        param: Box::new(HostType::Int),
+        ret: Box::new(HostType::Int),
+    };
+
+    let mut options = CompileOptions::default();
+    options
+        .register_host_module(
+            "js",
+            HostModuleDecl {
+                visibility: HostVisibility::Public,
+                functions: vec![
+                    HostFunctionDecl {
+                        visibility: HostVisibility::Public,
+                        name: "log".to_string(),
+                        sig: HostFnSig {
+                            params: vec![HostType::String],
+                            ret: HostType::Unit,
+                        },
+                    },
+                    HostFunctionDecl {
+                        visibility: HostVisibility::Public,
+                        name: "store_cont".to_string(),
+                        sig: HostFnSig {
+                            params: vec![cont_int_to_int.clone()],
+                            ret: HostType::Unit,
+                        },
+                    },
+                ],
+            },
+        )
+        .expect("register js host module");
+
+    write_bytes(&out, compile_example(&src, &options));
+}

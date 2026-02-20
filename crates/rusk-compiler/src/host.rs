@@ -24,6 +24,14 @@ pub enum HostType {
     Float,
     String,
     Bytes,
+    /// A one-shot delimited continuation value (`cont(P) -> R`).
+    ///
+    /// This is typechecked at compile time, but lowers to an opaque ABI handle at the VM/host
+    /// boundary.
+    Cont {
+        param: Box<HostType>,
+        ret: Box<HostType>,
+    },
     /// A runtime type representation (`typerep`), used by some core intrinsics.
     TypeRep,
     Array(Box<HostType>),

@@ -770,6 +770,7 @@ fn abi_type_from_host_type(ty: &crate::host::HostType) -> Option<rusk_bytecode::
         H::Float => Some(A::Float),
         H::String => Some(A::String),
         H::Bytes => Some(A::Bytes),
+        H::Cont { .. } => Some(A::Continuation),
         H::Any | H::TypeRep | H::Array(_) | H::Tuple(_) => None,
     }
 }

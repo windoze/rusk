@@ -186,6 +186,44 @@ impl Vm {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = dropPinnedContinuation)]
+    pub fn drop_pinned_continuation(
+        &mut self,
+        k_index: u32,
+        k_generation: u32,
+    ) -> Result<(), JsValue> {
+        rusk_vm::vm_drop_pinned_continuation(
+            &mut self.vm,
+            ContinuationHandle {
+                index: k_index,
+                generation: k_generation,
+            },
+        )
+        .map_err(vm_error_to_js)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = resumePinnedContinuationTail)]
+    pub fn resume_pinned_continuation_tail(
+        &mut self,
+        k_index: u32,
+        k_generation: u32,
+        value: JsValue,
+    ) -> Result<(), JsValue> {
+        let value = js_to_abi_value(value).map_err(|message| JsValue::from_str(&message))?;
+        rusk_vm::vm_resume_pinned_continuation_tail(
+            &mut self.vm,
+            ContinuationHandle {
+                index: k_index,
+                generation: k_generation,
+            },
+            value,
+        )
+        .map_err(vm_error_to_js)?;
+        self.state = VmState::RunningOrSuspended;
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = isDone)]
     pub fn is_done(&self) -> bool {
         matches!(self.state, VmState::Done)
@@ -236,6 +274,7 @@ fn abi_type_to_js(ty: AbiType) -> JsValue {
         AbiType::Float => "float",
         AbiType::String => "string",
         AbiType::Bytes => "bytes",
+        AbiType::Continuation => "continuation",
     })
 }
 
@@ -247,6 +286,20 @@ fn abi_value_to_js(v: &AbiValue) -> JsValue {
         AbiValue::Float(x) => JsValue::from_f64(*x),
         AbiValue::String(s) => JsValue::from_str(s),
         AbiValue::Bytes(b) => Uint8Array::from(b.as_slice()).into(),
+        AbiValue::Continuation(k) => {
+            let obj = Object::new();
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("index"),
+                &JsValue::from_f64(k.index as f64),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("generation"),
+                &JsValue::from_f64(k.generation as f64),
+            );
+            obj.into()
+        }
     }
 }
 
@@ -276,11 +329,55 @@ fn js_to_abi_value(v: JsValue) -> Result<AbiValue, String> {
             .map_err(|_| "expected Uint8Array for bytes".to_string())?;
         return Ok(AbiValue::Bytes(bytes.to_vec()));
     }
+    if v.is_object() {
+        // Continuation handle object: `{ index: u32, generation: u32 }`.
+        let index_v = Reflect::get(&v, &JsValue::from_str("index")).unwrap_or(JsValue::UNDEFINED);
+        let gen_v =
+            Reflect::get(&v, &JsValue::from_str("generation")).unwrap_or(JsValue::UNDEFINED);
+        if !index_v.is_undefined() && !gen_v.is_undefined() {
+            let index = js_to_u32(&index_v).map_err(|e| format!("continuation.index: {e}"))?;
+            let generation =
+                js_to_u32(&gen_v).map_err(|e| format!("continuation.generation: {e}"))?;
+            return Ok(AbiValue::Continuation(ContinuationHandle {
+                index,
+                generation,
+            }));
+        }
+    }
 
     Err(format!(
         "unsupported AbiValue JS type (got {})",
         js_typeof(&v)
     ))
+}
+
+fn js_to_u32(v: &JsValue) -> Result<u32, String> {
+    if v.is_bigint() {
+        let bi: BigInt = v
+            .clone()
+            .dyn_into()
+            .map_err(|_| "expected bigint".to_string())?;
+        let n_i64 = i64::try_from(bi).map_err(|_| "bigint out of range for u32".to_string())?;
+        return u32::try_from(n_i64).map_err(|_| "bigint out of range for u32".to_string());
+    }
+
+    let Some(n) = v.as_f64() else {
+        return Err("expected number or bigint".to_string());
+    };
+    if !n.is_finite() {
+        return Err("must be finite".to_string());
+    }
+    if n < 0.0 {
+        return Err("must be >= 0".to_string());
+    }
+    if n.fract() != 0.0 {
+        return Err("must be an integer".to_string());
+    }
+    let u = n as u32;
+    if (u as f64) != n {
+        return Err("out of range for u32".to_string());
+    }
+    Ok(u)
 }
 
 fn js_to_u64(v: &JsValue) -> Result<u64, JsValue> {

@@ -50,6 +50,7 @@ fn abi_type_from_host_type(ty: &rusk_mir::HostType) -> Option<AbiType> {
         H::Float => Some(AbiType::Float),
         H::String => Some(AbiType::String),
         H::Bytes => Some(AbiType::Bytes),
+        H::Cont { .. } => Some(AbiType::Continuation),
         H::Any | H::TypeRep | H::Array(_) | H::Tuple(_) => None,
     }
 }

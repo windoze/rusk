@@ -1,0 +1,28 @@
+// Example: host-stored continuations
+//
+// This demonstrates passing a captured continuation (`cont(int) -> int`) across the VM/host
+// boundary as an opaque handle.
+//
+// To run this example, the embedding host must provide a `host` module with two host imports:
+//
+//   host::store_cont(k: cont(int) -> int) -> unit
+//   host::take_cont() -> cont(int) -> int
+//
+// The host can store multiple outstanding continuation handles concurrently and return them later.
+//
+// Note: an embedding host may also choose to resume a stored handle directly (without passing it
+// back into Rusk code) via the VM API `vm_resume_pinned_continuation_tail`.
+
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    // Capture `k` and store it on the host (not in Rusk locals/heap).
+    match @E.boom() {
+        @E.boom() -> k => { host::store_cont(k); 0 }
+        x => x
+    };
+
+    // Later: ask the host for the stored continuation handle and resume it.
+    let k = host::take_cont();
+    k(42)
+}

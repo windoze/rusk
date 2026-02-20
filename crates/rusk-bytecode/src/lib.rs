@@ -36,7 +36,7 @@ pub struct TypeId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct MethodId(pub u32);
 
-/// A VM/host boundary ABI type (v0): builtin primitives only.
+/// A VM/host boundary ABI type (v0): builtin primitives plus opaque continuation handles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AbiType {
     Unit,
@@ -45,6 +45,11 @@ pub enum AbiType {
     Float,
     String,
     Bytes,
+    /// An opaque one-shot continuation handle (`cont(P) -> R`).
+    ///
+    /// The parameter/return types are a compile-time surface only; at the ABI boundary this is
+    /// represented as an opaque handle.
+    Continuation,
 }
 
 /// A host import signature restricted to [`AbiType`].

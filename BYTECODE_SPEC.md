@@ -112,7 +112,8 @@ values in a readonly view when appropriate (i.e. references are re-tagged as rea
 
 ## 3. ABI boundary (VM ↔ host)
 
-The embedding boundary is intentionally small and uses ABI-safe primitives only.
+The embedding boundary is intentionally small and uses ABI-safe primitives plus opaque continuation
+handles.
 
 ### 3.1 `AbiType`
 
@@ -124,6 +125,10 @@ The bytecode-level ABI supports:
 - `float`
 - `string`
 - `bytes`
+- `continuation` (opaque handle)
+
+`continuation` does not encode parameter/return types at the bytecode ABI level; it is an opaque
+runtime handle only meaningful within the VM instance it came from.
 
 These are the only types allowed in:
 
@@ -665,7 +670,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `8`
+- minor = `10`
 
 The reference decoder requires an **exact** version match.
 
@@ -714,6 +719,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 | 3 | `Float` |
 | 4 | `String` |
 | 5 | `Bytes` |
+| 6 | `Continuation` |
 
 #### Bytecode `ConstValue` (`u8`)
 

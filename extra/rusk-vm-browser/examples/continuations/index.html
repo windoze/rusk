@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rusk-vm-browser: continuations</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        margin: 24px;
+      }
+      pre {
+        background: #0b1020;
+        color: #d8e2ff;
+        padding: 12px;
+        border-radius: 8px;
+        overflow: auto;
+      }
+      button {
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>continuations</h1>
+    <p>
+      Demonstrates storing a continuation handle in JavaScript and tail-resuming it from JS.
+    </p>
+    <p>
+      <button id="run">Run VM</button>
+      <button id="click" disabled>Click to resume</button>
+    </p>
+    <pre id="out">(not run yet)</pre>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

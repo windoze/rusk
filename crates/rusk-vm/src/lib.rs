@@ -13,5 +13,6 @@ pub use error::{HostError, VmError};
 pub use host::HostFn;
 pub use metrics::VmMetrics;
 pub use vm::{
-    ContinuationHandle, StepResult, TypeRepId, Vm, vm_drop_continuation, vm_resume, vm_step,
+    ContinuationHandle, StepResult, TypeRepId, Vm, vm_drop_continuation,
+    vm_drop_pinned_continuation, vm_resume, vm_resume_pinned_continuation_tail, vm_step,
 };

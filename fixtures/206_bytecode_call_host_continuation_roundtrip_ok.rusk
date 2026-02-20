@@ -1,0 +1,12 @@
+// expect: ok int 42
+
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    match @E.boom() {
+        @E.boom() -> k => { test::store_cont(k); 0 }
+        x => x
+    };
+    let k = test::take_cont();
+    k(42)
+}

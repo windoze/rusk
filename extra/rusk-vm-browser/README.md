@@ -17,6 +17,8 @@ The exported API is intentionally small and step-driven:
 - `vm.registerHostImport(id, fn)` installs a synchronous host import implementation
 - `vm.resume(kIndex, kGeneration, value)` resumes a suspended external effect
 - `vm.dropContinuation(kIndex, kGeneration)` cancels a suspended external effect (traps)
+- `vm.dropPinnedContinuation(kIndex, kGeneration)` releases a host-pinned continuation handle
+- `vm.resumePinnedContinuationTail(kIndex, kGeneration, value)` schedules a tail-resume of a pinned continuation handle (does not step; return value is discarded)
 - `vm.listHostImports()` and `vm.listExternalEffects()` help wire up IDs by name
 
 `AbiValue` mapping at the JS boundary:
@@ -27,6 +29,7 @@ The exported API is intentionally small and step-driven:
 - `float(f64)` → `number`
 - `string` → `string`
 - `bytes` → `Uint8Array`
+- `continuation` → `{ index: number, generation: number }`
 
 ## Build
 
