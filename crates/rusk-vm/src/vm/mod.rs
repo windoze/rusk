@@ -613,6 +613,7 @@ struct PrimitiveTypeIds {
     char: TypeId,
     string: TypeId,
     bytes: TypeId,
+    array: Option<TypeId>,
 }
 
 impl PrimitiveTypeIds {
@@ -634,6 +635,7 @@ impl PrimitiveTypeIds {
             char: lookup("char")?,
             string: lookup("string")?,
             bytes: lookup("bytes")?,
+            array: module.type_id("array"),
         })
     }
 }
@@ -1913,10 +1915,10 @@ fn eval_core_intrinsic(
                 if *from < 0 {
                     return Err("core::intrinsics::string_slice: from must be >= 0".to_string());
                 }
-                if let Some(to) = to_opt {
-                    if to < 0 {
-                        return Err("core::intrinsics::string_slice: to must be >= 0".to_string());
-                    }
+                if let Some(to) = to_opt
+                    && to < 0
+                {
+                    return Err("core::intrinsics::string_slice: to must be >= 0".to_string());
                 }
 
                 let from_cp: usize = (*from)
@@ -1929,10 +1931,10 @@ fn eval_core_intrinsic(
                     })
                     .transpose()?;
 
-                if let Some(to_cp) = to_cp {
-                    if from_cp > to_cp {
-                        return Err("core::intrinsics::string_slice: from > to".to_string());
-                    }
+                if let Some(to_cp) = to_cp
+                    && from_cp > to_cp
+                {
+                    return Err("core::intrinsics::string_slice: from > to".to_string());
                 }
 
                 // Convert Unicode scalar indices (codepoints) into UTF-8 byte offsets.
@@ -1947,10 +1949,10 @@ fn eval_core_intrinsic(
                     if cp_idx == from_cp {
                         from_byte = Some(byte_idx);
                     }
-                    if let Some(to_cp) = to_cp {
-                        if cp_idx == to_cp {
-                            to_byte = Some(byte_idx);
-                        }
+                    if let Some(to_cp) = to_cp
+                        && cp_idx == to_cp
+                    {
+                        to_byte = Some(byte_idx);
                     }
                     cp_idx += 1;
                 }

@@ -672,11 +672,26 @@ impl<'a> FnTypechecker<'a> {
 
                 // Normalize `<nominal as Iface>::Assoc` when the impl is known.
                 let self_ty_stripped = strip_readonly(&self_ty);
-                if let Ty::App(TyCon::Named(type_name), type_args) = self_ty_stripped
+                let dyn_self = match self_ty_stripped {
+                    Ty::App(TyCon::Named(type_name), type_args) => {
+                        Some((type_name.clone(), type_args.clone()))
+                    }
+                    Ty::Array(elem) => Some(("array".to_string(), vec![*elem.clone()])),
+                    Ty::Unit => Some(("unit".to_string(), Vec::new())),
+                    Ty::Bool => Some(("bool".to_string(), Vec::new())),
+                    Ty::Int => Some(("int".to_string(), Vec::new())),
+                    Ty::Float => Some(("float".to_string(), Vec::new())),
+                    Ty::Byte => Some(("byte".to_string(), Vec::new())),
+                    Ty::Char => Some(("char".to_string(), Vec::new())),
+                    Ty::String => Some(("string".to_string(), Vec::new())),
+                    Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
+                    _ => None,
+                };
+                if let Some((type_name, type_args)) = dyn_self
                     && let Some(template) = self
                         .env
                         .interface_assoc_types
-                        .get(&(type_name.clone(), iface.clone(), assoc.clone()))
+                        .get(&(type_name, iface.clone(), assoc.clone()))
                         .cloned()
                 {
                     let ty_subst: HashMap<GenId, Ty> =
@@ -1045,6 +1060,11 @@ impl<'a> FnTypechecker<'a> {
             && let Some(local) = self.lookup_local(path.segments[0].name.as_str())
         {
             return Ok(local.ty.clone());
+        }
+
+        // Prelude-like `Option` constructors: `None` is treated as `Option::None`.
+        if path.segments.len() == 1 && path.segments[0].name == "None" {
+            return self.typecheck_enum_lit("Option", &path.segments[0], &[], span);
         }
 
         let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
@@ -2626,6 +2646,62 @@ impl<'a> FnTypechecker<'a> {
                     }
                 }
 
+                // Prelude-like `Option` constructors in patterns: `Some(p)` / `None`.
+                //
+                // This is intentionally limited to `Option` to avoid ambiguity for user enums.
+                if path.segments.len() == 1
+                    && matches!(path.segments[0].name.as_str(), "Some" | "None")
+                    && let Some(def) = self.env.enums.get("Option")
+                {
+                    let variant = &path.segments[0];
+                    let Some(variant_fields) = def.variants.get(&variant.name) else {
+                        return Err(TypeError {
+                            message: format!(
+                                "unknown variant `{}` on enum `{}`",
+                                variant.name, def.name
+                            ),
+                            span: variant.span,
+                        });
+                    };
+                    if args.len() != variant_fields.len() {
+                        return Err(TypeError {
+                            message: format!(
+                                "wrong number of fields for pattern `{}::{}`: expected {}, got {}",
+                                def.name,
+                                variant.name,
+                                variant_fields.len(),
+                                args.len()
+                            ),
+                            span: *span,
+                        });
+                    }
+
+                    let mut type_args = Vec::with_capacity(def.generics.len());
+                    for _ in &def.generics {
+                        type_args.push(self.infer.fresh_type_var());
+                    }
+                    let expected_ty = Ty::App(TyCon::Named(def.name.clone()), type_args.clone());
+                    let (ro, inner_expected) = match expected {
+                        Ty::Readonly(inner) => (true, *inner),
+                        other => (false, other),
+                    };
+                    let _ = self.infer.unify(inner_expected, expected_ty, *span)?;
+
+                    let ty_subst: HashMap<GenId, Ty> =
+                        type_args.iter().cloned().enumerate().collect();
+                    let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                    let mut binds = Vec::new();
+                    for (subpat, fty) in args.iter().zip(variant_fields.iter()) {
+                        let mut fty = subst_ty(fty.clone(), &ty_subst, &con_subst);
+                        if ro {
+                            fty = fty.as_readonly_view();
+                        }
+                        binds.extend(self.typecheck_pattern(subpat, fty)?);
+                    }
+                    return Ok(binds);
+                }
+
                 // Fallback: new-type struct constructor `TypePath(value)`.
                 let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
                 let (kind, struct_name) = self
@@ -2801,6 +2877,20 @@ impl<'a> FnTypechecker<'a> {
                     self.expr_types.insert(*callee_span, local_ty.clone());
                     return self.typecheck_call_via_fn_value(local_ty, args, span);
                 }
+            }
+
+            // Prelude-like `Option` constructors: `Some(v)` / `None()`.
+            if path.segments.len() == 1 && matches!(path.segments[0].name.as_str(), "Some" | "None")
+            {
+                if !explicit_type_args.is_empty() {
+                    return Err(TypeError {
+                        message:
+                            "type arguments are only allowed on named function and method calls"
+                                .to_string(),
+                        span,
+                    });
+                }
+                return self.typecheck_enum_lit("Option", &path.segments[0], args, span);
             }
 
             let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();

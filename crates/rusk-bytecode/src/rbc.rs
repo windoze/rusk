@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 11;
+const VERSION_MINOR: u16 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -209,6 +209,22 @@ impl Encoder {
             for (method_id, fn_id) in entries {
                 self.write_u32(type_id.0);
                 self.write_u32(method_id.0);
+                self.write_u32(fn_id.0);
+            }
+        }
+
+        // Assoc type dispatch table (sparse encoding, deterministic order by type_id then key).
+        let mut assoc_len: usize = 0;
+        for entries in &module.assoc_type_dispatch {
+            assoc_len = assoc_len.saturating_add(entries.len());
+        }
+        self.write_len(assoc_len)?;
+        for (type_index, entries) in module.assoc_type_dispatch.iter().enumerate() {
+            let type_id = TypeId(type_index as u32);
+            for (iface_type_id, assoc, fn_id) in entries {
+                self.write_u32(type_id.0);
+                self.write_u32(iface_type_id.0);
+                self.write_string(assoc)?;
                 self.write_u32(fn_id.0);
             }
         }
@@ -627,6 +643,18 @@ impl Encoder {
                 self.write_u32(*dst);
                 self.write_type_rep_lit(base)?;
                 self.write_vec_reg(args)?;
+            }
+            Instruction::AssocTypeRep {
+                dst,
+                recv,
+                iface_type_id,
+                assoc,
+            } => {
+                self.write_u8(62);
+                self.write_u32(*dst);
+                self.write_u32(*recv);
+                self.write_u32(iface_type_id.0);
+                self.write_string(assoc)?;
             }
             Instruction::MakeStruct {
                 dst,
@@ -1191,6 +1219,29 @@ impl<'a> Decoder<'a> {
             entries.push((method_id, fn_id));
         }
 
+        // Assoc type dispatch table.
+        let mut assoc_type_dispatch: Vec<Vec<(TypeId, String, FunctionId)>> =
+            Vec::with_capacity(type_len);
+        assoc_type_dispatch.resize_with(type_len, Vec::new);
+        let assoc_len = self.read_len()?;
+        for _ in 0..assoc_len {
+            let type_id = TypeId(self.read_u32()?);
+            let iface_type_id = TypeId(self.read_u32()?);
+            let assoc = self.read_string()?;
+            let fn_id = FunctionId(self.read_u32()?);
+            let idx: usize = type_id
+                .0
+                .try_into()
+                .map_err(|_| self.err("type id overflow".to_string()))?;
+            let Some(entries) = assoc_type_dispatch.get_mut(idx) else {
+                return Err(self.err(format!(
+                    "invalid TypeId {} in assoc type dispatch entry",
+                    type_id.0
+                )));
+            };
+            entries.push((iface_type_id, assoc, fn_id));
+        }
+
         // Interface impls.
         let mut interface_impls: Vec<Vec<TypeId>> = Vec::with_capacity(type_len);
         interface_impls.resize_with(type_len, Vec::new);
@@ -1288,6 +1339,7 @@ impl<'a> Decoder<'a> {
             method_names,
             method_ids,
             vcall_dispatch,
+            assoc_type_dispatch,
             interface_impls,
             struct_layouts,
             external_effects,
@@ -1642,6 +1694,12 @@ impl<'a> Decoder<'a> {
                 dst: self.read_u32()?,
                 base: self.read_type_rep_lit()?,
                 args: self.read_vec_reg()?,
+            }),
+            62 => Ok(Instruction::AssocTypeRep {
+                dst: self.read_u32()?,
+                recv: self.read_u32()?,
+                iface_type_id: TypeId(self.read_u32()?),
+                assoc: self.read_string()?,
             }),
             6 => {
                 let dst = self.read_u32()?;

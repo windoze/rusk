@@ -282,6 +282,7 @@ impl Compiler {
     pub(super) fn compile_program(mut self, program: &Program) -> Result<Module, CompileError> {
         self.compile_module_items(&ModulePath::root(), &program.items)?;
         self.synthesize_builtin_interface_impl_wrappers()?;
+        self.synthesize_interface_assoc_type_typereps()?;
         self.populate_interface_dispatch_table()?;
         self.populate_interface_impl_table();
         self.populate_struct_layouts();
@@ -291,6 +292,80 @@ impl Compiler {
         self.resolve_function_constants()?;
 
         Ok(self.module)
+    }
+
+    fn synthesize_interface_assoc_type_typereps(&mut self) -> Result<(), CompileError> {
+        let span0 = Span::new(0, 0);
+
+        // We need an owned list since we mutate `self.module` while iterating.
+        let entries: Vec<((String, String, String), Ty)> = self
+            .env
+            .interface_assoc_types
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for ((type_name, iface_name, assoc_name), assoc_ty_template) in entries {
+            let fn_name = format!("impl::{iface_name}::for::{type_name}::{assoc_name}__typerep");
+            if self.module.function_ids.contains_key(&fn_name) {
+                continue;
+            }
+
+            let generics: Vec<typeck::GenericParamInfo> = if let Some(def) =
+                self.env.structs.get(&type_name)
+            {
+                def.generics.clone()
+            } else if let Some(def) = self.env.enums.get(&type_name) {
+                def.generics.clone()
+            } else if type_name == "array" {
+                vec![typeck::GenericParamInfo {
+                    name: "T".to_string(),
+                    arity: 0,
+                    bounds: Vec::new(),
+                    span: span0,
+                }]
+            } else if matches!(
+                type_name.as_str(),
+                "unit" | "bool" | "int" | "float" | "byte" | "char" | "string" | "bytes"
+            ) {
+                Vec::new()
+            } else {
+                return Err(CompileError::new(
+                    format!(
+                        "internal error: cannot synthesize assoc type typerep for unknown type `{type_name}`"
+                    ),
+                    span0,
+                ));
+            };
+
+            let mut lowerer = FunctionLowerer::new(
+                self,
+                FnKind::Real,
+                ModulePath::root(),
+                fn_name.clone(),
+                generics,
+            );
+            lowerer.bind_type_rep_params_for_signature();
+            let rep = lowerer.lower_type_rep_for_ty(&assoc_ty_template, span0)?;
+            lowerer.set_terminator(Terminator::Return { value: rep })?;
+
+            let mir_fn = lowerer.finish()?;
+            let id = self.module.add_function(mir_fn).map_err(|message| {
+                CompileError::new(format!("internal error: {message}"), span0)
+            })?;
+
+            let key = (type_name.clone(), iface_name.clone(), assoc_name.clone());
+            if self.module.assoc_type_reps.insert(key, id).is_some() {
+                return Err(CompileError::new(
+                    format!(
+                        "internal error: duplicate assoc type typerep dispatch for ({type_name}, {iface_name}, {assoc_name})"
+                    ),
+                    span0,
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn synthesize_builtin_interface_impl_wrappers(&mut self) -> Result<(), CompileError> {
@@ -1083,6 +1158,60 @@ impl Compiler {
             })?;
         }
 
+        // `array::iter` constructs a user-visible iterator adapter over a `readonly [T]`.
+        {
+            let name = "array::iter";
+            if !self.module.function_ids.contains_key(name) {
+                let generics = vec![typeck::GenericParamInfo {
+                    name: "T".to_string(),
+                    arity: 0,
+                    bounds: Vec::new(),
+                    span: span0,
+                }];
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    generics,
+                );
+                lowerer.bind_type_rep_params_for_signature();
+
+                let elem_rep = lowerer
+                    .generic_type_reps
+                    .first()
+                    .and_then(|v| *v)
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "internal error: missing `array::iter` TypeRep param",
+                            span0,
+                        )
+                    })?;
+
+                let recv = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::iter::ArrayIter::new".to_string(),
+                    args: vec![Operand::Local(elem_rep), Operand::Local(recv)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
+
         // Built-in inherent methods on primitive types.
         //
         // These are real MIR functions (not VM intrinsics) so they can be:
@@ -1202,6 +1331,41 @@ impl Compiler {
             &[Mutability::Readonly],
             "core::intrinsics::bytes_from_array",
         )?;
+        // `bytes::iter` constructs a user-visible iterator adapter over `bytes`.
+        {
+            let name = "bytes::iter";
+            if !self.module.function_ids.contains_key(name) {
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    Vec::new(),
+                );
+
+                let recv = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::iter::BytesIter::new".to_string(),
+                    args: vec![Operand::Local(recv)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
 
         // `string`.
         synthesize_prim_wrapper(
@@ -1230,6 +1394,41 @@ impl Compiler {
             &[Mutability::Readonly],
             "core::intrinsics::string_from_chars",
         )?;
+        // `string::chars` constructs a user-visible iterator adapter over Unicode scalar values.
+        {
+            let name = "string::chars";
+            if !self.module.function_ids.contains_key(name) {
+                let mut lowerer = FunctionLowerer::new(
+                    self,
+                    FnKind::Real,
+                    ModulePath::root(),
+                    name.to_string(),
+                    Vec::new(),
+                );
+
+                let recv = lowerer.alloc_local();
+                lowerer.params.push(Param {
+                    local: recv,
+                    mutability: Mutability::Readonly,
+                    ty: None,
+                });
+
+                let out = lowerer.alloc_local();
+                lowerer.emit(Instruction::Call {
+                    dst: Some(out),
+                    func: "core::iter::CharsIter::new".to_string(),
+                    args: vec![Operand::Local(recv)],
+                });
+                lowerer.set_terminator(Terminator::Return {
+                    value: Operand::Local(out),
+                })?;
+
+                let mir_fn = lowerer.finish()?;
+                self.module.add_function(mir_fn).map_err(|message| {
+                    CompileError::new(format!("internal error: {message}"), span0)
+                })?;
+            }
+        }
         synthesize_prim_wrapper(
             self,
             "string::from_utf8",
@@ -1514,6 +1713,17 @@ impl Compiler {
                     dst: remap_local(map, dst),
                     base,
                     args: args.into_iter().map(|op| remap_operand(map, &op)).collect(),
+                },
+                Instruction::AssocTypeRep {
+                    dst,
+                    recv,
+                    iface,
+                    assoc,
+                } => Instruction::AssocTypeRep {
+                    dst: remap_local(map, dst),
+                    recv: remap_operand(map, &recv),
+                    iface,
+                    assoc,
                 },
                 Instruction::MakeStruct {
                     dst,
@@ -2185,6 +2395,7 @@ impl Compiler {
                     }
                     Ok(())
                 }
+                Instruction::AssocTypeRep { recv, .. } => resolve_operand(function_ids, recv),
                 Instruction::MakeStruct {
                     type_args, fields, ..
                 } => {
@@ -3347,6 +3558,18 @@ impl<'a> FunctionLowerer<'a> {
 
                 let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
 
+                // Prelude-like `Option` constructors in patterns: `Some(p)` / `None()`.
+                if segments.len() == 1 && matches!(segments[0].as_str(), "Some" | "None") {
+                    return Ok((
+                        Pattern::Enum {
+                            enum_name: "Option".to_string(),
+                            variant: segments[0].clone(),
+                            fields: out_args,
+                        },
+                        binds,
+                    ));
+                }
+
                 if segments.len() >= 2 {
                     let prefix = &segments[..segments.len() - 1];
                     let last = segments.last().expect("len >= 2");
@@ -4249,11 +4472,21 @@ impl<'a> FunctionLowerer<'a> {
                     Operand::Local(dst)
                 }
             }
-            Ty::AssocProj { .. } => {
-                return Err(CompileError::new(
-                    "cannot reify associated type projections as `TypeRep` in this stage",
-                    span,
-                ));
+            Ty::AssocProj {
+                iface,
+                iface_args: _,
+                assoc,
+                self_ty,
+            } => {
+                let recv = self.lower_type_rep_for_ty(self_ty, span)?;
+                let dst = self.alloc_local();
+                self.emit(Instruction::AssocTypeRep {
+                    dst,
+                    recv,
+                    iface: iface.clone(),
+                    assoc: assoc.clone(),
+                });
+                Operand::Local(dst)
             }
             Ty::App(typeck::TyCon::Gen(_) | typeck::TyCon::Var(_), _) => {
                 return Err(CompileError::new(
@@ -4770,6 +5003,30 @@ impl<'a> FunctionLowerer<'a> {
                     }
                 }
             }
+        }
+
+        // Prelude-like `Option` constructors: `None` is lowered as `Option::None`.
+        if path.segments.len() == 1 && path.segments[0].name == "None" {
+            let dst = self.alloc_local();
+            let type_args = match self.ty_of_span(span) {
+                Some(ty) => match self.strip_readonly_ty(ty) {
+                    Ty::App(typeck::TyCon::Named(_name), args) => args.clone(),
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            let mut type_arg_reps = Vec::with_capacity(type_args.len());
+            for arg in &type_args {
+                type_arg_reps.push(self.lower_type_rep_for_ty(arg, span)?);
+            }
+            self.emit(Instruction::MakeEnum {
+                dst,
+                enum_name: "Option".to_string(),
+                type_args: type_arg_reps,
+                variant: "None".to_string(),
+                fields: Vec::new(),
+            });
+            return Ok(dst);
         }
 
         let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
@@ -6406,6 +6663,72 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             let segments: Vec<String> = path.segments.iter().map(|s| s.name.clone()).collect();
+
+            // Prelude-like `Option` constructors: `Some(v)` / `None()`.
+            //
+            // This is intentionally limited to `Option` (and can still be shadowed by locals).
+            if segments.len() == 1 && matches!(segments[0].as_str(), "Some" | "None") {
+                let variant = segments[0].as_str();
+                match (variant, args.len()) {
+                    ("Some", 1) | ("None", 0) => {}
+                    ("Some", n) => {
+                        return Err(CompileError::new(
+                            format!("arity mismatch for `Some(...)`: expected 1, got {n}"),
+                            span,
+                        ));
+                    }
+                    ("None", n) => {
+                        return Err(CompileError::new(
+                            format!("arity mismatch for `None(...)`: expected 0, got {n}"),
+                            span,
+                        ));
+                    }
+                    _ => {}
+                }
+
+                let mut ops = Vec::with_capacity(args.len());
+                for a in args {
+                    let v = self.lower_expr(a)?;
+                    ops.push(Operand::Local(v));
+                }
+
+                let type_args = match self.ty_of_span(span) {
+                    Some(ty) => match self.strip_readonly_ty(ty) {
+                        Ty::App(typeck::TyCon::Named(name), args) if name == "Option" => {
+                            args.clone()
+                        }
+                        other => {
+                            return Err(CompileError::new(
+                                format!(
+                                    "internal error: `Some/None` ctor lowered with unexpected type `{other:?}`"
+                                ),
+                                span,
+                            ));
+                        }
+                    },
+                    None => {
+                        return Err(CompileError::new(
+                            "internal error: missing inferred type for `Some/None` ctor"
+                                .to_string(),
+                            span,
+                        ));
+                    }
+                };
+                let mut type_arg_reps = Vec::with_capacity(type_args.len());
+                for arg in &type_args {
+                    type_arg_reps.push(self.lower_type_rep_for_ty(arg, span)?);
+                }
+
+                let dst = self.alloc_local();
+                self.emit(Instruction::MakeEnum {
+                    dst,
+                    enum_name: "Option".to_string(),
+                    type_args: type_arg_reps,
+                    variant: variant.to_string(),
+                    fields: ops,
+                });
+                return Ok(dst);
+            }
 
             // New-type struct constructor call: `Type(value)`.
             if let Some((kind, type_fqn)) = self

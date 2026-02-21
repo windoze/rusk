@@ -631,6 +631,9 @@ fn count_local_uses(func: &Function) -> Vec<usize> {
                         bump_operand(&mut counts, op);
                     }
                 }
+                Instruction::AssocTypeRep { recv, .. } => {
+                    bump_operand(&mut counts, recv);
+                }
 
                 Instruction::MakeStruct {
                     type_args, fields, ..

@@ -293,6 +293,108 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 }
             }
 
+            rusk_bytecode::Instruction::AssocTypeRep {
+                dst,
+                recv,
+                iface_type_id,
+                assoc,
+            } => {
+                let recv_rep = match read_type_rep(frame, *recv) {
+                    Ok(id) => id,
+                    Err(msg) => return trap(vm, format!("assoc_typerep recv: {msg}")),
+                };
+                let Some(node) = vm.type_reps.node(recv_rep) else {
+                    return trap(
+                        vm,
+                        format!("assoc_typerep: invalid typerep({})", recv_rep.0),
+                    );
+                };
+
+                let (dyn_type_id, dyn_type_args): (TypeId, Vec<TypeRepId>) = match &node.ctor {
+                    TypeCtor::Unit => (vm.primitive_type_ids.unit, Vec::new()),
+                    TypeCtor::Never => {
+                        return trap(
+                            vm,
+                            "assoc_typerep: cannot project associated types from `never`"
+                                .to_string(),
+                        );
+                    }
+                    TypeCtor::Bool => (vm.primitive_type_ids.bool, Vec::new()),
+                    TypeCtor::Int => (vm.primitive_type_ids.int, Vec::new()),
+                    TypeCtor::Float => (vm.primitive_type_ids.float, Vec::new()),
+                    TypeCtor::Byte => (vm.primitive_type_ids.byte, Vec::new()),
+                    TypeCtor::Char => (vm.primitive_type_ids.char, Vec::new()),
+                    TypeCtor::String => (vm.primitive_type_ids.string, Vec::new()),
+                    TypeCtor::Bytes => (vm.primitive_type_ids.bytes, Vec::new()),
+                    TypeCtor::Array => {
+                        let Some(array_id) = vm.primitive_type_ids.array else {
+                            return trap(
+                                vm,
+                                "assoc_typerep: missing required type name `array` in module type table".to_string(),
+                            );
+                        };
+                        (array_id, node.args.clone())
+                    }
+                    TypeCtor::Tuple(_) => {
+                        return trap(
+                            vm,
+                            "assoc_typerep: tuples do not support associated types in this stage"
+                                .to_string(),
+                        );
+                    }
+                    TypeCtor::Struct(type_id)
+                    | TypeCtor::Enum(type_id)
+                    | TypeCtor::Interface(type_id) => (*type_id, node.args.clone()),
+                    TypeCtor::Fn | TypeCtor::Cont => {
+                        return trap(
+                            vm,
+                            "assoc_typerep: functions do not support associated types in this stage"
+                                .to_string(),
+                        );
+                    }
+                };
+
+                let Some(fn_id) =
+                    vm.module
+                        .assoc_type_target(dyn_type_id, *iface_type_id, assoc.as_str())
+                else {
+                    let type_name = vm.module.type_name(dyn_type_id).unwrap_or("<unknown>");
+                    let iface_name = vm.module.type_name(*iface_type_id).unwrap_or("<unknown>");
+                    return trap(
+                        vm,
+                        format!("unresolved assoc type: <{type_name} as {iface_name}>::{assoc}"),
+                    );
+                };
+
+                let Some(callee) = vm.module.function(fn_id) else {
+                    return trap(vm, format!("invalid function id {}", fn_id.0));
+                };
+
+                if dyn_type_args.len() != callee.param_count as usize {
+                    return trap(
+                        vm,
+                        format!(
+                            "assoc_typerep arity mismatch: expected {} type args but got {}",
+                            callee.param_count,
+                            dyn_type_args.len()
+                        ),
+                    );
+                }
+
+                let mut regs: Vec<Option<Value>> = Vec::with_capacity(callee.reg_count as usize);
+                regs.resize(callee.reg_count as usize, None);
+                for (idx, id) in dyn_type_args.into_iter().enumerate() {
+                    regs[idx] = Some(Value::TypeRep(id));
+                }
+
+                vm.frames.push(Frame {
+                    func: fn_id,
+                    pc: 0,
+                    regs,
+                    return_dsts: ReturnDsts::from_option(Some(*dst)),
+                });
+            }
+
             rusk_bytecode::Instruction::MakeStruct {
                 dst,
                 type_id,

@@ -88,5 +88,97 @@ pub interface Iterator {
     }
 }
 
+pub interface ToIterator {
+    type Item;
+
+    // Convert a container into an `Iterator` interface object.
+    //
+    // Note: this is intended as the "generic adapter" entry-point. For the built-in container
+    // types, the compiler provides built-in impls:
+    // - arrays: `xs.to_iter()` lowers to `xs.iter()` (see `array::iter`)
+    // - bytes: `bs.to_iter()` lowers to `bs.iter()` (see `bytes::iter`)
+    // - string: `s.to_iter()` lowers to `s.chars()` (see `string::chars`)
+    readonly fn to_iter() -> Iterator{Item = Self::Item};
+}
+
+pub struct ArrayIter<T> {
+    xs: readonly [T],
+    idx: int,
+    len: int,
+}
+
+impl<T> ArrayIter<T> {
+    pub static fn new(xs: readonly [T]) -> ArrayIter<T> {
+        let len = xs.len();
+        ArrayIter { xs: xs, idx: 0, len: len }
+    }
+}
+
+impl<T> Iterator for ArrayIter<T> {
+    type Item = readonly T;
+
+    fn next() -> Option<Self::Item> {
+        if self.idx < self.len {
+            let out = self.xs[self.idx];
+            self.idx = self.idx + 1;
+            Option::Some(out)
+        } else {
+            Option::None
+        }
+    }
+}
+
+pub struct BytesIter {
+    bs: readonly bytes,
+    idx: int,
+    len: int,
+}
+
+impl BytesIter {
+    pub static fn new(bs: readonly bytes) -> BytesIter {
+        let len = bs.len();
+        BytesIter { bs: bs, idx: 0, len: len }
+    }
+}
+
+impl Iterator for BytesIter {
+    type Item = byte;
+
+    fn next() -> Option<byte> {
+        if self.idx < self.len {
+            let out = self.bs[self.idx];
+            self.idx = self.idx + 1;
+            Option::Some(out)
+        } else {
+            Option::None
+        }
+    }
+}
+
+pub struct CharsIter {
+    s: readonly string,
+    idx: int,
+}
+
+impl CharsIter {
+    pub static fn new(s: readonly string) -> CharsIter {
+        CharsIter { s: s, idx: 0 }
+    }
+}
+
+impl Iterator for CharsIter {
+    type Item = char;
+
+    fn next() -> Option<char> {
+        let next_idx = core::intrinsics::string_next_index(self.s, self.idx);
+        if next_idx == -1 { return Option::None; };
+
+        let codepoint = core::intrinsics::string_codepoint_at(self.s, self.idx);
+        self.idx = next_idx;
+        Option::Some(codepoint.to_char())
+    }
+}
+
 // Note: built-in container iteration (`for x in [..]`, `for b in bytes`, `for c in string`) is a
-// compiler feature; user-visible iterators are regular structs implementing `Iterator`.
+// compiler feature. `array::iter`, `bytes::iter`, and `string::chars` provide user-visible
+// iterators that implement `core::iter::Iterator`.

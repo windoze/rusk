@@ -30,8 +30,13 @@
    - [宿主端效果分发](#宿主端效果分发)
    - [恢复 vs 取消](#恢复-vs-取消)
    - [限制](#限制)
-7. [泛型特化（高级）](#泛型特化高级)
-8. [故障排除](#故障排除)
+7. [固定延续：宿主可存储的延续句柄](#固定延续宿主可存储的延续句柄)
+   - [带延续签名的宿主函数](#带延续签名的宿主函数)
+   - [延续值如何跨越 ABI 边界](#延续值如何跨越-abi-边界)
+   - [宿主驱动的尾恢复](#宿主驱动的尾恢复)
+   - [删除固定延续](#删除固定延续)
+8. [泛型特化（高级）](#泛型特化高级)
+9. [故障排除](#故障排除)
 
 ---
 
@@ -71,6 +76,7 @@
 - `float`（IEEE-754 `f64`）
 - `string`（UTF-8）
 - `bytes`（`Vec<u8>`）
+- `continuation`（不透明的延续句柄；参见[固定延续：宿主可存储的延续句柄](#固定延续宿主可存储的延续句柄)）
 
 在 Rust 中：
 
@@ -443,6 +449,171 @@ loop {
 
 ---
 
+## 固定延续：宿主可存储的延续句柄
+
+Rusk 支持**一等、一次性的限定延续**作为语言级别的值（类型 `cont(<param>) -> <ret>`）。这些可以在效果处理器中捕获、存储在变量中，并稍后恢复。
+
+从"宿主尾恢复"功能（2026-02-20）开始，**延续值可以作为不透明句柄跨越 VM/宿主 ABI 边界**。这使得以下嵌入场景成为可能：
+
+- Rusk 程序捕获一个延续并将其传递给宿主（通过宿主导入调用或外部化效果结果）。
+- 宿主将延续句柄存储在宿主拥有的状态中（例如调度器、事件循环或自定义注册表）。
+- 宿主稍后可以**恢复**延续（要么将句柄传回 Rusk 代码，要么使用宿主驱动的尾恢复 API）。
+- 宿主可以显式**删除**未使用的延续以释放资源。
+
+这对于需要将 Rusk 延续与原生事件循环、异步运行时或其他宿主端调度机制集成的嵌入特别有用。
+
+### 带延续签名的宿主函数
+
+要声明接受或返回延续的宿主函数，在签名中使用 `HostType::Cont`：
+
+```rust
+use rusk_compiler::{
+    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
+};
+
+let mut options = CompileOptions::default();
+
+options.register_host_module(
+    "host",
+    HostModuleDecl {
+        visibility: HostVisibility::Public,
+        functions: vec![
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "store_cont".to_string(),
+                sig: HostFnSig {
+                    params: vec![HostType::Cont {
+                        param: Box::new(HostType::Int),
+                        ret: Box::new(HostType::Int),
+                    }],
+                    ret: HostType::Unit,
+                },
+            },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "take_cont".to_string(),
+                sig: HostFnSig {
+                    params: Vec::new(),
+                    ret: HostType::Cont {
+                        param: Box::new(HostType::Int),
+                        ret: Box::new(HostType::Int),
+                    },
+                },
+            },
+        ],
+    },
+)?;
+```
+
+在 Rusk 代码中，这些宿主函数可以自然地调用：
+
+```rusk
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    // 捕获一个延续并将其传递给宿主进行存储
+    match @E.boom() {
+        @E.boom() -> k => { host::store_cont(k); 0 }
+        x => x
+    };
+
+    // 之后：从宿主检索延续并恢复它
+    let k = host::take_cont();
+    k(42)
+}
+```
+
+### 延续值如何跨越 ABI 边界
+
+当 `Value::Continuation` 跨越 VM/宿主边界（作为参数或返回值）时，VM 自动在内部 GC 根表中**固定**延续，并将其转换为：
+
+- `AbiValue::Continuation(ContinuationHandle)`
+
+其中 `ContinuationHandle` 是一个不透明的、经过代数检查的句柄：
+
+```rust
+use rusk_vm::{AbiValue, ContinuationHandle};
+
+// 在宿主导入实现中：
+if let Some(id) = module.host_import_id("host::store_cont") {
+    vm.register_host_import(id, |args: &[AbiValue]| match args {
+        [AbiValue::Continuation(handle)] => {
+            // 将句柄存储在宿主状态中（例如 Vec 或 HashMap）
+            store_continuation_somewhere(*handle);
+            Ok(AbiValue::Unit)
+        }
+        _ => Err(/* ... */)
+    })?;
+}
+```
+
+当 `AbiValue::Continuation(handle)` 流回 VM（例如从宿主导入返回）时，VM 查找固定的延续并将其转换回 `Value::Continuation`。
+
+**重要属性：**
+
+- **固定延续是 GC 根**：当宿主持有句柄时，捕获的 Rusk 帧/值保持活动状态（不会被回收）。
+- **句柄是不透明的且特定于 VM**：它们在发出它们的 VM 之外没有意义。
+- **保留一次性语义**：恢复延续（在语言中或从宿主）消耗底层状态；进一步的恢复尝试将失败并返回 `InvalidContinuation`。
+- **代数检查防止释放后使用**：如果句柄的槽被重用，陈旧的句柄将被拒绝。
+
+### 宿主驱动的尾恢复
+
+宿主可以使用以下方法直接恢复固定的延续：
+
+```rust
+use rusk_vm::{vm_resume_pinned_continuation_tail, AbiValue};
+
+vm_resume_pinned_continuation_tail(&mut vm, handle, AbiValue::Int(42))?;
+```
+
+这是一个**尾恢复**操作：
+
+- 它消耗一次性延续状态。
+- 它将捕获的延续段拼接到当前 VM 栈*之上*（就像从一个在 VM 中未表示的宿主处理器帧进行尾恢复）。
+- 延续的最终返回值被**丢弃**（没有"第二半部分"宿主处理器帧来接收它）。如果 VM 栈为空，恢复的延续成为新的入口计算，其返回值照常成为程序结果。
+- 该操作是**仅调度的**：它不会步进 VM。宿主必须随后调用 `vm_step` 来驱动执行。
+
+宿主端恢复循环示例：
+
+```rust
+use rusk_vm::{StepResult, vm_step, vm_resume_pinned_continuation_tail, AbiValue};
+
+// 在从宿主导入调用存储延续句柄之后：
+vm_resume_pinned_continuation_tail(&mut vm, stored_handle, AbiValue::Int(42))?;
+
+loop {
+    match vm_step(&mut vm, None) {
+        StepResult::Done { value } => break value,
+        StepResult::Trap { message } => panic!("vm trapped: {message}"),
+        StepResult::Yield { .. } => continue,
+        StepResult::Request { .. } => { /* 处理外部化效果 */ }
+    }
+}
+```
+
+**为什么只支持尾恢复？**
+
+非尾宿主恢复需要宿主为宿主效果处理器的"第二半部分"保持状态，这超出了当前嵌入模型的范围。尾恢复语义通过在不返回控制到宿主处理器帧的情况下消耗延续来避免这种情况。
+
+### 删除固定延续
+
+如果宿主决定不恢复延续（例如取消请求或在关闭时清理），它必须显式删除句柄以释放固定的资源：
+
+```rust
+use rusk_vm::vm_drop_pinned_continuation;
+
+vm_drop_pinned_continuation(&mut vm, handle)?;
+```
+
+删除后，句柄变为无效，捕获的延续状态有资格进行垃圾回收（除非仍可从运行中的 VM 访问）。
+
+**重要：**
+
+- 删除延续**不是**错误；这是一个正常的清理操作（相当于在 Rusk 代码中放弃延续）。
+- 尝试两次删除同一句柄，或删除已消耗的句柄，会返回错误。
+
+---
+
 ## 泛型特化（高级）
 
 大多数嵌入可以忽略本节。
@@ -499,3 +670,7 @@ loop {
 
 - **"unhandled effect: Interface.method"**
   - 程序执行了一个没有语言内处理器的效果，并且它没有在模块中声明为外部化效果。
+
+- **"invalid continuation handle"**（使用 `vm_resume_pinned_continuation_tail` 或 `vm_drop_pinned_continuation` 时）
+  - 延续句柄已过期（已被消耗或删除）、代数错误或属于不同的 VM。
+  - 确保句柄仅使用一次（一次性），并且在先前的消耗操作之后不要尝试恢复/删除。
