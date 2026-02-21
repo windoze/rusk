@@ -41,7 +41,8 @@ public final class Vm {
             TypeId byteTy,
             TypeId charTy,
             TypeId stringTy,
-            TypeId bytesTy) {}
+            TypeId bytesTy,
+            TypeId arrayTy) {}
 
     private record VCallFastPathIds(MethodId hash, MethodId eq, MethodId ne) {}
 
@@ -188,7 +189,8 @@ public final class Vm {
                                 () ->
                                         new VmError.InvalidState(
                                                 "missing required primitive type name `bytes` in module type table"));
-        return new PrimitiveTypeIds(unit, bool, intTy, floatTy, byteTy, charTy, stringTy, bytesTy);
+        TypeId arrayTy = module.typeId("array").orElse(null);
+        return new PrimitiveTypeIds(unit, bool, intTy, floatTy, byteTy, charTy, stringTy, bytesTy, arrayTy);
     }
 
     public StepResult step(Long fuel) {
@@ -474,6 +476,103 @@ public final class Vm {
             TypeReps.TypeRepId id =
                     typeReps.intern(new TypeReps.TypeRepNode(ctor, argIds));
             writeValue(frame, i.dst(), new Value.TypeRep(id));
+            return null;
+        }
+
+        if (inst instanceof Instruction.AssocTypeRep i) {
+            TypeReps.TypeRepId recvRep;
+            try {
+                recvRep = readTypeRep(frame, i.recv());
+            } catch (VmTrap t) {
+                throw new VmTrap("assoc_typerep recv: " + t.getMessage());
+            }
+
+            TypeReps.TypeRepNode node = typeReps.node(recvRep);
+            if (node == null) {
+                throw new VmTrap("assoc_typerep: invalid typerep(" + recvRep.index() + ")");
+            }
+
+            TypeId dynTypeId;
+            List<TypeReps.TypeRepId> dynTypeArgs;
+            TypeReps.TypeCtor ctor = node.ctor();
+            if (ctor instanceof TypeReps.TypeCtor.Unit) {
+                dynTypeId = primitiveTypeIds.unit();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Never) {
+                throw new VmTrap("assoc_typerep: cannot project associated types from `never`");
+            } else if (ctor instanceof TypeReps.TypeCtor.Bool) {
+                dynTypeId = primitiveTypeIds.bool();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Int) {
+                dynTypeId = primitiveTypeIds.intTy();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Float) {
+                dynTypeId = primitiveTypeIds.floatTy();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Byte) {
+                dynTypeId = primitiveTypeIds.byteTy();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Char) {
+                dynTypeId = primitiveTypeIds.charTy();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.String) {
+                dynTypeId = primitiveTypeIds.stringTy();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Bytes) {
+                dynTypeId = primitiveTypeIds.bytesTy();
+                dynTypeArgs = List.of();
+            } else if (ctor instanceof TypeReps.TypeCtor.Array) {
+                if (primitiveTypeIds.arrayTy() == null) {
+                    throw new VmTrap("assoc_typerep: missing required type name `array` in module type table");
+                }
+                dynTypeId = primitiveTypeIds.arrayTy();
+                dynTypeArgs = node.args();
+            } else if (ctor instanceof TypeReps.TypeCtor.Tuple) {
+                throw new VmTrap("assoc_typerep: tuples do not support associated types in this stage");
+            } else if (ctor instanceof TypeReps.TypeCtor.Struct s) {
+                dynTypeId = s.typeId();
+                dynTypeArgs = node.args();
+            } else if (ctor instanceof TypeReps.TypeCtor.Enum e) {
+                dynTypeId = e.typeId();
+                dynTypeArgs = node.args();
+            } else if (ctor instanceof TypeReps.TypeCtor.Interface iface) {
+                dynTypeId = iface.typeId();
+                dynTypeArgs = node.args();
+            } else if (ctor instanceof TypeReps.TypeCtor.Fn || ctor instanceof TypeReps.TypeCtor.Cont) {
+                throw new VmTrap("assoc_typerep: functions do not support associated types in this stage");
+            } else {
+                throw new VmTrap("assoc_typerep: unhandled typerep ctor " + ctor.getClass().getSimpleName());
+            }
+
+            FunctionId fnId =
+                    module.assocTypeTarget(dynTypeId, i.ifaceTypeId(), i.assoc())
+                            .orElseThrow(
+                                    () -> {
+                                        String typeName = module.typeName(dynTypeId).orElse("<unknown>");
+                                        String ifaceName = module.typeName(i.ifaceTypeId()).orElse("<unknown>");
+                                        return new VmTrap(
+                                                "unresolved assoc type: <" + typeName + " as " + ifaceName + ">::" + i.assoc());
+                                    });
+
+            Function callee = module.function(fnId).orElse(null);
+            if (callee == null) {
+                throw new VmTrap("invalid function id " + fnId.index());
+            }
+
+            if (dynTypeArgs.size() != callee.paramCount()) {
+                throw new VmTrap(
+                        "assoc_typerep arity mismatch: expected "
+                                + callee.paramCount()
+                                + " type args but got "
+                                + dynTypeArgs.size());
+            }
+
+            Value[] regs = new Value[callee.regCount()];
+            for (int idx = 0; idx < dynTypeArgs.size(); idx++) {
+                regs[idx] = new Value.TypeRep(dynTypeArgs.get(idx));
+            }
+
+            frames.add(new Frame(fnId, 0, regs, new ReturnDsts.One(i.dst())));
             return null;
         }
 

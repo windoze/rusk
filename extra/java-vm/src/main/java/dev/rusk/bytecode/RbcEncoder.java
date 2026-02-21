@@ -8,7 +8,7 @@ import java.util.Map;
 final class RbcEncoder {
     private static final byte[] MAGIC = new byte[] {'R', 'U', 'S', 'K', 'B', 'C', '0', 0};
     private static final int VERSION_MAJOR = 0;
-    private static final int VERSION_MINOR = 11;
+    private static final int VERSION_MINOR = 12;
 
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
 
@@ -136,6 +136,24 @@ final class RbcEncoder {
             for (ExecutableModule.VCallEntry e : module.vcallDispatch().get(typeIndex)) {
                 writeU32(typeIndex);
                 writeU32(e.method().index());
+                writeU32(e.function().index());
+            }
+        }
+
+        // Assoc type dispatch table (sparse encoding, deterministic order by type_id then key).
+        long assocLen = 0;
+        for (List<ExecutableModule.AssocTypeEntry> entries : module.assocTypeDispatch()) {
+            assocLen += entries.size();
+        }
+        if (assocLen > Integer.MAX_VALUE) {
+            throw new RbcEncodeException("length overflow");
+        }
+        writeLen((int) assocLen);
+        for (int typeIndex = 0; typeIndex < module.assocTypeDispatch().size(); typeIndex++) {
+            for (ExecutableModule.AssocTypeEntry e : module.assocTypeDispatch().get(typeIndex)) {
+                writeU32(typeIndex);
+                writeU32(e.ifaceType().index());
+                writeString(e.assoc());
                 writeU32(e.function().index());
             }
         }
@@ -423,6 +441,12 @@ final class RbcEncoder {
             writeU32(i.dst());
             writeTypeRepLit(i.base());
             writeVecReg(i.args());
+        } else if (inst instanceof Instruction.AssocTypeRep i) {
+            writeU8(62);
+            writeU32(i.dst());
+            writeU32(i.recv());
+            writeU32(i.ifaceTypeId().index());
+            writeString(i.assoc());
         } else if (inst instanceof Instruction.MakeStruct i) {
             writeU8(6);
             writeU32(i.dst());

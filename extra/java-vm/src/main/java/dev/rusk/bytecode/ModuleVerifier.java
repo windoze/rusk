@@ -82,6 +82,13 @@ public final class ModuleVerifier {
                             + " does not match type_names length "
                             + typesLen);
         }
+        if (module.assocTypeDispatch().size() != typesLen) {
+            throw new VerifyException(
+                    "assoc_type_dispatch length "
+                            + module.assocTypeDispatch().size()
+                            + " does not match type_names length "
+                            + typesLen);
+        }
         if (module.interfaceImpls().size() != typesLen) {
             throw new VerifyException(
                     "interface_impls length "
@@ -172,8 +179,56 @@ public final class ModuleVerifier {
             }
         }
 
-        // Interface impl tables are sorted unique lists of TypeId.
         int typeCount = module.typeNames().size();
+
+        // Assoc type dispatch table integrity: strictly sorted/unique by (interface, assoc), and ids in range.
+        for (int typeIdx = 0; typeIdx < module.assocTypeDispatch().size(); typeIdx++) {
+            List<ExecutableModule.AssocTypeEntry> entries = module.assocTypeDispatch().get(typeIdx);
+            Integer prevIface = null;
+            String prevAssoc = null;
+            for (ExecutableModule.AssocTypeEntry e : entries) {
+                int iid = e.ifaceType().index();
+                String assoc = e.assoc();
+                int fid = e.function().index();
+                if (iid < 0 || iid >= typeCount) {
+                    throw new VerifyException(
+                            "assoc_type_dispatch for TypeId "
+                                    + typeIdx
+                                    + " contains invalid interface TypeId "
+                                    + iid
+                                    + " (types="
+                                    + typeCount
+                                    + ")");
+                }
+                if (assoc.isEmpty()) {
+                    throw new VerifyException("assoc_type_dispatch for TypeId " + typeIdx + " contains empty assoc name");
+                }
+                if (prevIface != null
+                        && prevAssoc != null
+                        && (prevIface.intValue() > iid
+                                || (prevIface.intValue() == iid && prevAssoc.compareTo(assoc) >= 0))) {
+                    throw new VerifyException(
+                            "assoc_type_dispatch list for TypeId "
+                                    + typeIdx
+                                    + " is not strictly sorted/unique by (interface, assoc)");
+                }
+                if (fid < 0 || fid >= module.functions().size()) {
+                    throw new VerifyException(
+                            "assoc_type_dispatch entry (TypeId "
+                                    + typeIdx
+                                    + ", interface TypeId "
+                                    + iid
+                                    + ", assoc `"
+                                    + assoc
+                                    + "`) points to invalid function id "
+                                    + fid);
+                }
+                prevIface = iid;
+                prevAssoc = assoc;
+            }
+        }
+
+        // Interface impl tables are sorted unique lists of TypeId.
         for (int typeIdx = 0; typeIdx < module.interfaceImpls().size(); typeIdx++) {
             List<TypeId> ifaces = module.interfaceImpls().get(typeIdx);
             Integer prev = null;
@@ -435,6 +490,13 @@ public final class ModuleVerifier {
             verifyTypeRepLitInterned(module, i.base(), here + ": MakeTypeRep base");
             for (int r : i.args()) {
                 verifyReg(regCount, r, here + ": MakeTypeRep arg");
+            }
+        } else if (inst instanceof Instruction.AssocTypeRep i) {
+            verifyReg(regCount, i.dst(), here + ": dst");
+            verifyReg(regCount, i.recv(), here + ": recv");
+            verifyTypeId(module, i.ifaceTypeId(), here + ": iface type id");
+            if (i.assoc().isEmpty()) {
+                throw new VerifyException(here + ": AssocTypeRep has empty assoc name");
             }
         } else if (inst instanceof Instruction.MakeStruct i) {
             verifyTypeId(module, i.typeId(), here + ": type id");

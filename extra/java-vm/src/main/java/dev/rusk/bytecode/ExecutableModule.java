@@ -30,6 +30,8 @@ public final class ExecutableModule {
 
     // vcall_dispatch[type_id] = sorted unique list of (method_id, fn_id).
     private final List<List<VCallEntry>> vcallDispatch;
+    // assoc_type_dispatch[type_id] = sorted unique list of (iface_type_id, assoc_name, fn_id).
+    private final List<List<AssocTypeEntry>> assocTypeDispatch;
     // interface_impls[type_id] = sorted unique list of implemented interface TypeIds.
     private final List<List<TypeId>> interfaceImpls;
     // struct_layouts[type_id] = null for non-struct, or field names for struct types.
@@ -55,6 +57,7 @@ public final class ExecutableModule {
                 new ArrayList<>(),
                 new ArrayList<>(),
                 new ArrayList<>(),
+                new ArrayList<>(),
                 new TreeMap<>(),
                 new FunctionId(0));
 
@@ -74,6 +77,7 @@ public final class ExecutableModule {
             List<String> methodNames,
             NavigableMap<String, MethodId> methodIds,
             List<List<VCallEntry>> vcallDispatch,
+            List<List<AssocTypeEntry>> assocTypeDispatch,
             List<List<TypeId>> interfaceImpls,
             List<List<String>> structLayouts,
             List<ExternalEffectDecl> externalEffects,
@@ -89,6 +93,7 @@ public final class ExecutableModule {
         this.methodNames = Objects.requireNonNull(methodNames, "methodNames");
         this.methodIds = Objects.requireNonNull(methodIds, "methodIds");
         this.vcallDispatch = Objects.requireNonNull(vcallDispatch, "vcallDispatch");
+        this.assocTypeDispatch = Objects.requireNonNull(assocTypeDispatch, "assocTypeDispatch");
         this.interfaceImpls = Objects.requireNonNull(interfaceImpls, "interfaceImpls");
         this.structLayouts = Objects.requireNonNull(structLayouts, "structLayouts");
         this.externalEffects = Objects.requireNonNull(externalEffects, "externalEffects");
@@ -134,6 +139,10 @@ public final class ExecutableModule {
 
     public List<List<VCallEntry>> vcallDispatch() {
         return Collections.unmodifiableList(vcallDispatch);
+    }
+
+    public List<List<AssocTypeEntry>> assocTypeDispatch() {
+        return Collections.unmodifiableList(assocTypeDispatch);
     }
 
     public List<List<TypeId>> interfaceImpls() {
@@ -254,6 +263,7 @@ public final class ExecutableModule {
         typeNames.add(name);
         typeIds.put(name, typeId);
         vcallDispatch.add(new ArrayList<>());
+        assocTypeDispatch.add(new ArrayList<>());
         interfaceImpls.add(new ArrayList<>());
         structLayouts.add(null);
         return typeId;
@@ -336,6 +346,54 @@ public final class ExecutableModule {
         return Optional.of(entries.get(pos).function());
     }
 
+    public void addAssocTypeEntry(TypeId typeId, TypeId ifaceTypeId, String assoc, FunctionId fnId) {
+        Objects.requireNonNull(typeId, "typeId");
+        Objects.requireNonNull(ifaceTypeId, "ifaceTypeId");
+        Objects.requireNonNull(assoc, "assoc");
+        Objects.requireNonNull(fnId, "fnId");
+
+        if (assoc.isEmpty()) {
+            throw new IllegalArgumentException("cannot add assoc type entry with empty assoc name");
+        }
+
+        int idx = typeId.index();
+        if (idx < 0 || idx >= assocTypeDispatch.size()) {
+            throw new IllegalArgumentException("invalid TypeId " + idx);
+        }
+
+        List<AssocTypeEntry> entries = assocTypeDispatch.get(idx);
+        int pos = java.util.Collections.binarySearch(entries, new AssocTypeEntry(ifaceTypeId, assoc, fnId));
+        if (pos >= 0) {
+            throw new IllegalArgumentException(
+                    "duplicate assoc type dispatch entry for type "
+                            + typeId.index()
+                            + " interface "
+                            + ifaceTypeId.index()
+                            + " assoc `"
+                            + assoc
+                            + "`");
+        }
+        entries.add(-pos - 1, new AssocTypeEntry(ifaceTypeId, assoc, fnId));
+    }
+
+    public Optional<FunctionId> assocTypeTarget(TypeId typeId, TypeId ifaceTypeId, String assoc) {
+        Objects.requireNonNull(typeId, "typeId");
+        Objects.requireNonNull(ifaceTypeId, "ifaceTypeId");
+        Objects.requireNonNull(assoc, "assoc");
+
+        int idx = typeId.index();
+        if (idx < 0 || idx >= assocTypeDispatch.size()) {
+            return Optional.empty();
+        }
+        List<AssocTypeEntry> entries = assocTypeDispatch.get(idx);
+        int pos =
+                java.util.Collections.binarySearch(entries, new AssocTypeEntry(ifaceTypeId, assoc, new FunctionId(0)));
+        if (pos < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(entries.get(pos).function());
+    }
+
     public void setInterfaceImpls(TypeId typeId, List<TypeId> ifaces) {
         Objects.requireNonNull(typeId, "typeId");
         Objects.requireNonNull(ifaces, "ifaces");
@@ -407,6 +465,23 @@ public final class ExecutableModule {
         @Override
         public int compareTo(VCallEntry o) {
             return Integer.compare(method.index(), o.method.index());
+        }
+    }
+
+    public record AssocTypeEntry(TypeId ifaceType, String assoc, FunctionId function) implements Comparable<AssocTypeEntry> {
+        public AssocTypeEntry {
+            Objects.requireNonNull(ifaceType, "ifaceType");
+            Objects.requireNonNull(assoc, "assoc");
+            Objects.requireNonNull(function, "function");
+        }
+
+        @Override
+        public int compareTo(AssocTypeEntry o) {
+            int c = Integer.compare(ifaceType.index(), o.ifaceType.index());
+            if (c != 0) {
+                return c;
+            }
+            return assoc.compareTo(o.assoc);
         }
     }
 

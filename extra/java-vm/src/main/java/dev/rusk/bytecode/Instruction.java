@@ -10,6 +10,7 @@ public sealed interface Instruction
                 Instruction.AsReadonly,
                 Instruction.IsType,
                 Instruction.MakeTypeRep,
+                Instruction.AssocTypeRep,
                 Instruction.MakeStruct,
                 Instruction.MakeArray,
                 Instruction.MakeTuple,
@@ -85,6 +86,13 @@ public sealed interface Instruction
             Objects.requireNonNull(base, "base");
             Objects.requireNonNull(args, "args");
             args = List.copyOf(args);
+        }
+    }
+
+    record AssocTypeRep(int dst, int recv, TypeId ifaceTypeId, String assoc) implements Instruction {
+        public AssocTypeRep {
+            Objects.requireNonNull(ifaceTypeId, "ifaceTypeId");
+            Objects.requireNonNull(assoc, "assoc");
         }
     }
 

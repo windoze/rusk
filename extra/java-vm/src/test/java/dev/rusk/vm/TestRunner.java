@@ -7,6 +7,7 @@ import dev.rusk.bytecode.EffectSpec;
 import dev.rusk.bytecode.ExecutableModule;
 import dev.rusk.bytecode.ExternalEffectDecl;
 import dev.rusk.bytecode.Function;
+import dev.rusk.bytecode.FunctionId;
 import dev.rusk.bytecode.HandlerClause;
 import dev.rusk.bytecode.HostFnSig;
 import dev.rusk.bytecode.HostImport;
@@ -25,6 +26,7 @@ public final class TestRunner {
         testVmDoneForTrivialProgram();
         testVmArgvInjection();
         testTypeTestNeverIsFalse();
+        testAssocTypeRepResolvesViaDispatch();
         testIntrinsicStringNextIndexAndCodepointAt();
         testIntrinsicStringSliceUsesCodepoints();
         testIntrinsicStringByteSlice();
@@ -97,6 +99,47 @@ public final class TestRunner {
         AbiValue v = ((StepResult.Done) r).value();
         assert v instanceof AbiValue.Bool;
         assert !((AbiValue.Bool) v).value();
+    }
+
+    private static void testAssocTypeRepResolvesViaDispatch() throws Exception {
+        ExecutableModule module = new ExecutableModule();
+        TypeId boxTypeId = module.internType("Box");
+        TypeId ifaceTypeId = module.internType("MyIface");
+
+        // Associated type impl: <Box<T> as MyIface>::Item = T
+        FunctionId assocFn =
+                module.addFunction(
+                        new Function(
+                                "Box_Item",
+                                1,
+                                1,
+                                List.of(new Instruction.Return(0))));
+        module.addAssocTypeEntry(boxTypeId, ifaceTypeId, "Item", assocFn);
+
+        FunctionId main =
+                module.addFunction(
+                        new Function(
+                                "main",
+                                5,
+                                0,
+                                List.of(
+                                        new Instruction.Const(0, new ConstValue.TypeRep(new TypeRepLit.Int())),
+                                        new Instruction.MakeTypeRep(1, new TypeRepLit.Struct("Box"), List.of(0)),
+                                        new Instruction.AssocTypeRep(2, 1, ifaceTypeId, "Item"),
+                                        new Instruction.Const(3, new ConstValue.Int(123)),
+                                        new Instruction.IsType(4, 3, 2),
+                                        new Instruction.Return(4))));
+        module.setEntry(main);
+
+        // Exercise encode->decode as well (v0.12 adds assoc_type_dispatch + AssocTypeRep).
+        ExecutableModule decoded = Rbc.fromBytes(Rbc.toBytes(module));
+
+        Vm vm = new Vm(decoded, new HostImportRegistry());
+        StepResult r = vm.step(null);
+        assert r instanceof StepResult.Done;
+        AbiValue v = ((StepResult.Done) r).value();
+        assert v instanceof AbiValue.Bool;
+        assert ((AbiValue.Bool) v).value();
     }
 
     private static void testVmDoneForTrivialProgram() throws Exception {

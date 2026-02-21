@@ -11,7 +11,7 @@ import java.util.TreeSet;
 final class RbcDecoder {
     private static final byte[] MAGIC = new byte[] {'R', 'U', 'S', 'K', 'B', 'C', '0', 0};
     private static final int VERSION_MAJOR = 0;
-    private static final int VERSION_MINOR = 11;
+    private static final int VERSION_MINOR = 12;
 
     private byte[] bytes;
     private int pos;
@@ -253,6 +253,25 @@ final class RbcDecoder {
             vcallDispatch.get(typeId).add(new ExecutableModule.VCallEntry(new MethodId(methodId), new FunctionId(fnId)));
         }
 
+        // Assoc type dispatch table.
+        ArrayList<List<ExecutableModule.AssocTypeEntry>> assocTypeDispatch = new ArrayList<>(typeLen);
+        for (int i = 0; i < typeLen; i++) {
+            assocTypeDispatch.add(new ArrayList<>());
+        }
+        int assocLen = readLen();
+        for (int i = 0; i < assocLen; i++) {
+            int typeId = readU32Usize("type id overflow");
+            int ifaceTypeId = readU32Usize("type id overflow");
+            String assoc = readString();
+            int fnId = readU32Usize("function id overflow");
+            if (typeId < 0 || typeId >= assocTypeDispatch.size()) {
+                throw err("invalid TypeId " + typeId + " in assoc type dispatch entry");
+            }
+            assocTypeDispatch
+                    .get(typeId)
+                    .add(new ExecutableModule.AssocTypeEntry(new TypeId(ifaceTypeId), assoc, new FunctionId(fnId)));
+        }
+
         // Interface impls.
         ArrayList<List<TypeId>> interfaceImpls = new ArrayList<>(typeLen);
         for (int i = 0; i < typeLen; i++) {
@@ -348,6 +367,7 @@ final class RbcDecoder {
                 methodNames,
                 methodIds,
                 vcallDispatch,
+                assocTypeDispatch,
                 interfaceImpls,
                 structLayouts,
                 externalEffects,
@@ -595,6 +615,8 @@ final class RbcDecoder {
             case 3 -> new Instruction.AsReadonly(readU32Reg(), readU32Reg());
             case 4 -> new Instruction.IsType(readU32Reg(), readU32Reg(), readU32Reg());
             case 5 -> new Instruction.MakeTypeRep(readU32Reg(), readTypeRepLit(), readVecReg());
+            case 62 -> new Instruction.AssocTypeRep(
+                    readU32Reg(), readU32Reg(), new TypeId(readU32Usize("type id overflow")), readString());
             case 6 -> {
                 int dst = readU32Reg();
                 long typeId = readU32();
