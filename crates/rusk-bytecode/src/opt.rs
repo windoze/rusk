@@ -513,6 +513,7 @@ fn instr_def_reg(instr: &Instruction) -> Option<Reg> {
         | Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
+        | Instruction::AssocTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
         | Instruction::MakeTuple { dst, .. }
@@ -569,6 +570,7 @@ fn set_instr_dst(instr: &mut Instruction, new_dst: Reg) -> bool {
         | Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
+        | Instruction::AssocTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
         | Instruction::MakeTuple { dst, .. }
@@ -636,6 +638,7 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
         Instruction::IsType { value, ty, .. } => vec![*value, *ty],
 
         Instruction::MakeTypeRep { args, .. } => args.clone(),
+        Instruction::AssocTypeRep { recv, .. } => vec![*recv],
         Instruction::MakeStruct {
             type_args, fields, ..
         } => type_args
@@ -745,6 +748,7 @@ fn instr_write_regs(instr: &Instruction) -> Vec<Reg> {
         | Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
+        | Instruction::AssocTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
         | Instruction::MakeTuple { dst, .. }
@@ -825,6 +829,9 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
             for r in args {
                 *r = f(*r);
             }
+        }
+        Instruction::AssocTypeRep { recv, .. } => {
+            *recv = f(*recv);
         }
         Instruction::MakeStruct {
             type_args, fields, ..
@@ -1396,6 +1403,7 @@ fn update_const_env(env: &mut BTreeMap<Reg, ScalarConst>, instr: &Instruction) {
         Instruction::AsReadonly { dst, .. }
         | Instruction::IsType { dst, .. }
         | Instruction::MakeTypeRep { dst, .. }
+        | Instruction::AssocTypeRep { dst, .. }
         | Instruction::MakeStruct { dst, .. }
         | Instruction::MakeArray { dst, .. }
         | Instruction::MakeTuple { dst, .. }

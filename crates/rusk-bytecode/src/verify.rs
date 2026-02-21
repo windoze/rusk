@@ -112,6 +112,15 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
             ),
         });
     }
+    if module.assoc_type_dispatch.len() != types_len {
+        return Err(VerifyError {
+            message: format!(
+                "assoc_type_dispatch length {} does not match type_names length {}",
+                module.assoc_type_dispatch.len(),
+                types_len
+            ),
+        });
+    }
     if module.interface_impls.len() != types_len {
         return Err(VerifyError {
             message: format!(
@@ -217,8 +226,52 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         }
     }
 
-    // Interface impl tables are sorted lists of TypeId.
     let type_count = module.type_names.len() as u32;
+
+    // Assoc type dispatch table integrity.
+    for (type_idx, entries) in module.assoc_type_dispatch.iter().enumerate() {
+        let mut prev_iface: Option<u32> = None;
+        let mut prev_assoc: Option<&str> = None;
+        for (iface_type_id, assoc, fn_id) in entries {
+            if iface_type_id.0 >= type_count {
+                return Err(VerifyError {
+                    message: format!(
+                        "assoc_type_dispatch for TypeId {type_idx} contains invalid interface TypeId {} (types={type_count})",
+                        iface_type_id.0
+                    ),
+                });
+            }
+            if assoc.is_empty() {
+                return Err(VerifyError {
+                    message: format!(
+                        "assoc_type_dispatch for TypeId {type_idx} contains empty assoc name"
+                    ),
+                });
+            }
+            if let Some(prev_iface) = prev_iface
+                && let Some(prev_assoc) = prev_assoc
+                && (prev_iface, prev_assoc) >= (iface_type_id.0, assoc.as_str())
+            {
+                return Err(VerifyError {
+                    message: format!(
+                        "assoc_type_dispatch list for TypeId {type_idx} is not strictly sorted/unique by (interface, assoc)"
+                    ),
+                });
+            }
+            if (fn_id.0 as usize) >= module.functions.len() {
+                return Err(VerifyError {
+                    message: format!(
+                        "assoc_type_dispatch entry (TypeId {type_idx}, interface TypeId {}, assoc `{}`) points to invalid function id {}",
+                        iface_type_id.0, assoc, fn_id.0
+                    ),
+                });
+            }
+            prev_iface = Some(iface_type_id.0);
+            prev_assoc = Some(assoc.as_str());
+        }
+    }
+
+    // Interface impl tables are sorted lists of TypeId.
     for (type_idx, ifaces) in module.interface_impls.iter().enumerate() {
         let mut prev: Option<TypeId> = None;
         for iface_id in ifaces {
@@ -578,6 +631,25 @@ fn verify_instruction(
             verify_type_rep_lit_interned(module, base, &format!("{}: MakeTypeRep base", here()))?;
             for r in args {
                 verify_reg(reg_count, *r, &format!("{}: MakeTypeRep arg", here()))?;
+            }
+        }
+        Instruction::AssocTypeRep {
+            dst,
+            recv,
+            iface_type_id,
+            assoc,
+        } => {
+            verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
+            verify_reg(reg_count, *recv, &format!("{}: recv", here()))?;
+            verify_type_id(
+                module,
+                *iface_type_id,
+                &format!("{}: iface type id", here()),
+            )?;
+            if assoc.is_empty() {
+                return Err(VerifyError {
+                    message: format!("{}: AssocTypeRep has empty assoc name", here()),
+                });
             }
         }
         Instruction::MakeStruct {

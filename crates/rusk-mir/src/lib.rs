@@ -57,6 +57,14 @@ pub struct Module {
     /// Optional virtual-call resolution: `(type_name, method_name) -> FunctionId`.
     pub methods: BTreeMap<(String, String), FunctionId>,
 
+    /// Optional associated type `typerep` dispatch:
+    /// `(type_name, interface_name, assoc_name) -> FunctionId`.
+    ///
+    /// This is used to reify `T::Assoc` projections into runtime `TypeRep` values when generics
+    /// are reified (e.g. when constructing `Option<T::Item>` in generic iterator adapters).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub assoc_type_reps: BTreeMap<(String, String, String), FunctionId>,
+
     /// Optional interface implementation metadata: `(type_name -> {interface_name...})`.
     ///
     /// Used by checked casts / runtime type tests for `interface` targets.
@@ -414,6 +422,16 @@ pub enum Instruction {
         dst: Local,
         base: TypeRepLit,
         args: Vec<Operand>,
+    },
+
+    /// Computes the runtime `TypeRep` for an associated type projection.
+    ///
+    /// This reifies `<recv as iface>::assoc` into a runtime `typerep` value.
+    AssocTypeRep {
+        dst: Local,
+        recv: Operand,
+        iface: String,
+        assoc: String,
     },
 
     MakeStruct {

@@ -340,6 +340,16 @@ pub enum Instruction {
         args: Vec<Reg>,
     },
 
+    /// Compute a `typerep` for an associated type projection.
+    ///
+    /// This evaluates `<recv as iface>::assoc` at runtime.
+    AssocTypeRep {
+        dst: Reg,
+        recv: Reg,
+        iface_type_id: TypeId,
+        assoc: String,
+    },
+
     MakeStruct {
         dst: Reg,
         type_id: TypeId,
@@ -668,6 +678,13 @@ pub struct ExecutableModule {
     /// `vcall_dispatch[type_id]` is a sorted list of `(MethodId, FunctionId)` pairs.
     pub vcall_dispatch: Vec<Vec<(MethodId, FunctionId)>>,
 
+    /// Associated type `typerep` dispatch table indexed by receiver `TypeId`.
+    ///
+    /// `assoc_type_dispatch[type_id]` is a sorted list of `(InterfaceTypeId, AssocName, FunctionId)`
+    /// entries. Each function takes the receiver's runtime type arguments (as leading `typerep`
+    /// params) and returns the associated type's `typerep`.
+    pub assoc_type_dispatch: Vec<Vec<(TypeId, String, FunctionId)>>,
+
     /// Runtime interface membership table indexed by dynamic `TypeId`.
     ///
     /// `interface_impls[type_id]` is a sorted list of implemented interface `TypeId`s.
@@ -698,6 +715,7 @@ impl ExecutableModule {
             method_names: Vec::new(),
             method_ids: BTreeMap::new(),
             vcall_dispatch: Vec::new(),
+            assoc_type_dispatch: Vec::new(),
             interface_impls: Vec::new(),
             struct_layouts: Vec::new(),
             external_effects: Vec::new(),
@@ -782,6 +800,7 @@ impl ExecutableModule {
         self.type_ids.insert(name.clone(), id);
         self.type_names.push(name);
         self.vcall_dispatch.push(Vec::new());
+        self.assoc_type_dispatch.push(Vec::new());
         self.interface_impls.push(Vec::new());
         self.struct_layouts.push(None);
         Ok(id)
@@ -848,6 +867,54 @@ impl ExecutableModule {
         let entries = self.vcall_dispatch.get(type_id.0 as usize)?;
         let idx = entries.binary_search_by_key(&method.0, |(m, _)| m.0).ok()?;
         entries.get(idx).map(|(_, f)| *f)
+    }
+
+    pub fn add_assoc_type_entry(
+        &mut self,
+        type_id: TypeId,
+        iface_type_id: TypeId,
+        assoc: String,
+        fn_id: FunctionId,
+    ) -> Result<(), String> {
+        if assoc.is_empty() {
+            return Err("cannot add assoc type entry with empty assoc name".to_string());
+        }
+
+        let Some(entries) = self.assoc_type_dispatch.get_mut(type_id.0 as usize) else {
+            return Err(format!("invalid TypeId {}", type_id.0));
+        };
+
+        let key = (iface_type_id.0, assoc.as_str());
+        let pos = entries
+            .binary_search_by(|(iface, name, _)| (iface.0, name.as_str()).cmp(&key))
+            .unwrap_or_else(|pos| pos);
+
+        if entries
+            .get(pos)
+            .is_some_and(|(iface, name, _)| iface == &iface_type_id && name == &assoc)
+        {
+            return Err(format!(
+                "duplicate assoc type dispatch entry for type {} interface {} assoc `{}`",
+                type_id.0, iface_type_id.0, assoc
+            ));
+        }
+
+        entries.insert(pos, (iface_type_id, assoc, fn_id));
+        Ok(())
+    }
+
+    pub fn assoc_type_target(
+        &self,
+        type_id: TypeId,
+        iface_type_id: TypeId,
+        assoc: &str,
+    ) -> Option<FunctionId> {
+        let entries = self.assoc_type_dispatch.get(type_id.0 as usize)?;
+        let key = (iface_type_id.0, assoc);
+        let idx = entries
+            .binary_search_by(|(iface, name, _)| (iface.0, name.as_str()).cmp(&key))
+            .ok()?;
+        entries.get(idx).map(|(_, _, f)| *f)
     }
 
     pub fn set_interface_impls(

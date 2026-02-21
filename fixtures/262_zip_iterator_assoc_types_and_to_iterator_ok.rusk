@@ -1,0 +1,52 @@
+// expect: ok int 206
+
+use core::iter::Iterator;
+
+struct ZipIterator<T1: Iterator, T2: Iterator> {
+    iter1: T1,
+    iter2: T2,
+}
+
+impl<T1: Iterator, T2: Iterator> ZipIterator<T1, T2> {
+    static fn new(iter1: T1, iter2: T2) -> ZipIterator<T1, T2> {
+        ZipIterator { iter1: iter1, iter2: iter2 }
+    }
+}
+
+impl<T1: Iterator, T2: Iterator> Iterator for ZipIterator<T1, T2> {
+    type Item = (T1::Item, T2::Item);
+
+    fn next() -> Option<Self::Item> {
+        match (self.iter1.next(), self.iter2.next()) {
+            (Some(a), Some(b)) => Some((a, b)),
+            _ => None,
+        }
+    }
+}
+
+fn zip_count() -> int {
+    let it = ZipIterator::new("ab".chars(), "XY".chars());
+    let n = 0;
+    for _p in it { n = n + 1; };
+    n
+}
+
+fn sum_array_via_to_iter() -> int {
+    let xs = [1, 2, 3];
+    let it = xs.to_iter();
+    let sum = 0;
+    for x in it { sum = sum + x; };
+    sum
+}
+
+fn sum_bytes_via_to_iter() -> int {
+    readonly bs = b"ABC";
+    let it = bs.to_iter();
+    let sum = 0;
+    for b in it { sum = sum + b.to_int(); };
+    sum
+}
+
+fn main() -> int {
+    zip_count() + sum_array_via_to_iter() + sum_bytes_via_to_iter()
+}

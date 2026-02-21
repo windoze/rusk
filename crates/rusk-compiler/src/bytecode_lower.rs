@@ -396,6 +396,13 @@ pub fn lower_mir_module_with_options(
             .map_err(LowerError::new)?;
     }
 
+    for ((ty, iface, assoc), id) in &mir.assoc_type_reps {
+        let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
+        let iface_id = out.intern_type(iface.clone()).map_err(LowerError::new)?;
+        out.add_assoc_type_entry(type_id, iface_id, assoc.clone(), FunctionId(id.0))
+            .map_err(LowerError::new)?;
+    }
+
     Ok(out)
 }
 
@@ -657,6 +664,22 @@ fn lower_mir_instruction(
                 dst: local(*dst),
                 base: lower_type_rep_lit(out, base)?,
                 args: bc_args,
+            });
+        }
+
+        I::AssocTypeRep {
+            dst,
+            recv,
+            iface,
+            assoc,
+        } => {
+            let recv = op_reg(out, recv, code, temps)?;
+            let iface_type_id = out.intern_type(iface.clone()).map_err(LowerError::new)?;
+            code.push(Instruction::AssocTypeRep {
+                dst: local(*dst),
+                recv,
+                iface_type_id,
+                assoc: assoc.clone(),
             });
         }
 

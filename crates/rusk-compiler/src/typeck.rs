@@ -779,6 +779,20 @@ fn add_prelude(env: &mut ProgramEnv) {
     );
 
     add_fn(
+        "bytes::iter",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::Bytes))],
+        Ty::App(
+            TyCon::Named("core::iter::BytesIter".to_string()),
+            Vec::new(),
+        ),
+    );
+    env.inherent_method_kinds.insert(
+        "bytes::iter".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
         "bytes::from_array",
         Vec::new(),
         vec![Ty::Readonly(Box::new(Ty::Array(Box::new(Ty::Byte))))],
@@ -815,6 +829,20 @@ fn add_prelude(env: &mut ProgramEnv) {
     );
     env.inherent_method_kinds.insert(
         "string::byte_slice".to_string(),
+        InherentMethodKind::Instance { readonly: true },
+    );
+
+    add_fn(
+        "string::chars",
+        Vec::new(),
+        vec![Ty::Readonly(Box::new(Ty::String))],
+        Ty::App(
+            TyCon::Named("core::iter::CharsIter".to_string()),
+            Vec::new(),
+        ),
+    );
+    env.inherent_method_kinds.insert(
+        "string::chars".to_string(),
         InherentMethodKind::Instance { readonly: true },
     );
 
@@ -955,6 +983,16 @@ fn add_prelude(env: &mut ProgramEnv) {
             array(ro(Ty::Gen(0))),
             true,
         ),
+        // Iterator adapter.
+        (
+            "array::iter",
+            vec![ro(array(Ty::Gen(0)))],
+            Ty::App(
+                TyCon::Named("core::iter::ArrayIter".to_string()),
+                vec![Ty::Gen(0)],
+            ),
+            true,
+        ),
     ] {
         add_fn(name, array_generics(), params, ret);
         env.inherent_method_kinds.insert(
@@ -1040,6 +1078,71 @@ fn add_prelude(env: &mut ProgramEnv) {
             format!("impl::{len_iface}::for::{type_name}::len"),
         );
     }
+
+    // `core::iter::ToIterator` for built-in container types.
+    //
+    // This provides a user-visible way to construct an `Iterator` from arrays/bytes/strings,
+    // complementing the compiler's built-in `for x in ...` lowering for container iteration.
+    let to_iterator_iface = "core::iter::ToIterator";
+    // Arrays: `Item = readonly T`, `to_iter` lowers to `array::iter`.
+    env.interface_impls
+        .insert(("array".to_string(), to_iterator_iface.to_string()));
+    env.interface_methods.insert(
+        (
+            "array".to_string(),
+            to_iterator_iface.to_string(),
+            "to_iter".to_string(),
+        ),
+        "array::iter".to_string(),
+    );
+    env.interface_assoc_types.insert(
+        (
+            "array".to_string(),
+            to_iterator_iface.to_string(),
+            "Item".to_string(),
+        ),
+        Ty::Readonly(Box::new(Ty::Gen(0))),
+    );
+
+    // Bytes: `Item = byte`, `to_iter` lowers to `bytes::iter`.
+    env.interface_impls
+        .insert(("bytes".to_string(), to_iterator_iface.to_string()));
+    env.interface_methods.insert(
+        (
+            "bytes".to_string(),
+            to_iterator_iface.to_string(),
+            "to_iter".to_string(),
+        ),
+        "bytes::iter".to_string(),
+    );
+    env.interface_assoc_types.insert(
+        (
+            "bytes".to_string(),
+            to_iterator_iface.to_string(),
+            "Item".to_string(),
+        ),
+        Ty::Byte,
+    );
+
+    // Strings: `Item = char`, `to_iter` lowers to `string::chars`.
+    env.interface_impls
+        .insert(("string".to_string(), to_iterator_iface.to_string()));
+    env.interface_methods.insert(
+        (
+            "string".to_string(),
+            to_iterator_iface.to_string(),
+            "to_iter".to_string(),
+        ),
+        "string::chars".to_string(),
+    );
+    env.interface_assoc_types.insert(
+        (
+            "string".to_string(),
+            to_iterator_iface.to_string(),
+            "Item".to_string(),
+        ),
+        Ty::Char,
+    );
 
     // `core::hash::Hash` for built-in primitive types.
     let hash_iface = "core::hash::Hash";
@@ -2778,13 +2881,13 @@ fn process_impl_item(
                         if contains_self_type(&aty) {
                             aty = subst_self_type(aty, &expected_recv_base);
                         }
-                        if contains_assoc_proj(&aty) {
-                            return Err(TypeError {
-                                message: "associated type definitions must not reference associated types in this stage"
-                                    .to_string(),
-                                span: def.ty.span(),
-                            });
-                        }
+                        validate_assoc_projs_in_ty(env, &aty, def.ty.span())?;
+                        validate_assoc_projs_well_formed_in_ty(
+                            env,
+                            &impl_generics,
+                            &aty,
+                            def.ty.span(),
+                        )?;
                         validate_value_ty(env, &aty, def.ty.span())?;
                         validate_nominal_bounds_well_formed_in_ty(
                             env,
@@ -2851,6 +2954,29 @@ fn process_impl_item(
                 .iter()
                 .map(|(name, (ty, _span))| (name.clone(), ty.clone()))
                 .collect();
+
+            // Record nominal interface implementations, including transitive supers, *before*
+            // validating impl method signatures. This allows `Self::Assoc` projections to be used
+            // in impl method signatures without tripping the "does not implement" check while the
+            // impl is being processed.
+            //
+            // This is used for:
+            // - checked casts (`as?`) / type tests (`is`) against interfaces, including marker
+            //   interfaces with zero methods
+            // - overlap detection for marker interfaces (no methods => no interface_methods keys)
+            let mut all_ifaces = BTreeSet::<String>::new();
+            collect_interface_and_supers(env, &iface_def_name, &mut all_ifaces);
+            for iface in all_ifaces {
+                let key = (type_name.clone(), iface.clone());
+                if !env.interface_impls.insert(key) {
+                    return Err(TypeError {
+                        message: format!(
+                            "overlapping impls for `{type_name}`: duplicate implementation of interface `{iface}`"
+                        ),
+                        span: item.span,
+                    });
+                }
+            }
             for (mname, info) in &iface_methods {
                 let method = impl_methods_by_name.get(mname).copied();
 
@@ -3179,26 +3305,6 @@ fn process_impl_item(
                 }
             }
 
-            // Record nominal interface implementations, including transitive supers.
-            //
-            // This is used for:
-            // - checked casts (`as?`) / type tests (`is`) against interfaces, including marker
-            //   interfaces with zero methods
-            // - overlap detection for marker interfaces (no methods => no interface_methods keys)
-            let mut all_ifaces = BTreeSet::<String>::new();
-            collect_interface_and_supers(env, &iface_def_name, &mut all_ifaces);
-            for iface in all_ifaces {
-                let key = (type_name.clone(), iface.clone());
-                if !env.interface_impls.insert(key) {
-                    return Err(TypeError {
-                        message: format!(
-                            "overlapping impls for `{type_name}`: duplicate implementation of interface `{iface}`"
-                        ),
-                        span: item.span,
-                    });
-                }
-            }
-
             // Record associated type definitions for this impl, including transitive supers.
             let mut all_ifaces = BTreeSet::<String>::new();
             collect_interface_and_supers(env, &iface_def_name, &mut all_ifaces);
@@ -3373,12 +3479,14 @@ fn lower_generic_params_in_scope(
 struct GenericScope {
     names: HashMap<String, GenId>,
     arities: Vec<usize>,
+    bounds: Vec<Vec<Ty>>,
 }
 
 impl GenericScope {
     fn new(params: &[GenericParamInfo]) -> Result<Self, TypeError> {
         let mut names = HashMap::new();
         let mut arities = Vec::with_capacity(params.len());
+        let mut bounds = Vec::with_capacity(params.len());
         for (idx, p) in params.iter().enumerate() {
             if names.insert(p.name.clone(), idx).is_some() {
                 return Err(TypeError {
@@ -3387,13 +3495,22 @@ impl GenericScope {
                 });
             }
             arities.push(p.arity);
+            bounds.push(p.bounds.clone());
         }
-        Ok(Self { names, arities })
+        Ok(Self {
+            names,
+            arities,
+            bounds,
+        })
     }
 
     fn lookup(&self, name: &str) -> Option<(GenId, usize)> {
         let id = *self.names.get(name)?;
         Some((id, self.arities[id]))
+    }
+
+    fn bounds(&self, id: GenId) -> &[Ty] {
+        self.bounds.get(id).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -3549,6 +3666,107 @@ fn lower_path_type_with_self_iface(
                 .to_string(),
             span: path.span,
         });
+    }
+
+    // Shorthand associated type projection: `T::Assoc` where `T` is an in-scope arity-0 type
+    // parameter.
+    //
+    // This is sugar for the qualified form `Iface::Assoc<T>` with `Iface` inferred from `T`'s
+    // interface bounds.
+    if path.segments.len() == 2 && path.assoc_bindings.is_empty() {
+        let base_seg = &path.segments[0];
+        let assoc_seg = &path.segments[1];
+        if base_seg.args.is_empty() && assoc_seg.args.is_empty() {
+            let base_name = base_seg.name.name.as_str();
+            if let Some((gen_id, arity)) = scope.lookup(base_name) {
+                if arity != 0 {
+                    return Err(TypeError {
+                        message: format!(
+                            "type constructor `{base_name}` cannot be used with associated type projection `{base_name}::...`"
+                        ),
+                        span: path.span,
+                    });
+                }
+
+                let assoc_name = assoc_seg.name.name.clone();
+
+                // Find candidate bound interfaces that (transitively) declare this associated
+                // type name.
+                let mut candidates: Vec<(String, Vec<Ty>)> = Vec::new();
+                for bound in scope.bounds(gen_id) {
+                    let (bound_iface, bound_args) = match bound {
+                        Ty::App(TyCon::Named(iface), args) => (iface.clone(), args.clone()),
+                        Ty::Iface { iface, args, .. } => (iface.clone(), args.clone()),
+                        _ => continue,
+                    };
+                    let Some(def) = env.interfaces.get(&bound_iface) else {
+                        continue;
+                    };
+                    if !def.all_assoc_types.contains_key(&assoc_name) {
+                        continue;
+                    }
+                    if !candidates
+                        .iter()
+                        .any(|(iface, args)| iface == &bound_iface && args == &bound_args)
+                    {
+                        candidates.push((bound_iface, bound_args));
+                    }
+                }
+
+                if candidates.is_empty() {
+                    return Err(TypeError {
+                        message: format!(
+                            "associated type projection `{base_name}::{assoc_name}` requires a bound `{base_name}: I` where `I` declares `{assoc_name}`"
+                        ),
+                        span: path.span,
+                    });
+                }
+
+                // Prefer the most specific candidate when one bound implies another.
+                //
+                // Example: if `T: J + I` and `J: I`, then `T::Assoc` should resolve via `J`.
+                let mut keep = vec![true; candidates.len()];
+                for i in 0..candidates.len() {
+                    for j in 0..candidates.len() {
+                        if i == j {
+                            continue;
+                        }
+                        let (iface_i, _args_i) = &candidates[i];
+                        let (iface_j, args_j) = &candidates[j];
+                        if infer_super_interface_args(env, iface_j, args_j, iface_i).is_some() {
+                            keep[i] = false;
+                            break;
+                        }
+                    }
+                }
+                let mut filtered = Vec::new();
+                for (cand, k) in candidates.into_iter().zip(keep.into_iter()) {
+                    if k {
+                        filtered.push(cand);
+                    }
+                }
+
+                if filtered.len() != 1 {
+                    let mut names = filtered.into_iter().map(|(i, _args)| i).collect::<Vec<_>>();
+                    names.sort();
+                    return Err(TypeError {
+                        message: format!(
+                            "ambiguous associated type projection `{base_name}::{assoc_name}`; candidates: {}. Use fully-qualified syntax `Iface::{assoc_name}<{base_name}>`",
+                            names.join(", ")
+                        ),
+                        span: path.span,
+                    });
+                }
+
+                let (iface, iface_args) = filtered.into_iter().next().expect("filtered.len()==1");
+                return Ok(Ty::AssocProj {
+                    iface,
+                    iface_args,
+                    assoc: assoc_name,
+                    self_ty: Box::new(Ty::Gen(gen_id)),
+                });
+            }
+        }
     }
 
     // Qualified associated type projection: `Iface<...>::Assoc<T>`.
@@ -4093,6 +4311,68 @@ fn validate_assoc_projs_well_formed_in_ty(
                     {
                         return Err(TypeError {
                             message: format!("type `{type_name}` does not implement `{iface_ty}`"),
+                            span,
+                        });
+                    }
+                    Ok(())
+                }
+                // Built-in primitive types can have built-in impls for arity-0 interfaces with
+                // associated types.
+                Ty::Unit
+                | Ty::Bool
+                | Ty::Int
+                | Ty::Float
+                | Ty::Byte
+                | Ty::Char
+                | Ty::String
+                | Ty::Bytes => {
+                    if !iface_args.is_empty() {
+                        return Err(TypeError {
+                            message: format!(
+                                "associated type projection `{iface}::{assoc}<...>` requires a concrete nominal type or a type parameter; got `{self_ty_stripped}`"
+                            ),
+                            span,
+                        });
+                    }
+                    let type_name = match self_ty_stripped {
+                        Ty::Unit => "unit",
+                        Ty::Bool => "bool",
+                        Ty::Int => "int",
+                        Ty::Float => "float",
+                        Ty::Byte => "byte",
+                        Ty::Char => "char",
+                        Ty::String => "string",
+                        Ty::Bytes => "bytes",
+                        _ => unreachable!(),
+                    };
+                    if !env
+                        .interface_impls
+                        .contains(&(type_name.to_string(), iface.clone()))
+                    {
+                        return Err(TypeError {
+                            message: format!("type `{type_name}` does not implement `{iface_ty}`"),
+                            span,
+                        });
+                    }
+                    Ok(())
+                }
+                // Arrays are not nominal types, but can have built-in impls for arity-0
+                // interfaces with associated types.
+                Ty::Array(_elem) => {
+                    if !iface_args.is_empty() {
+                        return Err(TypeError {
+                            message: format!(
+                                "associated type projection `{iface}::{assoc}<...>` requires a concrete nominal type or a type parameter; got `{self_ty_stripped}`"
+                            ),
+                            span,
+                        });
+                    }
+                    if !env
+                        .interface_impls
+                        .contains(&("array".to_string(), iface.clone()))
+                    {
+                        return Err(TypeError {
+                            message: format!("type `array` does not implement `{iface_ty}`"),
                             span,
                         });
                     }
