@@ -18,6 +18,18 @@ final class RuskBytes {
         this.len = bytes.length;
     }
 
+    static RuskBytes view(byte[] buf, int start, int len) {
+        Objects.requireNonNull(buf, "buf");
+        if (start < 0 || len < 0) {
+            throw new IndexOutOfBoundsException("start/len must be >= 0");
+        }
+        int end = start + len;
+        if (end < start || end > buf.length) {
+            throw new IndexOutOfBoundsException("range out of bounds: start=" + start + ", len=" + len);
+        }
+        return new RuskBytes(buf, start, len);
+    }
+
     private RuskBytes(byte[] buf, int start, int len) {
         this.buf = buf;
         this.start = start;
@@ -80,4 +92,3 @@ final class RuskBytes {
         return h;
     }
 }
-

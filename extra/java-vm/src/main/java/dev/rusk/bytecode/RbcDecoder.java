@@ -11,7 +11,7 @@ import java.util.TreeSet;
 final class RbcDecoder {
     private static final byte[] MAGIC = new byte[] {'R', 'U', 'S', 'K', 'B', 'C', '0', 0};
     private static final int VERSION_MAJOR = 0;
-    private static final int VERSION_MINOR = 9;
+    private static final int VERSION_MINOR = 11;
 
     private byte[] bytes;
     private int pos;

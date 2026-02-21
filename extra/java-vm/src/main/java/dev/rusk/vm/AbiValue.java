@@ -10,7 +10,8 @@ public sealed interface AbiValue
                 AbiValue.Int,
                 AbiValue.Float,
                 AbiValue.Str,
-                AbiValue.Bytes {
+                AbiValue.Bytes,
+                AbiValue.Continuation {
     AbiType ty();
 
     record Unit() implements AbiValue {
@@ -68,5 +69,15 @@ public sealed interface AbiValue
             return AbiType.BYTES;
         }
     }
-}
 
+    record Continuation(ContinuationHandle value) implements AbiValue {
+        public Continuation {
+            Objects.requireNonNull(value, "value");
+        }
+
+        @Override
+        public AbiType ty() {
+            return AbiType.CONTINUATION;
+        }
+    }
+}

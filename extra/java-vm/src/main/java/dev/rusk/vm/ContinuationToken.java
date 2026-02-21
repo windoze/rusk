@@ -19,6 +19,10 @@ final class ContinuationToken {
         return s;
     }
 
+    boolean isConsumed() {
+        return state == null;
+    }
+
     record ContinuationState(List<Frame> frames, List<HandlerEntry> handlers, Integer performDst) {
         public ContinuationState {
             Objects.requireNonNull(frames, "frames");
@@ -28,4 +32,3 @@ final class ContinuationToken {
         }
     }
 }
-

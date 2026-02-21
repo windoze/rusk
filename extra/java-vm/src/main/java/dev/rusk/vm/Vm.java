@@ -54,6 +54,7 @@ public final class Vm {
     private final TypeReps typeReps = new TypeReps();
     private final ArrayList<Frame> frames = new ArrayList<>();
     private final ArrayList<HandlerEntry> handlers = new ArrayList<>();
+    private final PinnedContinuations pinnedContinuations = new PinnedContinuations();
 
     private VmState state = new VmState.Running();
     private boolean inHostCall = false;
@@ -279,7 +280,12 @@ public final class Vm {
                 throw new VmError.InvalidState("resume with empty stack");
             }
             Frame top = frames.get(frames.size() - 1);
-            Value v = Value.fromAbi(value);
+            Value v;
+            try {
+                v = valueFromAbi(value);
+            } catch (VmTrap e) {
+                throw new VmError.InvalidState("resume value conversion failed: " + e.getMessage());
+            }
             try {
                 writeValue(top, dst, v);
             } catch (VmTrap e) {
@@ -306,6 +312,16 @@ public final class Vm {
         frames.clear();
         handlers.clear();
         state = new VmState.Trapped("cancelled");
+    }
+
+    public void dropPinnedContinuation(ContinuationHandle k) throws VmError {
+        Objects.requireNonNull(k, "k");
+
+        if (inHostCall) {
+            throw new VmError.InvalidState("vm re-entered during host call");
+        }
+
+        pinnedContinuations.dropPinned(k);
     }
 
     // ====== VM state ======
@@ -343,6 +359,68 @@ public final class Vm {
     private StepResult trap(String message) {
         state = new VmState.Trapped(message);
         return new StepResult.Trap(message);
+    }
+
+    // ====== ABI conversions ======
+
+    private AbiValue valueToAbi(Value v) throws VmTrap {
+        if (v instanceof Value.Unit) {
+            return new AbiValue.Unit();
+        }
+        if (v instanceof Value.Bool b) {
+            return new AbiValue.Bool(b.value());
+        }
+        if (v instanceof Value.Int n) {
+            return new AbiValue.Int(n.value());
+        }
+        if (v instanceof Value.Float x) {
+            return new AbiValue.Float(x.value());
+        }
+        if (v instanceof Value.Str s) {
+            return new AbiValue.Str(s.value().asJavaString());
+        }
+        if (v instanceof Value.Bytes b) {
+            return new AbiValue.Bytes(b.value().toByteArray());
+        }
+        if (v instanceof Value.Continuation c) {
+            try {
+                return new AbiValue.Continuation(pinnedContinuations.pin(c.token()));
+            } catch (IllegalStateException e) {
+                throw new VmTrap(e.getMessage());
+            }
+        }
+        throw new VmTrap("non-ABI-safe value (" + v.kind() + ")");
+    }
+
+    private Value valueFromAbi(AbiValue v) throws VmTrap {
+        if (v instanceof AbiValue.Unit) {
+            return new Value.Unit();
+        }
+        if (v instanceof AbiValue.Bool b) {
+            return new Value.Bool(b.value());
+        }
+        if (v instanceof AbiValue.Int n) {
+            return new Value.Int(n.value());
+        }
+        if (v instanceof AbiValue.Float x) {
+            return new Value.Float(x.value());
+        }
+        if (v instanceof AbiValue.Str s) {
+            return new Value.Str(new RuskString(s.value()));
+        }
+        if (v instanceof AbiValue.Bytes b) {
+            return new Value.Bytes(new RuskBytes(b.value()));
+        }
+        if (v instanceof AbiValue.Continuation c) {
+            ContinuationToken token;
+            try {
+                token = pinnedContinuations.resolve(c.value());
+            } catch (VmError.InvalidContinuation e) {
+                throw new VmTrap(e.getMessage());
+            }
+            return new Value.Continuation(token);
+        }
+        throw new VmTrap("unknown AbiValue: " + v);
     }
 
     // ====== Instruction execution ======
@@ -1512,10 +1590,7 @@ public final class Vm {
             throw new VmTrap("non-empty return destination at entry return");
         }
 
-        AbiValue abi = v.toAbiOrNull();
-        if (abi == null) {
-            throw new VmTrap("non-ABI-safe return value");
-        }
+        AbiValue abi = valueToAbi(v);
         state = new VmState.Done(abi);
         return new StepResult.Done(abi);
     }
@@ -1586,8 +1661,10 @@ public final class Vm {
         for (int i = 0; i < argRegs.size(); i++) {
             Value v = readValue(frame, argRegs.get(i));
             AbiType expected = imp.sig().params().get(i);
-            AbiValue abi = v.toAbiOrNull();
-            if (abi == null) {
+            AbiValue abi;
+            try {
+                abi = valueToAbi(v);
+            } catch (VmTrap e) {
                 throw new VmTrap(
                         "host call `"
                                 + imp.name()
@@ -1633,7 +1710,7 @@ public final class Vm {
         }
 
         if (dst != null) {
-            writeValue(frame, dst, Value.fromAbi(abiRet));
+            writeValue(frame, dst, valueFromAbi(abiRet));
         }
     }
 
@@ -1769,8 +1846,10 @@ public final class Vm {
         for (int i = 0; i < argValues.size(); i++) {
             Value v = argValues.get(i);
             AbiType expected = decl.sig().params().get(i);
-            AbiValue abi = v.toAbiOrNull();
-            if (abi == null) {
+            AbiValue abi;
+            try {
+                abi = valueToAbi(v);
+            } catch (VmTrap e) {
                 throw new VmTrap(
                         "external effect `"
                                 + decl.interfaceName()
@@ -2127,16 +2206,6 @@ public final class Vm {
 
         String badArgs = "core::intrinsics::" + intr.name() + ": bad args: " + args;
 
-        // Helper: Option constructors.
-        TypeId optionTypeId = module.typeId("Option").orElse(null);
-        if (optionTypeId == null) {
-            throw new VmTrap("missing required enum type `Option`");
-        }
-        java.util.function.BiFunction<TypeReps.TypeRepId, Value, Value> someOption =
-                (typeArg, v) -> allocRef(new EnumObj(optionTypeId, List.of(typeArg), "Some", new ArrayList<>(List.of(v))));
-        java.util.function.Function<TypeReps.TypeRepId, Value> noneOption =
-                (typeArg) -> allocRef(new EnumObj(optionTypeId, List.of(typeArg), "None", new ArrayList<>()));
-
         // Helper: intern common typereps.
         TypeReps.TypeRepId byteRep =
                 typeReps.intern(new TypeReps.TypeRepNode(new TypeReps.TypeCtor.Byte(), List.of()));
@@ -2190,13 +2259,10 @@ public final class Vm {
                 if (v instanceof Value.Ref) {
                     return new Value.Str(new RuskString("ref"));
                 }
-                if (v instanceof Value.Continuation) {
-                    return new Value.Str(new RuskString("continuation"));
-                }
                 throw new VmTrap(badArgs);
             }
             case Panic -> {
-                if (args.size() == 2 && args.get(0) instanceof Value.TypeRep && args.get(1) instanceof Value.Str msg) {
+                if (args.size() == 1 && args.get(0) instanceof Value.Str msg) {
                     throw new VmTrap("panic: " + msg.value().asJavaString());
                 }
                 throw new VmTrap(badArgs);
@@ -2254,6 +2320,57 @@ public final class Vm {
                         throw new VmTrap("core::intrinsics::int_mod: modulo by zero");
                     }
                     return new Value.Int(a.value() % b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntAnd -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Int a && args.get(1) instanceof Value.Int b) {
+                    return new Value.Int(a.value() & b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntOr -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Int a && args.get(1) instanceof Value.Int b) {
+                    return new Value.Int(a.value() | b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntXor -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Int a && args.get(1) instanceof Value.Int b) {
+                    return new Value.Int(a.value() ^ b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntNot -> {
+                if (args.size() == 1 && args.get(0) instanceof Value.Int v) {
+                    return new Value.Int(~v.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntShl -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Int a && args.get(1) instanceof Value.Int sh) {
+                    if (sh.value() < 0 || sh.value() >= 64) {
+                        throw new VmTrap("core::intrinsics::int_shl: shift amount out of range");
+                    }
+                    return new Value.Int(a.value() << (int) sh.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntShr -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Int a && args.get(1) instanceof Value.Int sh) {
+                    if (sh.value() < 0 || sh.value() >= 64) {
+                        throw new VmTrap("core::intrinsics::int_shr: shift amount out of range");
+                    }
+                    return new Value.Int(a.value() >> (int) sh.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case IntUShr -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Int a && args.get(1) instanceof Value.Int sh) {
+                    if (sh.value() < 0 || sh.value() >= 64) {
+                        throw new VmTrap("core::intrinsics::int_ushr: shift amount out of range");
+                    }
+                    return new Value.Int(a.value() >>> (int) sh.value());
                 }
                 throw new VmTrap(badArgs);
             }
@@ -2458,10 +2575,10 @@ public final class Vm {
                         throw new VmTrap("core::intrinsics::array_pop: expected an array");
                     }
                     if (a.items.isEmpty()) {
-                        return noneOption.apply(elemRep.value());
+                        return optionNone(elemRep.value());
                     }
                     Value popped = a.items.remove(a.items.size() - 1);
-                    return someOption.apply(elemRep.value(), popped);
+                    return optionSome(elemRep.value(), popped);
                 }
                 throw new VmTrap(badArgs);
             }
@@ -2646,15 +2763,66 @@ public final class Vm {
             case IntTryByte -> {
                 if (args.size() == 1 && args.get(0) instanceof Value.Int v) {
                     if (0 <= v.value() && v.value() <= 255) {
-                        return someOption.apply(byteRep, new Value.Byte((int) v.value()));
+                        return optionSome(byteRep, new Value.Byte((int) v.value()));
                     }
-                    return noneOption.apply(byteRep);
+                    return optionNone(byteRep);
                 }
                 throw new VmTrap(badArgs);
             }
             case ByteToInt -> {
                 if (args.size() == 1 && args.get(0) instanceof Value.Byte v) {
                     return new Value.Int(v.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteAnd -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Byte a && args.get(1) instanceof Value.Byte b) {
+                    return new Value.Byte(a.value() & b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteOr -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Byte a && args.get(1) instanceof Value.Byte b) {
+                    return new Value.Byte(a.value() | b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteXor -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Byte a && args.get(1) instanceof Value.Byte b) {
+                    return new Value.Byte(a.value() ^ b.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteNot -> {
+                if (args.size() == 1 && args.get(0) instanceof Value.Byte v) {
+                    return new Value.Byte((~v.value()) & 0xFF);
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteShl -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Byte a && args.get(1) instanceof Value.Int sh) {
+                    if (sh.value() < 0 || sh.value() >= 8) {
+                        throw new VmTrap("core::intrinsics::byte_shl: shift amount out of range");
+                    }
+                    return new Value.Byte((a.value() << (int) sh.value()) & 0xFF);
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteShr -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Byte a && args.get(1) instanceof Value.Int sh) {
+                    if (sh.value() < 0 || sh.value() >= 8) {
+                        throw new VmTrap("core::intrinsics::byte_shr: shift amount out of range");
+                    }
+                    return new Value.Byte(a.value() >>> (int) sh.value());
+                }
+                throw new VmTrap(badArgs);
+            }
+            case ByteUShr -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Byte a && args.get(1) instanceof Value.Int sh) {
+                    if (sh.value() < 0 || sh.value() >= 8) {
+                        throw new VmTrap("core::intrinsics::byte_ushr: shift amount out of range");
+                    }
+                    return new Value.Byte(a.value() >>> (int) sh.value());
                 }
                 throw new VmTrap(badArgs);
             }
@@ -2681,10 +2849,10 @@ public final class Vm {
                     if (0 <= n && n <= 0x10FFFFL) {
                         int cp = (int) n;
                         if (!(0xD800 <= cp && cp <= 0xDFFF) && Character.isValidCodePoint(cp)) {
-                            return someOption.apply(charRep, new Value.Char(cp));
+                            return optionSome(charRep, new Value.Char(cp));
                         }
                     }
-                    return noneOption.apply(charRep);
+                    return optionNone(charRep);
                 }
                 throw new VmTrap(badArgs);
             }
@@ -2699,14 +2867,14 @@ public final class Vm {
                 if (args.size() == 2 && args.get(0) instanceof Value.Bytes b && args.get(1) instanceof Value.Int idx) {
                     long i = idx.value();
                     if (i < 0 || i > Integer.MAX_VALUE) {
-                        return noneOption.apply(byteRep);
+                        return optionNone(byteRep);
                     }
                     int ii = (int) i;
                     if (ii >= b.value().byteLen()) {
-                        return noneOption.apply(byteRep);
+                        return optionNone(byteRep);
                     }
                     int byteValue = b.value().byteAt(ii) & 0xFF;
-                    return someOption.apply(byteRep, new Value.Byte(byteValue));
+                    return optionSome(byteRep, new Value.Byte(byteValue));
                 }
                 throw new VmTrap(badArgs);
             }
@@ -2769,27 +2937,157 @@ public final class Vm {
 
             case StringSlice -> {
                 if (args.size() == 3 && args.get(0) instanceof Value.Str s && args.get(1) instanceof Value.Int from) {
+                    Optional<Long> toOpt = readOptionInt(args.get(2));
+                    RuskString rs = s.value();
+
+                    if (from.value() < 0) {
+                        throw new VmTrap("core::intrinsics::string_slice: from must be >= 0");
+                    }
+                    if (toOpt.isPresent() && toOpt.get() < 0) {
+                        throw new VmTrap("core::intrinsics::string_slice: to must be >= 0");
+                    }
+
+                    if (from.value() > Integer.MAX_VALUE) {
+                        throw new VmTrap("core::intrinsics::string_slice: from overflow");
+                    }
+                    int fromCp = (int) from.value();
+
+                    Integer toCp = null;
+                    if (toOpt.isPresent()) {
+                        long toLong = toOpt.get();
+                        if (toLong > Integer.MAX_VALUE) {
+                            throw new VmTrap("core::intrinsics::string_slice: to overflow");
+                        }
+                        toCp = (int) toLong;
+                    }
+
+                    if (toCp != null && fromCp > toCp) {
+                        throw new VmTrap("core::intrinsics::string_slice: from > to");
+                    }
+
+                    // Convert codepoint indices into UTF-8 byte offsets.
+                    Integer fromByte = (fromCp == 0) ? 0 : null;
+                    Integer toByte = (toCp != null && toCp == 0) ? 0 : null;
+                    int cpIdx = 0;
+                    int byteIdx = 0;
+                    while (byteIdx < rs.byteLen()) {
+                        if (fromByte == null && cpIdx == fromCp) {
+                            fromByte = byteIdx;
+                        }
+                        if (toCp != null && toByte == null && cpIdx == toCp) {
+                            toByte = byteIdx;
+                        }
+                        try {
+                            byteIdx = rs.decodeNextChar(byteIdx).nextByteIndex();
+                        } catch (CharacterCodingException e) {
+                            throw new VmTrap("core::intrinsics::string_slice: invalid UTF-8");
+                        }
+                        cpIdx += 1;
+                    }
+                    int cpLen = cpIdx;
+
+                    if (fromByte == null) {
+                        if (fromCp == cpLen) {
+                            fromByte = rs.byteLen();
+                        } else {
+                            throw new VmTrap("core::intrinsics::string_slice: from out of bounds");
+                        }
+                    }
+
+                    int toByteFinal;
+                    if (toCp == null) {
+                        toByteFinal = rs.byteLen();
+                    } else if (toByte != null) {
+                        toByteFinal = toByte;
+                    } else {
+                        if (toCp == cpLen) {
+                            toByteFinal = rs.byteLen();
+                        } else {
+                            throw new VmTrap("core::intrinsics::string_slice: to out of bounds");
+                        }
+                    }
+
+                    try {
+                        return new Value.Str(rs.slice(fromByte, toByteFinal));
+                    } catch (CharacterCodingException e) {
+                        throw new VmTrap("core::intrinsics::string_slice: invalid UTF-8 boundary");
+                    }
+                }
+                throw new VmTrap(badArgs);
+            }
+            case StringByteSlice -> {
+                if (args.size() == 3 && args.get(0) instanceof Value.Str s && args.get(1) instanceof Value.Int from) {
                     long len = s.value().byteLen();
                     Optional<Long> toOpt = readOptionInt(args.get(2));
                     long to = toOpt.orElse(len);
 
                     if (from.value() < 0) {
-                        throw new VmTrap("core::intrinsics::string_slice: from must be >= 0");
+                        throw new VmTrap("core::intrinsics::string_byte_slice: from must be >= 0");
                     }
                     if (to < 0) {
-                        throw new VmTrap("core::intrinsics::string_slice: to must be >= 0");
+                        throw new VmTrap("core::intrinsics::string_byte_slice: to must be >= 0");
                     }
                     if (from.value() > to) {
-                        throw new VmTrap("core::intrinsics::string_slice: from > to");
+                        throw new VmTrap("core::intrinsics::string_byte_slice: from > to");
                     }
                     if (to > len) {
-                        throw new VmTrap("core::intrinsics::string_slice: to out of bounds");
+                        throw new VmTrap("core::intrinsics::string_byte_slice: to out of bounds");
+                    }
+                    if (from.value() > Integer.MAX_VALUE || to > Integer.MAX_VALUE) {
+                        throw new VmTrap("core::intrinsics::string_byte_slice: index overflow");
                     }
 
+                    return new Value.Bytes(s.value().sliceBytes((int) from.value(), (int) to));
+                }
+                throw new VmTrap(badArgs);
+            }
+            case StringNextIndex -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Str s && args.get(1) instanceof Value.Int idx) {
+                    if (idx.value() < 0) {
+                        throw new VmTrap("core::intrinsics::string_next_index: idx must be >= 0");
+                    }
+                    if (idx.value() > Integer.MAX_VALUE) {
+                        throw new VmTrap("core::intrinsics::string_next_index: idx overflow");
+                    }
+                    int i = (int) idx.value();
+                    int len = s.value().byteLen();
+                    if (i > len) {
+                        throw new VmTrap("core::intrinsics::string_next_index: idx out of bounds");
+                    }
+                    if (i == len) {
+                        return new Value.Int(-1);
+                    }
+                    if (!s.value().isCharBoundary(i)) {
+                        throw new VmTrap("core::intrinsics::string_next_index: invalid UTF-8 boundary");
+                    }
                     try {
-                        return new Value.Str(s.value().slice((int) from.value(), (int) to));
+                        return new Value.Int(s.value().decodeNextChar(i).nextByteIndex());
                     } catch (CharacterCodingException e) {
-                        throw new VmTrap("core::intrinsics::string_slice: invalid UTF-8 boundary");
+                        throw new VmTrap("core::intrinsics::string_next_index: invalid UTF-8");
+                    }
+                }
+                throw new VmTrap(badArgs);
+            }
+            case StringCodepointAt -> {
+                if (args.size() == 2 && args.get(0) instanceof Value.Str s && args.get(1) instanceof Value.Int idx) {
+                    if (idx.value() < 0) {
+                        throw new VmTrap("core::intrinsics::string_codepoint_at: idx must be >= 0");
+                    }
+                    if (idx.value() > Integer.MAX_VALUE) {
+                        throw new VmTrap("core::intrinsics::string_codepoint_at: idx overflow");
+                    }
+                    int i = (int) idx.value();
+                    int len = s.value().byteLen();
+                    if (i >= len) {
+                        throw new VmTrap("core::intrinsics::string_codepoint_at: idx out of bounds");
+                    }
+                    if (!s.value().isCharBoundary(i)) {
+                        throw new VmTrap("core::intrinsics::string_codepoint_at: invalid UTF-8 boundary");
+                    }
+                    try {
+                        return new Value.Int(s.value().decodeNextChar(i).codePoint());
+                    } catch (CharacterCodingException e) {
+                        throw new VmTrap("core::intrinsics::string_codepoint_at: invalid UTF-8");
                     }
                 }
                 throw new VmTrap(badArgs);
@@ -2820,9 +3118,9 @@ public final class Vm {
                 if (args.size() == 1 && args.get(0) instanceof Value.Bytes b) {
                     Optional<RuskString> maybe = RuskString.tryFromUtf8BytesStrict(b.value().toByteArray());
                     if (maybe.isPresent()) {
-                        return someOption.apply(stringRep, new Value.Str(maybe.get()));
+                        return optionSome(stringRep, new Value.Str(maybe.get()));
                     }
-                    return noneOption.apply(stringRep);
+                    return optionNone(stringRep);
                 }
                 throw new VmTrap(badArgs);
             }
@@ -2854,21 +3152,37 @@ public final class Vm {
                     for (int i = 0; i < a.items.size(); i++) {
                         Value item = a.items.get(i);
                         if (!(item instanceof Value.Int n) || n.value() < 0 || n.value() > 0xFFFFL) {
-                            return noneOption.apply(stringRep);
+                            return optionNone(stringRep);
                         }
                         units[i] = (int) n.value();
                     }
                     String out = decodeUtf16Strict(units);
                     if (out == null) {
-                        return noneOption.apply(stringRep);
+                        return optionNone(stringRep);
                     }
-                    return someOption.apply(stringRep, new Value.Str(new RuskString(out)));
+                    return optionSome(stringRep, new Value.Str(new RuskString(out)));
                 }
                 throw new VmTrap(badArgs);
             }
         }
 
         throw new VmTrap("unimplemented intrinsic: " + intr);
+    }
+
+    private Value optionSome(TypeReps.TypeRepId typeArg, Value v) throws VmTrap {
+        TypeId optionTypeId = module.typeId("Option").orElse(null);
+        if (optionTypeId == null) {
+            throw new VmTrap("missing required enum type `Option`");
+        }
+        return allocRef(new EnumObj(optionTypeId, List.of(typeArg), "Some", new ArrayList<>(List.of(v))));
+    }
+
+    private Value optionNone(TypeReps.TypeRepId typeArg) throws VmTrap {
+        TypeId optionTypeId = module.typeId("Option").orElse(null);
+        if (optionTypeId == null) {
+            throw new VmTrap("missing required enum type `Option`");
+        }
+        return allocRef(new EnumObj(optionTypeId, List.of(typeArg), "None", new ArrayList<>()));
     }
 
     private Optional<Long> readOptionInt(Value v) throws VmTrap {

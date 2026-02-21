@@ -6,7 +6,8 @@ public enum AbiType {
     INT(2),
     FLOAT(3),
     STRING(4),
-    BYTES(5);
+    BYTES(5),
+    CONTINUATION(6);
 
     private final int tag;
 
@@ -26,8 +27,8 @@ public enum AbiType {
             case 3 -> FLOAT;
             case 4 -> STRING;
             case 5 -> BYTES;
+            case 6 -> CONTINUATION;
             default -> throw new IllegalArgumentException("invalid AbiType tag " + tag);
         };
     }
 }
-

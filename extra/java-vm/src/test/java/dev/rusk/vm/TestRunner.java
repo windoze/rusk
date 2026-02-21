@@ -7,21 +7,29 @@ import dev.rusk.bytecode.EffectSpec;
 import dev.rusk.bytecode.ExecutableModule;
 import dev.rusk.bytecode.ExternalEffectDecl;
 import dev.rusk.bytecode.Function;
+import dev.rusk.bytecode.HandlerClause;
 import dev.rusk.bytecode.HostFnSig;
 import dev.rusk.bytecode.HostImport;
 import dev.rusk.bytecode.HostImportId;
 import dev.rusk.bytecode.Instruction;
+import dev.rusk.bytecode.Intrinsic;
 import dev.rusk.bytecode.Rbc;
 import dev.rusk.bytecode.TypeRepLit;
+import dev.rusk.bytecode.TypeId;
 import java.util.List;
 
 public final class TestRunner {
     public static void main(String[] args) throws Exception {
         testRbcRoundtrip();
+        testRbcAllowsContinuationAbiType();
         testVmDoneForTrivialProgram();
         testVmArgvInjection();
         testTypeTestNeverIsFalse();
+        testIntrinsicStringNextIndexAndCodepointAt();
+        testIntrinsicStringSliceUsesCodepoints();
+        testIntrinsicStringByteSlice();
         testHostImportCall();
+        testHostImportContinuationAbiValue();
         testExternalEffectRequestResume();
         testExternalEffectDrop();
         testBytesBoundaryCopy();
@@ -47,6 +55,25 @@ public final class TestRunner {
         byte[] bytes2 = Rbc.toBytes(decoded);
 
         assert java.util.Arrays.equals(bytes, bytes2);
+    }
+
+    private static void testRbcAllowsContinuationAbiType() throws Exception {
+        ExecutableModule module = new ExecutableModule();
+        module.addHostImport(new HostImport("k", new HostFnSig(List.of(AbiType.CONTINUATION), AbiType.UNIT)));
+
+        var main =
+                module.addFunction(
+                        new Function(
+                                "main",
+                                1,
+                                0,
+                                List.of(new Instruction.Return(0))));
+        module.setEntry(main);
+
+        byte[] bytes = Rbc.toBytes(module);
+        ExecutableModule decoded = Rbc.fromBytes(bytes);
+        assert decoded.hostImports().size() == 1;
+        assert decoded.hostImports().get(0).sig().params().get(0) == AbiType.CONTINUATION;
     }
 
     private static void testTypeTestNeverIsFalse() throws Exception {
@@ -90,6 +117,123 @@ public final class TestRunner {
         assert done.value() instanceof AbiValue.Unit;
     }
 
+    private static void testIntrinsicStringNextIndexAndCodepointAt() throws Exception {
+        ExecutableModule module = new ExecutableModule();
+
+        var main =
+                module.addFunction(
+                        new Function(
+                                "main",
+                                4,
+                                0,
+                                List.of(
+                                        new Instruction.Const(0, new ConstValue.Str("a\uD83D\uDE00")),
+                                        new Instruction.Const(1, new ConstValue.Int(0)),
+                                        new Instruction.Call(
+                                                2,
+                                                new CallTarget.IntrinsicTarget(Intrinsic.StringNextIndex),
+                                                List.of(0, 1)),
+                                        new Instruction.Call(
+                                                3,
+                                                new CallTarget.IntrinsicTarget(Intrinsic.StringCodepointAt),
+                                                List.of(0, 2)),
+                                        new Instruction.Return(3))));
+        module.setEntry(main);
+
+        Vm vm = new Vm(module, new HostImportRegistry());
+        StepResult r = vm.step(null);
+        assert r instanceof StepResult.Done;
+        AbiValue v = ((StepResult.Done) r).value();
+        assert v instanceof AbiValue.Int;
+        assert ((AbiValue.Int) v).value() == 0x1F600L;
+    }
+
+    private static void testIntrinsicStringSliceUsesCodepoints() throws Exception {
+        ExecutableModule module = new ExecutableModule();
+        TypeId optionTypeId = module.internType("Option");
+
+        var main =
+                module.addFunction(
+                        new Function(
+                                "main",
+                                6,
+                                0,
+                                List.of(
+                                        // s = "a😀b"
+                                        new Instruction.Const(0, new ConstValue.Str("a\uD83D\uDE00b")),
+                                        // from = 1 (codepoint index)
+                                        new Instruction.Const(1, new ConstValue.Int(1)),
+                                        // Option<int> type arg
+                                        new Instruction.Const(2, new ConstValue.TypeRep(new TypeRepLit.Int())),
+                                        // to = 2 (codepoint index)
+                                        new Instruction.Const(3, new ConstValue.Int(2)),
+                                        // to_opt = Some(2)
+                                        new Instruction.MakeEnum(
+                                                4,
+                                                optionTypeId,
+                                                List.of(2),
+                                                "Some",
+                                                List.of(3)),
+                                        // out = string_slice(s, from, to_opt) => "😀"
+                                        new Instruction.Call(
+                                                5,
+                                                new CallTarget.IntrinsicTarget(Intrinsic.StringSlice),
+                                                List.of(0, 1, 4)),
+                                        new Instruction.Return(5))));
+        module.setEntry(main);
+
+        Vm vm = new Vm(module, new HostImportRegistry());
+        StepResult r = vm.step(null);
+        assert r instanceof StepResult.Done;
+        AbiValue v = ((StepResult.Done) r).value();
+        assert v instanceof AbiValue.Str;
+        assert ((AbiValue.Str) v).value().equals("\uD83D\uDE00");
+    }
+
+    private static void testIntrinsicStringByteSlice() throws Exception {
+        ExecutableModule module = new ExecutableModule();
+        TypeId optionTypeId = module.internType("Option");
+
+        var main =
+                module.addFunction(
+                        new Function(
+                                "main",
+                                6,
+                                0,
+                                List.of(
+                                        // s = "a😀b" (UTF-8 bytes: [a][😀😀😀😀][b])
+                                        new Instruction.Const(0, new ConstValue.Str("a\uD83D\uDE00b")),
+                                        // from = 1 (byte index, after 'a')
+                                        new Instruction.Const(1, new ConstValue.Int(1)),
+                                        // Option<int> type arg
+                                        new Instruction.Const(2, new ConstValue.TypeRep(new TypeRepLit.Int())),
+                                        // to = 5 (byte index, end of 😀)
+                                        new Instruction.Const(3, new ConstValue.Int(5)),
+                                        // to_opt = Some(5)
+                                        new Instruction.MakeEnum(
+                                                4,
+                                                optionTypeId,
+                                                List.of(2),
+                                                "Some",
+                                                List.of(3)),
+                                        // out = string_byte_slice(s, from, to_opt) => UTF-8 bytes of 😀
+                                        new Instruction.Call(
+                                                5,
+                                                new CallTarget.IntrinsicTarget(Intrinsic.StringByteSlice),
+                                                List.of(0, 1, 4)),
+                                        new Instruction.Return(5))));
+        module.setEntry(main);
+
+        Vm vm = new Vm(module, new HostImportRegistry());
+        StepResult r = vm.step(null);
+        assert r instanceof StepResult.Done;
+        AbiValue v = ((StepResult.Done) r).value();
+        assert v instanceof AbiValue.Bytes;
+        byte[] got = ((AbiValue.Bytes) v).value();
+        byte[] want = "\uD83D\uDE00".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assert java.util.Arrays.equals(got, want);
+    }
+
     private static void testHostImportCall() throws Exception {
         ExecutableModule module = new ExecutableModule();
         module.addHostImport(
@@ -128,6 +272,71 @@ public final class TestRunner {
         AbiValue v = ((StepResult.Done) r).value();
         assert v instanceof AbiValue.Int;
         assert ((AbiValue.Int) v).value() == 3;
+    }
+
+    private static void testHostImportContinuationAbiValue() throws Exception {
+        ExecutableModule module = new ExecutableModule();
+        module.addHostImport(
+                new HostImport(
+                        "capture",
+                        new HostFnSig(List.of(AbiType.CONTINUATION), AbiType.UNIT)));
+
+        var main =
+                module.addFunction(
+                        new Function(
+                                "main",
+                                2,
+                                0,
+                                List.of(
+                                        new Instruction.Const(1, new ConstValue.Unit()),
+                                        new Instruction.PushHandler(
+                                                List.of(
+                                                        new HandlerClause(
+                                                                new EffectSpec("test", List.of(), "yield"),
+                                                                List.of(),
+                                                                4,
+                                                                List.of(0)))),
+                                        new Instruction.Perform(
+                                                null,
+                                                new EffectSpec("test", List.of(), "yield"),
+                                                List.of()),
+                                        // Normal path if the continuation is resumed.
+                                        new Instruction.Return(1),
+                                        // Handler clause body:
+                                        new Instruction.PopHandler(),
+                                        new Instruction.Call(
+                                                null,
+                                                new CallTarget.Host(new HostImportId(0)),
+                                                List.of(0)),
+                                        new Instruction.Return(1))));
+        module.setEntry(main);
+
+        ContinuationHandle[] captured = new ContinuationHandle[1];
+        HostImportRegistry reg = new HostImportRegistry();
+        reg.register(
+                new HostImportId(0),
+                args -> {
+                    assert args.size() == 1;
+                    assert args.get(0) instanceof AbiValue.Continuation;
+                    ContinuationHandle k = ((AbiValue.Continuation) args.get(0)).value();
+                    assert k.index() != 0;
+                    captured[0] = k;
+                    return new AbiValue.Unit();
+                });
+
+        Vm vm = new Vm(module, reg);
+        StepResult r = vm.step(null);
+        assert r instanceof StepResult.Done;
+        assert captured[0] != null;
+
+        vm.dropPinnedContinuation(captured[0]);
+        boolean threw = false;
+        try {
+            vm.dropPinnedContinuation(captured[0]);
+        } catch (VmError.InvalidContinuation e) {
+            threw = true;
+        }
+        assert threw;
     }
 
     private static void testVmArgvInjection() throws Exception {

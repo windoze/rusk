@@ -82,6 +82,7 @@ public enum Intrinsic {
     BytesFromArray(57),
 
     StringSlice(58),
+    StringByteSlice(86),
     StringNextIndex(59),
     StringCodepointAt(60),
     StringFromChars(61),
@@ -182,6 +183,7 @@ public enum Intrinsic {
             case 56 -> BytesToArray;
             case 57 -> BytesFromArray;
             case 58 -> StringSlice;
+            case 86 -> StringByteSlice;
             case 59 -> StringNextIndex;
             case 60 -> StringCodepointAt;
             case 61 -> StringFromChars;

@@ -6,6 +6,7 @@ Rusk 的 `.rbc` 字节码，并提供与 Rust 参考 VM 类似的宿主驱动 AP
 - `step(fuel)`：以 fuel 驱动解释执行
 - `resume(k, value)`：恢复一次外部化 effect 的挂起点
 - `dropContinuation(k)`：取消一次外部化 effect（进入 trapped: `cancelled`）
+- `dropPinnedContinuation(k)`：释放一个“可在宿主侧保存的 continuation”句柄（见下文 ABI）
 
 实现目标优先对齐仓库内 `BYTECODE_SPEC.md` 与 Rust 参考实现（`crates/rusk-bytecode`、`crates/rusk-vm`）
 的语义。
@@ -65,3 +66,7 @@ cd extra/java-vm
 - 该 Java VM 目前是独立子工程，不参与 Rust workspace 的 `cargo test`。
 - `.rbc` 版本以 `crates/rusk-bytecode/src/rbc.rs` 中的 `MAGIC` 与版本号为准。
 - 运行时堆对象（struct/enum/array/tuple）直接用 Java 对象图表示，由 JVM GC 回收；不会维护全局强引用表。
+- ABI 支持 `continuation`：宿主导入与外部化 effect 的签名可以使用 `AbiType.CONTINUATION`，对应的运行时值是
+  `AbiValue.Continuation(ContinuationHandle)`。
+  - `ContinuationHandle.index == 0` 保留给 `StepResult.Request` 的挂起句柄；
+  - `ContinuationHandle.index >= 1` 表示 pinned continuation，可跨越一次 `step()` 调用在宿主侧保存并回传给 VM。

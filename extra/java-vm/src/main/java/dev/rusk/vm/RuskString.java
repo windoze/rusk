@@ -169,6 +169,19 @@ final class RuskString {
         return new RuskString(buf, start + from, toExclusive - from);
     }
 
+    RuskBytes sliceBytes(int from, int toExclusive) {
+        if (from < 0 || toExclusive < 0) {
+            throw new IllegalArgumentException("slice indices must be >= 0");
+        }
+        if (from > toExclusive) {
+            throw new IllegalArgumentException("from > to");
+        }
+        if (toExclusive > len) {
+            throw new IndexOutOfBoundsException("to out of bounds: to=" + toExclusive + ", len=" + len);
+        }
+        return RuskBytes.view(buf, start + from, toExclusive - from);
+    }
+
     RuskString concat(RuskString other) {
         int newLen = this.len + other.len;
         byte[] out = new byte[newLen];
@@ -205,4 +218,3 @@ final class RuskString {
         return h;
     }
 }
-

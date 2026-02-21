@@ -8,7 +8,7 @@ import java.util.Map;
 final class RbcEncoder {
     private static final byte[] MAGIC = new byte[] {'R', 'U', 'S', 'K', 'B', 'C', '0', 0};
     private static final int VERSION_MAJOR = 0;
-    private static final int VERSION_MINOR = 9;
+    private static final int VERSION_MINOR = 11;
 
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
 
