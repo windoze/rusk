@@ -1011,11 +1011,11 @@ impl<'a> FnTypechecker<'a> {
                 Ty::Unit
             }
             Expr::For {
-                binding,
+                pat,
                 iter,
                 body,
                 span,
-            } => self.typecheck_for(binding, iter, body, *span)?,
+            } => self.typecheck_for(pat, iter, body, *span)?,
             Expr::Block { block, .. } => self.typecheck_block(block, use_kind)?,
 
             Expr::Call {
@@ -2153,7 +2153,7 @@ impl<'a> FnTypechecker<'a> {
 
     fn typecheck_for(
         &mut self,
-        binding: &Ident,
+        pat: &Pattern,
         iter: &Expr,
         body: &Block,
         span: Span,
@@ -2252,14 +2252,17 @@ impl<'a> FnTypechecker<'a> {
         };
 
         self.push_scope();
-        self.bind_local(
-            binding,
-            LocalInfo {
-                ty: elem_ty,
-                kind: BindingKind::Const,
-                span: binding.span,
-            },
-        )?;
+        let binds = self.typecheck_pattern(pat, elem_ty)?;
+        for (name, ty) in binds {
+            self.bind_local(
+                &name,
+                LocalInfo {
+                    ty,
+                    kind: BindingKind::Const,
+                    span: name.span,
+                },
+            )?;
+        }
         self.loop_depth += 1;
         let _ = self.typecheck_block(body, ExprUse::Stmt)?;
         self.loop_depth -= 1;
