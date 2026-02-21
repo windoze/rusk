@@ -31,8 +31,13 @@ editors, servers, or other runtimes.
    - [Host-side effect dispatch](#host-side-effect-dispatch)
    - [Resuming vs cancelling](#resuming-vs-cancelling)
    - [Limitations](#limitations)
-7. [Generic specialization (advanced)](#generic-specialization-advanced)
-8. [Troubleshooting](#troubleshooting)
+7. [Pinned Continuations: host-storable continuation handles](#pinned-continuations-host-storable-continuation-handles)
+   - [Host functions with continuation signatures](#host-functions-with-continuation-signatures)
+   - [How continuation values cross the ABI boundary](#how-continuation-values-cross-the-abi-boundary)
+   - [Host-driven tail resumption](#host-driven-tail-resumption)
+   - [Dropping pinned continuations](#dropping-pinned-continuations)
+8. [Generic specialization (advanced)](#generic-specialization-advanced)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -75,6 +80,7 @@ The current bytecode VM ABI supports:
 - `float` (IEEE-754 `f64`)
 - `string` (UTF-8)
 - `bytes` (`Vec<u8>`)
+- `continuation` (opaque continuation handles; see [Pinned Continuations](#pinned-continuations-host-storable-continuation-handles))
 
 In Rust:
 
@@ -468,6 +474,194 @@ For deeper background on how effects and continuations work in Rusk, see:
 
 ---
 
+## Pinned Continuations: host-storable continuation handles
+
+Rusk supports **first-class, one-shot delimited continuations** as language-level values (type
+`cont(<param>) -> <ret>`). These can be captured in effect handlers, stored in variables, and
+resumed later.
+
+Starting with the "Tail-resume from host" feature (2026-02-20), **continuation values can cross
+the VM/host ABI boundary** as opaque handles. This enables embeddings where:
+
+- A Rusk program captures a continuation and passes it to the host (via a host import call or
+  externalized effect result).
+- The host stores the continuation handle(s) in host-owned state (e.g. a scheduler, event loop, or
+  custom registry).
+- The host can later **resume** the continuation (either by passing the handle back to Rusk code,
+  or by using the host-driven tail-resume API).
+- The host can explicitly **drop** unused continuations to release resources.
+
+This is particularly useful for embeddings that need to integrate Rusk continuations with native
+event loops, async runtimes, or other host-side scheduling mechanisms.
+
+### Host functions with continuation signatures
+
+To declare host functions that accept or return continuations, use `HostType::Cont` in the
+signature:
+
+```rust
+use rusk_compiler::{
+    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
+};
+
+let mut options = CompileOptions::default();
+
+options.register_host_module(
+    "host",
+    HostModuleDecl {
+        visibility: HostVisibility::Public,
+        functions: vec![
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "store_cont".to_string(),
+                sig: HostFnSig {
+                    params: vec![HostType::Cont {
+                        param: Box::new(HostType::Int),
+                        ret: Box::new(HostType::Int),
+                    }],
+                    ret: HostType::Unit,
+                },
+            },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "take_cont".to_string(),
+                sig: HostFnSig {
+                    params: Vec::new(),
+                    ret: HostType::Cont {
+                        param: Box::new(HostType::Int),
+                        ret: Box::new(HostType::Int),
+                    },
+                },
+            },
+        ],
+    },
+)?;
+```
+
+In Rusk code, these host functions can be called naturally:
+
+```rusk
+interface E { fn boom() -> int; }
+
+fn main() -> int {
+    // Capture a continuation and pass it to the host for storage
+    match @E.boom() {
+        @E.boom() -> k => { host::store_cont(k); 0 }
+        x => x
+    };
+
+    // Later: retrieve the continuation from the host and resume it
+    let k = host::take_cont();
+    k(42)
+}
+```
+
+### How continuation values cross the ABI boundary
+
+When a `Value::Continuation` crosses the VM/host boundary (as an argument or return value), the VM
+automatically **pins** the continuation in an internal GC-rooted table and converts it to:
+
+- `AbiValue::Continuation(ContinuationHandle)`
+
+Where `ContinuationHandle` is an opaque, generation-checked handle:
+
+```rust
+use rusk_vm::{AbiValue, ContinuationHandle};
+
+// In a host import implementation:
+if let Some(id) = module.host_import_id("host::store_cont") {
+    vm.register_host_import(id, |args: &[AbiValue]| match args {
+        [AbiValue::Continuation(handle)] => {
+            // Store the handle in host state (e.g. a Vec or HashMap)
+            store_continuation_somewhere(*handle);
+            Ok(AbiValue::Unit)
+        }
+        _ => Err(/* ... */)
+    })?;
+}
+```
+
+When `AbiValue::Continuation(handle)` flows back into the VM (e.g. returned from a host import),
+the VM looks up the pinned continuation and converts it back to `Value::Continuation`.
+
+**Important properties:**
+
+- **Pinned continuations are GC-rooted**: while the host holds a handle, the captured Rusk
+  frames/values remain alive (will not be collected).
+- **Handles are opaque and VM-specific**: they have no meaning outside the VM that issued them.
+- **One-shot semantics are preserved**: resuming a continuation (in-language or from the host)
+  consumes the underlying state; further resume attempts fail with `InvalidContinuation`.
+- **Generation checks prevent use-after-free**: if a handle's slot is reused, stale handles are
+  rejected.
+
+### Host-driven tail resumption
+
+The host can directly resume a pinned continuation using:
+
+```rust
+use rusk_vm::{vm_resume_pinned_continuation_tail, AbiValue};
+
+vm_resume_pinned_continuation_tail(&mut vm, handle, AbiValue::Int(42))?;
+```
+
+This is a **tail-resume** operation:
+
+- It consumes the one-shot continuation state.
+- It splices the captured continuation segment *on top of* the current VM stack (as-if tail-resuming
+  from a host handler frame that is not represented in the VM).
+- The continuation's final return value is **discarded** (there is no "second half" host handler
+  frame to receive it). If the VM stack is empty, the resumed continuation becomes the new entry
+  computation and its return value becomes the program result as usual.
+- The operation is **schedule-only**: it does not step the VM. The host must subsequently call
+  `vm_step` to drive execution.
+
+Example host-side resume loop:
+
+```rust
+use rusk_vm::{StepResult, vm_step, vm_resume_pinned_continuation_tail, AbiValue};
+
+// After storing a continuation handle from a host import call:
+vm_resume_pinned_continuation_tail(&mut vm, stored_handle, AbiValue::Int(42))?;
+
+loop {
+    match vm_step(&mut vm, None) {
+        StepResult::Done { value } => break value,
+        StepResult::Trap { message } => panic!("vm trapped: {message}"),
+        StepResult::Yield { .. } => continue,
+        StepResult::Request { .. } => { /* handle externalized effects */ }
+    }
+}
+```
+
+**Why tail-only?**
+
+A non-tail host resume would require the host to keep state for the "second half" of a host effect
+handler, which is outside the scope of the current embedding model. Tail-resume semantics avoid
+this by consuming the continuation without returning control to a host handler frame.
+
+### Dropping pinned continuations
+
+If the host decides not to resume a continuation (e.g. cancelling a request or cleaning up on
+shutdown), it must explicitly drop the handle to release the pinned resources:
+
+```rust
+use rusk_vm::vm_drop_pinned_continuation;
+
+vm_drop_pinned_continuation(&mut vm, handle)?;
+```
+
+After dropping, the handle becomes invalid and the captured continuation state is eligible for
+garbage collection (unless still reachable from the running VM).
+
+**Important:**
+
+- Dropping a continuation is **not** an error; it is a normal cleanup operation (equivalent to
+  abandoning a continuation in Rusk code).
+- Attempting to drop the same handle twice, or dropping an already-consumed handle, returns an
+  error.
+
+---
+
 ## Generic specialization (advanced)
 
 Most embeddings can ignore this section.
@@ -530,6 +724,13 @@ evolve (this is a v0 runtime).
   - A host import attempted to call back into the VM (directly or indirectly). Host imports must
     be synchronous leaf operations.
 
-- **“unhandled effect: Interface.method”**
+- **”unhandled effect: Interface.method”**
   - The program performed an effect that had no in-language handler, and it was not declared as an
     externalized effect in the module.
+
+- **”invalid continuation handle”** (when using `vm_resume_pinned_continuation_tail` or
+  `vm_drop_pinned_continuation`)
+  - The continuation handle is stale (already consumed or dropped), has the wrong generation, or
+    belongs to a different VM.
+  - Ensure the handle is used only once (one-shot) and that you're not attempting to resume/drop
+    after a previous consume operation.
