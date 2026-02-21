@@ -4943,11 +4943,11 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Loop { body, span } => self.lower_loop_expr(body, *span),
             Expr::While { cond, body, span } => self.lower_while_expr(cond, body, *span),
             Expr::For {
-                binding,
+                pat,
                 iter,
                 body,
                 span,
-            } => self.lower_for_expr(binding, iter, body, *span),
+            } => self.lower_for_expr(pat, iter, body, *span),
 
             Expr::Block { block, .. } => self.lower_block_expr(block),
 
@@ -5331,7 +5331,7 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_for_expr(
         &mut self,
-        binding: &crate::ast::Ident,
+        pat: &AstPattern,
         iter: &Expr,
         body: &Block,
         span: Span,
@@ -5416,23 +5416,7 @@ impl<'a> FunctionLowerer<'a> {
                         arr: Operand::Local(iterable_local),
                         idx: Operand::Local(idx_local),
                     });
-
-                    self.push_scope();
-                    self.bind_var(
-                        &binding.name,
-                        VarInfo {
-                            storage: VarStorage::Local(elem_local),
-                            kind: BindingKind::Const,
-                        },
-                    );
-                    self.lower_block_stmt(body)?;
-                    self.pop_scope();
-                    if !self.is_current_terminated() {
-                        self.set_terminator(Terminator::Br {
-                            target: loop_step,
-                            args: Vec::new(),
-                        })?;
-                    }
+                    self.lower_for_body_with_pattern(pat, elem_local, body, loop_step, span)?;
 
                     self.set_current(loop_step);
                     self.emit(Instruction::IntAdd {
@@ -5497,23 +5481,7 @@ impl<'a> FunctionLowerer<'a> {
                         arr: Operand::Local(iterable_local),
                         idx: Operand::Local(idx_local),
                     });
-
-                    self.push_scope();
-                    self.bind_var(
-                        &binding.name,
-                        VarInfo {
-                            storage: VarStorage::Local(elem_local),
-                            kind: BindingKind::Const,
-                        },
-                    );
-                    self.lower_block_stmt(body)?;
-                    self.pop_scope();
-                    if !self.is_current_terminated() {
-                        self.set_terminator(Terminator::Br {
-                            target: loop_step,
-                            args: Vec::new(),
-                        })?;
-                    }
+                    self.lower_for_body_with_pattern(pat, elem_local, body, loop_step, span)?;
 
                     self.set_current(loop_step);
                     self.emit(Instruction::IntAdd {
@@ -5587,23 +5555,7 @@ impl<'a> FunctionLowerer<'a> {
                         func: "core::intrinsics::int_to_char".to_string(),
                         args: vec![Operand::Local(codepoint_local)],
                     });
-
-                    self.push_scope();
-                    self.bind_var(
-                        &binding.name,
-                        VarInfo {
-                            storage: VarStorage::Local(ch_local),
-                            kind: BindingKind::Const,
-                        },
-                    );
-                    self.lower_block_stmt(body)?;
-                    self.pop_scope();
-                    if !self.is_current_terminated() {
-                        self.set_terminator(Terminator::Br {
-                            target: loop_step,
-                            args: Vec::new(),
-                        })?;
-                    }
+                    self.lower_for_body_with_pattern(pat, ch_local, body, loop_step, span)?;
 
                     self.set_current(loop_step);
                     self.emit(Instruction::Copy {
@@ -5727,22 +5679,7 @@ impl<'a> FunctionLowerer<'a> {
         })?;
 
         self.set_current(loop_body);
-        self.push_scope();
-        self.bind_var(
-            &binding.name,
-            VarInfo {
-                storage: VarStorage::Local(some_param),
-                kind: BindingKind::Const,
-            },
-        );
-        self.lower_block_stmt(body)?;
-        self.pop_scope();
-        if !self.is_current_terminated() {
-            self.set_terminator(Terminator::Br {
-                target: loop_head,
-                args: Vec::new(),
-            })?;
-        }
+        self.lower_for_body_with_pattern(pat, some_param, body, loop_head, span)?;
 
         self.set_current(loop_none);
         if !self.is_current_terminated() {
@@ -5756,6 +5693,102 @@ impl<'a> FunctionLowerer<'a> {
         self.set_current(after_block);
         let _ = span;
         Ok(self.alloc_unit())
+    }
+
+    fn lower_for_body_with_pattern(
+        &mut self,
+        pat: &AstPattern,
+        value_local: Local,
+        body: &Block,
+        next_block: BlockId,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        match pat {
+            AstPattern::Wildcard { .. } => {
+                self.push_scope();
+                self.lower_block_stmt(body)?;
+                self.pop_scope();
+                if !self.is_current_terminated() {
+                    self.set_terminator(Terminator::Br {
+                        target: next_block,
+                        args: Vec::new(),
+                    })?;
+                }
+                Ok(())
+            }
+
+            AstPattern::Bind { name, .. } => {
+                self.push_scope();
+                self.bind_var(
+                    &name.name,
+                    VarInfo {
+                        storage: VarStorage::Local(value_local),
+                        kind: BindingKind::Const,
+                    },
+                );
+                self.lower_block_stmt(body)?;
+                self.pop_scope();
+                if !self.is_current_terminated() {
+                    self.set_terminator(Terminator::Br {
+                        target: next_block,
+                        args: Vec::new(),
+                    })?;
+                }
+                Ok(())
+            }
+
+            other_pat => {
+                let (mir_pat, bind_names) = self.lower_ast_pattern(other_pat)?;
+
+                let ok_block = self.new_block("for_pat_ok");
+                let mut params = Vec::with_capacity(bind_names.len());
+                for _ in 0..bind_names.len() {
+                    params.push(self.alloc_local());
+                }
+                self.blocks[ok_block.0].params = params.clone();
+
+                let trap_block = self.new_block("for_pat_fail");
+                let prev = self.current;
+                self.set_current(trap_block);
+                self.set_terminator(Terminator::Trap {
+                    message: "for-binding pattern match failed".to_string(),
+                })?;
+                self.set_current(prev);
+
+                self.set_terminator(Terminator::Switch {
+                    value: Operand::Local(value_local),
+                    cases: vec![SwitchCase {
+                        pattern: mir_pat,
+                        target: ok_block,
+                    }],
+                    default: trap_block,
+                })?;
+
+                self.set_current(ok_block);
+                self.push_scope();
+                for (name, local) in bind_names.into_iter().zip(params.into_iter()) {
+                    self.bind_var(
+                        &name,
+                        VarInfo {
+                            storage: VarStorage::Local(local),
+                            kind: BindingKind::Const,
+                        },
+                    );
+                }
+                self.lower_block_stmt(body)?;
+                self.pop_scope();
+
+                if !self.is_current_terminated() {
+                    self.set_terminator(Terminator::Br {
+                        target: next_block,
+                        args: Vec::new(),
+                    })?;
+                }
+
+                let _ = span;
+                Ok(())
+            }
+        }
     }
 
     fn lower_field_expr(

@@ -2312,13 +2312,13 @@ impl<'a> Parser<'a> {
 
     fn parse_for_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.expect(TokenKind::KwFor)?.span.start;
-        let binding = self.expect_ident()?;
+        let pat = self.parse_pattern()?;
         self.expect(TokenKind::KwIn)?;
         let iter = self.parse_expr_no_struct_lit()?;
         let body = self.parse_block()?;
         let end = body.span.end;
         Ok(Expr::For {
-            binding,
+            pat,
             iter: Box::new(iter),
             body,
             span: Span::new(start, end),

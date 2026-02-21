@@ -570,7 +570,7 @@ WhileExpr      := "while" Expr Block ;
 `for` is provided as syntax:
 
 ```
-ForExpr        := "for" Ident "in" Expr Block ;
+ForExpr        := "for" Pattern "in" Expr Block ;
 ```
 
 and desugars (in the type system and compiler) to a `while` loop over an iterator
@@ -615,6 +615,7 @@ Patterns are used in:
 - effect arms’ parameter patterns
 - function parameters (§3.2.1)
 - binding statements: `let` / `const` / `readonly` (§3.5)
+- `for` loop bindings (§3.6.6)
 
 ```
 Pattern        := "_"                       // wildcard
@@ -754,7 +755,7 @@ statement position (ends with `;`), in which case missing `else` yields `unit`.
 - `break` exits the innermost loop and yields `unit` for that loop expression.
 - `continue` jumps to the next iteration of the innermost loop.
 
-`for x in iter { body }` desugars via §9.4.
+`for pat in iter { body }` desugars via §9.4.
 
 ### 5.4 Return
 
@@ -1457,14 +1458,14 @@ Required baseline `ToString` impls (v0.4 surface):
 
 ### 9.4 `for` Desugaring (`core::iter::Iterator`)
 
-`for x in iter { body }` desugars to:
+`for pat in iter { body }` desugars to:
 
 ```rust
 let __iterable = iter;
 let __it = /* see below: obtaining an iterator */;
 loop {
   match core::iter::Iterator::next(__it) {
-    Option::Some(x) => { body; }
+    Option::Some(__item) => { const pat = __item; body; }
     Option::None => break;
   }
 }

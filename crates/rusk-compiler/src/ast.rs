@@ -448,7 +448,7 @@ pub enum Expr {
         span: Span,
     },
     For {
-        binding: Ident,
+        pat: Pattern,
         iter: Box<Expr>,
         body: Block,
         span: Span,

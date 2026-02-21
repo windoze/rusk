@@ -142,6 +142,107 @@ fn for_loop_over_bytes_iterates_byte_values() {
 }
 
 #[test]
+fn for_loop_allows_wildcard_pattern_binding() {
+    let src = r#"
+        fn count() -> int {
+            let n = 0;
+            let xs = [1, 2, 3];
+            for _ in xs {
+                n = n + 1;
+            };
+            n
+        }
+
+        fn main() -> unit { () }
+    "#;
+
+    let mut module = compile_to_bytecode(src).expect("compile");
+    module.entry = module.function_id("count").expect("count fn id");
+
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Int(3)
+        }
+    );
+}
+
+#[test]
+fn for_loop_allows_tuple_destructuring_over_builtin_arrays() {
+    let src = r#"
+        fn sum_pairs() -> int {
+            let total = 0;
+            let xs = [(1, 2), (3, 4), (5, 6)];
+            for (x, y) in xs {
+                total = total + x + y;
+            };
+            total
+        }
+
+        fn main() -> unit { () }
+    "#;
+
+    let mut module = compile_to_bytecode(src).expect("compile");
+    module.entry = module.function_id("sum_pairs").expect("sum_pairs fn id");
+
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Int(21)
+        }
+    );
+}
+
+#[test]
+fn for_loop_allows_tuple_destructuring_over_custom_iterator() {
+    let src = r#"
+        use core::iter::Iterator;
+
+        struct Pairs { cur: int, end: int }
+
+        impl Iterator for Pairs {
+          type Item = (int, int);
+          fn next() -> Option<(int, int)> {
+            if self.cur < self.end {
+              let out = (self.cur, self.cur * 2);
+              self.cur = self.cur + 1;
+              Option::Some(out)
+            } else {
+              Option::None
+            }
+          }
+        }
+
+        fn sum() -> int {
+            let total = 0;
+            let p = Pairs { cur: 1, end: 4 };
+            for (x, y) in p {
+                total = total + x + y;
+            };
+            total
+        }
+
+        fn main() -> unit { () }
+    "#;
+
+    let mut module = compile_to_bytecode(src).expect("compile");
+    module.entry = module.function_id("sum").expect("sum fn id");
+
+    let mut vm = Vm::new(module).expect("vm init");
+    let out = vm_step(&mut vm, None);
+    assert_eq!(
+        out,
+        StepResult::Done {
+            value: AbiValue::Int(18)
+        }
+    );
+}
+
+#[test]
 fn for_loop_over_custom_iterator_type_is_supported() {
     let src = r#"
         use core::iter::Iterator;

@@ -216,14 +216,11 @@ fn free_value_vars_in_expr(expr: &Expr, bound: &BTreeSet<String>, out: &mut BTre
             out.extend(free_value_vars_in_block(body, &mut bound.clone()));
         }
         Expr::For {
-            binding,
-            iter,
-            body,
-            ..
+            pat, iter, body, ..
         } => {
             free_value_vars_in_expr(iter, bound, out);
             let mut inner_bound = bound.clone();
-            inner_bound.insert(binding.name.clone());
+            free_value_vars_in_pattern(pat, &mut inner_bound);
             out.extend(free_value_vars_in_block(body, &mut inner_bound));
         }
         Expr::Block { block, .. } => {
@@ -399,14 +396,11 @@ fn collect_captured_vars_in_expr(
             collect_captured_vars_in_block(body, &mut bound.clone(), captured);
         }
         Expr::For {
-            binding,
-            iter,
-            body,
-            ..
+            pat, iter, body, ..
         } => {
             collect_captured_vars_in_expr(iter, bound, captured);
             let mut inner_bound = bound.clone();
-            inner_bound.insert(binding.name.clone());
+            free_value_vars_in_pattern(pat, &mut inner_bound);
             collect_captured_vars_in_block(body, &mut inner_bound, captured);
         }
         Expr::Block { block, .. } => {
