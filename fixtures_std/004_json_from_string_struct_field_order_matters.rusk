@@ -1,0 +1,22 @@
+// expect: ok string std::json: missing field: a
+
+use core::serde::SerdeError;
+
+struct Pair {
+    a: int,
+    b: int,
+}
+
+derive Deserialize for Pair;
+
+fn main() -> string {
+    // Derived order is `a`, then `b` — this JSON provides `b` first.
+    let src = "{\"b\":2,\"a\":1}";
+    match std::json::from_string::<Pair>(src) {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            SerdeError::Message(msg) => msg,
+            SerdeError::UnknownEnumTag(_, tag) => f"{tag}",
+        },
+    }
+}

@@ -161,8 +161,7 @@ fn typecheck_impl_item(
                     span: item.span,
                 })?;
 
-                let synthesized =
-                    synthesize_default_method_fn_item(method_info.receiver_readonly, template);
+                let synthesized = synthesize_default_method_fn_item(method_info.receiver, template);
                 let origin_iface_def =
                     env.interfaces.get(&method_info.origin).ok_or(TypeError {
                         message: format!(
@@ -359,10 +358,16 @@ fn typecheck_function_body_with_options(
             )
         })
         .collect();
+    let static_iface_self_tys = tc
+        .static_iface_self_tys
+        .into_iter()
+        .map(|(key, ty)| (key, tc.infer.resolve_ty(ty)))
+        .collect();
     Ok(FnTypeInfo {
         expr_types,
         call_type_args,
         method_type_args,
+        static_iface_self_tys,
         effect_interface_args,
     })
 }
@@ -388,6 +393,7 @@ struct FnTypechecker<'a> {
     expr_types: HashMap<Span, Ty>,
     call_type_args: HashMap<(Span, String), Vec<Ty>>,
     method_type_args: HashMap<(Span, String), Vec<Ty>>,
+    static_iface_self_tys: HashMap<(Span, String), Ty>,
     effect_interface_args: HashMap<(Span, String), Vec<Ty>>,
     stmt_exprs: HashSet<Span>,
     loop_depth: usize,
@@ -410,6 +416,7 @@ impl<'a> FnTypechecker<'a> {
             expr_types: HashMap::new(),
             call_type_args: HashMap::new(),
             method_type_args: HashMap::new(),
+            static_iface_self_tys: HashMap::new(),
             effect_interface_args: HashMap::new(),
             stmt_exprs: HashSet::new(),
             loop_depth: 0,
@@ -499,6 +506,19 @@ impl<'a> FnTypechecker<'a> {
         {
             return Err(TypeError {
                 message: "cannot infer type arguments for generic method; add a type annotation"
+                    .to_string(),
+                span,
+            });
+        }
+        if let Some(span) = self
+            .static_iface_self_tys
+            .iter()
+            .filter(|(_key, ty)| contains_infer_vars(&self.infer.resolve_ty((*ty).clone())))
+            .map(|((span, _method_id), _ty)| *span)
+            .min_by_key(|span| (span.start, span.end))
+        {
+            return Err(TypeError {
+                message: "cannot infer implementing type for static interface method call; add a type annotation"
                     .to_string(),
                 span,
             });
@@ -1428,6 +1448,15 @@ impl<'a> FnTypechecker<'a> {
                 span: method.span,
             });
         };
+        if matches!(method_info.receiver, MethodReceiverKind::Static) {
+            return Err(TypeError {
+                message: format!(
+                    "static interface method `{}::{}` is not an effect operation",
+                    method_info.origin, method.name
+                ),
+                span: method.span,
+            });
+        }
         if !method_info.sig.generics.is_empty() {
             return Err(TypeError {
                 message: "method-generic effect operations are not supported yet".to_string(),
@@ -2941,6 +2970,31 @@ impl<'a> FnTypechecker<'a> {
                             let candidate = format!("{type_fqn}::{last}");
                             if self.env.functions.contains_key(&candidate) {
                                 func_name = Some(candidate);
+                            } else {
+                                let self_type_expr = TypeExpr::Path(crate::ast::PathType {
+                                    segments: path.segments[..path.segments.len() - 1]
+                                        .iter()
+                                        .map(|seg| crate::ast::PathTypeSegment {
+                                            name: seg.clone(),
+                                            args: Vec::new(),
+                                            span: seg.span,
+                                        })
+                                        .collect(),
+                                    assoc_bindings: Vec::new(),
+                                    span: path.span,
+                                });
+                                if let Some(ty) = self
+                                    .try_typecheck_static_iface_method_sugar_call(
+                                        &type_fqn,
+                                        self_type_expr,
+                                        last_ident,
+                                        explicit_type_args,
+                                        args,
+                                        span,
+                                    )?
+                                {
+                                    return Ok(ty);
+                                }
                             }
                         }
                         crate::modules::DefKind::Interface => {
@@ -2956,6 +3010,31 @@ impl<'a> FnTypechecker<'a> {
                             let candidate = format!("{type_fqn}::{last}");
                             if self.env.functions.contains_key(&candidate) {
                                 func_name = Some(candidate);
+                            } else {
+                                let self_type_expr = TypeExpr::Path(crate::ast::PathType {
+                                    segments: path.segments[..path.segments.len() - 1]
+                                        .iter()
+                                        .map(|seg| crate::ast::PathTypeSegment {
+                                            name: seg.clone(),
+                                            args: Vec::new(),
+                                            span: seg.span,
+                                        })
+                                        .collect(),
+                                    assoc_bindings: Vec::new(),
+                                    span: path.span,
+                                });
+                                if let Some(ty) = self
+                                    .try_typecheck_static_iface_method_sugar_call(
+                                        &type_fqn,
+                                        self_type_expr,
+                                        last_ident,
+                                        explicit_type_args,
+                                        args,
+                                        span,
+                                    )?
+                                {
+                                    return Ok(ty);
+                                }
                             }
                         }
                     }
@@ -2977,6 +3056,32 @@ impl<'a> FnTypechecker<'a> {
                     let candidate = format!("{prim}::{last}");
                     if self.env.functions.contains_key(&candidate) {
                         func_name = Some(candidate);
+                    } else {
+                        let prim_ty = match prim {
+                            "unit" => PrimType::Unit,
+                            "bool" => PrimType::Bool,
+                            "int" => PrimType::Int,
+                            "float" => PrimType::Float,
+                            "byte" => PrimType::Byte,
+                            "char" => PrimType::Char,
+                            "string" => PrimType::String,
+                            "bytes" => PrimType::Bytes,
+                            _ => PrimType::Unit,
+                        };
+                        let self_type_expr = TypeExpr::Prim {
+                            prim: prim_ty,
+                            span: path.span,
+                        };
+                        if let Some(ty) = self.try_typecheck_static_iface_method_sugar_call(
+                            prim,
+                            self_type_expr,
+                            path.segments.last().expect("len == 2"),
+                            explicit_type_args,
+                            args,
+                            span,
+                        )? {
+                            return Ok(ty);
+                        }
                     }
                 }
             }
@@ -3219,119 +3324,269 @@ impl<'a> FnTypechecker<'a> {
                 span,
             });
         };
-        if args.is_empty() {
-            return Err(TypeError {
-                message: format!(
-                    "interface method call `{iface_name}::{method_name}` requires an explicit receiver argument"
-                ),
-                span,
-            });
+        match method_info.receiver {
+            MethodReceiverKind::Instance {
+                readonly: method_readonly,
+            } => {
+                if args.is_empty() {
+                    return Err(TypeError {
+                        message: format!(
+                            "interface method call `{iface_name}::{method_name}` requires an explicit receiver argument"
+                        ),
+                        span,
+                    });
+                }
+                if args.len() != method_info.sig.params.len() + 1 {
+                    return Err(TypeError {
+                        message: format!(
+                            "arity mismatch for `{iface_name}::{method_name}`: expected {}, got {}",
+                            method_info.sig.params.len() + 1,
+                            args.len()
+                        ),
+                        span,
+                    });
+                }
+
+                let recv_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
+                let mut recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+                if let Ty::Var(id) = strip_readonly(&recv_ty_resolved)
+                    && self.infer.int_lit_vars.contains_key(id)
+                {
+                    // We don't support deferring interface-impl selection on an unconstrained receiver in
+                    // this stage. Integer literals can be either `int` or `byte`, so apply the standard
+                    // fallback to `int` when they need to act as an interface receiver (e.g. f-strings).
+                    let _ = self.infer.unify(Ty::Var(*id), Ty::Int, args[0].span())?;
+                    recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+                }
+                if !method_readonly && matches!(recv_ty_resolved, Ty::Readonly(_)) {
+                    return Err(TypeError {
+                        message: format!(
+                            "cannot call mutable interface method `{iface_name}::{method_name}` on a readonly receiver"
+                        ),
+                        span: args[0].span(),
+                    });
+                }
+
+                // For interface-typed receivers, only dyn-dispatchable methods are callable.
+                //
+                // Constrained generics (`T: I`) are also dynamically dispatched, but they can still call
+                // "Self-only" methods since `Self` is statically the same type parameter at the call site.
+                let recv_for_dispatch = strip_readonly(&recv_ty_resolved);
+                let recv_is_iface_object = matches!(recv_for_dispatch, Ty::Iface { .. })
+                    || matches!(recv_for_dispatch, Ty::App(TyCon::Named(name), _) if self.env.interfaces.contains_key(name));
+                if recv_is_iface_object
+                    && !interface_method_sig_is_dyn_dispatchable(&method_info.sig)
+                {
+                    let method_id = format!("{}::{method_name}", method_info.origin);
+                    return Err(TypeError {
+                        message: format!(
+                            "method `{method_id}` is not dynamically dispatchable because it mentions `Self` in its signature; call requires a concrete receiver type"
+                        ),
+                        span: method.span,
+                    });
+                }
+
+                let iface_args = self
+                    .infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
+                    .ok_or(TypeError {
+                        message: format!(
+                            "type `{recv_ty_resolved}` does not implement interface `{iface_name}`"
+                        ),
+                        span: args[0].span(),
+                    })?;
+                let iface_arity = iface.generics.len();
+                let self_ty_for_inst = match recv_for_dispatch {
+                    Ty::Iface { .. } => None,
+                    Ty::App(TyCon::Named(name), _) if self.env.interfaces.contains_key(name) => {
+                        None
+                    }
+                    _ => Some(recv_for_dispatch),
+                };
+                let mut inst = instantiate_interface_method_sig(
+                    &method_info.sig,
+                    &iface_args,
+                    iface_arity,
+                    self_ty_for_inst,
+                    &mut self.infer,
+                );
+                inst.params = inst
+                    .params
+                    .into_iter()
+                    .map(|t| self.normalize_assoc_projs_in_ty(t))
+                    .collect();
+                inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
+
+                if let Ty::Iface { assoc_bindings, .. } = recv_for_dispatch {
+                    inst.params = inst
+                        .params
+                        .into_iter()
+                        .map(|t| self.subst_self_assoc_projs_from_bindings(t, assoc_bindings))
+                        .collect();
+                    inst.ret = self.subst_self_assoc_projs_from_bindings(inst.ret, assoc_bindings);
+                }
+                let target_name = format!("{iface_name}::{method_name}");
+                self.apply_explicit_type_args(
+                    explicit_type_args,
+                    &method_info.sig.generics,
+                    &inst.reified_type_args,
+                    &target_name,
+                    span,
+                )?;
+                let target_iface = Ty::App(TyCon::Named(iface_name.to_string()), iface_args);
+                self.ensure_implements_interface_type(
+                    &recv_ty_resolved,
+                    &target_iface,
+                    args[0].span(),
+                )?;
+
+                for (arg, expected) in args[1..].iter().zip(inst.params.iter()) {
+                    let got = self.typecheck_expr(arg, ExprUse::Value)?;
+                    let _ = self.unify_expected(expected.clone(), got, arg.span())?;
+                }
+                if !inst.reified_type_args.is_empty() {
+                    let method_id = format!("{}::{method_name}", method_info.origin);
+                    self.method_type_args
+                        .insert((span, method_id), inst.reified_type_args.clone());
+                }
+                Ok(inst.ret)
+            }
+            MethodReceiverKind::Static => {
+                if explicit_type_args.is_empty() {
+                    return Err(TypeError {
+                        message: format!(
+                            "static interface method call `{iface_name}::{method_name}` requires an explicit implementing type argument; use `{iface_name}::{method_name}::<Type>(...)`"
+                        ),
+                        span,
+                    });
+                }
+
+                let self_ty = self.lower_type_expr_in_fn(&explicit_type_args[0])?;
+                let self_ty_resolved = self.infer.resolve_ty(self_ty.clone());
+                let iface_args = self
+                    .infer_interface_args_for_receiver(&self_ty_resolved, iface_name)
+                    .ok_or(TypeError {
+                        message: format!(
+                            "type `{self_ty_resolved}` does not implement interface `{iface_name}`"
+                        ),
+                        span,
+                    })?;
+                let iface_arity = iface.generics.len();
+                let mut inst = instantiate_interface_method_sig(
+                    &method_info.sig,
+                    &iface_args,
+                    iface_arity,
+                    Some(strip_readonly(&self_ty_resolved)),
+                    &mut self.infer,
+                );
+                inst.params = inst
+                    .params
+                    .into_iter()
+                    .map(|t| self.normalize_assoc_projs_in_ty(t))
+                    .collect();
+                inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
+
+                let target_name = format!("{iface_name}::{method_name}");
+                self.apply_explicit_type_args(
+                    &explicit_type_args[1..],
+                    &method_info.sig.generics,
+                    &inst.reified_type_args,
+                    &target_name,
+                    span,
+                )?;
+
+                if args.len() != inst.params.len() {
+                    return Err(TypeError {
+                        message: format!(
+                            "arity mismatch for `{iface_name}::{method_name}`: expected {}, got {}",
+                            inst.params.len(),
+                            args.len()
+                        ),
+                        span,
+                    });
+                }
+                for (arg, expected) in args.iter().zip(inst.params.iter()) {
+                    let got = self.typecheck_expr(arg, ExprUse::Value)?;
+                    let _ = self.unify_expected(expected.clone(), got, arg.span())?;
+                }
+
+                let method_id = format!("{}::{method_name}", method_info.origin);
+                self.static_iface_self_tys.insert(
+                    (span, method_id.clone()),
+                    strip_readonly(&self_ty_resolved).clone(),
+                );
+                if !inst.reified_type_args.is_empty() {
+                    self.method_type_args
+                        .insert((span, method_id), inst.reified_type_args.clone());
+                }
+
+                Ok(inst.ret)
+            }
         }
-        if args.len() != method_info.sig.params.len() + 1 {
-            return Err(TypeError {
-                message: format!(
-                    "arity mismatch for `{iface_name}::{method_name}`: expected {}, got {}",
-                    method_info.sig.params.len() + 1,
-                    args.len()
-                ),
-                span,
-            });
+    }
+
+    fn try_typecheck_static_iface_method_sugar_call(
+        &mut self,
+        self_type_name: &str,
+        self_type_expr: TypeExpr,
+        method: &Ident,
+        explicit_type_args: &[TypeExpr],
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Option<Ty>, TypeError> {
+        let mut candidates: BTreeSet<String> = BTreeSet::new();
+
+        for (ty_name, origin_iface, method_name) in self.env.interface_static_methods.keys() {
+            if ty_name != self_type_name || method_name != &method.name {
+                continue;
+            }
+
+            // Respect interface visibility (private interfaces should not be callable across modules).
+            if let Some(def) = self.env.modules.def(origin_iface)
+                && !def.vis.is_public()
+                && !self.module.is_descendant_of(&def.defining_module)
+            {
+                continue;
+            }
+
+            // Defensive: ensure this really is a static interface method.
+            if let Some(iface_def) = self.env.interfaces.get(origin_iface)
+                && let Some(info) = iface_def.all_methods.get(&method.name)
+                && matches!(info.receiver, MethodReceiverKind::Static)
+            {
+                candidates.insert(origin_iface.clone());
+            }
         }
 
-        let recv_ty = self.typecheck_expr(&args[0], ExprUse::Value)?;
-        let mut recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
-        if let Ty::Var(id) = strip_readonly(&recv_ty_resolved)
-            && self.infer.int_lit_vars.contains_key(id)
-        {
-            // We don't support deferring interface-impl selection on an unconstrained receiver in
-            // this stage. Integer literals can be either `int` or `byte`, so apply the standard
-            // fallback to `int` when they need to act as an interface receiver (e.g. f-strings).
-            let _ = self.infer.unify(Ty::Var(*id), Ty::Int, args[0].span())?;
-            recv_ty_resolved = self.infer.resolve_ty(recv_ty.clone());
+        if candidates.is_empty() {
+            return Ok(None);
         }
-        if !method_info.receiver_readonly && matches!(recv_ty_resolved, Ty::Readonly(_)) {
+        if candidates.len() != 1 {
+            let mut names: Vec<String> = candidates.into_iter().collect();
+            names.sort();
             return Err(TypeError {
                 message: format!(
-                    "cannot call mutable interface method `{iface_name}::{method_name}` on a readonly receiver"
-                ),
-                span: args[0].span(),
-            });
-        }
-
-        // For interface-typed receivers, only dyn-dispatchable methods are callable.
-        //
-        // Constrained generics (`T: I`) are also dynamically dispatched, but they can still call
-        // "Self-only" methods since `Self` is statically the same type parameter at the call site.
-        let recv_for_dispatch = strip_readonly(&recv_ty_resolved);
-        let recv_is_iface_object = matches!(recv_for_dispatch, Ty::Iface { .. })
-            || matches!(recv_for_dispatch, Ty::App(TyCon::Named(name), _) if self.env.interfaces.contains_key(name));
-        if recv_is_iface_object && !interface_method_sig_is_dyn_dispatchable(&method_info.sig) {
-            let method_id = format!("{}::{method_name}", method_info.origin);
-            return Err(TypeError {
-                message: format!(
-                    "method `{method_id}` is not dynamically dispatchable because it mentions `Self` in its signature; call requires a concrete receiver type"
+                    "ambiguous static interface method call `{self_type_name}::{}`; candidates: {}. Use fully-qualified syntax `Iface::{}::<{self_type_name}>(...)`",
+                    method.name,
+                    names.join(", "),
+                    method.name,
                 ),
                 span: method.span,
             });
         }
 
-        let iface_args = self
-            .infer_interface_args_for_receiver(&recv_ty_resolved, iface_name)
-            .ok_or(TypeError {
-                message: format!(
-                    "type `{recv_ty_resolved}` does not implement interface `{iface_name}`"
-                ),
-                span: args[0].span(),
-            })?;
-        let iface_arity = iface.generics.len();
-        let self_ty_for_inst = match recv_for_dispatch {
-            Ty::Iface { .. } => None,
-            Ty::App(TyCon::Named(name), _) if self.env.interfaces.contains_key(name) => None,
-            _ => Some(recv_for_dispatch),
-        };
-        let mut inst = instantiate_interface_method_sig(
-            &method_info.sig,
-            &iface_args,
-            iface_arity,
-            self_ty_for_inst,
-            &mut self.infer,
-        );
-        inst.params = inst
-            .params
-            .into_iter()
-            .map(|t| self.normalize_assoc_projs_in_ty(t))
-            .collect();
-        inst.ret = self.normalize_assoc_projs_in_ty(inst.ret);
-
-        if let Ty::Iface { assoc_bindings, .. } = recv_for_dispatch {
-            inst.params = inst
-                .params
-                .into_iter()
-                .map(|t| self.subst_self_assoc_projs_from_bindings(t, assoc_bindings))
-                .collect();
-            inst.ret = self.subst_self_assoc_projs_from_bindings(inst.ret, assoc_bindings);
-        }
-        let target_name = format!("{iface_name}::{method_name}");
-        self.apply_explicit_type_args(
-            explicit_type_args,
-            &method_info.sig.generics,
-            &inst.reified_type_args,
-            &target_name,
+        let origin_iface = candidates.into_iter().next().expect("len == 1");
+        let mut combined_type_args: Vec<TypeExpr> =
+            Vec::with_capacity(explicit_type_args.len() + 1);
+        combined_type_args.push(self_type_expr);
+        combined_type_args.extend_from_slice(explicit_type_args);
+        let ty = self.typecheck_interface_method_call(
+            &origin_iface,
+            method,
+            &combined_type_args,
+            args,
             span,
         )?;
-        let target_iface = Ty::App(TyCon::Named(iface_name.to_string()), iface_args);
-        self.ensure_implements_interface_type(&recv_ty_resolved, &target_iface, args[0].span())?;
-
-        for (arg, expected) in args[1..].iter().zip(inst.params.iter()) {
-            let got = self.typecheck_expr(arg, ExprUse::Value)?;
-            let _ = self.unify_expected(expected.clone(), got, arg.span())?;
-        }
-        if !inst.reified_type_args.is_empty() {
-            let method_id = format!("{}::{method_name}", method_info.origin);
-            self.method_type_args
-                .insert((span, method_id), inst.reified_type_args.clone());
-        }
-        Ok(inst.ret)
+        Ok(Some(ty))
     }
 
     fn typecheck_method_call(
@@ -3379,8 +3634,11 @@ impl<'a> FnTypechecker<'a> {
             && let Some(prefer_iface) = self.prefer_interface_methods_for_self.clone()
             && let Some(iface_def) = self.env.interfaces.get(&prefer_iface)
             && let Some(info) = iface_def.all_methods.get(&method.name)
+            && let MethodReceiverKind::Instance {
+                readonly: method_readonly,
+            } = info.receiver
         {
-            if receiver_is_readonly && !info.receiver_readonly {
+            if receiver_is_readonly && !method_readonly {
                 return Err(TypeError {
                     message: format!(
                         "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
@@ -3548,7 +3806,13 @@ impl<'a> FnTypechecker<'a> {
                 let Some(info) = iface_def.all_methods.get(&method.name) else {
                     continue;
                 };
-                if receiver_is_readonly && !info.receiver_readonly {
+                let MethodReceiverKind::Instance {
+                    readonly: method_readonly,
+                } = info.receiver
+                else {
+                    continue;
+                };
+                if receiver_is_readonly && !method_readonly {
                     saw_mutable_candidate = true;
                     continue;
                 }
@@ -3646,6 +3910,18 @@ impl<'a> FnTypechecker<'a> {
                     span: method.span,
                 });
             };
+            let MethodReceiverKind::Instance {
+                readonly: method_readonly,
+            } = info.receiver
+            else {
+                return Err(TypeError {
+                    message: format!(
+                        "method `{iface_name}::{}` is a static interface method and cannot be called with a receiver",
+                        method.name
+                    ),
+                    span: method.span,
+                });
+            };
             if !interface_method_sig_is_dyn_dispatchable(&info.sig) {
                 let method_id = format!("{}::{}", info.origin, method.name);
                 return Err(TypeError {
@@ -3655,7 +3931,7 @@ impl<'a> FnTypechecker<'a> {
                     span: method.span,
                 });
             }
-            if receiver_is_readonly && !info.receiver_readonly {
+            if receiver_is_readonly && !method_readonly {
                 return Err(TypeError {
                     message: format!(
                         "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
@@ -3721,6 +3997,18 @@ impl<'a> FnTypechecker<'a> {
                     span: method.span,
                 });
             };
+            let MethodReceiverKind::Instance {
+                readonly: method_readonly,
+            } = info.receiver
+            else {
+                return Err(TypeError {
+                    message: format!(
+                        "method `{iface_name}::{}` is a static interface method and cannot be called with a receiver",
+                        method.name
+                    ),
+                    span: method.span,
+                });
+            };
             if !interface_method_sig_is_dyn_dispatchable(&info.sig) {
                 let method_id = format!("{}::{}", info.origin, method.name);
                 return Err(TypeError {
@@ -3730,7 +4018,7 @@ impl<'a> FnTypechecker<'a> {
                     span: method.span,
                 });
             }
-            if receiver_is_readonly && !info.receiver_readonly {
+            if receiver_is_readonly && !method_readonly {
                 return Err(TypeError {
                     message: format!(
                         "cannot call mutable method `{}` on a readonly receiver `{recv_ty_resolved}`",
@@ -3800,7 +4088,13 @@ impl<'a> FnTypechecker<'a> {
             let Some(method_info) = iface.all_methods.get(&method.name) else {
                 continue;
             };
-            if receiver_is_readonly && !method_info.receiver_readonly {
+            let MethodReceiverKind::Instance {
+                readonly: method_readonly,
+            } = method_info.receiver
+            else {
+                continue;
+            };
+            if receiver_is_readonly && !method_readonly {
                 saw_mutable_candidate = true;
                 continue;
             }

@@ -3,6 +3,7 @@ use rusk_compiler::{
 };
 use rusk_vm::{AbiValue, ContinuationHandle, HostError, Vm};
 
+#[allow(dead_code)]
 pub fn register_test_host_module(options: &mut CompileOptions) {
     let cont_int_to_int = HostType::Cont {
         param: Box::new(HostType::Int),

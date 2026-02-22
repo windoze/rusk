@@ -1,0 +1,20 @@
+// expect: ok string 9
+
+use core::serde::SerdeError;
+
+enum E {
+    A,
+    B(int),
+}
+
+derive Deserialize for E;
+
+fn main() -> string {
+    match std::json::from_string::<E>("[9]") {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            SerdeError::UnknownEnumTag(_, tag) => f"{tag}",
+            SerdeError::Message(msg) => msg,
+        },
+    }
+}

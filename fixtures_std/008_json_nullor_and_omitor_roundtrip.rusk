@@ -1,0 +1,24 @@
+// expect: ok string {"a":1,"b":null}
+
+struct Config {
+    a: int,
+    b: std::json::NullOr<int>,
+    c: std::json::OmitOr<int>,
+}
+
+derive Serialize + Deserialize for Config;
+
+fn main() -> string {
+    // Missing `c` should decode as `OmitOr::Omit`; `b` uses explicit JSON `null`.
+    let src = "{\"a\":1,\"b\":null}";
+    let cfg = match std::json::from_string::<Config>(src) {
+        Result::Ok(v) => v,
+        Result::Err(_) => panic("deserialize error"),
+    };
+
+    match std::json::to_string(cfg) {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic("serialize error"),
+    }
+}
+

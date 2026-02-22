@@ -112,6 +112,15 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
             ),
         });
     }
+    if module.scall_dispatch.len() != types_len {
+        return Err(VerifyError {
+            message: format!(
+                "scall_dispatch length {} does not match type_names length {}",
+                module.scall_dispatch.len(),
+                types_len
+            ),
+        });
+    }
     if module.assoc_type_dispatch.len() != types_len {
         return Err(VerifyError {
             message: format!(
@@ -218,6 +227,39 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
                 return Err(VerifyError {
                     message: format!(
                         "vcall dispatch entry (TypeId {type_idx}, MethodId {}) points to invalid function id {}",
+                        method_id.0, fn_id.0
+                    ),
+                });
+            }
+            prev = Some(*method_id);
+        }
+    }
+
+    // SCall dispatch table integrity.
+    for (type_idx, entries) in module.scall_dispatch.iter().enumerate() {
+        let mut prev: Option<MethodId> = None;
+        for (method_id, fn_id) in entries {
+            if method_id.0 >= method_count {
+                return Err(VerifyError {
+                    message: format!(
+                        "scall dispatch entry for TypeId {type_idx} has invalid MethodId {} (methods={method_count})",
+                        method_id.0
+                    ),
+                });
+            }
+            if let Some(prev) = prev
+                && prev.0 >= method_id.0
+            {
+                return Err(VerifyError {
+                    message: format!(
+                        "scall dispatch list for TypeId {type_idx} is not strictly sorted/unique by MethodId"
+                    ),
+                });
+            }
+            if (fn_id.0 as usize) >= module.functions.len() {
+                return Err(VerifyError {
+                    message: format!(
+                        "scall dispatch entry (TypeId {type_idx}, MethodId {}) points to invalid function id {}",
                         method_id.0, fn_id.0
                     ),
                 });
@@ -820,6 +862,25 @@ fn verify_instruction(
                 verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
             }
             verify_reg(reg_count, *obj, &format!("{}: obj", here()))?;
+            for r in method_type_args {
+                verify_reg(reg_count, *r, &format!("{}: method type arg", here()))?;
+            }
+            for r in args {
+                verify_reg(reg_count, *r, &format!("{}: arg", here()))?;
+            }
+        }
+        Instruction::SCall {
+            dst,
+            self_ty,
+            method,
+            method_type_args,
+            args,
+        } => {
+            verify_method_id(module, *method, &format!("{}: method id", here()))?;
+            if let Some(dst) = dst {
+                verify_reg(reg_count, *dst, &format!("{}: dst", here()))?;
+            }
+            verify_reg(reg_count, *self_ty, &format!("{}: self_ty", here()))?;
             for r in method_type_args {
                 verify_reg(reg_count, *r, &format!("{}: method type arg", here()))?;
             }

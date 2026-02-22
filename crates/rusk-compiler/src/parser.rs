@@ -116,6 +116,12 @@ impl<'a> Parser<'a> {
             TokenKind::KwInterface => Ok(Item::Interface(self.parse_interface_item(vis)?)),
             TokenKind::KwMod => Ok(Item::Mod(self.parse_mod_item(vis)?)),
             TokenKind::KwUse => Ok(Item::Use(self.parse_use_item(vis)?)),
+            TokenKind::KwDerive => {
+                if vis.is_public() {
+                    return Err(self.error_here("`derive` items cannot be `pub`"));
+                }
+                Ok(Item::Derive(self.parse_derive_item()?))
+            }
             TokenKind::KwImpl => {
                 if vis.is_public() {
                     return Err(self.error_here("`impl` items cannot be `pub`"));
@@ -342,25 +348,30 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let mut readonly = false;
+            let mut saw_readonly = false;
+            let mut saw_static = false;
             match self.lookahead.kind {
                 TokenKind::KwReadonly => {
-                    readonly = true;
+                    saw_readonly = true;
                     self.bump()?;
                 }
                 TokenKind::KwStatic => {
-                    return Err(self.error_here("`static fn` is not allowed in interfaces"));
+                    saw_static = true;
+                    self.bump()?;
                 }
                 TokenKind::KwType => {
                     return Err(self.error_here("unexpected `type` in interface"));
                 }
                 _ => {}
             }
-            if readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
-                return Err(self.error_here("`static fn` is not allowed in interfaces"));
+            if saw_readonly && matches!(self.lookahead.kind, TokenKind::KwStatic) {
+                return Err(self.error_here("`readonly static fn` is not allowed"));
             }
-            if readonly && matches!(self.lookahead.kind, TokenKind::KwType) {
-                return Err(self.error_here("`readonly type` is not allowed in interfaces"));
+            if saw_static && matches!(self.lookahead.kind, TokenKind::KwReadonly) {
+                return Err(self.error_here("`static readonly fn` is not allowed"));
+            }
+            if (saw_readonly || saw_static) && matches!(self.lookahead.kind, TokenKind::KwType) {
+                return Err(self.error_here("qualifiers are not allowed on `type` items"));
             }
             self.expect(TokenKind::KwFn)?;
             let m_name = self.expect_ident()?;
@@ -396,7 +407,13 @@ impl<'a> Parser<'a> {
                 (Some(body), end)
             };
             members.push(InterfaceMember::Method(InterfaceMethodMember {
-                readonly,
+                receiver: if saw_static {
+                    MethodReceiverKind::Static
+                } else {
+                    MethodReceiverKind::Instance {
+                        readonly: saw_readonly,
+                    }
+                },
                 name: m_name,
                 generics: m_generics,
                 params,
@@ -460,6 +477,24 @@ impl<'a> Parser<'a> {
             vis,
             path,
             alias,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_derive_item(&mut self) -> Result<DeriveItem, ParseError> {
+        let start = self.expect(TokenKind::KwDerive)?.span.start;
+        let mut derives = Vec::new();
+        derives.push(self.expect_ident()?);
+        while matches!(self.lookahead.kind, TokenKind::Plus) {
+            self.bump()?;
+            derives.push(self.expect_ident()?);
+        }
+        self.expect(TokenKind::KwFor)?;
+        let target = self.expect_ident()?;
+        let end = self.expect(TokenKind::Semi)?.span.end;
+        Ok(DeriveItem {
+            derives,
+            target,
             span: Span::new(start, end),
         })
     }

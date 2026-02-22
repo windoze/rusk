@@ -1,0 +1,19 @@
+// expect: ok string [0]|[1,5]
+
+fn main() -> string {
+    let none: Option<int> = Option::None;
+    let some: Option<int> = Option::Some(5);
+
+    let s_none = match std::json::to_string(none) {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic("serialize error"),
+    };
+
+    let s_some = match std::json::to_string(some) {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic("serialize error"),
+    };
+
+    s_none + "|" + s_some
+}
+

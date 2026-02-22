@@ -555,6 +555,7 @@ fn instr_def_reg(instr: &Instruction) -> Option<Reg> {
         Instruction::Call { dst: Some(dst), .. }
         | Instruction::ICall { dst: Some(dst), .. }
         | Instruction::VCall { dst: Some(dst), .. }
+        | Instruction::SCall { dst: Some(dst), .. }
         | Instruction::Perform { dst: Some(dst), .. }
         | Instruction::Resume { dst: Some(dst), .. } => Some(*dst),
 
@@ -615,6 +616,7 @@ fn set_instr_dst(instr: &mut Instruction, new_dst: Reg) -> bool {
         Instruction::Call { dst, .. }
         | Instruction::ICall { dst, .. }
         | Instruction::VCall { dst, .. }
+        | Instruction::SCall { dst, .. }
         | Instruction::Perform { dst, .. }
         | Instruction::Resume { dst, .. } => {
             if dst.is_some() {
@@ -716,6 +718,18 @@ fn instr_read_regs(instr: &Instruction) -> Vec<Reg> {
             out.extend(args.iter().copied());
             out
         }
+        Instruction::SCall {
+            self_ty,
+            method_type_args,
+            args,
+            ..
+        } => {
+            let mut out = Vec::with_capacity(1 + method_type_args.len() + args.len());
+            out.push(*self_ty);
+            out.extend(method_type_args.iter().copied());
+            out.extend(args.iter().copied());
+            out
+        }
 
         Instruction::PushHandler { clauses } => clauses
             .iter()
@@ -792,6 +806,7 @@ fn instr_write_regs(instr: &Instruction) -> Vec<Reg> {
         Instruction::Call { dst: Some(dst), .. }
         | Instruction::ICall { dst: Some(dst), .. }
         | Instruction::VCall { dst: Some(dst), .. }
+        | Instruction::SCall { dst: Some(dst), .. }
         | Instruction::Perform { dst: Some(dst), .. }
         | Instruction::Resume { dst: Some(dst), .. } => vec![*dst],
 
@@ -940,6 +955,20 @@ fn map_instr_reads(instr: &mut Instruction, mut f: impl FnMut(Reg) -> Reg) {
             ..
         } => {
             *obj = f(*obj);
+            for r in method_type_args {
+                *r = f(*r);
+            }
+            for r in args {
+                *r = f(*r);
+            }
+        }
+        Instruction::SCall {
+            self_ty,
+            method_type_args,
+            args,
+            ..
+        } => {
+            *self_ty = f(*self_ty);
             for r in method_type_args {
                 *r = f(*r);
             }
@@ -1444,6 +1473,7 @@ fn update_const_env(env: &mut BTreeMap<Reg, ScalarConst>, instr: &Instruction) {
         | Instruction::Call { dst: Some(dst), .. }
         | Instruction::ICall { dst: Some(dst), .. }
         | Instruction::VCall { dst: Some(dst), .. }
+        | Instruction::SCall { dst: Some(dst), .. }
         | Instruction::Perform { dst: Some(dst), .. }
         | Instruction::Resume { dst: Some(dst), .. } => {
             env.remove(dst);

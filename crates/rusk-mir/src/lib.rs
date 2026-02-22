@@ -57,6 +57,14 @@ pub struct Module {
     /// Optional virtual-call resolution: `(type_name, method_name) -> FunctionId`.
     pub methods: BTreeMap<(String, String), FunctionId>,
 
+    /// Optional static interface method resolution: `(type_name, method_name) -> FunctionId`.
+    ///
+    /// This is used for dynamic dispatch of static interface method calls when the implementing
+    /// `Self` type is only known via a runtime `TypeRep` (e.g. `I::f::<T>(...)` inside generic
+    /// functions).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub static_methods: BTreeMap<(String, String), FunctionId>,
+
     /// Optional associated type `typerep` dispatch:
     /// `(type_name, interface_name, assoc_name) -> FunctionId`.
     ///
@@ -679,6 +687,20 @@ pub enum Instruction {
         ///
         /// Type arguments coming from the receiver's nominal type (impl/header generics) are
         /// derived from the receiver value at runtime.
+        method_type_args: Vec<Operand>,
+        args: Vec<Operand>,
+    },
+    /// Dynamic dispatch for static interface method calls.
+    ///
+    /// The `self_ty` operand must evaluate to a runtime `TypeRep`. The callee is selected via
+    /// `(type_name, method)` lookup using the `TypeRep`'s runtime constructor, then invoked with:
+    /// - the `Self` type arguments (from the `TypeRep`)
+    /// - any method-level generic `TypeRep` arguments
+    /// - the provided value arguments
+    SCall {
+        dst: Option<Local>,
+        self_ty: Operand,
+        method: String,
         method_type_args: Vec<Operand>,
         args: Vec<Operand>,
     },

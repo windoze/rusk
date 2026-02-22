@@ -54,7 +54,7 @@ Rusk treats keywords as reserved and they cannot be used as identifiers.
 
 Items and declarations:
 
-`pub`, `use`, `mod`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `impl`, `type`
+`pub`, `use`, `mod`, `derive`, `as`, `is`, `fn`, `cont`, `let`, `const`, `readonly`, `static`, `struct`, `enum`, `interface`, `impl`, `type`
 
 Control flow:
 
@@ -99,7 +99,7 @@ The grammar below is descriptive and intended to be unambiguous for implementati
 ```
 Program        := Item* ;
 
-Item           := Visibility? (FnItem | StructItem | EnumItem | InterfaceItem | ImplItem | ModItem | UseItem) ;
+Item           := Visibility? (FnItem | StructItem | EnumItem | InterfaceItem | ImplItem | ModItem | UseItem | DeriveItem) ;
 
 Visibility     := "pub" ;
 ```
@@ -161,7 +161,7 @@ Enum values are heap-allocated tagged unions.
 
 Interfaces define:
 - (1) method signatures for static dispatch (compile-time resolved calls), and
-- (2) effect signatures for `@Interface.method(...)`.
+- (2) effect signatures for `@Interface.method(...)` (instance methods only).
 
 ```
 InterfaceItem  := "interface" Ident GenericParams?
@@ -170,13 +170,16 @@ InterfaceItem  := "interface" Ident GenericParams?
 InterfaceMember:= AssocTypeDecl | InterfaceMethodMember ;
 AssocTypeDecl   := "type" Ident ";" ;
 InterfaceMethodMember
-               := ("readonly")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
+               := ("readonly" | "static")? "fn" Ident GenericParams? "(" ParamList? ")" ReturnType?
                   ( ";" | Block ) ;
 ```
 
 Notes:
 - If `ReturnType` is omitted in an interface member, it defaults to `unit`.
-- `interface` members are always instance methods (they take an implicit receiver). `static fn` is not allowed in interfaces.
+- Interface methods may be either:
+  - **instance methods** (`fn` / `readonly fn`) which take an implicit receiver, and may also be used as effect operations (§7.1),
+  - **static methods** (`static fn`) which have no receiver and are **not** effect operations.
+- `readonly` and `static` are mutually exclusive.
 - An interface member with a body (`{ ... }`) is a **default method**. An `impl` may omit methods that have defaults.
 - `interface` items may inherit from one or more super-interfaces using `: A + B + ...`.
 - Super-interfaces must resolve to interfaces (not structs/enums).
@@ -200,8 +203,13 @@ ImplMethod     := ("readonly" | "static")? "fn" Ident GenericParams? "(" ParamLi
 Notes:
 - In `impl Type { ... }`, `fn` defines an instance method with an implicit receiver (`self`).
 - `readonly fn` defines an instance method whose receiver is a readonly view inside the method body.
-- `static fn` defines a receiver-less static method, callable only as `Type::method(...)`.
-- In `impl Interface for Type { ... }`, `static fn` is forbidden and method receiver mutability (`readonly` vs non-`readonly`) must match the interface declaration.
+- `static fn` defines a receiver-less static method (no `self`), callable as:
+  - `Type::method(...)` for inherent static methods, and
+  - `I::method::<Type>(...)` for interface static methods.
+- In `impl Interface for Type { ... }`, method receiver kind and mutability must match the interface declaration:
+  - `fn` implements `fn`
+  - `readonly fn` implements `readonly fn`
+  - `static fn` implements `static fn`
 
 #### 3.2.6 Modules
 
@@ -243,6 +251,29 @@ Notes:
 - The built-in module `core` is always available as `core::...`.
 - `core::prelude` is automatically imported into every module (like Rust’s prelude). In v0.4, it
   contains `panic`.
+
+#### 3.2.8 Derives (`derive`)
+
+Derives are **compiler-supported, compile-time expansions** that generate one or more `impl` items.
+
+```rust
+derive Serialize + Deserialize for Box;
+```
+
+Grammar:
+
+```
+DeriveItem     := "derive" DeriveList "for" Ident ";" ;
+DeriveList     := Ident ( "+" Ident )* ;
+```
+
+Notes:
+- Derive items must appear in the **same module** as the referenced struct/enum definition.
+- Supported derives in v0.4:
+  - `Serialize` (expands to an `impl core::serde::Serialize for <Type> { ... }`)
+  - `Deserialize` (expands to an `impl core::serde::Deserialize for <Type> { ... }`)
+- Unknown derive names are compile errors.
+- A derive is pure sugar: after expansion the program contains only normal `impl` items; there is no runtime reflection.
 
 ### 3.3 Generics
 
@@ -776,7 +807,10 @@ Methods have an **implicit receiver**:
   - `recv.m(args...)` (method-call sugar, if unambiguous).
 - `readonly fn m(...)` declares that `self` is a readonly view inside `m`.
 - A non-`readonly` (mutable) method cannot be called on a `readonly T` receiver; a `readonly fn` method can be called on both `T` and `readonly T` receivers.
-- `static fn m(...)` declares a receiver-less method, callable only as `Type::m(...)`. Static methods are allowed only in inherent `impl Type { ... }` blocks.
+- `static fn m(...)` declares a receiver-less method (no `self`).
+  - In an inherent impl (`impl Type { ... }`), it is callable as `Type::m(...)`.
+  - In an interface (`interface I { static fn m(...) ... }`), it is callable as `I::m::<Type>(...)` where the first explicit type argument selects the implementing `Self` type.
+  - A call of the form `Type::m(...)` may also resolve to a static interface method if it is unambiguous (§6.2).
 - Interface members may provide a body (`{ ... }`) as a **default method**. An `impl` may omit methods that have defaults.
 - `Self` is a special type placeholder:
   - In interface definitions, `Self` denotes the implementing type.
@@ -831,6 +865,19 @@ the compiler reports an ambiguity error and requires explicit qualification.
 > Rationale: this keeps “TypeScript-like ergonomics” while maintaining “Rust-like”
 > explicitness where it matters.
 
+Static interface methods are called using explicit qualification with an explicit implementing type:
+
+```rust
+Deserialize::deserialize::<Point>(d)
+```
+
+Notes:
+- Static interface method calls must include an explicit implementing type argument:
+  `I::m::<Type>(...)`. This is required because static interface methods have no value receiver.
+- If the implementing type is a concrete nominal type, the call may be resolved statically.
+- If the implementing type is an interface-constrained generic (`T: I`), the call is dynamically
+  dispatched at runtime based on `T`’s runtime type argument.
+
 ### 6.2 Inherent Methods
 
 Inherent methods are defined with `impl Type { ... }` and called as:
@@ -851,6 +898,14 @@ Resolution rules:
 1. Inherent methods on the receiver’s nominal type
 2. Interface methods (if unambiguous)
 3. Otherwise: error
+
+Static interface method sugar:
+
+- A call expression `Type::m(args...)` resolves to an interface static method if:
+  1. there is **no** inherent static method `Type::m`, and
+  2. exactly one visible interface provides a `static fn m(...)` implementation for `Type`.
+- If multiple interfaces provide a matching static method, the call is ambiguous and must be
+  written in fully-qualified form: `I::m::<Type>(...)`.
 
 Inside an interface default method body, method-call sugar on the reserved receiver `self`
 resolves within the current interface method set before considering inherent methods on the
@@ -1033,6 +1088,8 @@ Effect signature restrictions (v0.4):
 
 - Effect operations are declared using interface methods, but not every interface method is a valid
   effect operation in this stage.
+- Static interface methods (`static fn`) are never effect operations and cannot be called using
+  effect syntax (`@I.m(...)` is rejected if `m` is static).
 - In particular, the parameter and return types of an effect operation must be runtime-reifiable
   value types and must **not** mention:
   - the bare `Self` type, or
@@ -1667,6 +1724,57 @@ Built-in implementations:
 `string` does not implement `Len` in v0.4 because the choice of “length in bytes” vs “length in
 Unicode scalar values” is user-visible. Use `"s".chars().count()` to count Unicode scalar values,
 or `string::byte_slice` for byte-level operations.
+
+### 9.9 Serialization (`core::serde`) and JSON (`std::json`)
+
+Rusk provides a small, format-agnostic serialization interface in `core::serde`:
+
+- `enum core::serde::SerdeError { Message(string), UnknownEnumTag(string, int) }`
+- `interface core::serde::Serializer { ... }`
+- `interface core::serde::Deserializer { ... }`
+- `interface core::serde::Serialize { readonly fn serialize(s: Serializer) -> Result<unit, SerdeError>; }`
+- `interface core::serde::Deserialize { static fn deserialize(d: Deserializer) -> Result<Self, SerdeError>; }`
+
+The built-in derives `Serialize` and `Deserialize` expand to normal `impl` items that target these
+interfaces (see §3.2.8). There is no runtime reflection.
+
+#### 9.9.1 `std::json` (sysroot module)
+
+When `std` is available, the sysroot provides a JSON adapter in `std::json`:
+
+- `pub fn std::json::to_string<T: core::serde::Serialize>(value: T) -> Result<string, SerdeError>`
+- `pub fn std::json::from_string<T: core::serde::Deserialize>(src: string) -> Result<T, SerdeError>`
+
+Encoding rules (current stage, intended for round-tripping derived values):
+
+- `unit` → JSON `null`
+- `bool` → JSON `true` / `false`
+- `int` → JSON number (decimal)
+- `float` → JSON number (using the runtime’s `float -> string` conversion)
+- `byte` → JSON number in `0..=255`
+- `char` → JSON string of length 1
+- `string` → JSON string with standard escapes (`\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, and `\u00XX` for other ASCII control bytes)
+- `bytes` → JSON array of integers (`[b0, b1, ...]`)
+- `std::json::NullOr<T>` → JSON `null` or a `T` value
+  - `NullOr::Null` → `null`
+  - `NullOr::Value(v)` → encoding of `v`
+- structs → JSON object with derived field names, emitted in derived field order
+  - example: `Point { x: 1, y: 2 }` → `{"x":1,"y":2}`
+- `std::json::OmitOr<T>` → field omission in JSON objects (only meaningful as a struct field type)
+  - `OmitOr::Omit` serializes by omitting the object entry entirely
+  - a missing field during decoding becomes `OmitOr::Omit`
+- enums → JSON array where the first element is the **0-based variant index**, followed by the
+  serialized payload fields
+  - example: `Option::None::<int>` → `[0]`
+  - example: `Option::Some(5)` → `[1,5]`
+
+Decoding rules / limitations:
+
+- Whitespace is allowed between tokens.
+- Struct field order must match the derived order and field names must match.
+- Struct fields are required unless their type is `std::json::OmitOr<_>`.
+- `from_string` rejects trailing non-whitespace characters after the top-level value.
+- Float deserialization is not supported yet in v0 (no `string -> float` conversion primitive).
 
 ## 10. Compilation Pipeline (Normative)
 

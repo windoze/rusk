@@ -1,0 +1,8 @@
+// expect: compile_error unknown derive
+
+struct Point { x: int }
+
+derive Foo for Point;
+
+fn main() -> int { 0 }
+

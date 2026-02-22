@@ -1,0 +1,26 @@
+// expect: ok string {}|{"x":null}|{"x":123}
+
+struct S {
+    x: std::json::OmitOr<std::json::NullOr<int>>,
+}
+
+derive Serialize + Deserialize for S;
+
+fn roundtrip(src: string) -> string {
+    let v = match std::json::from_string::<S>(src) {
+        Result::Ok(v) => v,
+        Result::Err(_) => panic("deserialize error"),
+    };
+    match std::json::to_string(v) {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic("serialize error"),
+    }
+}
+
+fn main() -> string {
+    let a = roundtrip("{}");
+    let b = roundtrip("{\"x\":null}");
+    let c = roundtrip("{\"x\":123}");
+    a + "|" + b + "|" + c
+}
+

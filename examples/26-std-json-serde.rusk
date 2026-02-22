@@ -1,0 +1,107 @@
+// 26 - `std::json` + `core::serde` 派生（derive）
+//
+// 这个示例展示：
+// - `derive Serialize + Deserialize for Type;` 生成序列化/反序列化实现
+// - `std::json::to_string` / `std::json::from_string` 的基本用法
+//
+// 注意（当前阶段的限制）：
+// - `std::json` 的反序列化要求 struct 字段顺序与派生顺序一致，并且字段名必须匹配。
+// - `float` 反序列化暂不支持（v0 还没有 string -> float 的转换原语）。
+//
+// 另外：
+// - `Option<T>` 的 JSON 表示是一个“带 tag 的 enum”（例如 `Option::None` -> `[0]`，`Option::Some(5)` -> `[1,5]`），
+//   这用于在不同格式之间保持一致的、可 round-trip 的结构化编码。
+// - 如果你想表达 JSON 特有的 `value | null` / “字段缺失（omission）”，请使用：
+//   - `std::json::NullOr<T>`：显式 JSON `null`
+//   - `std::json::OmitOr<T>`：JSON object 字段缺失（omit）
+//   - 组合：`std::json::OmitOr<std::json::NullOr<T>>` 可区分 missing / null / value
+
+enum Role {
+    User(int),
+    Admin,
+}
+
+derive Serialize + Deserialize for Role;
+
+struct User {
+    id: int,
+    name: string,
+    active: bool,
+    role: Role,
+    data: bytes,
+}
+
+derive Serialize + Deserialize for User;
+
+// A typical “patch/update” shape in JSON:
+// - omit => no change (field not present)
+// - null => clear the value (explicit null)
+// - value => set the value
+struct NicknamePatch {
+    nickname: std::json::OmitOr<std::json::NullOr<string>>,
+}
+
+derive Serialize + Deserialize for NicknamePatch;
+
+fn serde_error_string(e: core::serde::SerdeError) -> string {
+    match e {
+        core::serde::SerdeError::Message(msg) => msg,
+        core::serde::SerdeError::UnknownEnumTag(name, tag) => f"UnknownEnumTag({name}, {tag})",
+    }
+}
+
+fn main() {
+    let u = User {
+        id: 7,
+        name: "Alice \"The Great\"",
+        active: true,
+        role: Role::User(123),
+        data: b"\x01\x02\x03",
+    };
+
+    let json = "";
+    match std::json::to_string(u) {
+        Result::Ok(s) => { json = s; }
+        Result::Err(e) => {
+            let msg = serde_error_string(e);
+            std::println(f"serialize error: {msg}");
+            return;
+        }
+    }
+    std::println(f"json = {json}");
+
+    let u2 = User {
+        id: 0,
+        name: "",
+        active: false,
+        role: Role::Admin,
+        data: b"",
+    };
+    match std::json::from_string::<User>(json) {
+        Result::Ok(v) => { u2 = v; }
+        Result::Err(e) => {
+            let msg = serde_error_string(e);
+            std::println(f"deserialize error: {msg}");
+            return;
+        }
+    }
+
+    std::println(f"roundtrip: id={u2.id} name={u2.name} active={u2.active}");
+
+    let p1 = NicknamePatch { nickname: std::json::OmitOr::Omit };
+    let p2 = NicknamePatch { nickname: std::json::OmitOr::Value(std::json::NullOr::Null) };
+    let p3 = NicknamePatch { nickname: std::json::OmitOr::Value(std::json::NullOr::Value("Bob")) };
+
+    match std::json::to_string(p1) {
+        Result::Ok(s) => std::println(f"patch omit = {s}"),
+        Result::Err(e) => std::println(f"patch omit error = {serde_error_string(e)}"),
+    }
+    match std::json::to_string(p2) {
+        Result::Ok(s) => std::println(f"patch null = {s}"),
+        Result::Err(e) => std::println(f"patch null error = {serde_error_string(e)}"),
+    }
+    match std::json::to_string(p3) {
+        Result::Ok(s) => std::println(f"patch value = {s}"),
+        Result::Err(e) => std::println(f"patch value error = {serde_error_string(e)}"),
+    }
+}

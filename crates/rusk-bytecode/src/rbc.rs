@@ -24,7 +24,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 12;
+const VERSION_MINOR: u16 = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -205,6 +205,21 @@ impl Encoder {
         }
         self.write_len(dispatch_len)?;
         for (type_index, entries) in module.vcall_dispatch.iter().enumerate() {
+            let type_id = TypeId(type_index as u32);
+            for (method_id, fn_id) in entries {
+                self.write_u32(type_id.0);
+                self.write_u32(method_id.0);
+                self.write_u32(fn_id.0);
+            }
+        }
+
+        // SCall dispatch table (sparse encoding, deterministic order by type_id then method_id).
+        let mut scall_len: usize = 0;
+        for entries in &module.scall_dispatch {
+            scall_len = scall_len.saturating_add(entries.len());
+        }
+        self.write_len(scall_len)?;
+        for (type_index, entries) in module.scall_dispatch.iter().enumerate() {
             let type_id = TypeId(type_index as u32);
             for (method_id, fn_id) in entries {
                 self.write_u32(type_id.0);
@@ -958,6 +973,20 @@ impl Encoder {
                 self.write_vec_reg(method_type_args)?;
                 self.write_vec_reg(args)?;
             }
+            Instruction::SCall {
+                dst,
+                self_ty,
+                method,
+                method_type_args,
+                args,
+            } => {
+                self.write_u8(63);
+                self.write_option_reg(dst)?;
+                self.write_u32(*self_ty);
+                self.write_u32(method.0);
+                self.write_vec_reg(method_type_args)?;
+                self.write_vec_reg(args)?;
+            }
             Instruction::PushHandler { clauses } => {
                 self.write_u8(36);
                 self.write_len(clauses.len())?;
@@ -1219,6 +1248,24 @@ impl<'a> Decoder<'a> {
             entries.push((method_id, fn_id));
         }
 
+        // Static interface call dispatch table.
+        let mut scall_dispatch: Vec<Vec<(MethodId, FunctionId)>> = Vec::with_capacity(type_len);
+        scall_dispatch.resize_with(type_len, Vec::new);
+        let scall_len = self.read_len()?;
+        for _ in 0..scall_len {
+            let type_id = TypeId(self.read_u32()?);
+            let method_id = MethodId(self.read_u32()?);
+            let fn_id = FunctionId(self.read_u32()?);
+            let idx: usize = type_id
+                .0
+                .try_into()
+                .map_err(|_| self.err("type id overflow".to_string()))?;
+            let Some(entries) = scall_dispatch.get_mut(idx) else {
+                return Err(self.err(format!("invalid TypeId {} in scall entry", type_id.0)));
+            };
+            entries.push((method_id, fn_id));
+        }
+
         // Assoc type dispatch table.
         let mut assoc_type_dispatch: Vec<Vec<(TypeId, String, FunctionId)>> =
             Vec::with_capacity(type_len);
@@ -1339,6 +1386,7 @@ impl<'a> Decoder<'a> {
             method_names,
             method_ids,
             vcall_dispatch,
+            scall_dispatch,
             assoc_type_dispatch,
             interface_impls,
             struct_layouts,
@@ -1941,6 +1989,13 @@ impl<'a> Decoder<'a> {
             35 => Ok(Instruction::VCall {
                 dst: self.read_option_reg()?,
                 obj: self.read_u32()?,
+                method: MethodId(self.read_u32()?),
+                method_type_args: self.read_vec_reg()?,
+                args: self.read_vec_reg()?,
+            }),
+            63 => Ok(Instruction::SCall {
+                dst: self.read_option_reg()?,
+                self_ty: self.read_u32()?,
                 method: MethodId(self.read_u32()?),
                 method_type_args: self.read_vec_reg()?,
                 args: self.read_vec_reg()?,

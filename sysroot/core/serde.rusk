@@ -1,0 +1,129 @@
+// Serialization / deserialization interfaces (format-agnostic).
+
+pub enum SerdeError {
+    Message(string),
+    UnknownEnumTag(string, int),
+}
+
+pub interface Serializer {
+    fn unit() -> core::result::Result<unit, SerdeError>;
+    fn bool(v: bool) -> core::result::Result<unit, SerdeError>;
+    fn int(v: int) -> core::result::Result<unit, SerdeError>;
+    fn float(v: float) -> core::result::Result<unit, SerdeError>;
+    fn byte(v: byte) -> core::result::Result<unit, SerdeError>;
+    fn char(v: char) -> core::result::Result<unit, SerdeError>;
+    fn string(v: string) -> core::result::Result<unit, SerdeError>;
+    fn bytes(v: bytes) -> core::result::Result<unit, SerdeError>;
+
+    fn struct_begin(name: string, field_count: int) -> core::result::Result<unit, SerdeError>;
+    fn struct_field(name: string) -> core::result::Result<unit, SerdeError>;
+    fn struct_end() -> core::result::Result<unit, SerdeError>;
+
+    fn enum_begin(name: string, variant_count: int) -> core::result::Result<unit, SerdeError>;
+    fn enum_variant(
+        name: string,
+        index: int,
+        field_count: int,
+    ) -> core::result::Result<unit, SerdeError>;
+    fn enum_end() -> core::result::Result<unit, SerdeError>;
+}
+
+pub interface Deserializer {
+    fn unit() -> core::result::Result<unit, SerdeError>;
+    fn bool() -> core::result::Result<bool, SerdeError>;
+    fn int() -> core::result::Result<int, SerdeError>;
+    fn float() -> core::result::Result<float, SerdeError>;
+    fn byte() -> core::result::Result<byte, SerdeError>;
+    fn char() -> core::result::Result<char, SerdeError>;
+    fn string() -> core::result::Result<string, SerdeError>;
+    fn bytes() -> core::result::Result<bytes, SerdeError>;
+
+    fn struct_begin(name: string, field_count: int) -> core::result::Result<unit, SerdeError>;
+    fn struct_field(name: string) -> core::result::Result<unit, SerdeError>;
+    fn struct_end() -> core::result::Result<unit, SerdeError>;
+
+    fn enum_begin(name: string, variant_count: int) -> core::result::Result<int, SerdeError>;
+    fn enum_variant(
+        name: string,
+        index: int,
+        field_count: int,
+    ) -> core::result::Result<unit, SerdeError>;
+    fn enum_end() -> core::result::Result<unit, SerdeError>;
+}
+
+pub interface Serialize {
+    readonly fn serialize(s: Serializer) -> core::result::Result<unit, SerdeError>;
+}
+
+pub interface Deserialize {
+    static fn deserialize(d: Deserializer) -> core::result::Result<Self, SerdeError>;
+}
+
+// Helper functions used by the compiler's built-in primitive impl wrappers.
+//
+// These keep the compiler-side wrappers small: they just forward to these functions,
+// which then dispatch to the user-provided Serializer/Deserializer implementation.
+
+pub fn __serialize_unit(_v: unit, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.unit()
+}
+
+pub fn __serialize_bool(v: bool, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.bool(v)
+}
+
+pub fn __serialize_int(v: int, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.int(v)
+}
+
+pub fn __serialize_float(v: float, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.float(v)
+}
+
+pub fn __serialize_byte(v: byte, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.byte(v)
+}
+
+pub fn __serialize_char(v: char, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.char(v)
+}
+
+pub fn __serialize_string(v: string, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.string(v)
+}
+
+pub fn __serialize_bytes(v: bytes, s: Serializer) -> core::result::Result<unit, SerdeError> {
+    s.bytes(v)
+}
+
+pub fn __deserialize_unit(d: Deserializer) -> core::result::Result<unit, SerdeError> {
+    d.unit()
+}
+
+pub fn __deserialize_bool(d: Deserializer) -> core::result::Result<bool, SerdeError> {
+    d.bool()
+}
+
+pub fn __deserialize_int(d: Deserializer) -> core::result::Result<int, SerdeError> {
+    d.int()
+}
+
+pub fn __deserialize_float(d: Deserializer) -> core::result::Result<float, SerdeError> {
+    d.float()
+}
+
+pub fn __deserialize_byte(d: Deserializer) -> core::result::Result<byte, SerdeError> {
+    d.byte()
+}
+
+pub fn __deserialize_char(d: Deserializer) -> core::result::Result<char, SerdeError> {
+    d.char()
+}
+
+pub fn __deserialize_string(d: Deserializer) -> core::result::Result<string, SerdeError> {
+    d.string()
+}
+
+pub fn __deserialize_bytes(d: Deserializer) -> core::result::Result<bytes, SerdeError> {
+    d.bytes()
+}

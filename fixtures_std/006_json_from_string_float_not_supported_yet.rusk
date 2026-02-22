@@ -1,0 +1,13 @@
+// expect: ok string std::json: float deserialization is not supported yet
+
+use core::serde::SerdeError;
+
+fn main() -> string {
+    match std::json::from_string::<float>("1.5") {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            SerdeError::Message(msg) => msg,
+            SerdeError::UnknownEnumTag(_, tag) => f"{tag}",
+        },
+    }
+}

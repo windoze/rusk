@@ -1,0 +1,8 @@
+// expect: compile_error not an effect operation
+
+interface I { static fn foo() -> int; }
+
+fn main() -> unit {
+    let _ = @I.foo();
+}
+

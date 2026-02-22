@@ -8,3 +8,4 @@ pub mod iter;
 pub mod len;
 pub mod hash;
 pub mod map;
+pub mod serde;

@@ -393,6 +393,7 @@ impl ModuleResolver {
                     )?;
                 }
                 Item::Impl(_) => {}
+                Item::Derive(_) => {}
             }
         }
 

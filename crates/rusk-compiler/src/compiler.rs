@@ -1016,8 +1016,9 @@ fn compile_program_to_mir(
     program: &Program,
     options: &CompileOptions,
 ) -> Result<Module, CompileError> {
-    let (env, types) = typecheck_program_with_entry_validation(program, options)?;
-    Compiler::new(env, types).compile_program(program)
+    let program = crate::derive_expand::expand_derives(program)?;
+    let (env, types) = typecheck_program_with_entry_validation(&program, options)?;
+    Compiler::new(env, types).compile_program(&program)
 }
 
 fn typecheck_program_with_entry_validation(
@@ -1098,7 +1099,10 @@ fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
 
         let next = require_method(iface_def, iface_name, "next")?;
         ensure(
-            !next.receiver_readonly,
+            matches!(
+                next.receiver,
+                MethodReceiverKind::Instance { readonly: false }
+            ),
             format!("`{iface_name}::next` must be mutable (not `readonly`)"),
             iface_def.span,
         )?;
@@ -1131,7 +1135,10 @@ fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
 
         let method = require_method(iface_def, iface_name, "to_string")?;
         ensure(
-            method.receiver_readonly,
+            matches!(
+                method.receiver,
+                MethodReceiverKind::Instance { readonly: true }
+            ),
             format!("`{iface_name}::to_string` must be `readonly`"),
             iface_def.span,
         )?;
@@ -1309,7 +1316,10 @@ fn validate_sysroot_lang_items(env: &ProgramEnv) -> Result<(), CompileError> {
 
             let method = require_method(iface_def, iface_name, method_name)?;
             ensure(
-                method.receiver_readonly == *receiver_readonly,
+                matches!(
+                    method.receiver,
+                    MethodReceiverKind::Instance { readonly } if readonly == *receiver_readonly
+                ),
                 format!(
                     "`{iface_name}::{method_name}` must be `{}`",
                     if *receiver_readonly {
