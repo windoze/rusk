@@ -1,12 +1,13 @@
-// expect: ok int 7
+// expect: ok int 42
 
 interface I { static fn foo(n: int) -> int; }
 struct S {}
 
 impl I for S {
-    static fn foo(n: int) -> int { n + 1 }
+    static fn foo(n: int) -> int { n }
 }
 
 fn main() -> int {
-    I::foo::<S>(6)
+    S::foo(42)
 }
+

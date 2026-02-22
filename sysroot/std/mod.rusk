@@ -2,6 +2,7 @@
 //
 // It is only loaded by the compiler when the `_std_host` host module is declared.
 
+pub mod json;
+
 pub use crate::_std_host::print;
 pub use crate::_std_host::println;
-

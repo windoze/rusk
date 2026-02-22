@@ -1,0 +1,13 @@
+// expect: ok string std::json: trailing characters
+
+use core::serde::SerdeError;
+
+fn main() -> string {
+    match std::json::from_string::<int>("123 trailing") {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            SerdeError::Message(msg) => msg,
+            SerdeError::UnknownEnumTag(_, tag) => f"{tag}",
+        },
+    }
+}

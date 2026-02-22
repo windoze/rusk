@@ -1,0 +1,1237 @@
+// JSON serializer/deserializer for `core::serde`.
+//
+// This module intentionally targets a small, self-contained subset of JSON sufficient for
+// round-tripping values derived with `core::serde::{Serialize, Deserialize}`.
+//
+// Notes / limitations (current stage):
+// - Float deserialization is not supported yet (no `string -> float` conversion in v0).
+// - Struct field order must match the derived order (the parser is streaming).
+
+use core::serde::Deserialize;
+use core::serde::Deserializer;
+use core::serde::SerdeError;
+use core::serde::Serialize;
+use core::serde::Serializer;
+
+// -------- JSON-specific wrappers --------
+
+// Explicit `null` in JSON (distinct from encoding a regular Rusk enum).
+pub enum NullOr<T> {
+    Null,
+    Value(T),
+}
+
+// Field omission in JSON objects.
+//
+// When used as a struct field type under `std::json`:
+// - `OmitOr::Omit` serializes by omitting the field entry entirely.
+// - If the field is missing during deserialization, it becomes `OmitOr::Omit`.
+pub enum OmitOr<T> {
+    Omit,
+    Value(T),
+}
+
+impl<T: Serialize> Serialize for NullOr<T> {
+    readonly fn serialize(s: Serializer) -> Result<unit, SerdeError> {
+        match self {
+            NullOr::Null => s.unit(),
+            NullOr::Value(v) => Serialize::serialize(v, s),
+        }
+    }
+}
+
+impl<T: Deserialize> Deserialize for NullOr<T> {
+    static fn deserialize(d: Deserializer) -> Result<NullOr<T>, SerdeError> {
+        // This adapter is JSON-specific; we need a lookahead to avoid backtracking.
+        match d as? JsonDeserializer {
+            Option::None => Result::Err(SerdeError::Message("std::json: NullOr requires JsonDeserializer")),
+            Option::Some(jd) => match jd.peek_value_start_byte() {
+                Result::Err(e) => Result::Err(e),
+                Result::Ok(b) => match b {
+                    Option::None => Result::Err(SerdeError::Message("std::json: unexpected EOF")),
+                    Option::Some(start) => {
+                        if start == 110 { // 'n' in "null"
+                            match d.unit() {
+                                Result::Ok(_) => Result::Ok(NullOr::Null),
+                                Result::Err(e) => Result::Err(e),
+                            }
+                        } else {
+                            match Deserialize::deserialize::<T>(d) {
+                                Result::Ok(v) => Result::Ok(NullOr::Value(v)),
+                                Result::Err(e) => Result::Err(e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for OmitOr<T> {
+    readonly fn serialize(s: Serializer) -> Result<unit, SerdeError> {
+        match self {
+            OmitOr::Value(v) => Serialize::serialize(v, s),
+            OmitOr::Omit => match s as? JsonSerializer {
+                Option::Some(js) => js.omit_pending_field(),
+                Option::None => Result::Err(SerdeError::Message("std::json: OmitOr::Omit requires JsonSerializer")),
+            }
+        }
+    }
+}
+
+impl<T: Deserialize> Deserialize for OmitOr<T> {
+    static fn deserialize(d: Deserializer) -> Result<OmitOr<T>, SerdeError> {
+        match d as? JsonDeserializer {
+            Option::None => Result::Err(SerdeError::Message("std::json: OmitOr requires JsonDeserializer")),
+            Option::Some(jd) => {
+                // `JsonDeserializer::struct_field` may mark a field as missing without consuming input.
+                if jd.pending_field_missing {
+                    jd.pending_field_missing = false;
+                    jd.pending_field_missing_name = "";
+                    return Result::Ok(OmitOr::Omit);
+                }
+
+                match Deserialize::deserialize::<T>(d) {
+                    Result::Ok(v) => Result::Ok(OmitOr::Value(v)),
+                    Result::Err(e) => Result::Err(e),
+                }
+            }
+        }
+    }
+}
+
+pub fn to_string<T: Serialize>(value: T) -> Result<string, SerdeError> {
+    let s = (JsonSerializer::new() as Serializer);
+    match Serialize::serialize(value, s) {
+        Result::Err(e) => Result::Err(e),
+        Result::Ok(_) => match s as? JsonSerializer {
+            Option::Some(js) => Result::Ok(js.out),
+            Option::None => Result::Err(SerdeError::Message("std::json: internal error")),
+        },
+    }
+}
+
+pub fn from_string<T: Deserialize>(src: string) -> Result<T, SerdeError> {
+    let d = (JsonDeserializer::new(src) as Deserializer);
+    match Deserialize::deserialize::<T>(d) {
+        Result::Err(e) => Result::Err(e),
+        Result::Ok(v) => match d as? JsonDeserializer {
+            Option::Some(jd) => {
+                jd.skip_ws();
+                if jd.eof() {
+                    Result::Ok(v)
+                } else {
+                    Result::Err(SerdeError::Message("std::json: trailing characters"))
+                }
+            }
+            Option::None => Result::Err(SerdeError::Message("std::json: internal error")),
+        },
+    }
+}
+
+// -------- Serializer --------
+
+// Context kinds:
+// - 0: object (`{ ... }`) - comma handling is performed by `struct_field`.
+// - 1: array (`[ ... ]`) - comma handling is performed by `before_value`.
+struct JsonSerializer {
+    out: string,
+    ctx_kinds: [int],
+    ctx_first: [bool],
+    pending_field: bool,
+    pending_field_out_len: int,
+    pending_field_prev_first: bool,
+}
+
+impl JsonSerializer {
+    static fn new() -> JsonSerializer {
+        JsonSerializer {
+            out: "",
+            ctx_kinds: [],
+            ctx_first: [],
+            pending_field: false,
+            pending_field_out_len: 0,
+            pending_field_prev_first: false,
+        }
+    }
+
+    fn push_ctx(kind: int) {
+        self.ctx_kinds.push(kind);
+        self.ctx_first.push(true);
+    }
+
+    fn pop_ctx() {
+        let _ = self.ctx_kinds.pop();
+        let _ = self.ctx_first.pop();
+    }
+
+    fn top_kind() -> Option<int> {
+        if self.ctx_kinds.len() == 0 { Option::None } else { Option::Some(self.ctx_kinds[self.ctx_kinds.len() - 1]) }
+    }
+
+    fn before_value() {
+        // A previous `struct_field` is now being satisfied by emitting a value.
+        if self.pending_field {
+            self.pending_field = false;
+        }
+
+        match self.top_kind() {
+            Option::None => {}
+            Option::Some(kind) => {
+                if kind != 1 { return; }
+                let i = self.ctx_first.len() - 1;
+                if self.ctx_first[i] {
+                    self.ctx_first[i] = false;
+                } else {
+                    self.out = self.out + ",";
+                }
+            }
+        }
+    }
+
+    fn write_raw(s: string) {
+        self.out = self.out + s;
+    }
+
+    fn omit_pending_field() -> Result<unit, SerdeError> {
+        if !self.pending_field {
+            return Result::Err(SerdeError::Message("std::json: omit used outside of a struct field"));
+        }
+
+        // Only valid while serializing an object field.
+        let kind = 0;
+        match self.top_kind() {
+            Option::Some(k) => { kind = k; }
+            Option::None => {
+                return Result::Err(SerdeError::Message("std::json: omit used with no context"));
+            }
+        }
+        if kind != 0 {
+            return Result::Err(SerdeError::Message("std::json: omit used in non-object context"));
+        }
+
+        let i = self.ctx_first.len() - 1;
+        self.ctx_first[i] = self.pending_field_prev_first;
+        let prefix = core::intrinsics::string_byte_slice(self.out, 0, Option::Some(self.pending_field_out_len));
+        self.out = core::intrinsics::string_from_utf8(prefix);
+        self.pending_field = false;
+        Result::Ok(())
+    }
+
+    fn write_escaped_string(s: string) {
+        self.write_raw("\"");
+
+        // Iterate by UTF-8 byte index (using intrinsics) and escape only the required subset.
+        let idx = 0;
+        while true {
+            let next = core::intrinsics::string_next_index(s, idx);
+            if next == -1 { break; }
+            let cp = core::intrinsics::string_codepoint_at(s, idx);
+
+            // `"` and `\\`
+            if cp == 34 {
+                self.write_raw("\\\"");
+            } else if cp == 92 {
+                self.write_raw("\\\\");
+            } else if cp == 10 {
+                self.write_raw("\\n");
+            } else if cp == 13 {
+                self.write_raw("\\r");
+            } else if cp == 9 {
+                self.write_raw("\\t");
+            } else if cp == 8 {
+                self.write_raw("\\b");
+            } else if cp == 12 {
+                self.write_raw("\\f");
+            } else if cp < 32 {
+                // Encode remaining C0 controls as `\u00XX`.
+                self.write_raw("\\u00");
+                let hi = hex_digit((cp >> 4) & 15);
+                let lo = hex_digit(cp & 15);
+                self.write_raw(char_to_string(hi));
+                self.write_raw(char_to_string(lo));
+            } else {
+                // Emit the codepoint as-is.
+                let ch = core::intrinsics::int_to_char(cp);
+                self.write_raw(char_to_string(ch));
+            }
+
+            idx = next;
+        };
+
+        self.write_raw("\"");
+    }
+}
+
+impl Serializer for JsonSerializer {
+    fn unit() -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_raw("null");
+        Result::Ok(())
+    }
+
+    fn bool(v: bool) -> Result<unit, SerdeError> {
+        self.before_value();
+        if v { self.write_raw("true") } else { self.write_raw("false") };
+        Result::Ok(())
+    }
+
+    fn int(v: int) -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_raw(core::intrinsics::to_string(v));
+        Result::Ok(())
+    }
+
+    fn float(v: float) -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_raw(core::intrinsics::to_string(v));
+        Result::Ok(())
+    }
+
+    fn byte(v: byte) -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_raw(core::intrinsics::to_string(core::intrinsics::byte_to_int(v)));
+        Result::Ok(())
+    }
+
+    fn char(v: char) -> Result<unit, SerdeError> {
+        self.before_value();
+        readonly chars = [v];
+        let s = core::intrinsics::string_from_chars(chars);
+        self.write_escaped_string(s);
+        Result::Ok(())
+    }
+
+    fn string(v: string) -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_escaped_string(v);
+        Result::Ok(())
+    }
+
+    fn bytes(v: bytes) -> Result<unit, SerdeError> {
+        self.before_value();
+
+        // Encode bytes as a JSON array of integers.
+        self.write_raw("[");
+        let i = 0;
+        while i < v.len() {
+            if i != 0 { self.write_raw(",") };
+            let b = v[i];
+            self.write_raw(core::intrinsics::to_string(core::intrinsics::byte_to_int(b)));
+            i = i + 1;
+        };
+        self.write_raw("]");
+        Result::Ok(())
+    }
+
+    fn struct_begin(_name: string, _field_count: int) -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_raw("{");
+        self.push_ctx(0);
+        Result::Ok(())
+    }
+
+    fn struct_field(name: string) -> Result<unit, SerdeError> {
+        let kind = 0;
+        match self.top_kind() {
+            Option::Some(k) => { kind = k; }
+            Option::None => { return Result::Err(SerdeError::Message("std::json: struct_field outside of struct")); }
+        }
+        if kind != 0 {
+            return Result::Err(SerdeError::Message("std::json: struct_field in non-struct context"));
+        }
+
+        // Record a rewind point so `std::json::OmitOr::Omit` can remove this field.
+        let out_len = core::intrinsics::string_byte_slice(self.out, 0, Option::None).len();
+        let i = self.ctx_first.len() - 1;
+        self.pending_field = true;
+        self.pending_field_out_len = out_len;
+        self.pending_field_prev_first = self.ctx_first[i];
+        if self.ctx_first[i] {
+            self.ctx_first[i] = false;
+        } else {
+            self.write_raw(",");
+        }
+
+        self.write_escaped_string(name);
+        self.write_raw(":");
+        Result::Ok(())
+    }
+
+    fn struct_end() -> Result<unit, SerdeError> {
+        self.pop_ctx();
+        self.write_raw("}");
+        Result::Ok(())
+    }
+
+    fn enum_begin(_name: string, _variant_count: int) -> Result<unit, SerdeError> {
+        self.before_value();
+        self.write_raw("[");
+        self.push_ctx(1);
+        Result::Ok(())
+    }
+
+    fn enum_variant(_name: string, index: int, _field_count: int) -> Result<unit, SerdeError> {
+        // First element of the enum array is the tag index.
+        self.before_value();
+        self.write_raw(core::intrinsics::to_string(index));
+        Result::Ok(())
+    }
+
+    fn enum_end() -> Result<unit, SerdeError> {
+        self.pop_ctx();
+        self.write_raw("]");
+        Result::Ok(())
+    }
+}
+
+// -------- Deserializer --------
+
+struct JsonDeserializer {
+    src: string,
+    data: bytes,
+    idx: int,
+    ctx_kinds: [int],
+    ctx_first: [bool],
+    pending_field_missing: bool,
+    pending_field_missing_name: string,
+}
+
+impl JsonDeserializer {
+    static fn new(src: string) -> JsonDeserializer {
+        JsonDeserializer {
+            src: src,
+            data: core::intrinsics::string_byte_slice(src, 0, Option::None),
+            idx: 0,
+            ctx_kinds: [],
+            ctx_first: [],
+            pending_field_missing: false,
+            pending_field_missing_name: "",
+        }
+    }
+
+    fn eof() -> bool { self.idx >= self.data.len() }
+
+    fn peek() -> Option<byte> {
+        if self.eof() { Option::None } else { Option::Some(self.data[self.idx]) }
+    }
+
+    fn bump() -> Result<byte, SerdeError> {
+        match self.peek() {
+            Option::None => Result::Err(SerdeError::Message("std::json: unexpected EOF")),
+            Option::Some(b) => {
+                self.idx = self.idx + 1;
+                Result::Ok(b)
+            }
+        }
+    }
+
+    fn skip_ws() {
+        while true {
+            match self.peek() {
+                Option::None => { break; }
+                Option::Some(b) => {
+                    let v = core::intrinsics::byte_to_int(b);
+                    if v == 32 || v == 9 || v == 10 || v == 13 {
+                        self.idx = self.idx + 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn skip_ws_at(idx: int) -> int {
+        let i = idx;
+        while i < self.data.len() {
+            let v = core::intrinsics::byte_to_int(self.data[i]);
+            if v == 32 || v == 9 || v == 10 || v == 13 {
+                i = i + 1;
+                continue;
+            }
+            break;
+        }
+        i
+    }
+
+    fn parse_string_at(idx: int) -> Result<(string, int), SerdeError> {
+        let i = idx;
+        if i >= self.data.len() {
+            return Result::Err(SerdeError::Message("std::json: unexpected EOF"));
+        }
+        let quote = self.data[i];
+        i = i + 1;
+        if core::intrinsics::byte_to_int(quote) != 34 {
+            return Result::Err(SerdeError::Message("std::json: expected string"));
+        }
+
+        let out: [byte] = [];
+        while true {
+            if i >= self.data.len() {
+                return Result::Err(SerdeError::Message("std::json: unexpected EOF"));
+            }
+            let b = self.data[i];
+            i = i + 1;
+            let v = core::intrinsics::byte_to_int(b);
+            if v == 34 { // '"'
+                break;
+            }
+            if v == 92 { // '\\'
+                if i >= self.data.len() {
+                    return Result::Err(SerdeError::Message("std::json: unexpected EOF"));
+                }
+                let esc = self.data[i];
+                i = i + 1;
+                let ev = core::intrinsics::byte_to_int(esc);
+                if ev == 34 || ev == 92 || ev == 47 {
+                    out.push(esc);
+                } else if ev == 110 {
+                    out.push(core::intrinsics::int_to_byte(10));
+                } else if ev == 114 {
+                    out.push(core::intrinsics::int_to_byte(13));
+                } else if ev == 116 {
+                    out.push(core::intrinsics::int_to_byte(9));
+                } else if ev == 98 {
+                    out.push(core::intrinsics::int_to_byte(8));
+                } else if ev == 102 {
+                    out.push(core::intrinsics::int_to_byte(12));
+                } else if ev == 117 {
+                    // `\uXXXX` (we only support `\u00XX` for ASCII).
+                    if i + 4 > self.data.len() {
+                        return Result::Err(SerdeError::Message("std::json: unexpected EOF"));
+                    }
+                    let h1 = self.data[i];
+                    let h2 = self.data[i + 1];
+                    let h3 = self.data[i + 2];
+                    let h4 = self.data[i + 3];
+                    i = i + 4;
+
+                    let v1 = 0;
+                    match hex_value(h1) {
+                        Result::Ok(v) => { v1 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let v2 = 0;
+                    match hex_value(h2) {
+                        Result::Ok(v) => { v2 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let v3 = 0;
+                    match hex_value(h3) {
+                        Result::Ok(v) => { v3 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let v4 = 0;
+                    match hex_value(h4) {
+                        Result::Ok(v) => { v4 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+
+                    if v1 != 0 || v2 != 0 {
+                        return Result::Err(SerdeError::Message("std::json: unsupported \\u escape"));
+                    }
+                    let code = v3 * 16 + v4;
+                    out.push(core::intrinsics::int_to_byte(code));
+                } else {
+                    return Result::Err(SerdeError::Message("std::json: invalid escape"));
+                }
+            } else {
+                out.push(b);
+            }
+        }
+
+        readonly out_ro = out;
+        let b = core::intrinsics::bytes_from_array(out_ro);
+        let s = core::intrinsics::string_from_utf8(b);
+        Result::Ok((s, i))
+    }
+
+    fn peek_value_start_byte() -> Result<Option<int>, SerdeError> {
+        if self.pending_field_missing {
+            let msg = "std::json: missing field: " + self.pending_field_missing_name;
+            return Result::Err(SerdeError::Message(msg));
+        }
+
+        let i = self.skip_ws_at(self.idx);
+        let j = i;
+
+        match self.top_kind() {
+            Option::Some(kind) => {
+                if kind == 1 {
+                    let k = self.ctx_first.len() - 1;
+                    if !self.ctx_first[k] {
+                        if j < self.data.len() && core::intrinsics::byte_to_int(self.data[j]) == 44 {
+                            j = self.skip_ws_at(j + 1);
+                        };
+                    };
+                };
+            }
+            Option::None => {}
+        };
+
+        if j >= self.data.len() {
+            Result::Ok(Option::None)
+        } else {
+            Result::Ok(Option::Some(core::intrinsics::byte_to_int(self.data[j])))
+        }
+    }
+
+    fn expect_byte(expected: int) -> Result<unit, SerdeError> {
+        self.skip_ws();
+        match self.bump() {
+            Result::Err(e) => Result::Err(e),
+            Result::Ok(b) => {
+                if core::intrinsics::byte_to_int(b) != expected {
+                    Result::Err(SerdeError::Message("std::json: unexpected character"))
+                } else {
+                    Result::Ok(())
+                }
+            }
+        }
+    }
+
+    fn push_ctx(kind: int) {
+        self.ctx_kinds.push(kind);
+        self.ctx_first.push(true);
+    }
+
+    fn pop_ctx() {
+        let _ = self.ctx_kinds.pop();
+        let _ = self.ctx_first.pop();
+    }
+
+    fn top_kind() -> Option<int> {
+        if self.ctx_kinds.len() == 0 { Option::None } else { Option::Some(self.ctx_kinds[self.ctx_kinds.len() - 1]) }
+    }
+
+    fn begin_value() -> Result<unit, SerdeError> {
+        if self.pending_field_missing {
+            let msg = "std::json: missing field: " + self.pending_field_missing_name;
+            self.pending_field_missing = false;
+            self.pending_field_missing_name = "";
+            return Result::Err(SerdeError::Message(msg));
+        }
+        self.skip_ws();
+        match self.top_kind() {
+            Option::None => Result::Ok(()),
+            Option::Some(kind) => {
+                if kind != 1 { return Result::Ok(()); }
+                let i = self.ctx_first.len() - 1;
+                if self.ctx_first[i] {
+                    self.ctx_first[i] = false;
+                    Result::Ok(())
+                } else {
+                    self.expect_byte(44) // ','
+                }
+            }
+        }
+    }
+
+    fn parse_literal(lit: string) -> Result<unit, SerdeError> {
+        self.skip_ws();
+        let lit_bytes = core::intrinsics::string_byte_slice(lit, 0, Option::None);
+        let i = 0;
+        while i < lit_bytes.len() {
+            let want = core::intrinsics::byte_to_int(lit_bytes[i]);
+            match self.bump() {
+                Result::Err(e) => { return Result::Err(e); }
+                Result::Ok(b) => {
+                    if core::intrinsics::byte_to_int(b) != want {
+                        return Result::Err(SerdeError::Message("std::json: invalid literal"));
+                    };
+                }
+            }
+            i = i + 1;
+        };
+        Result::Ok(())
+    }
+
+    fn parse_number_text() -> Result<string, SerdeError> {
+        self.skip_ws();
+        let start = self.idx;
+
+        // Optional sign.
+        match self.peek() {
+            Option::Some(b) => {
+                if core::intrinsics::byte_to_int(b) == 45 { // '-'
+                    self.idx = self.idx + 1;
+                };
+            }
+            Option::None => {}
+        }
+
+        // Digits.
+        let has_digit = false;
+        while true {
+            match self.peek() {
+                Option::Some(b) => {
+                    let v = core::intrinsics::byte_to_int(b);
+                    if v >= 48 && v <= 57 {
+                        self.idx = self.idx + 1;
+                        has_digit = true;
+                        continue;
+                    }
+                    break;
+                }
+                Option::None => { break; }
+            }
+        }
+        if !has_digit {
+            return Result::Err(SerdeError::Message("std::json: expected number"));
+        }
+
+        // Fractional part (we record it in the text but do not parse to float yet).
+        match self.peek() {
+            Option::Some(b) => {
+                if core::intrinsics::byte_to_int(b) == 46 { // '.'
+                    self.idx = self.idx + 1;
+                    while true {
+                        match self.peek() {
+                            Option::Some(b) => {
+                                let v = core::intrinsics::byte_to_int(b);
+                                if v >= 48 && v <= 57 {
+                                    self.idx = self.idx + 1;
+                                    continue;
+                                }
+                                break;
+                            }
+                            Option::None => { break; }
+                        }
+                    }
+                };
+            }
+            Option::None => {}
+        }
+
+        // Exponent.
+        match self.peek() {
+            Option::Some(b) => {
+                let v = core::intrinsics::byte_to_int(b);
+                if v == 101 || v == 69 { // 'e' or 'E'
+                    self.idx = self.idx + 1;
+                    match self.peek() {
+                        Option::Some(b2) => {
+                            let v2 = core::intrinsics::byte_to_int(b2);
+                            if v2 == 43 || v2 == 45 { // '+' or '-'
+                                self.idx = self.idx + 1;
+                            };
+                        }
+                        Option::None => {}
+                    }
+                    while true {
+                        match self.peek() {
+                            Option::Some(bd) => {
+                                let vd = core::intrinsics::byte_to_int(bd);
+                                if vd >= 48 && vd <= 57 {
+                                    self.idx = self.idx + 1;
+                                    continue;
+                                }
+                                break;
+                            }
+                            Option::None => { break; }
+                        }
+                    }
+                };
+            }
+            _ => {}
+        }
+
+        let slice = core::intrinsics::string_byte_slice(self.src, start, Option::Some(self.idx));
+        Result::Ok(core::intrinsics::string_from_utf8(slice))
+    }
+
+    fn parse_int_value() -> Result<int, SerdeError> {
+        let text = "";
+        match self.parse_number_text() {
+            Result::Ok(t) => { text = t; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        let bs = core::intrinsics::string_byte_slice(text, 0, Option::None);
+
+        // Reject floats/exponents for int parsing.
+        let i = 0;
+        while i < bs.len() {
+            let b = bs[i];
+            let v = core::intrinsics::byte_to_int(b);
+            if v == 46 || v == 101 || v == 69 {
+                return Result::Err(SerdeError::Message("std::json: expected integer"));
+            }
+            i = i + 1;
+        };
+
+        // Parse decimal into `int`.
+        let neg = false;
+        let idx = 0;
+        if bs.len() > 0 {
+            let b0 = bs[0];
+            if core::intrinsics::byte_to_int(b0) == 45 {
+                neg = true;
+                idx = 1;
+            };
+        }
+
+        let acc = 0;
+        while idx < bs.len() {
+            let b = bs[idx];
+            let v = core::intrinsics::byte_to_int(b);
+            if v < 48 || v > 57 {
+                return Result::Err(SerdeError::Message("std::json: invalid integer"));
+            }
+            acc = acc * 10 + (v - 48);
+            idx = idx + 1;
+        };
+        if neg { Result::Ok(0 - acc) } else { Result::Ok(acc) }
+    }
+
+    fn parse_string_value() -> Result<string, SerdeError> {
+        self.skip_ws();
+        match self.bump() {
+            Result::Err(e) => { return Result::Err(e); }
+            Result::Ok(quote) => {
+                if core::intrinsics::byte_to_int(quote) != 34 {
+                    return Result::Err(SerdeError::Message("std::json: expected string"));
+                };
+            }
+        }
+
+        let out: [byte] = [];
+        while true {
+            let b = core::intrinsics::int_to_byte(0);
+            match self.bump() {
+                Result::Ok(got) => { b = got; }
+                Result::Err(e) => { return Result::Err(e); }
+            }
+            let v = core::intrinsics::byte_to_int(b);
+            if v == 34 { // '"'
+                break;
+            }
+            if v == 92 { // '\\'
+                let esc = core::intrinsics::int_to_byte(0);
+                match self.bump() {
+                    Result::Ok(got) => { esc = got; }
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                let ev = core::intrinsics::byte_to_int(esc);
+                if ev == 34 || ev == 92 || ev == 47 {
+                    out.push(esc);
+                } else if ev == 110 {
+                    out.push(core::intrinsics::int_to_byte(10));
+                } else if ev == 114 {
+                    out.push(core::intrinsics::int_to_byte(13));
+                } else if ev == 116 {
+                    out.push(core::intrinsics::int_to_byte(9));
+                } else if ev == 98 {
+                    out.push(core::intrinsics::int_to_byte(8));
+                } else if ev == 102 {
+                    out.push(core::intrinsics::int_to_byte(12));
+                } else if ev == 117 {
+                    // `\uXXXX` (we only support `\u00XX` for ASCII).
+                    let h1 = core::intrinsics::int_to_byte(0);
+                    match self.bump() {
+                        Result::Ok(got) => { h1 = got; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let h2 = core::intrinsics::int_to_byte(0);
+                    match self.bump() {
+                        Result::Ok(got) => { h2 = got; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let h3 = core::intrinsics::int_to_byte(0);
+                    match self.bump() {
+                        Result::Ok(got) => { h3 = got; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let h4 = core::intrinsics::int_to_byte(0);
+                    match self.bump() {
+                        Result::Ok(got) => { h4 = got; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+
+                    let v1 = 0;
+                    match hex_value(h1) {
+                        Result::Ok(v) => { v1 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let v2 = 0;
+                    match hex_value(h2) {
+                        Result::Ok(v) => { v2 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let v3 = 0;
+                    match hex_value(h3) {
+                        Result::Ok(v) => { v3 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    let v4 = 0;
+                    match hex_value(h4) {
+                        Result::Ok(v) => { v4 = v; }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    if v1 != 0 || v2 != 0 {
+                        return Result::Err(SerdeError::Message("std::json: unsupported \\u escape"));
+                    }
+                    let code = v3 * 16 + v4;
+                    out.push(core::intrinsics::int_to_byte(code));
+                } else {
+                    return Result::Err(SerdeError::Message("std::json: invalid escape"));
+                }
+            } else {
+                out.push(b);
+            }
+        }
+
+        readonly out_ro = out;
+        let b = core::intrinsics::bytes_from_array(out_ro);
+        Result::Ok(core::intrinsics::string_from_utf8(b))
+    }
+}
+
+impl Deserializer for JsonDeserializer {
+    fn unit() -> Result<unit, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        match self.parse_literal("null") {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        Result::Ok(())
+    }
+
+    fn bool() -> Result<bool, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.skip_ws();
+        match self.peek() {
+            Option::Some(b) => {
+                let v = core::intrinsics::byte_to_int(b);
+                if v == 116 { // 't'
+                    match self.parse_literal("true") {
+                        Result::Ok(_) => {}
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    Result::Ok(true)
+                } else if v == 102 { // 'f'
+                    match self.parse_literal("false") {
+                        Result::Ok(_) => {}
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    Result::Ok(false)
+                } else {
+                    Result::Err(SerdeError::Message("std::json: expected bool"))
+                }
+            }
+            Option::None => Result::Err(SerdeError::Message("std::json: expected bool")),
+        }
+    }
+
+    fn int() -> Result<int, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.parse_int_value()
+    }
+
+    fn float() -> Result<float, SerdeError> {
+        let _ = self;
+        Result::Err(SerdeError::Message("std::json: float deserialization is not supported yet"))
+    }
+
+    fn byte() -> Result<byte, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        let n = 0;
+        match self.parse_int_value() {
+            Result::Ok(v) => { n = v; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        match core::intrinsics::int_try_byte(n) {
+            Option::Some(b) => Result::Ok(b),
+            Option::None => Result::Err(SerdeError::Message("std::json: byte out of range")),
+        }
+    }
+
+    fn char() -> Result<char, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        let s = "";
+        match self.parse_string_value() {
+            Result::Ok(v) => { s = v; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        let next = core::intrinsics::string_next_index(s, 0);
+        if next == -1 {
+            return Result::Err(SerdeError::Message("std::json: expected char"));
+        }
+        let next2 = core::intrinsics::string_next_index(s, next);
+        if next2 != -1 {
+            return Result::Err(SerdeError::Message("std::json: expected single-character string"));
+        }
+        let cp = core::intrinsics::string_codepoint_at(s, 0);
+        match core::intrinsics::int_try_char(cp) {
+            Option::Some(c) => Result::Ok(c),
+            Option::None => Result::Err(SerdeError::Message("std::json: invalid char")),
+        }
+    }
+
+    fn string() -> Result<string, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.parse_string_value()
+    }
+
+    fn bytes() -> Result<bytes, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        match self.expect_byte(91) { // '['
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        let out: [byte] = [];
+
+        self.skip_ws();
+        match self.peek() {
+            Option::Some(b) => {
+                if core::intrinsics::byte_to_int(b) == 93 {
+                    match self.bump() {
+                        Result::Ok(_) => {}
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    readonly out_ro = out;
+                    return Result::Ok(core::intrinsics::bytes_from_array(out_ro));
+                };
+            }
+            Option::None => {}
+        }
+
+        while true {
+            self.skip_ws();
+            let n = 0;
+            match self.parse_int_value() {
+                Result::Ok(v) => { n = v; }
+                Result::Err(e) => { return Result::Err(e); }
+            }
+            match core::intrinsics::int_try_byte(n) {
+                Option::Some(b) => out.push(b),
+                Option::None => { return Result::Err(SerdeError::Message("std::json: byte out of range")); }
+            }
+
+            self.skip_ws();
+            match self.peek() {
+                Option::Some(b) => {
+                    let v = core::intrinsics::byte_to_int(b);
+                    if v == 44 {
+                        match self.bump() {
+                            Result::Ok(_) => {}
+                            Result::Err(e) => { return Result::Err(e); }
+                        }
+                        continue;
+                    }
+                    if v == 93 {
+                        match self.bump() {
+                            Result::Ok(_) => {}
+                            Result::Err(e) => { return Result::Err(e); }
+                        }
+                        break;
+                    }
+                    return Result::Err(SerdeError::Message("std::json: expected ',' or ']'"));
+                }
+                Option::None => { return Result::Err(SerdeError::Message("std::json: expected ',' or ']'")); }
+            }
+        }
+
+        readonly out_ro = out;
+        Result::Ok(core::intrinsics::bytes_from_array(out_ro))
+    }
+
+    fn struct_begin(_name: string, _field_count: int) -> Result<unit, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        match self.expect_byte(123) { // '{'
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.push_ctx(0);
+        Result::Ok(())
+    }
+
+    fn struct_field(name: string) -> Result<unit, SerdeError> {
+        let kind = 0;
+        match self.top_kind() {
+            Option::Some(k) => { kind = k; }
+            Option::None => { return Result::Err(SerdeError::Message("std::json: struct_field outside of struct")); }
+        }
+        if kind != 0 {
+            return Result::Err(SerdeError::Message("std::json: struct_field in non-struct context"));
+        }
+
+        // Clear any previous "missing field" marker.
+        self.pending_field_missing = false;
+        self.pending_field_missing_name = "";
+
+        // Lookahead to see if the next key matches `name`. If not, mark this field as missing
+        // and allow `std::json::OmitOr<T>` to deserialize without consuming input.
+        let look = self.skip_ws_at(self.idx);
+        let ctx_i = self.ctx_first.len() - 1;
+        let is_first = self.ctx_first[ctx_i];
+
+        // End-of-object => missing field.
+        if look < self.data.len() && core::intrinsics::byte_to_int(self.data[look]) == 125 {
+            self.pending_field_missing = true;
+            self.pending_field_missing_name = name;
+            return Result::Ok(());
+        }
+
+        if is_first {
+            match self.parse_string_at(look) {
+                Result::Err(e) => { return Result::Err(e); }
+                Result::Ok((got, _)) => {
+                    if got != name {
+                        self.pending_field_missing = true;
+                        self.pending_field_missing_name = name;
+                        return Result::Ok(());
+                    };
+                }
+            }
+        } else {
+            // After a previous field value in an object we expect `,` or `}`.
+            if look >= self.data.len() {
+                return Result::Err(SerdeError::Message("std::json: unexpected EOF"));
+            }
+            if core::intrinsics::byte_to_int(self.data[look]) != 44 {
+                return Result::Err(SerdeError::Message("std::json: expected ',' or '}'"));
+            }
+            let after_comma = self.skip_ws_at(look + 1);
+            if after_comma < self.data.len() && core::intrinsics::byte_to_int(self.data[after_comma]) == 125 {
+                return Result::Err(SerdeError::Message("std::json: trailing comma in object"));
+            }
+
+            match self.parse_string_at(after_comma) {
+                Result::Err(e) => { return Result::Err(e); }
+                Result::Ok((got, _)) => {
+                    if got != name {
+                        self.pending_field_missing = true;
+                        self.pending_field_missing_name = name;
+                        return Result::Ok(());
+                    };
+                }
+            }
+        }
+
+        // Field is present: consume it for real.
+        self.skip_ws();
+        if self.ctx_first[ctx_i] {
+            self.ctx_first[ctx_i] = false;
+        } else {
+            match self.expect_byte(44) { // ','
+                Result::Ok(_) => {}
+                Result::Err(e) => { return Result::Err(e); }
+            }
+        }
+
+        let got = "";
+        match self.parse_string_value() {
+            Result::Ok(v) => { got = v; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        if got != name {
+            return Result::Err(SerdeError::Message("std::json: internal error: field name mismatch"));
+        };
+        match self.expect_byte(58) { // ':'
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        Result::Ok(())
+    }
+
+    fn struct_end() -> Result<unit, SerdeError> {
+        self.skip_ws();
+        match self.expect_byte(125) { // '}'
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.pop_ctx();
+        Result::Ok(())
+    }
+
+    fn enum_begin(name: string, variant_count: int) -> Result<int, SerdeError> {
+        match self.begin_value() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        match self.expect_byte(91) { // '['
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.push_ctx(1);
+        let tag = 0;
+        match self.int() {
+            Result::Ok(v) => { tag = v; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        if tag < 0 || tag >= variant_count {
+            return Result::Err(SerdeError::UnknownEnumTag(name, tag));
+        }
+        Result::Ok(tag)
+    }
+
+    fn enum_variant(_name: string, _index: int, _field_count: int) -> Result<unit, SerdeError> {
+        // No-op: field values are parsed via subsequent `Deserializer` calls and `begin_value`
+        // handles the commas within the enum array.
+        Result::Ok(())
+    }
+
+    fn enum_end() -> Result<unit, SerdeError> {
+        self.skip_ws();
+        match self.expect_byte(93) { // ']'
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        self.pop_ctx();
+        Result::Ok(())
+    }
+}
+
+// -------- Helpers --------
+
+fn char_to_string(c: char) -> string {
+    readonly chars = [c];
+    core::intrinsics::string_from_chars(chars)
+}
+
+fn hex_digit(n: int) -> char {
+    if n < 10 {
+        core::intrinsics::int_to_char(48 + n)
+    } else {
+        core::intrinsics::int_to_char(97 + (n - 10))
+    }
+}
+
+fn hex_value(b: byte) -> Result<int, SerdeError> {
+    let v = core::intrinsics::byte_to_int(b);
+    if v >= 48 && v <= 57 {
+        Result::Ok(v - 48)
+    } else if v >= 65 && v <= 70 {
+        Result::Ok(v - 65 + 10)
+    } else if v >= 97 && v <= 102 {
+        Result::Ok(v - 97 + 10)
+    } else {
+        Result::Err(SerdeError::Message("std::json: invalid hex digit"))
+    }
+}

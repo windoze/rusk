@@ -741,6 +741,20 @@ fn count_local_uses(func: &Function) -> Vec<usize> {
                         bump_operand(&mut counts, op);
                     }
                 }
+                Instruction::SCall {
+                    self_ty,
+                    method_type_args,
+                    args,
+                    ..
+                } => {
+                    bump_operand(&mut counts, self_ty);
+                    for op in method_type_args {
+                        bump_operand(&mut counts, op);
+                    }
+                    for op in args {
+                        bump_operand(&mut counts, op);
+                    }
+                }
                 Instruction::ICall { fnptr, args, .. } => {
                     bump_operand(&mut counts, fnptr);
                     for op in args {

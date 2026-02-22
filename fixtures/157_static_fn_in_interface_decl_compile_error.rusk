@@ -1,8 +1,7 @@
-// expect: compile_error static fn
+// expect: ok int 0
 
 interface I {
     static fn foo() -> int;
 }
 
 fn main() -> int { 0 }
-

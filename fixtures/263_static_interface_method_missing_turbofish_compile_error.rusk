@@ -1,0 +1,13 @@
+// expect: compile_error requires an explicit implementing type argument
+
+interface I { static fn foo(n: int) -> int; }
+struct S {}
+
+impl I for S {
+    static fn foo(n: int) -> int { n }
+}
+
+fn main() -> int {
+    I::foo(1)
+}
+

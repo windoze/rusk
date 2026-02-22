@@ -1992,6 +1992,123 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 });
             }
 
+            rusk_bytecode::Instruction::SCall {
+                dst,
+                self_ty,
+                method,
+                method_type_args,
+                args,
+            } => {
+                let self_rep = match read_type_rep(frame, *self_ty) {
+                    Ok(id) => id,
+                    Err(msg) => return trap(vm, format!("scall self_ty: {msg}")),
+                };
+                let Some(node) = vm.type_reps.node(self_rep) else {
+                    return trap(vm, format!("scall: invalid typerep({})", self_rep.0));
+                };
+
+                let (type_id, type_args): (TypeId, Vec<TypeRepId>) = match &node.ctor {
+                    TypeCtor::Unit => (vm.primitive_type_ids.unit, Vec::new()),
+                    TypeCtor::Never => {
+                        return trap(
+                            vm,
+                            "scall: cannot call static interface methods on `never`".to_string(),
+                        );
+                    }
+                    TypeCtor::Bool => (vm.primitive_type_ids.bool, Vec::new()),
+                    TypeCtor::Int => (vm.primitive_type_ids.int, Vec::new()),
+                    TypeCtor::Float => (vm.primitive_type_ids.float, Vec::new()),
+                    TypeCtor::Byte => (vm.primitive_type_ids.byte, Vec::new()),
+                    TypeCtor::Char => (vm.primitive_type_ids.char, Vec::new()),
+                    TypeCtor::String => (vm.primitive_type_ids.string, Vec::new()),
+                    TypeCtor::Bytes => (vm.primitive_type_ids.bytes, Vec::new()),
+                    TypeCtor::Array => {
+                        let Some(array_id) = vm.primitive_type_ids.array else {
+                            return trap(
+                                vm,
+                                "scall: missing required type name `array` in module type table"
+                                    .to_string(),
+                            );
+                        };
+                        (array_id, node.args.clone())
+                    }
+                    TypeCtor::Tuple(_) => {
+                        return trap(
+                            vm,
+                            "scall: tuples do not support interface static methods in this stage"
+                                .to_string(),
+                        );
+                    }
+                    TypeCtor::Struct(type_id)
+                    | TypeCtor::Enum(type_id)
+                    | TypeCtor::Interface(type_id) => (*type_id, node.args.clone()),
+                    TypeCtor::Fn | TypeCtor::Cont => {
+                        return trap(
+                            vm,
+                            "scall: functions do not support interface static methods in this stage"
+                                .to_string(),
+                        );
+                    }
+                };
+
+                let Some(fn_id) = vm.module.scall_target(type_id, *method) else {
+                    let type_name = vm.module.type_name(type_id).unwrap_or("<unknown>");
+                    let method_name = vm.module.method_name(*method).unwrap_or("<unknown>");
+                    return trap(
+                        vm,
+                        format!("unresolved scall method: {method_name} on {type_name}"),
+                    );
+                };
+
+                let Some(callee) = vm.module.function(fn_id) else {
+                    return trap(vm, format!("invalid function id {}", fn_id.0));
+                };
+
+                let mut arg_values =
+                    Vec::with_capacity(type_args.len() + method_type_args.len() + args.len());
+                for id in type_args {
+                    arg_values.push(Value::TypeRep(id));
+                }
+                for reg in method_type_args {
+                    let id = match read_type_rep(frame, *reg) {
+                        Ok(id) => id,
+                        Err(msg) => return trap(vm, format!("scall method_type_args: {msg}")),
+                    };
+                    arg_values.push(Value::TypeRep(id));
+                }
+                for reg in args {
+                    let v = match read_value(frame, *reg) {
+                        Ok(v) => v,
+                        Err(msg) => return trap(vm, format!("scall arg: {msg}")),
+                    };
+                    arg_values.push(v);
+                }
+
+                if arg_values.len() != callee.param_count as usize {
+                    return trap(
+                        vm,
+                        format!(
+                            "scall arity mismatch: expected {} args but got {}",
+                            callee.param_count,
+                            arg_values.len()
+                        ),
+                    );
+                }
+
+                let mut regs: Vec<Option<Value>> = Vec::with_capacity(callee.reg_count as usize);
+                regs.resize(callee.reg_count as usize, None);
+                for (idx, value) in arg_values.into_iter().enumerate() {
+                    regs[idx] = Some(value);
+                }
+
+                vm.frames.push(Frame {
+                    func: fn_id,
+                    pc: 0,
+                    regs,
+                    return_dsts: ReturnDsts::from_option(*dst),
+                });
+            }
+
             rusk_bytecode::Instruction::PushHandler { clauses } => {
                 let owner_depth = frame_index;
                 let mut runtime_clauses = Vec::with_capacity(clauses.len());

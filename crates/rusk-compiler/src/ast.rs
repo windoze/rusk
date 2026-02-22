@@ -27,6 +27,7 @@ pub enum Item {
     Impl(ImplItem),
     Mod(ModItem),
     Use(UseItem),
+    Derive(DeriveItem),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,6 +176,13 @@ pub struct UseItem {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct DeriveItem {
+    pub derives: Vec<Ident>,
+    pub target: Ident,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum InterfaceMember {
     AssocType(AssocTypeDecl),
     Method(InterfaceMethodMember),
@@ -188,7 +196,7 @@ pub struct AssocTypeDecl {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceMethodMember {
-    pub readonly: bool,
+    pub receiver: MethodReceiverKind,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,

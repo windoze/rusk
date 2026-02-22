@@ -1,0 +1,51 @@
+// expect: ok int 10202
+
+use core::serde::Deserialize;
+use core::serde::Deserializer;
+use core::serde::SerdeError;
+
+struct SeqDe { next_int: int }
+
+impl Deserializer for SeqDe {
+    fn unit() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn bool() -> Result<bool, SerdeError> { Result::Ok(false) }
+    fn int() -> Result<int, SerdeError> {
+        let out = if self.next_int == 0 { 10 } else { 20 };
+        self.next_int = self.next_int + 1;
+        Result::Ok(out)
+    }
+    fn float() -> Result<float, SerdeError> { Result::Ok(0.0) }
+    fn byte() -> Result<byte, SerdeError> { Result::Ok(0) }
+    fn char() -> Result<char, SerdeError> { Result::Ok('a') }
+    fn string() -> Result<string, SerdeError> { Result::Ok("") }
+    fn bytes() -> Result<bytes, SerdeError> { Result::Ok(b"") }
+
+    fn struct_begin(_name: string, _field_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn struct_field(_name: string) -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn struct_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+
+    fn enum_begin(_name: string, _variant_count: int) -> Result<int, SerdeError> { Result::Ok(0) }
+    fn enum_variant(_name: string, _index: int, _field_count: int) -> Result<unit, SerdeError> {
+        Result::Ok(())
+    }
+    fn enum_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+}
+
+struct Point { x: int, y: int }
+
+derive Deserialize for Point;
+
+fn main() -> int {
+    let d = (SeqDe { next_int: 0 } as Deserializer);
+    match Deserialize::deserialize::<Point>(d) {
+        Result::Err(_) => -1,
+        Result::Ok(p) => {
+            let n = match d as? SeqDe {
+                Option::Some(dd) => dd.next_int,
+                Option::None => 0,
+            };
+            p.x * 1000 + p.y * 10 + n
+        }
+    }
+}
+

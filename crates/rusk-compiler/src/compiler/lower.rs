@@ -284,6 +284,7 @@ impl Compiler {
         self.synthesize_builtin_interface_impl_wrappers()?;
         self.synthesize_interface_assoc_type_typereps()?;
         self.populate_interface_dispatch_table()?;
+        self.populate_static_interface_dispatch_table()?;
         self.populate_interface_impl_table();
         self.populate_struct_layouts();
         self.populate_host_imports()?;
@@ -420,6 +421,89 @@ impl Compiler {
             self.module.add_function(mir_fn).map_err(|message| {
                 CompileError::new(format!("internal error: {message}"), span0)
             })?;
+        }
+
+        // `core::serde::{Serialize, Deserialize}` impls for primitives (used by `derive`).
+        for prim in [
+            "unit", "bool", "int", "float", "byte", "char", "string", "bytes",
+        ] {
+            // `Serialize::serialize` (readonly receiver).
+            {
+                let name = format!("impl::core::serde::Serialize::for::{prim}::serialize");
+                if !self.module.function_ids.contains_key(&name) {
+                    let mut lowerer = FunctionLowerer::new(
+                        self,
+                        FnKind::Real,
+                        ModulePath::root(),
+                        name.clone(),
+                        Vec::new(),
+                    );
+
+                    let recv_local = lowerer.alloc_local();
+                    lowerer.params.push(Param {
+                        local: recv_local,
+                        mutability: Mutability::Readonly,
+                        ty: None,
+                    });
+                    let ser_local = lowerer.alloc_local();
+                    lowerer.params.push(Param {
+                        local: ser_local,
+                        mutability: Mutability::Readonly,
+                        ty: None,
+                    });
+
+                    let out = lowerer.alloc_local();
+                    lowerer.emit(Instruction::Call {
+                        dst: Some(out),
+                        func: format!("core::serde::__serialize_{prim}"),
+                        args: vec![Operand::Local(recv_local), Operand::Local(ser_local)],
+                    });
+                    lowerer.set_terminator(Terminator::Return {
+                        value: Operand::Local(out),
+                    })?;
+
+                    let mir_fn = lowerer.finish()?;
+                    self.module.add_function(mir_fn).map_err(|message| {
+                        CompileError::new(format!("internal error: {message}"), span0)
+                    })?;
+                }
+            }
+
+            // `Deserialize::deserialize` (static method).
+            {
+                let name = format!("impl::core::serde::Deserialize::for::{prim}::deserialize");
+                if !self.module.function_ids.contains_key(&name) {
+                    let mut lowerer = FunctionLowerer::new(
+                        self,
+                        FnKind::Real,
+                        ModulePath::root(),
+                        name.clone(),
+                        Vec::new(),
+                    );
+
+                    let de_local = lowerer.alloc_local();
+                    lowerer.params.push(Param {
+                        local: de_local,
+                        mutability: Mutability::Readonly,
+                        ty: None,
+                    });
+
+                    let out = lowerer.alloc_local();
+                    lowerer.emit(Instruction::Call {
+                        dst: Some(out),
+                        func: format!("core::serde::__deserialize_{prim}"),
+                        args: vec![Operand::Local(de_local)],
+                    });
+                    lowerer.set_terminator(Terminator::Return {
+                        value: Operand::Local(out),
+                    })?;
+
+                    let mir_fn = lowerer.finish()?;
+                    self.module.add_function(mir_fn).map_err(|message| {
+                        CompileError::new(format!("internal error: {message}"), span0)
+                    })?;
+                }
+            }
         }
 
         // `core::ops::*` impls for primitives.
@@ -1562,6 +1646,30 @@ impl Compiler {
         Ok(())
     }
 
+    fn populate_static_interface_dispatch_table(&mut self) -> Result<(), CompileError> {
+        for ((type_name, origin_iface, method_name), impl_fn) in &self.env.interface_static_methods
+        {
+            let method_id = format!("{origin_iface}::{method_name}");
+            let key = (type_name.clone(), method_id);
+            let Some(impl_id) = self.module.function_id(impl_fn.as_str()) else {
+                return Err(CompileError::new(
+                    format!("internal error: missing interface impl function `{impl_fn}`"),
+                    Span::new(0, 0),
+                ));
+            };
+            if let Some(prev) = self.module.static_methods.insert(key.clone(), impl_id) {
+                return Err(CompileError::new(
+                    format!(
+                        "internal error: duplicate static dispatch entry for ({}, {}) (prev={:?})",
+                        key.0, key.1, prev
+                    ),
+                    Span::new(0, 0),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_call_targets(&mut self) -> Result<(), CompileError> {
         let function_ids = self.module.function_ids.clone();
         let host_import_ids = self.module.host_import_ids.clone();
@@ -1647,6 +1755,7 @@ impl Compiler {
                         | Instruction::CallIdMulti { .. }
                         | Instruction::ICall { .. }
                         | Instruction::VCall { .. }
+                        | Instruction::SCall { .. }
                         | Instruction::PushHandler { .. }
                         | Instruction::PopHandler
                         | Instruction::Perform { .. }
@@ -1960,6 +2069,7 @@ impl Compiler {
                 | Instruction::CallId { .. }
                 | Instruction::CallIdMulti { .. }
                 | Instruction::VCall { .. }
+                | Instruction::SCall { .. }
                 | Instruction::ICall { .. }
                 | Instruction::PushHandler { .. }
                 | Instruction::PopHandler
@@ -2513,6 +2623,21 @@ impl Compiler {
                     }
                     Ok(())
                 }
+                Instruction::SCall {
+                    self_ty,
+                    method_type_args,
+                    args,
+                    ..
+                } => {
+                    resolve_operand(function_ids, self_ty)?;
+                    for op in method_type_args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    for op in args {
+                        resolve_operand(function_ids, op)?;
+                    }
+                    Ok(())
+                }
                 Instruction::ICall { fnptr, args, .. } => {
                     resolve_operand(function_ids, fnptr)?;
                     for op in args {
@@ -2649,6 +2774,7 @@ impl Compiler {
                 }
                 Item::Interface(_) => {}
                 Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {}
+                Item::Derive(_) => {}
             }
         }
         Ok(())
@@ -2755,7 +2881,7 @@ impl Compiler {
                             )
                         })?;
                     let synthesized =
-                        typeck::synthesize_default_method_fn_item(info.receiver_readonly, template);
+                        typeck::synthesize_default_method_fn_item(info.receiver, template);
                     self.compile_real_function_with_options(
                         &origin_module,
                         &synthesized,
@@ -6853,6 +6979,15 @@ impl<'a> FunctionLowerer<'a> {
                             let candidate = format!("{type_fqn}::{last}");
                             if self.compiler.env.functions.contains_key(&candidate) {
                                 func_name = Some(candidate);
+                            } else if let Some(dst) = self
+                                .try_lower_static_iface_method_sugar_call(
+                                    &type_fqn,
+                                    last.as_str(),
+                                    args,
+                                    span,
+                                )?
+                            {
+                                return Ok(dst);
                             }
                         }
                         DefKind::Interface => {
@@ -6867,6 +7002,15 @@ impl<'a> FunctionLowerer<'a> {
                             let candidate = format!("{type_fqn}::{last}");
                             if self.compiler.env.functions.contains_key(&candidate) {
                                 func_name = Some(candidate);
+                            } else if let Some(dst) = self
+                                .try_lower_static_iface_method_sugar_call(
+                                    &type_fqn,
+                                    last.as_str(),
+                                    args,
+                                    span,
+                                )?
+                            {
+                                return Ok(dst);
                             }
                         }
                     }
@@ -6886,6 +7030,10 @@ impl<'a> FunctionLowerer<'a> {
                     let candidate = format!("{prim}::{last}");
                     if self.compiler.env.functions.contains_key(&candidate) {
                         func_name = Some(candidate);
+                    } else if let Some(dst) =
+                        self.try_lower_static_iface_method_sugar_call(prim, last, args, span)?
+                    {
+                        return Ok(dst);
                     }
                 }
             }
@@ -6938,6 +7086,55 @@ impl<'a> FunctionLowerer<'a> {
         self.lower_call_closure(callee, args)
     }
 
+    fn try_lower_static_iface_method_sugar_call(
+        &mut self,
+        self_type_name: &str,
+        method_name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<Option<Local>, CompileError> {
+        let mut candidates: BTreeSet<String> = BTreeSet::new();
+        for (ty_name, origin_iface, mname) in self.compiler.env.interface_static_methods.keys() {
+            if ty_name != self_type_name || mname != method_name {
+                continue;
+            }
+
+            if let Some(def) = self.compiler.env.modules.def(origin_iface)
+                && !def.vis.is_public()
+                && !self.module.is_descendant_of(&def.defining_module)
+            {
+                continue;
+            }
+
+            if let Some(iface_def) = self.compiler.env.interfaces.get(origin_iface)
+                && let Some(info) = iface_def.all_methods.get(method_name)
+                && matches!(info.receiver, MethodReceiverKind::Static)
+            {
+                candidates.insert(origin_iface.clone());
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        if candidates.len() != 1 {
+            let mut names: Vec<String> = candidates.into_iter().collect();
+            names.sort();
+            return Err(CompileError::new(
+                format!(
+                    "ambiguous static interface method call `{self_type_name}::{method_name}`; candidates: {}",
+                    names.join(", ")
+                ),
+                span,
+            ));
+        }
+
+        let origin_iface = candidates.into_iter().next().expect("len == 1");
+        let dst =
+            self.lower_interface_method_call(origin_iface, method_name.to_string(), args, span)?;
+        Ok(Some(dst))
+    }
+
     fn lower_call_closure(&mut self, callee: &Expr, args: &[Expr]) -> Result<Local, CompileError> {
         let closure_val = self.lower_expr(callee)?;
 
@@ -6978,14 +7175,7 @@ impl<'a> FunctionLowerer<'a> {
         args: &[Expr],
         span: Span,
     ) -> Result<Local, CompileError> {
-        if args.is_empty() {
-            return Err(CompileError::new(
-                "interface method call requires an explicit receiver argument",
-                span,
-            ));
-        }
-
-        let (origin_iface, method_id, receiver_readonly) = {
+        let (origin_iface, method_id, receiver_kind) = {
             let Some(iface_def) = self.compiler.env.interfaces.get(&iface_name) else {
                 return Err(CompileError::new(
                     format!("internal error: unknown interface `{iface_name}`"),
@@ -7002,136 +7192,254 @@ impl<'a> FunctionLowerer<'a> {
             };
             let origin = method_info.origin.clone();
             let method_id = format!("{origin}::{method_name}");
-            (origin, method_id, method_info.receiver_readonly)
+            (origin, method_id, method_info.receiver)
         };
 
-        let recv_ty = self
-            .expr_ty(&args[0])
-            .ok_or_else(|| {
-                CompileError::new(
-                    "internal error: missing type for interface call receiver",
-                    args[0].span(),
-                )
-            })?
-            .clone();
+        match receiver_kind {
+            MethodReceiverKind::Instance {
+                readonly: receiver_readonly,
+            } => {
+                if args.is_empty() {
+                    return Err(CompileError::new(
+                        "interface method call requires an explicit receiver argument",
+                        span,
+                    ));
+                }
 
-        let recv_for_dispatch = match &recv_ty {
-            Ty::Readonly(inner) => inner.as_ref(),
-            other => other,
-        };
+                let recv_ty = self
+                    .expr_ty(&args[0])
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "internal error: missing type for interface call receiver",
+                            args[0].span(),
+                        )
+                    })?
+                    .clone();
 
-        // Static dispatch is only valid when the static receiver type is a concrete nominal type.
-        //
-        // Note: primitives can have built-in interface impls (e.g. `core::fmt::ToString`), but
-        // they are not `vcall`-dispatchable because `vcall` requires a `ref(struct|enum)` receiver.
-        let static_receiver: Option<(String, Vec<Ty>)> = match recv_for_dispatch {
-            Ty::App(typeck::TyCon::Named(type_name), recv_type_args)
-                if !self.compiler.env.interfaces.contains_key(type_name) =>
-            {
-                Some((type_name.clone(), recv_type_args.clone()))
-            }
-            Ty::Unit => Some(("unit".to_string(), Vec::new())),
-            Ty::Bool => Some(("bool".to_string(), Vec::new())),
-            Ty::Int => Some(("int".to_string(), Vec::new())),
-            Ty::Float => Some(("float".to_string(), Vec::new())),
-            Ty::Byte => Some(("byte".to_string(), Vec::new())),
-            Ty::Char => Some(("char".to_string(), Vec::new())),
-            Ty::String => Some(("string".to_string(), Vec::new())),
-            Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
-            Ty::Array(elem) => Some(("array".to_string(), vec![*elem.clone()])),
-            _ => None,
-        };
+                let recv_for_dispatch = match &recv_ty {
+                    Ty::Readonly(inner) => inner.as_ref(),
+                    other => other,
+                };
 
-        if let Some((type_name, recv_type_args)) = static_receiver {
-            let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
-                type_name.clone(),
-                origin_iface.clone(),
-                method_name.clone(),
-            )) else {
-                return Err(CompileError::new(
-                    format!("no impl found for `{origin_iface}::{method_name}` on `{type_name}`"),
-                    span,
-                ));
-            };
-            let impl_fn = impl_fn.clone();
+                // Static dispatch is only valid when the static receiver type is a concrete nominal type.
+                //
+                // Note: primitives can have built-in interface impls (e.g. `core::fmt::ToString`), but
+                // they are not `vcall`-dispatchable because `vcall` requires a `ref(struct|enum)` receiver.
+                let static_receiver: Option<(String, Vec<Ty>)> = match recv_for_dispatch {
+                    Ty::App(typeck::TyCon::Named(type_name), recv_type_args)
+                        if !self.compiler.env.interfaces.contains_key(type_name) =>
+                    {
+                        Some((type_name.clone(), recv_type_args.clone()))
+                    }
+                    Ty::Unit => Some(("unit".to_string(), Vec::new())),
+                    Ty::Bool => Some(("bool".to_string(), Vec::new())),
+                    Ty::Int => Some(("int".to_string(), Vec::new())),
+                    Ty::Float => Some(("float".to_string(), Vec::new())),
+                    Ty::Byte => Some(("byte".to_string(), Vec::new())),
+                    Ty::Char => Some(("char".to_string(), Vec::new())),
+                    Ty::String => Some(("string".to_string(), Vec::new())),
+                    Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
+                    Ty::Array(elem) => Some(("array".to_string(), vec![*elem.clone()])),
+                    _ => None,
+                };
 
-            let method_type_args = self
-                .compiler
-                .types
-                .for_fn(self.type_info_name.as_str())
-                .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
-                .cloned()
-                .unwrap_or_default();
-            let mut call_args =
-                Vec::with_capacity(recv_type_args.len() + method_type_args.len() + args.len());
-            for ty in &recv_type_args {
-                call_args.push(self.lower_type_rep_for_ty(ty, span)?);
-            }
-            for ty in &method_type_args {
-                call_args.push(self.lower_type_rep_for_ty(ty, span)?);
-            }
-            let recv_local = self.lower_expr(&args[0])?;
-            let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
-                let ro = self.alloc_local();
-                self.emit(Instruction::AsReadonly {
-                    dst: ro,
-                    src: recv_local,
+                if let Some((type_name, recv_type_args)) = static_receiver {
+                    let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
+                        type_name.clone(),
+                        origin_iface.clone(),
+                        method_name.clone(),
+                    )) else {
+                        return Err(CompileError::new(
+                            format!(
+                                "no impl found for `{origin_iface}::{method_name}` on `{type_name}`"
+                            ),
+                            span,
+                        ));
+                    };
+                    let impl_fn = impl_fn.clone();
+
+                    let method_type_args = self
+                        .compiler
+                        .types
+                        .for_fn(self.type_info_name.as_str())
+                        .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut call_args = Vec::with_capacity(
+                        recv_type_args.len() + method_type_args.len() + args.len(),
+                    );
+                    for ty in &recv_type_args {
+                        call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+                    }
+                    for ty in &method_type_args {
+                        call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+                    }
+                    let recv_local = self.lower_expr(&args[0])?;
+                    let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+                        let ro = self.alloc_local();
+                        self.emit(Instruction::AsReadonly {
+                            dst: ro,
+                            src: recv_local,
+                        });
+                        ro
+                    } else {
+                        recv_local
+                    };
+                    call_args.push(Operand::Local(recv_local));
+                    for a in &args[1..] {
+                        let v = self.lower_expr(a)?;
+                        call_args.push(Operand::Local(v));
+                    }
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(dst),
+                        func: impl_fn,
+                        args: call_args,
+                    });
+                    return Ok(dst);
+                }
+
+                // Otherwise, lower to dynamic dispatch (`vcall`).
+                let recv_local = self.lower_expr(&args[0])?;
+                let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
+                    let ro = self.alloc_local();
+                    self.emit(Instruction::AsReadonly {
+                        dst: ro,
+                        src: recv_local,
+                    });
+                    ro
+                } else {
+                    recv_local
+                };
+                let method_type_args = self
+                    .compiler
+                    .types
+                    .for_fn(self.type_info_name.as_str())
+                    .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
+                    .cloned()
+                    .unwrap_or_default();
+                let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
+                for ty in &method_type_args {
+                    method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+                }
+                let mut vcall_args = Vec::with_capacity(args.len().saturating_sub(1));
+                for a in &args[1..] {
+                    let v = self.lower_expr(a)?;
+                    vcall_args.push(Operand::Local(v));
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::VCall {
+                    dst: Some(dst),
+                    obj: Operand::Local(recv_local),
+                    method: method_id,
+                    method_type_args: method_type_arg_reps,
+                    args: vcall_args,
                 });
-                ro
-            } else {
-                recv_local
-            };
-            call_args.push(Operand::Local(recv_local));
-            for a in &args[1..] {
-                let v = self.lower_expr(a)?;
-                call_args.push(Operand::Local(v));
+                Ok(dst)
             }
-            let dst = self.alloc_local();
-            self.emit(Instruction::Call {
-                dst: Some(dst),
-                func: impl_fn,
-                args: call_args,
-            });
-            return Ok(dst);
-        }
+            MethodReceiverKind::Static => {
+                let self_ty = self
+                    .compiler
+                    .types
+                    .for_fn(self.type_info_name.as_str())
+                    .and_then(|info| info.static_iface_self_tys.get(&(span, method_id.clone())))
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            "internal error: missing implementing type for static interface call",
+                            span,
+                        )
+                    })?;
 
-        // Otherwise, lower to dynamic dispatch (`vcall`).
-        let recv_local = self.lower_expr(&args[0])?;
-        let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
-            let ro = self.alloc_local();
-            self.emit(Instruction::AsReadonly {
-                dst: ro,
-                src: recv_local,
-            });
-            ro
-        } else {
-            recv_local
-        };
-        let method_type_args = self
-            .compiler
-            .types
-            .for_fn(self.type_info_name.as_str())
-            .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
-            .cloned()
-            .unwrap_or_default();
-        let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
-        for ty in &method_type_args {
-            method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+                let recv_for_dispatch = match &self_ty {
+                    Ty::Readonly(inner) => inner.as_ref(),
+                    other => other,
+                };
+                let static_receiver: Option<(String, Vec<Ty>)> = match recv_for_dispatch {
+                    Ty::App(typeck::TyCon::Named(type_name), recv_type_args)
+                        if !self.compiler.env.interfaces.contains_key(type_name) =>
+                    {
+                        Some((type_name.clone(), recv_type_args.clone()))
+                    }
+                    Ty::Unit => Some(("unit".to_string(), Vec::new())),
+                    Ty::Bool => Some(("bool".to_string(), Vec::new())),
+                    Ty::Int => Some(("int".to_string(), Vec::new())),
+                    Ty::Float => Some(("float".to_string(), Vec::new())),
+                    Ty::Byte => Some(("byte".to_string(), Vec::new())),
+                    Ty::Char => Some(("char".to_string(), Vec::new())),
+                    Ty::String => Some(("string".to_string(), Vec::new())),
+                    Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
+                    Ty::Array(elem) => Some(("array".to_string(), vec![*elem.clone()])),
+                    _ => None,
+                };
+
+                let method_type_args = self
+                    .compiler
+                    .types
+                    .for_fn(self.type_info_name.as_str())
+                    .and_then(|info| info.method_type_args.get(&(span, method_id.clone())))
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some((type_name, self_type_args)) = static_receiver {
+                    let Some(impl_fn) = self.compiler.env.interface_static_methods.get(&(
+                        type_name.clone(),
+                        origin_iface.clone(),
+                        method_name.clone(),
+                    )) else {
+                        return Err(CompileError::new(
+                            format!(
+                                "no impl found for `{origin_iface}::{method_name}` on `{type_name}`"
+                            ),
+                            span,
+                        ));
+                    };
+                    let impl_fn = impl_fn.clone();
+
+                    let mut call_args = Vec::with_capacity(
+                        self_type_args.len() + method_type_args.len() + args.len(),
+                    );
+                    for ty in &self_type_args {
+                        call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+                    }
+                    for ty in &method_type_args {
+                        call_args.push(self.lower_type_rep_for_ty(ty, span)?);
+                    }
+                    for a in args {
+                        let v = self.lower_expr(a)?;
+                        call_args.push(Operand::Local(v));
+                    }
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::Call {
+                        dst: Some(dst),
+                        func: impl_fn,
+                        args: call_args,
+                    });
+                    return Ok(dst);
+                }
+
+                // Generic `Self` type (or other non-nominal form): dynamically dispatch based on
+                // the runtime `TypeRep` for the implementing type.
+                let self_ty_rep = self.lower_type_rep_for_ty(&self_ty, span)?;
+                let mut method_type_arg_reps = Vec::with_capacity(method_type_args.len());
+                for ty in &method_type_args {
+                    method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
+                }
+                let mut value_args = Vec::with_capacity(args.len());
+                for a in args {
+                    let v = self.lower_expr(a)?;
+                    value_args.push(Operand::Local(v));
+                }
+                let dst = self.alloc_local();
+                self.emit(Instruction::SCall {
+                    dst: Some(dst),
+                    self_ty: self_ty_rep,
+                    method: method_id,
+                    method_type_args: method_type_arg_reps,
+                    args: value_args,
+                });
+                Ok(dst)
+            }
         }
-        let mut vcall_args = Vec::with_capacity(args.len().saturating_sub(1));
-        for a in &args[1..] {
-            let v = self.lower_expr(a)?;
-            vcall_args.push(Operand::Local(v));
-        }
-        let dst = self.alloc_local();
-        self.emit(Instruction::VCall {
-            dst: Some(dst),
-            obj: Operand::Local(recv_local),
-            method: method_id,
-            method_type_args: method_type_arg_reps,
-            args: vcall_args,
-        });
-        Ok(dst)
     }
 
     fn lower_method_call(
@@ -7326,6 +7634,9 @@ impl<'a> FunctionLowerer<'a> {
             let Some(method_info) = iface.all_methods.get(&method.name) else {
                 continue;
             };
+            let MethodReceiverKind::Instance { .. } = method_info.receiver else {
+                continue;
+            };
             if type_implements_interface(&self.compiler.env, recv_nom, iface_name) {
                 origins
                     .entry(method_info.origin.clone())
@@ -7357,7 +7668,7 @@ impl<'a> FunctionLowerer<'a> {
             .interfaces
             .get(&origin_iface)
             .and_then(|d| d.all_methods.get(&method.name))
-            .is_some_and(|m| m.receiver_readonly);
+            .is_some_and(|m| matches!(m.receiver, MethodReceiverKind::Instance { readonly: true }));
         let Some(impl_fn) = self.compiler.env.interface_methods.get(&(
             recv_nom.to_string(),
             origin_iface.clone(),
@@ -7441,10 +7752,15 @@ impl<'a> FunctionLowerer<'a> {
                     span,
                 ));
             };
-            (
-                format!("{}::{method_name}", info.origin),
-                info.receiver_readonly,
-            )
+            let MethodReceiverKind::Instance { readonly } = info.receiver else {
+                return Err(CompileError::new(
+                    format!(
+                        "method `{iface_name}::{method_name}` is a static interface method and cannot be called with a receiver"
+                    ),
+                    span,
+                ));
+            };
+            (format!("{}::{method_name}", info.origin), readonly)
         };
 
         let recv_ty = self

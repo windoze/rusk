@@ -1,0 +1,85 @@
+// expect: ok int 30221022203
+
+use core::serde::SerdeError;
+use core::serde::Serialize;
+use core::serde::Serializer;
+
+struct HashSer { h: int }
+
+impl Serializer for HashSer {
+    fn unit() -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 10;
+        Result::Ok(())
+    }
+    fn bool(v: bool) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + if v { 11 } else { 12 };
+        Result::Ok(())
+    }
+    fn int(v: int) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + (20 + v);
+        Result::Ok(())
+    }
+    fn float(_v: float) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 13;
+        Result::Ok(())
+    }
+    fn byte(_v: byte) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 14;
+        Result::Ok(())
+    }
+    fn char(_v: char) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 15;
+        Result::Ok(())
+    }
+    fn string(_v: string) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 16;
+        Result::Ok(())
+    }
+    fn bytes(_v: bytes) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 17;
+        Result::Ok(())
+    }
+
+    fn struct_begin(_name: string, field_count: int) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + (1 + field_count);
+        Result::Ok(())
+    }
+    fn struct_field(_name: string) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 2;
+        Result::Ok(())
+    }
+    fn struct_end() -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 3;
+        Result::Ok(())
+    }
+
+    fn enum_begin(_name: string, variant_count: int) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + (4 + variant_count);
+        Result::Ok(())
+    }
+    fn enum_variant(_name: string, index: int, field_count: int) -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + (5 + index * 10 + field_count);
+        Result::Ok(())
+    }
+    fn enum_end() -> Result<unit, SerdeError> {
+        self.h = self.h * 100 + 6;
+        Result::Ok(())
+    }
+}
+
+struct Point { x: int, y: int }
+
+derive Serialize for Point;
+
+fn main() -> int {
+    let s = (HashSer { h: 0 } as Serializer);
+    let p = Point { x: 1, y: 2 };
+    match Serialize::serialize(p, s) {
+        Result::Ok(_) => match s as? HashSer {
+            Option::Some(hs) => hs.h,
+            Option::None => -1,
+        },
+        Result::Err(_) => -2,
+    }
+}
+

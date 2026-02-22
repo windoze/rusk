@@ -171,6 +171,10 @@ A bytecode module contains:
   - interned method name table; `MethodId(u32)` indexes this table
 - `vcall_dispatch: Vec<Vec<(MethodId, FunctionId)>>`
   - parallel to `type_names`; used by `vcall` dynamic dispatch
+- `scall_dispatch: Vec<Vec<(MethodId, FunctionId)>>`
+  - parallel to `type_names`; used by `scall` dynamic dispatch (static interface method calls)
+- `assoc_type_dispatch: Vec<Vec<(TypeId, String, FunctionId)>>`
+  - parallel to `type_names`; used to compute associated-type `typerep` projections at runtime
 - `interface_impls: Vec<Vec<TypeId>>`
   - parallel to `type_names`; used by runtime interface checks (`is_type` / `checked_cast`)
 - `struct_layouts: Vec<Option<Vec<String>>>`
@@ -227,7 +231,7 @@ Execution proceeds with a call stack of **frames**. Each frame contains:
 - `regs: Vec<Option<Value>>` (length = `reg_count`)
 - `return_dsts` (return destinations in the caller frame)
   - `None`: return value(s) are discarded
-  - `One(Reg)`: single-register return (from `Call` / `ICall` / `VCall`)
+  - `One(Reg)`: single-register return (from `Call` / `ICall` / `VCall` / `SCall`)
   - `Multi([Reg...])`: multi-register return (from `CallMulti`)
 
 Instruction fetch behavior:
@@ -437,6 +441,14 @@ This section defines operational semantics per instruction. All register indices
   - Produces an interned applied `typerep(base, args...)`.
 - `IsType { dst, value, ty }`
   - Reads `ty` as a `typerep` and writes `bool` indicating whether `value` matches that type.
+- `AssocTypeRep { dst, recv, iface_type_id, assoc }`
+  - Computes an associated type projection as a runtime `typerep`.
+  - `recv` must be a `typerep` value representing the receiver type.
+  - Looks up a projection function using `module.assoc_type_dispatch` keyed by:
+    - the receiver’s runtime `TypeId` (from `recv`’s constructor), and
+    - `(iface_type_id, assoc)`.
+  - Calls the projection function with the receiver’s instantiated type arguments (as leading
+    `typerep` values) and writes the returned `typerep` to `dst`.
 
 Type test notes (reference VM behavior):
 
@@ -504,7 +516,13 @@ These ops trap if operands are uninitialized or of the wrong type:
   - `IntDiv` traps on division by zero.
   - `IntMod` traps on modulo by zero.
   - Integer overflow wraps (two's complement).
+- `IntAnd`, `IntOr`, `IntXor`, `IntNot`
+- `IntShl`, `IntShr`, `IntUShr`
+  - Shift amount is an `int` and is masked to the integer bit width (64).
 - `IntLt`, `IntLe`, `IntGt`, `IntGe`, `IntEq`, `IntNe`
+- `ByteAnd`, `ByteOr`, `ByteXor`, `ByteNot`
+- `ByteShl`, `ByteShr`, `ByteUShr`
+  - Shift amount is an `int` and is masked to the byte bit width (8).
 - `BoolNot`, `BoolEq`, `BoolNe`
 
 ### 8.6 Calls
@@ -546,6 +564,15 @@ These ops trap if operands are uninitialized or of the wrong type:
     2. `method_type_args` as additional leading `typerep` values,
     3. the receiver value,
     4. `args`.
+- `SCall { dst, self_ty, method, method_type_args, args }`
+  - Dynamic dispatch for receiver-less interface calls based on the implementing type’s runtime `TypeId`:
+    - `self_ty` must be a runtime `typerep` value
+    - lookup uses `module.scall_dispatch[impl_type_id]` to resolve `method: MethodId` to a `FunctionId`
+    - implementing type args are read from the `typerep` (empty for primitives)
+  - The callee is invoked with argument list:
+    1. implementing type args as leading `typerep` values,
+    2. `method_type_args` as additional leading `typerep` values,
+    3. `args`.
 
 ### 8.7 Effects and control flow
 
@@ -618,7 +645,7 @@ The current intrinsic set includes:
 
 ---
 
-## 10. `.rbc` serialization format (v0.11)
+## 10. `.rbc` serialization format (v0.13)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -672,7 +699,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `10`
+- minor = `13`
 
 The reference decoder requires an **exact** version match.
 
@@ -695,15 +722,26 @@ After the header, the module is encoded as:
     - `type_id` is a `TypeId` index into `type_names`
     - `method_id` is a `MethodId` index into `method_names`
     - `fn_id` is a `FunctionId` index into `functions`
-13. `interface_impls_len: len`
-14. `interface_impls: repeat interface_impls_len times { type_id: u32, ifaces_len: len, ifaces: [u32; ifaces_len] }`
+13. `scall_dispatch_len: len`
+14. `scall_dispatch: repeat scall_dispatch_len times { type_id: u32, method_id: u32, fn_id: u32 }`
+    - `type_id` is a `TypeId` index into `type_names`
+    - `method_id` is a `MethodId` index into `method_names`
+    - `fn_id` is a `FunctionId` index into `functions`
+15. `assoc_type_dispatch_len: len`
+16. `assoc_type_dispatch: repeat assoc_type_dispatch_len times { type_id: u32, iface_type_id: u32, assoc: string, fn_id: u32 }`
+    - `type_id` is a `TypeId` index into `type_names` (dynamic type)
+    - `iface_type_id` is a `TypeId` index into `type_names` (interface name)
+    - `assoc` is the associated type name
+    - `fn_id` is a `FunctionId` index into `functions`
+17. `interface_impls_len: len`
+18. `interface_impls: repeat interface_impls_len times { type_id: u32, ifaces_len: len, ifaces: [u32; ifaces_len] }`
     - `type_id` is a `TypeId` (dynamic type)
     - each `iface` is a `TypeId` naming an interface
-15. `struct_layouts_len: len`
-16. `struct_layouts: repeat struct_layouts_len times { type_id: u32, fields_len: len, fields: [string; fields_len] }`
-17. `external_effects_len: len`
-18. `external_effects: [ExternalEffectDecl; external_effects_len]`
-19. `entry: u32` (FunctionId)
+19. `struct_layouts_len: len`
+20. `struct_layouts: repeat struct_layouts_len times { type_id: u32, fields_len: len, fields: [string; fields_len] }`
+21. `external_effects_len: len`
+22. `external_effects: [ExternalEffectDecl; external_effects_len]`
+23. `entry: u32` (FunctionId)
 
 The decoder rejects trailing bytes after the module.
 
@@ -876,7 +914,7 @@ Intrinsics use `u16` tags `0..=71`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.11):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.13):
 
 - `0`: `Const`
 - `1`: `Copy`
@@ -926,6 +964,22 @@ Instruction opcodes are normative tags used by the `.rbc` encoding (v0.11):
 - `45`: `ResumeTail`
 - `46`: `CallMulti`
 - `47`: `ReturnMulti`
+- `48`: `IntAnd`
+- `49`: `IntOr`
+- `50`: `IntXor`
+- `51`: `IntShl`
+- `52`: `IntShr`
+- `53`: `IntUShr`
+- `54`: `IntNot`
+- `55`: `ByteAnd`
+- `56`: `ByteOr`
+- `57`: `ByteXor`
+- `58`: `ByteShl`
+- `59`: `ByteShr`
+- `60`: `ByteUShr`
+- `61`: `ByteNot`
+- `62`: `AssocTypeRep`
+- `63`: `SCall`
 
 Instruction payloads are encoded by writing each operand field in the order listed in the
 instruction definition, using the primitive encodings from §10.2 (e.g. `u32` for registers and PC

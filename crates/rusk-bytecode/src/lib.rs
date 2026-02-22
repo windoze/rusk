@@ -590,6 +590,20 @@ pub enum Instruction {
         method_type_args: Vec<Reg>,
         args: Vec<Reg>,
     },
+    /// Dynamic dispatch for static interface method calls.
+    ///
+    /// The `self_ty` register must contain a runtime `typerep` value. The callee is selected
+    /// via `(TypeId, MethodId)` lookup derived from the `typerep` constructor, then invoked with:
+    /// - the `Self` type arguments (from the `typerep`)
+    /// - any method-level generic `typerep` arguments
+    /// - the provided value arguments
+    SCall {
+        dst: Option<Reg>,
+        self_ty: Reg,
+        method: MethodId,
+        method_type_args: Vec<Reg>,
+        args: Vec<Reg>,
+    },
 
     PushHandler {
         clauses: Vec<HandlerClause>,
@@ -678,6 +692,11 @@ pub struct ExecutableModule {
     /// `vcall_dispatch[type_id]` is a sorted list of `(MethodId, FunctionId)` pairs.
     pub vcall_dispatch: Vec<Vec<(MethodId, FunctionId)>>,
 
+    /// Static interface method dispatch table indexed by receiver `TypeId`.
+    ///
+    /// `scall_dispatch[type_id]` is a sorted list of `(MethodId, FunctionId)` pairs.
+    pub scall_dispatch: Vec<Vec<(MethodId, FunctionId)>>,
+
     /// Associated type `typerep` dispatch table indexed by receiver `TypeId`.
     ///
     /// `assoc_type_dispatch[type_id]` is a sorted list of `(InterfaceTypeId, AssocName, FunctionId)`
@@ -715,6 +734,7 @@ impl ExecutableModule {
             method_names: Vec::new(),
             method_ids: BTreeMap::new(),
             vcall_dispatch: Vec::new(),
+            scall_dispatch: Vec::new(),
             assoc_type_dispatch: Vec::new(),
             interface_impls: Vec::new(),
             struct_layouts: Vec::new(),
@@ -800,6 +820,7 @@ impl ExecutableModule {
         self.type_ids.insert(name.clone(), id);
         self.type_names.push(name);
         self.vcall_dispatch.push(Vec::new());
+        self.scall_dispatch.push(Vec::new());
         self.assoc_type_dispatch.push(Vec::new());
         self.interface_impls.push(Vec::new());
         self.struct_layouts.push(None);
@@ -865,6 +886,35 @@ impl ExecutableModule {
 
     pub fn vcall_target(&self, type_id: TypeId, method: MethodId) -> Option<FunctionId> {
         let entries = self.vcall_dispatch.get(type_id.0 as usize)?;
+        let idx = entries.binary_search_by_key(&method.0, |(m, _)| m.0).ok()?;
+        entries.get(idx).map(|(_, f)| *f)
+    }
+
+    pub fn add_scall_entry(
+        &mut self,
+        type_id: TypeId,
+        method: MethodId,
+        fn_id: FunctionId,
+    ) -> Result<(), String> {
+        let Some(entries) = self.scall_dispatch.get_mut(type_id.0 as usize) else {
+            return Err(format!("invalid TypeId {}", type_id.0));
+        };
+        let pos = entries
+            .binary_search_by_key(&method.0, |(m, _)| m.0)
+            .unwrap_or_else(|pos| pos);
+
+        if entries.get(pos).is_some_and(|(m, _)| *m == method) {
+            return Err(format!(
+                "duplicate scall dispatch entry for type {} method {}",
+                type_id.0, method.0
+            ));
+        }
+        entries.insert(pos, (method, fn_id));
+        Ok(())
+    }
+
+    pub fn scall_target(&self, type_id: TypeId, method: MethodId) -> Option<FunctionId> {
+        let entries = self.scall_dispatch.get(type_id.0 as usize)?;
         let idx = entries.binary_search_by_key(&method.0, |(m, _)| m.0).ok()?;
         entries.get(idx).map(|(_, f)| *f)
     }

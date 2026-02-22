@@ -15,6 +15,7 @@ mod typeck;
 
 /// Script front-end: parses and compiles Rusk source to bytecode (via an internal MIR).
 mod compiler;
+mod derive_expand;
 
 // Re-export commonly used types
 pub use compiler::{

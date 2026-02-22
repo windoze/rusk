@@ -1,0 +1,33 @@
+// expect: ok string {"id":7,"name":"Alice \"The Great\"\nLine2","active":true,"role":[0,123],"data":[1,2,3]}
+
+enum Role {
+    User(int),
+    Admin,
+}
+
+derive Serialize + Deserialize for Role;
+
+struct User {
+    id: int,
+    name: string,
+    active: bool,
+    role: Role,
+    data: bytes,
+}
+
+derive Serialize + Deserialize for User;
+
+fn main() -> string {
+    let u = User {
+        id: 7,
+        name: "Alice \"The Great\"\nLine2",
+        active: true,
+        role: Role::User(123),
+        data: b"\x01\x02\x03",
+    };
+
+    match std::json::to_string(u) {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic("serialize error"),
+    }
+}

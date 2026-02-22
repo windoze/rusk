@@ -1,12 +1,18 @@
 // expect: ok int 7
 
 interface I { static fn foo(n: int) -> int; }
+
 struct S {}
 
 impl I for S {
     static fn foo(n: int) -> int { n + 1 }
 }
 
-fn main() -> int {
-    I::foo::<S>(6)
+fn call_foo<T: I>(n: int) -> int {
+    I::foo::<T>(n)
 }
+
+fn main() -> int {
+    call_foo::<S>(6)
+}
+

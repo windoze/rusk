@@ -1,3 +1,9 @@
+use core::serde::Deserialize;
+use core::serde::Deserializer;
+use core::serde::SerdeError;
+use core::serde::Serialize;
+use core::serde::Serializer;
+
 impl<T> Option<T> {
     pub readonly fn is_some() -> bool {
         match self {
@@ -42,6 +48,73 @@ impl<T> Option<T> {
         match self {
             Option::Some(v) => v,
             Option::None => f(),
+        }
+    }
+}
+
+// -------- Serde impls --------
+
+impl<T: Serialize> Serialize for Option<T> {
+    readonly fn serialize(s: Serializer) -> Result<unit, SerdeError> {
+        match s.enum_begin("Option", 2) {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+
+        match self {
+            Option::None => {
+                match s.enum_variant("None", 0, 0) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+            }
+            Option::Some(v) => {
+                match s.enum_variant("Some", 1, 1) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                match Serialize::serialize(v, s) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+            }
+        }
+
+        s.enum_end()
+    }
+}
+
+impl<T: Deserialize> Deserialize for Option<T> {
+    static fn deserialize(d: Deserializer) -> Result<Option<T>, SerdeError> {
+        let tag = 0;
+        match d.enum_begin("Option", 2) {
+            Result::Ok(v) => { tag = v; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+
+        if tag == 0 {
+            match d.enum_variant("None", 0, 0) {
+                Result::Ok(_) => {}
+                Result::Err(e) => { return Result::Err(e); }
+            }
+            match d.enum_end() {
+                Result::Ok(_) => Result::Ok(Option::None),
+                Result::Err(e) => Result::Err(e),
+            }
+        } else if tag == 1 {
+            match d.enum_variant("Some", 1, 1) {
+                Result::Ok(_) => {}
+                Result::Err(e) => { return Result::Err(e); }
+            }
+            match Deserialize::deserialize::<T>(d) {
+                Result::Err(e) => Result::Err(e),
+                Result::Ok(v) => match d.enum_end() {
+                    Result::Ok(_) => Result::Ok(Option::Some(v)),
+                    Result::Err(e) => Result::Err(e),
+                }
+            }
+        } else {
+            Result::Err(SerdeError::UnknownEnumTag("Option", tag))
         }
     }
 }

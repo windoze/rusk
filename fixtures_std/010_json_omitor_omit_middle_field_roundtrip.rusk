@@ -1,0 +1,22 @@
+// expect: ok string {"a":1,"c":3}
+
+struct Middle {
+    a: int,
+    b: std::json::OmitOr<int>,
+    c: int,
+}
+
+derive Serialize + Deserialize for Middle;
+
+fn main() -> string {
+    let src = "{\"a\":1,\"c\":3}";
+    let v = match std::json::from_string::<Middle>(src) {
+        Result::Ok(v) => v,
+        Result::Err(_) => panic("deserialize error"),
+    };
+    match std::json::to_string(v) {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic("serialize error"),
+    }
+}
+

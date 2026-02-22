@@ -43,7 +43,7 @@ MIR uses the following identifier forms in its canonical textual format
 - **Function name**: `<ident>` (e.g. `main`, `process_data`)
 - **Block label**: `<ident>` (e.g. `block0`, `block_log`)
 - **Local**: `%<ident>` (e.g. `%0`, `%msg`, `%k`)
-- **Virtual method id**: `<InterfaceFqn>::<method>` (e.g. `Logger::log`)
+- **Interface method id**: `<InterfaceFqn>::<method>` (e.g. `Logger::log`)
 
 An implementation may intern these names.
 
@@ -64,11 +64,17 @@ A module contains:
 - functions (required)
 - optional interface/type metadata (optional, for tooling/validation/optimization)
 - optional method-resolution metadata (optional, for `vcall`)
+- optional static interface method-resolution metadata (optional, for `scall`)
 - optional declared host imports (optional, for embedding/validation)
 
 In this implementation, method-resolution metadata is represented as a lookup table:
 
 - `(dynamic_type_name, method_id) -> function_id`
+
+Static interface method-resolution metadata (for receiver-less interface calls where the
+implementing type is only known via a runtime `typerep`) is represented as:
+
+- `(type_name, method_id) -> function_id`
 
 Additionally, checked casts / runtime type tests against `interface` targets may use optional
 interface-implementation metadata:
@@ -472,9 +478,24 @@ but avoid call/dispatch overhead.
       4. then `<op_args...>`.
   - Trap: missing method resolution.
 
+- `scall` (static interface call, dynamic):
+  - Syntax: `%dst = scall <op_self_ty> <method> <method_type_args...> (<op_args...>)`
+  - Semantics:
+    - Evaluate `<op_self_ty>` to a runtime `typerep` value.
+    - Determine the implementing type name and its instantiated type arguments from the `typerep`.
+    - Resolve `<method>` via module method metadata, typically:
+      `(type_name, <method>) -> <fn_name>`.
+    - Invoke `<fn_name>` with arguments:
+      1. the implementing type’s instantiated type arguments (as `typerep` values),
+      2. `<method_type_args...>` (as `typerep` values),
+      3. then `<op_args...>`.
+  - Trap: missing method resolution.
+
 For interface dynamic dispatch in v0.4, the compiler uses a canonical method-id string:
 
 - `<origin_interface_fqn>::<method_name>`
+
+This method id form is used for both `vcall` and `scall`.
 
 Argument passing respects Rusk’s value/reference semantics:
 - primitives and other value types are cloned
@@ -485,7 +506,10 @@ Notes for the Rusk front-end (source-level methods):
 
 - An instance method is lowered to a normal MIR function where the **first value parameter** is the receiver.
 - A `readonly fn` method is represented by giving the receiver parameter a readonly view type, so the corresponding MIR parameter is marked `readonly` and runtime writes through it trap.
-- A `static fn` method is lowered as a normal function with **no receiver parameter** (direct `call`).
+- A `static fn` method is lowered as a normal function with **no receiver parameter**.
+  - If the implementing `Self` type is known at compile time, calls can be lowered to a direct `call`.
+  - If the implementing `Self` type is only known via a runtime `typerep` (e.g. `I::f::<T>(...)` in generic code),
+    calls may be lowered to `scall`.
 - Default interface methods may be compiled by generating:
   - a private function for the default body, and
   - a per-`impl` wrapper used in the method-resolution table when the impl omits that method.

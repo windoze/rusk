@@ -380,6 +380,13 @@ pub fn lower_mir_module_with_options(
             .map_err(LowerError::new)?;
     }
 
+    for ((ty, method), id) in &mir.static_methods {
+        let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
+        let method_id = out.intern_method(method.clone()).map_err(LowerError::new)?;
+        out.add_scall_entry(type_id, method_id, FunctionId(id.0))
+            .map_err(LowerError::new)?;
+    }
+
     for (ty, ifaces) in &mir.interface_impls {
         let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
         let mut ids = Vec::with_capacity(ifaces.len());
@@ -1209,6 +1216,35 @@ fn lower_mir_instruction(
             code.push(Instruction::VCall {
                 dst: dst.map(local),
                 obj,
+                method: method_id,
+                method_type_args: bc_method_type_args,
+                args: bc_args,
+            });
+        }
+
+        I::SCall {
+            dst,
+            self_ty,
+            method,
+            method_type_args,
+            args,
+        } => {
+            let self_ty = op_reg(out, self_ty, code, temps)?;
+            let method_id = out.intern_method(method.clone()).map_err(LowerError::new)?;
+
+            let mut bc_method_type_args = Vec::with_capacity(method_type_args.len());
+            for arg in method_type_args {
+                bc_method_type_args.push(op_reg(out, arg, code, temps)?);
+            }
+
+            let mut bc_args = Vec::with_capacity(args.len());
+            for arg in args {
+                bc_args.push(op_reg(out, arg, code, temps)?);
+            }
+
+            code.push(Instruction::SCall {
+                dst: dst.map(local),
+                self_ty,
                 method: method_id,
                 method_type_args: bc_method_type_args,
                 args: bc_args,

@@ -278,16 +278,12 @@ pub(crate) struct InterfaceDefaultTemplate {
 }
 
 pub(crate) fn synthesize_default_method_fn_item(
-    receiver_readonly: bool,
+    receiver: MethodReceiverKind,
     template: &InterfaceDefaultTemplate,
 ) -> FnItem {
     FnItem {
         vis: Visibility::Private,
-        kind: FnItemKind::Method {
-            receiver: MethodReceiverKind::Instance {
-                readonly: receiver_readonly,
-            },
-        },
+        kind: FnItemKind::Method { receiver },
         name: template.name.clone(),
         generics: template.generics.clone(),
         params: template.params.clone(),
@@ -299,7 +295,7 @@ pub(crate) fn synthesize_default_method_fn_item(
 
 #[derive(Clone, Debug)]
 pub(crate) struct InterfaceMethodDecl {
-    pub(crate) receiver_readonly: bool,
+    pub(crate) receiver: MethodReceiverKind,
     pub(crate) has_default: bool,
     pub(crate) default_template: Option<InterfaceDefaultTemplate>,
     pub(crate) sig: InterfaceMethodSig,
@@ -316,7 +312,7 @@ pub(crate) struct InterfaceAssocType {
 #[derive(Clone, Debug)]
 pub(crate) struct InterfaceMethod {
     pub(crate) origin: String,
-    pub(crate) receiver_readonly: bool,
+    pub(crate) receiver: MethodReceiverKind,
     pub(crate) has_default: bool,
     pub(crate) default_template: Option<InterfaceDefaultTemplate>,
     pub(crate) sig: InterfaceMethodSig,
@@ -381,6 +377,13 @@ pub(crate) struct ProgramEnv {
     /// `function_name` must exist in `functions`.
     pub(crate) interface_methods: BTreeMap<(String, String, String), String>,
 
+    /// Static interface method table keyed by canonical interface method id:
+    ///
+    /// `(type_name, origin_interface_name, method_name) -> function_name`.
+    ///
+    /// `function_name` must exist in `functions`.
+    pub(crate) interface_static_methods: BTreeMap<(String, String, String), String>,
+
     /// Associated type definitions for interface impls.
     ///
     /// Keyed by:
@@ -413,6 +416,14 @@ pub(crate) struct FnTypeInfo {
     ///
     /// Keyed by the call expression span.
     pub(crate) method_type_args: HashMap<(Span, String), Vec<Ty>>,
+    /// Implementing `Self` type for static interface method calls.
+    ///
+    /// Static interface methods have no value receiver, so the implementing type must be supplied
+    /// explicitly (e.g. `I::f::<T>(...)`). We record the selected `Self` type at each call site so
+    /// lowering can choose the correct impl function and reify any needed type arguments.
+    ///
+    /// Keyed by `(call_span, canonical_method_id)`.
+    pub(crate) static_iface_self_tys: HashMap<(Span, String), Ty>,
     /// Instantiated interface type arguments for effects (perform + handler patterns).
     ///
     /// Effect identity includes:
@@ -1017,6 +1028,35 @@ fn add_prelude(env: &mut ProgramEnv) {
                 "to_string".to_string(),
             ),
             format!("impl::{to_string_iface}::for::{prim}::to_string"),
+        );
+    }
+
+    // `core::serde::{Serialize, Deserialize}` for primitives (used by `derive` codegen).
+    let serialize_iface = "core::serde::Serialize";
+    let deserialize_iface = "core::serde::Deserialize";
+    for prim in [
+        "unit", "bool", "int", "float", "byte", "char", "string", "bytes",
+    ] {
+        env.interface_impls
+            .insert((prim.to_string(), serialize_iface.to_string()));
+        env.interface_methods.insert(
+            (
+                prim.to_string(),
+                serialize_iface.to_string(),
+                "serialize".to_string(),
+            ),
+            format!("impl::{serialize_iface}::for::{prim}::serialize"),
+        );
+
+        env.interface_impls
+            .insert((prim.to_string(), deserialize_iface.to_string()));
+        env.interface_static_methods.insert(
+            (
+                prim.to_string(),
+                deserialize_iface.to_string(),
+                "deserialize".to_string(),
+            ),
+            format!("impl::{deserialize_iface}::for::{prim}::deserialize"),
         );
     }
 
@@ -1843,9 +1883,75 @@ fn declare_method_sig_with_receiver(
     Ok(())
 }
 
+fn declare_method_sig_without_receiver(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    generic_prefix: &[GenericParamInfo],
+    method: &FnItem,
+    name: String,
+    self_ty: Ty,
+    self_iface: Option<&SelfIfaceCtx>,
+) -> Result<(), TypeError> {
+    if env.functions.contains_key(&name) {
+        return Err(TypeError {
+            message: format!("duplicate function `{name}`"),
+            span: method.name.span,
+        });
+    }
+
+    let self_ty = strip_readonly(&self_ty).clone();
+
+    let mut method_generics =
+        lower_generic_params_in_scope(env, module, generic_prefix, &method.generics, true)?;
+    for g in &mut method_generics {
+        for bound in &mut g.bounds {
+            if contains_self_type(bound) {
+                *bound = subst_self_type(bound.clone(), &self_ty);
+            }
+        }
+    }
+    let mut generics: Vec<GenericParamInfo> = generic_prefix.to_vec();
+    generics.extend(method_generics);
+    let scope = GenericScope::new(&generics)?;
+
+    let mut params = Vec::with_capacity(method.params.len());
+    for p in &method.params {
+        let mut ty = lower_type_expr_with_self_iface(env, module, &scope, &p.ty, self_iface)?;
+        if contains_self_type(&ty) {
+            ty = subst_self_type(ty, &self_ty);
+        }
+        validate_assoc_projs_in_ty(env, &ty, p.ty.span())?;
+        validate_assoc_projs_well_formed_in_ty(env, &generics, &ty, p.ty.span())?;
+        validate_value_ty(env, &ty, p.ty.span())?;
+        params.push(ty);
+    }
+    let mut ret = lower_type_expr_with_self_iface(env, module, &scope, &method.ret, self_iface)?;
+    if contains_self_type(&ret) {
+        ret = subst_self_type(ret, &self_ty);
+    }
+    validate_assoc_projs_in_ty(env, &ret, method.ret.span())?;
+    validate_assoc_projs_well_formed_in_ty(env, &generics, &ret, method.ret.span())?;
+    validate_value_ty(env, &ret, method.ret.span())?;
+
+    env.functions.insert(
+        name.clone(),
+        FnSig {
+            name,
+            vis: method.vis,
+            defining_module: module.clone(),
+            generics,
+            params,
+            ret,
+            span: method.span,
+        },
+    );
+    Ok(())
+}
+
 struct InterfaceDefaultWrapperSigDecl<'a> {
     iface_arity: usize,
-    receiver_ty: Ty,
+    receiver_ty: Option<Ty>,
+    self_ty: Ty,
     method_info: &'a InterfaceMethod,
     name: String,
     span: Span,
@@ -1860,6 +1966,7 @@ fn declare_synthetic_interface_default_wrapper_sig(
     let InterfaceDefaultWrapperSigDecl {
         iface_arity,
         receiver_ty,
+        self_ty,
         method_info,
         name,
         span,
@@ -1879,7 +1986,7 @@ fn declare_synthetic_interface_default_wrapper_sig(
         });
     }
     let shift = impl_arity - iface_arity;
-    let self_ty = strip_readonly(&receiver_ty).clone();
+    let self_ty = strip_readonly(&self_ty).clone();
 
     let mut generics: Vec<GenericParamInfo> = impl_generics.to_vec();
     for g in &method_info.sig.generics {
@@ -1904,8 +2011,11 @@ fn declare_synthetic_interface_default_wrapper_sig(
         });
     }
 
-    let mut params = Vec::with_capacity(method_info.sig.params.len() + 1);
-    params.push(receiver_ty);
+    let mut params =
+        Vec::with_capacity(method_info.sig.params.len() + receiver_ty.is_some() as usize);
+    if let Some(receiver_ty) = receiver_ty {
+        params.push(receiver_ty);
+    }
     params.extend(method_info.sig.params.iter().cloned().map(|t| {
         let t = shift_method_generics(t, iface_arity, shift);
         if contains_self_type(&t) {
@@ -2203,7 +2313,7 @@ fn fill_interface(
                 methods.insert(
                     mname.clone(),
                     InterfaceMethodDecl {
-                        receiver_readonly: member.readonly,
+                        receiver: member.receiver,
                         has_default: member.body.is_some(),
                         default_template,
                         sig: InterfaceMethodSig {
@@ -2323,7 +2433,7 @@ fn compute_interface_all_methods(
             name,
             InterfaceMethod {
                 origin: iface.to_string(),
-                receiver_readonly: decl.receiver_readonly,
+                receiver: decl.receiver,
                 has_default: decl.has_default,
                 default_template: decl.default_template,
                 sig: decl.sig,
@@ -2367,7 +2477,7 @@ fn compute_interface_all_methods(
                 rewrite_interface_method_sig(&meth.sig, &iface_subst, sup_arity, iface_arity);
             let rewritten = InterfaceMethod {
                 origin: meth.origin,
-                receiver_readonly: meth.receiver_readonly,
+                receiver: meth.receiver,
                 has_default: meth.has_default,
                 default_template: meth.default_template,
                 sig: rewritten_sig,
@@ -2910,15 +3020,6 @@ fn process_impl_item(
                                 span: method.span,
                             });
                         }
-                        if let FnItemKind::Method { receiver } = method.kind
-                            && matches!(receiver, MethodReceiverKind::Static)
-                        {
-                            return Err(TypeError {
-                                message: "`static fn` is not allowed in interface impl blocks"
-                                    .to_string(),
-                                span: method.span,
-                            });
-                        }
                         if impl_methods_by_name.insert(mname.clone(), method).is_some() {
                             return Err(TypeError {
                                 message: format!("duplicate method `{mname}` in impl"),
@@ -2981,14 +3082,16 @@ fn process_impl_item(
                 let method = impl_methods_by_name.get(mname).copied();
 
                 let impl_fn_name = format!("impl::{iface_name}::for::{type_name}::{mname}");
-
-                let receiver_ty = if info.receiver_readonly {
-                    Ty::Readonly(Box::new(expected_recv_base.clone()))
-                } else {
-                    expected_recv_base.clone()
-                };
-
                 let key = (type_name.clone(), info.origin.clone(), mname.clone());
+
+                let receiver_ty = match info.receiver {
+                    MethodReceiverKind::Instance { readonly } => Some(if readonly {
+                        Ty::Readonly(Box::new(expected_recv_base.clone()))
+                    } else {
+                        expected_recv_base.clone()
+                    }),
+                    MethodReceiverKind::Static => None,
+                };
 
                 let Some(method) = method else {
                     if !info.has_default {
@@ -3008,6 +3111,7 @@ fn process_impl_item(
                         InterfaceDefaultWrapperSigDecl {
                             iface_arity,
                             receiver_ty,
+                            self_ty: expected_recv_base.clone(),
                             method_info: info,
                             name: impl_fn_name.clone(),
                             span: item.span,
@@ -3039,7 +3143,11 @@ fn process_impl_item(
                         }
                     }
 
-                    if env.interface_methods.contains_key(&key) {
+                    let table = match info.receiver {
+                        MethodReceiverKind::Instance { .. } => &mut env.interface_methods,
+                        MethodReceiverKind::Static => &mut env.interface_static_methods,
+                    };
+                    if table.contains_key(&key) {
                         return Err(TypeError {
                             message: format!(
                                 "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
@@ -3048,7 +3156,7 @@ fn process_impl_item(
                             span: item.span,
                         });
                     }
-                    env.interface_methods.insert(key, impl_fn_name);
+                    table.insert(key, impl_fn_name);
                     continue;
                 };
 
@@ -3067,20 +3175,40 @@ fn process_impl_item(
                         span: method.span,
                     });
                 };
-                let MethodReceiverKind::Instance { readonly } = receiver else {
-                    return Err(TypeError {
-                        message: "internal error: interface impl methods must be instance methods"
-                            .to_string(),
-                        span: method.span,
-                    });
-                };
-                if readonly != info.receiver_readonly {
-                    return Err(TypeError {
-                        message: format!(
-                            "method `{mname}` receiver mutability does not match interface `{iface_def_name}`"
-                        ),
-                        span: method.name.span,
-                    });
+
+                match (info.receiver, receiver) {
+                    (
+                        MethodReceiverKind::Instance {
+                            readonly: expected_ro,
+                        },
+                        MethodReceiverKind::Instance { readonly },
+                    ) => {
+                        if readonly != expected_ro {
+                            return Err(TypeError {
+                                message: format!(
+                                    "method `{mname}` receiver mutability does not match interface `{iface_def_name}`"
+                                ),
+                                span: method.name.span,
+                            });
+                        }
+                    }
+                    (MethodReceiverKind::Static, MethodReceiverKind::Static) => {}
+                    (MethodReceiverKind::Instance { .. }, MethodReceiverKind::Static) => {
+                        return Err(TypeError {
+                            message: format!(
+                                "method `{mname}` must be an instance method to match interface `{iface_def_name}`"
+                            ),
+                            span: method.name.span,
+                        });
+                    }
+                    (MethodReceiverKind::Static, MethodReceiverKind::Instance { .. }) => {
+                        return Err(TypeError {
+                            message: format!(
+                                "method `{mname}` must be `static fn` to match interface `{iface_def_name}`"
+                            ),
+                            span: method.name.span,
+                        });
+                    }
                 }
 
                 let expected_params = info.sig.params.len();
@@ -3095,15 +3223,31 @@ fn process_impl_item(
                 }
 
                 // Declare the implementing function with a stable internal name.
-                declare_method_sig_with_receiver(
-                    env,
-                    module,
-                    &impl_generics,
-                    method,
-                    impl_fn_name.clone(),
-                    receiver_ty,
-                    Some(&self_iface_ctx),
-                )?;
+                match info.receiver {
+                    MethodReceiverKind::Instance { .. } => {
+                        let receiver_ty = receiver_ty.expect("instance receiver");
+                        declare_method_sig_with_receiver(
+                            env,
+                            module,
+                            &impl_generics,
+                            method,
+                            impl_fn_name.clone(),
+                            receiver_ty,
+                            Some(&self_iface_ctx),
+                        )?;
+                    }
+                    MethodReceiverKind::Static => {
+                        declare_method_sig_without_receiver(
+                            env,
+                            module,
+                            &impl_generics,
+                            method,
+                            impl_fn_name.clone(),
+                            expected_recv_base.clone(),
+                            Some(&self_iface_ctx),
+                        )?;
+                    }
+                }
                 if let Some(sig) = env.functions.get_mut(&impl_fn_name) {
                     sig.params = sig
                         .params
@@ -3142,8 +3286,11 @@ fn process_impl_item(
                         span: item.span,
                     });
                 }
+
                 // Receiver type must match the impl target type.
-                if let Some(recv_ty) = impl_sig.params.first() {
+                if matches!(info.receiver, MethodReceiverKind::Instance { .. })
+                    && let Some(recv_ty) = impl_sig.params.first()
+                {
                     let expected_recv = Ty::App(TyCon::Named(type_name.clone()), type_args.clone());
                     if strip_readonly(recv_ty) != strip_readonly(&expected_recv) {
                         return Err(TypeError {
@@ -3154,6 +3301,7 @@ fn process_impl_item(
                         });
                     }
                 }
+
                 // Non-receiver params + return must match the interface signature, with method
                 // generic indices shifted into the impl's generic environment.
                 let shift = impl_arity - expected_iface_arity;
@@ -3250,7 +3398,17 @@ fn process_impl_item(
                         }
                     })
                     .collect::<Vec<_>>();
-                let got_params = impl_sig.params.iter().skip(1).cloned().collect::<Vec<_>>();
+                let skip = if matches!(info.receiver, MethodReceiverKind::Instance { .. }) {
+                    1
+                } else {
+                    0
+                };
+                let got_params = impl_sig
+                    .params
+                    .iter()
+                    .skip(skip)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 if expected_params != got_params {
                     return Err(TypeError {
                         message: format!(
@@ -3280,7 +3438,11 @@ fn process_impl_item(
                     });
                 }
 
-                if env.interface_methods.contains_key(&key) {
+                let table = match info.receiver {
+                    MethodReceiverKind::Instance { .. } => &mut env.interface_methods,
+                    MethodReceiverKind::Static => &mut env.interface_static_methods,
+                };
+                if table.contains_key(&key) {
                     return Err(TypeError {
                         message: format!(
                             "overlapping impls for `{type_name}`: duplicate implementation of `{origin}::{mname}`",
@@ -3289,7 +3451,7 @@ fn process_impl_item(
                         span: item.span,
                     });
                 }
-                env.interface_methods.insert(key, impl_fn_name);
+                table.insert(key, impl_fn_name);
             }
 
             // Disallow extra methods (strictness).

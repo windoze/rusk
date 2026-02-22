@@ -57,3 +57,4 @@ cargo run --bin rusk -- examples/01-hello-world.rbc
 - `23-effects-state-management.rusk`：更大示例：用效应建模状态与清理（类 React）
 - `24-result-try-throw.rusk`：`core::result`：基于效应的 `try`/`throw`/`catch`/`finally`
 - `25-host-stored-continuations.rusk`：高级：把 continuation 句柄交给宿主保存与恢复
+- `26-std-json-serde.rusk`：`std::json`：配合 `derive Serialize + Deserialize` 做 JSON 序列化/反序列化

@@ -1,0 +1,6 @@
+// expect: compile_error derive target `Missing` not found
+
+derive Serialize for Missing;
+
+fn main() -> int { 0 }
+
