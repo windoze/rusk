@@ -1,0 +1,6 @@
+// expect: ok unit
+mod foo;
+
+fn main() {
+    foo::hello();
+}

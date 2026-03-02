@@ -3,9 +3,9 @@ use crate::host::{HostModuleDecl, HostVisibility};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
 use crate::source_map::{SourceMap, SourceName};
+use crate::vfs::{FsSourceProvider, SourceProvider};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1225,6 +1225,7 @@ impl ResolvedItem {
 }
 
 pub(crate) struct ModuleLoader {
+    source_provider: Arc<dyn SourceProvider>,
     next_base_offset: usize,
     loaded_files: BTreeSet<PathBuf>,
     source_map: SourceMap,
@@ -1241,7 +1242,12 @@ pub(crate) struct ModuleLoaderMetrics {
 
 impl ModuleLoader {
     pub(crate) fn new() -> Self {
+        Self::with_source_provider(Arc::new(FsSourceProvider))
+    }
+
+    pub(crate) fn with_source_provider(source_provider: Arc<dyn SourceProvider>) -> Self {
         Self {
+            source_provider,
             next_base_offset: 0,
             loaded_files: BTreeSet::new(),
             source_map: SourceMap::new(),
@@ -1261,26 +1267,28 @@ impl ModuleLoader {
         &mut self,
         entry_path: &Path,
     ) -> Result<Program, LoadError> {
-        let display_path = entry_path.to_path_buf();
-
         let read_start = Instant::now();
-        let source = fs::read_to_string(entry_path).map_err(|e| LoadError {
-            message: format!("failed to read `{}`: {e}", entry_path.display()),
-            span: Span::new(0, 0),
-        })?;
+        let source = self
+            .source_provider
+            .read_to_string(entry_path)
+            .map_err(|e| LoadError {
+                message: format!("failed to read `{}`: {e}", entry_path.display()),
+                span: Span::new(0, 0),
+            })?;
         self.metrics.files_read += 1;
         self.metrics.bytes_read = self.metrics.bytes_read.saturating_add(source.len());
         self.metrics.read_time += read_start.elapsed();
 
-        let canon_entry = entry_path
-            .canonicalize()
+        let canon_entry = self
+            .source_provider
+            .canonicalize(entry_path)
             .unwrap_or_else(|_| entry_path.to_path_buf());
-        self.loaded_files.insert(canon_entry);
+        self.loaded_files.insert(canon_entry.clone());
 
         let src: Arc<str> = Arc::from(source);
         let base_offset = self.alloc_base_offset(&src);
         self.source_map.add_source(
-            SourceName::Path(display_path.clone()),
+            SourceName::Path(canon_entry.clone()),
             Arc::clone(&src),
             base_offset,
         );
@@ -1290,7 +1298,7 @@ impl ModuleLoader {
         let mut program = parser.parse_program()?;
         self.metrics.parse_time += parse_start.elapsed();
 
-        let module_dir = display_path
+        let module_dir = canon_entry
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -1359,8 +1367,8 @@ impl ModuleLoader {
                 let file_path = module_dir.join(format!("{name}.rusk"));
                 let dir_path = child_dir.join("mod.rusk");
 
-                let file_exists = file_path.exists();
-                let dir_exists = dir_path.exists();
+                let file_exists = self.source_provider.exists(&file_path);
+                let dir_exists = self.source_provider.exists(&dir_path);
                 if file_exists && dir_exists {
                     return Err(LoadError {
                         message: format!(
@@ -1387,7 +1395,10 @@ impl ModuleLoader {
                     });
                 };
 
-                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let canon = self
+                    .source_provider
+                    .canonicalize(&path)
+                    .unwrap_or_else(|_| path.clone());
                 if !self.loaded_files.insert(canon.clone()) {
                     return Err(LoadError {
                         message: format!("module file `{}` loaded multiple times", canon.display()),
@@ -1396,17 +1407,20 @@ impl ModuleLoader {
                 }
 
                 let read_start = Instant::now();
-                let source = fs::read_to_string(&canon).map_err(|e| LoadError {
-                    message: format!("failed to read `{}`: {e}", canon.display()),
-                    span: item.span,
-                })?;
+                let source =
+                    self.source_provider
+                        .read_to_string(&canon)
+                        .map_err(|e| LoadError {
+                            message: format!("failed to read `{}`: {e}", canon.display()),
+                            span: item.span,
+                        })?;
                 self.metrics.files_read += 1;
                 self.metrics.bytes_read = self.metrics.bytes_read.saturating_add(source.len());
                 self.metrics.read_time += read_start.elapsed();
                 let src: Arc<str> = Arc::from(source);
                 let base_offset = self.alloc_base_offset(&src);
                 self.source_map.add_source(
-                    SourceName::Path(path.clone()),
+                    SourceName::Path(canon.clone()),
                     Arc::clone(&src),
                     base_offset,
                 );

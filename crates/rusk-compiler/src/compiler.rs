@@ -589,7 +589,7 @@ fn synthesize_sysroot_module(name: &str, items: Vec<Item>) -> Item {
     })
 }
 
-fn load_sysroot_items(
+pub(crate) fn load_sysroot_items(
     loader: &mut ModuleLoader,
     options: &CompileOptions,
 ) -> Result<Vec<Item>, CompileError> {
@@ -621,7 +621,7 @@ fn load_sysroot_items(
     Ok(out)
 }
 
-fn reject_reserved_module_names(items: &[Item]) -> Result<(), CompileError> {
+pub(crate) fn reject_reserved_module_names(items: &[Item]) -> Result<(), CompileError> {
     fn visit_items(items: &[Item]) -> Result<(), CompileError> {
         for item in items {
             let Item::Mod(m) = item else {
@@ -1021,7 +1021,7 @@ fn compile_program_to_mir(
     Compiler::new(env, types).compile_program(&program)
 }
 
-fn typecheck_program_with_entry_validation(
+pub(crate) fn typecheck_program_with_entry_validation(
     program: &Program,
     options: &CompileOptions,
 ) -> Result<(ProgramEnv, TypeInfo), CompileError> {

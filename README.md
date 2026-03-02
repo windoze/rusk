@@ -48,6 +48,7 @@ fn main() -> int {
 - `crates/rusk-bytecode/`: bytecode module + `.rbc` serialization + verifier
 - `crates/rusk-vm/`: bytecode VM runtime (step API, host imports, effects)
 - `crates/rusk-host/`: reusable host-module declarations + installers (e.g. `std::print`)
+- `crates/rusk-lsp/`: Language Server Protocol (LSP) server for editor integration
 - `fixtures/` and `tests/`: executable fixtures and regression tests
 
 ## Quick Start
@@ -73,3 +74,4 @@ Additional resources:
 
 - [Embedding the VM](docs/embedding-vm.md) — detailed guide for VM integration
 - [Delimited Continuations and Scoped Effects](docs/delimited-continuations-and-scoped-effects.md) — in-depth explanation of Rusk's effect system
+- [Rusk LSP](docs/rusk-lsp.md) — editor integration via Language Server Protocol

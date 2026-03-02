@@ -13,6 +13,9 @@ cargo run --bin rusk -- examples/01-hello-world.rusk
 # 运行多文件模块示例
 cargo run --bin rusk -- examples/11-modules/main.rusk
 
+# 运行用于编辑器/LSP 测试的最小多文件示例
+cargo run --bin rusk -- examples/lsp/main.rusk
+
 # 直接运行已编译的 .rbc 字节码模块
 # 注意：仓库默认会忽略 `*.rbc`（它们通常是编译产物），如果你本地没有该文件可以先生成：
 #   cargo run --bin ruskc -- examples/01-hello-world.rusk
@@ -43,6 +46,7 @@ cargo run --bin rusk -- examples/01-hello-world.rbc
 - `09-closures-and-functions-as-values.rusk`：闭包/函数值、高阶函数、捕获变量
 - `10-generics.rusk`：泛型结构体 + 泛型函数（参数化多态）
 - `11-modules/`：多文件程序：`mod` / `use` / 别名
+- `lsp/`：最小多文件示例（用于测试 `rusk-lsp` 等编辑器工具）
 - `12-interfaces-and-dynamic-dispatch.rusk`：接口（`interface`）、实现（`impl`）、动态分发（`as Interface`）
 - `13-associated-types.rusk`：关联类型（`Self::Item` / 限定投影）、迭代器接口示例
 - `14-type-tests-is-asq.rusk`：运行时类型测试：`is` 与安全向下转型 `as?`

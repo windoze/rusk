@@ -38,6 +38,7 @@ fn main() -> int {
 - `crates/rusk-bytecode/`：字节码模块 + `.rbc` 序列化 + verifier
 - `crates/rusk-vm/`：字节码 VM 运行时（step API、宿主导入、效应）
 - `crates/rusk-host/`：可重用的宿主模块声明 + 安装器（例如 `std::print`）
+- `crates/rusk-lsp/`：Language Server Protocol（LSP）语言服务器，用于编辑器集成
 - `fixtures/` 和 `tests/`：可执行的测试夹具和回归测试
 
 ## 快速开始
@@ -63,3 +64,4 @@ cargo test
 
 - [嵌入 VM](docs/embedding-vm.zh.md) — VM 集成的详细指南
 - [限定延续与作用域效应](docs/delimited-continuations-and-scoped-effects.zh.md) — 深入解释 Rusk 的效应系统
+- [Rusk LSP](docs/rusk-lsp.zh.md) — 通过 LSP 进行编辑器集成

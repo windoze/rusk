@@ -8,6 +8,7 @@ members = [
     "crates/rusk-host",
     "crates/rusk-bytecode",
     "crates/rusk-vm",
+    "crates/rusk-lsp",
 ]
 
 [package]

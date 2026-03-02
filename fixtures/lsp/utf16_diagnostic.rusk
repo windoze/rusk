@@ -1,0 +1,6 @@
+fn main() {
+    let s = "😀";
+    // The `#` below is intentionally invalid to exercise LSP UTF-16 range mapping.
+    let t = "ok"; #
+}
+

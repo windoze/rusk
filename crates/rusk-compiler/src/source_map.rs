@@ -125,6 +125,40 @@ impl SourceMap {
         })
     }
 
+    /// Resolves a global [`Span`] to a source file + file-relative byte range.
+    pub fn lookup_span_bytes(&self, span: Span) -> Option<SourceByteRange> {
+        if self.files.is_empty() {
+            return None;
+        }
+
+        let start = span.start.min(span.end);
+        let end = span.end.max(span.start);
+
+        let file_idx = self.files.partition_point(|file| file.base_offset <= start);
+        let file = self.files.get(file_idx.checked_sub(1)?)?;
+
+        if !file.contains_global_offset(start) {
+            return None;
+        }
+
+        let file_end = file.base_offset.saturating_add(file.len_bytes());
+        if end > file_end {
+            return None;
+        }
+
+        Some(SourceByteRange {
+            name: file.name.clone(),
+            start: file.global_to_local(start),
+            end: file.global_to_local(end),
+        })
+    }
+
+    /// Returns the source text for `name` if it is present in this map.
+    pub fn source_text(&self, name: &SourceName) -> Option<Arc<str>> {
+        let file = self.files.iter().find(|f| &f.name == name)?;
+        Some(Arc::clone(&file.src))
+    }
+
     /// Renders a span into a human-readable `"file: <l:c> - <l:c>"` location string.
     pub fn render_span_location(&self, span: Span) -> Option<String> {
         let range = self.lookup_span(span)?;
@@ -164,6 +198,17 @@ impl SourceRange {
             self.end.col
         )
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// A resolved source range for a [`Span`] using file-relative UTF-8 byte offsets.
+pub struct SourceByteRange {
+    /// Source file identity.
+    pub name: SourceName,
+    /// Start byte offset within the file (inclusive).
+    pub start: usize,
+    /// End byte offset within the file (exclusive).
+    pub end: usize,
 }
 
 fn compute_line_starts(src: &str) -> Vec<usize> {
@@ -258,5 +303,38 @@ mod tests {
         let eof = map.lookup_span(Span::new(3, 3)).expect("range");
         assert_eq!(eof.start, LineCol { line: 1, col: 4 });
         assert_eq!(eof.end, LineCol { line: 1, col: 4 });
+    }
+
+    #[test]
+    fn lookup_span_bytes_returns_file_relative_offsets() {
+        let src = Arc::<str>::from("a\nbc");
+        let mut map = SourceMap::new();
+        map.add_source(
+            SourceName::Virtual("<string>".to_string()),
+            Arc::clone(&src),
+            10,
+        );
+
+        let span = Span::new(12, 14); // "bc" (local 2..4)
+        let range = map.lookup_span_bytes(span).expect("byte range");
+        assert_eq!(
+            range,
+            SourceByteRange {
+                name: SourceName::Virtual("<string>".to_string()),
+                start: 2,
+                end: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn source_text_returns_original_source() {
+        let src = Arc::<str>::from("hello");
+        let mut map = SourceMap::new();
+        let name = SourceName::Virtual("<v>".to_string());
+        map.add_source(name.clone(), Arc::clone(&src), 0);
+
+        let got = map.source_text(&name).expect("source");
+        assert_eq!(got.as_ref(), "hello");
     }
 }

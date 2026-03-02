@@ -1,0 +1,4 @@
+pub fn hello() {
+    std::println("hello from the rusk-lsp example");
+}
+

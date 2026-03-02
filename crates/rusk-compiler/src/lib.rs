@@ -12,6 +12,7 @@ mod mir_opt;
 mod modules;
 mod parser;
 mod typeck;
+pub mod vfs;
 
 /// Script front-end: parses and compiles Rusk source to bytecode (via an internal MIR).
 mod compiler;
@@ -34,5 +35,8 @@ pub mod source;
 
 /// Source map for tracking source locations.
 pub mod source_map;
+
+/// Public analysis APIs intended for editor tooling (e.g. LSP).
+pub mod analysis;
 
 // NOTE: MIR serialization APIs intentionally not exposed: MIR is an internal compiler IR.
