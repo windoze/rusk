@@ -14,12 +14,20 @@ Current MVP features:
   - supports unsaved editor buffers via an overlay source provider (no need to save to disk)
   - converts compiler byte spans to correct LSP ranges (0-based UTF-16 columns)
 - `textDocument/documentSymbol` (top-level symbols)
+  - includes a doc-comment summary in `DocumentSymbol.detail` when available (`/// ...`)
 - `textDocument/completion` (keyword completion)
+- `textDocument/definition` (best-effort navigation)
+  - top-level items (functions / structs / enums / interfaces / modules)
+  - function parameters + generic parameters
+  - struct fields (`s.a`, `S { a: ... }`)
+  - inherent methods (`s.m()`, `Type::m()`)
+  - enum variants (`E::V`, `E::V(...)`, pattern matches)
+  - effect/interface methods in `@I.m(...)`
 
 Planned follow-ups (see `proposals/rusk-lsp.md`):
 
 - hover inferred type
-- go-to-definition
+- more accurate go-to-definition (semantic resolution across scopes + shadowing)
 - better error accumulation / multiple diagnostics per file
 
 ## Running
@@ -64,4 +72,3 @@ the compilation root for diagnostics.
 ## Example
 
 See `examples/lsp/` for a minimal multi-file program (`main.rusk` + `foo.rusk`).
-

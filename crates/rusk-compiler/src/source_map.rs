@@ -159,6 +159,11 @@ impl SourceMap {
         Some(Arc::clone(&file.src))
     }
 
+    /// Returns the list of sources currently tracked by this map.
+    pub fn source_names(&self) -> Vec<SourceName> {
+        self.files.iter().map(|f| f.name.clone()).collect()
+    }
+
     /// Renders a span into a human-readable `"file: <l:c> - <l:c>"` location string.
     pub fn render_span_location(&self, span: Span) -> Option<String> {
         let range = self.lookup_span(span)?;
@@ -336,5 +341,29 @@ mod tests {
 
         let got = map.source_text(&name).expect("source");
         assert_eq!(got.as_ref(), "hello");
+    }
+
+    #[test]
+    fn source_names_lists_tracked_sources() {
+        let mut map = SourceMap::new();
+        map.add_source(
+            SourceName::Virtual("a".to_string()),
+            Arc::<str>::from(""),
+            0,
+        );
+        map.add_source(
+            SourceName::Virtual("b".to_string()),
+            Arc::<str>::from(""),
+            10,
+        );
+
+        let names = map.source_names();
+        assert_eq!(
+            names,
+            vec![
+                SourceName::Virtual("a".to_string()),
+                SourceName::Virtual("b".to_string())
+            ]
+        );
     }
 }

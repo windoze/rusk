@@ -3,16 +3,22 @@
 ## What's in the folder
 
 * This folder contains all of the files necessary for your extension.
-* `package.json` - this is the manifest file in which you declare your language support and define the location of the grammar file that has been copied into your extension.
+* `package.json` - extension manifest (language contributions + LSP client activation).
 * `syntaxes/rusk.tmLanguage` - this is the Text mate grammar file that is used for tokenization.
 * `language-configuration.json` - this is the language configuration, defining the tokens that are used for comments and brackets.
+* `src/extension.ts` - VSCode extension entrypoint (starts `rusk-lsp` via stdio).
+* `tsconfig.json` - TypeScript build configuration.
 
 ## Get up and running straight away
 
-* Make sure the language configuration settings in `language-configuration.json` are accurate.
-* Press `F5` to open a new window with your extension loaded.
+* Build/install the language server first (repo root):
+  * `cargo build -p rusk-lsp`
+* Install JS deps and compile the extension (this folder):
+  * `npm install`
+  * `npm run compile`
+* Press `F5` to open a new window with your extension loaded (Extension Development Host).
 * Create a new file with a file name suffix matching your language.
-* Verify that syntax highlighting works and that the language configuration settings are working.
+* Verify that syntax highlighting works, and that diagnostics/completions appear (LSP).
 
 ## Make changes
 
@@ -21,7 +27,8 @@
 
 ## Add more language features
 
-* To add features such as IntelliSense, hovers and validators check out the VS Code extenders documentation at https://code.visualstudio.com/api/language-extensions/overview
+* Add server features in `crates/rusk-lsp/` (hover/definition/etc), then surface them automatically via the LSP client.
+* VS Code language extensions overview: https://code.visualstudio.com/api/language-extensions/overview
 
 ## Install your extension
 

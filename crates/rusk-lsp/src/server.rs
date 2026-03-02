@@ -1,5 +1,5 @@
 use crate::config::{RuskLspConfig, apply_init_options, resolve_path};
-use crate::text::{byte_range_to_range, position_to_byte_offset};
+use crate::text::{byte_offset_to_position, byte_range_to_range, position_to_byte_offset};
 use rusk_compiler::analysis as compiler_analysis;
 use rusk_compiler::source_map::SourceName;
 use rusk_compiler::vfs::SourceProvider;
@@ -12,8 +12,9 @@ use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    InitializeParams, InitializeResult, OneOf, Position, Range, ServerCapabilities, ServerInfo,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
+    GotoDefinitionParams, GotoDefinitionResponse, InitializeParams, InitializeResult, Location,
+    OneOf, Position, Range, ServerCapabilities, ServerInfo, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
     TextDocumentSyncKind, Url, WorkDoneProgressOptions,
 };
 use tower_lsp::{Client, LanguageServer};
@@ -272,6 +273,7 @@ impl LanguageServer for RuskLanguageServer {
                     completion_item: None,
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -388,6 +390,76 @@ impl LanguageServer for RuskLanguageServer {
 
         Ok(Some(CompletionResponse::Array(items)))
     }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let Some(src) = self.get_overlay_text(&uri) else {
+            return Ok(None);
+        };
+
+        let Some((ident, ident_start, ident_end)) = extract_ident_at(&src, pos) else {
+            return Ok(None);
+        };
+
+        let Some(path) = uri.to_file_path().ok() else {
+            return Ok(None);
+        };
+        let key = OverlaySourceProvider::key_for_path(&path);
+        let doc_name = SourceName::Path(key);
+
+        let snapshots = self
+            .state
+            .snapshots
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+
+        if let Some(snapshot) = snapshots
+            .iter()
+            .find(|s| s.source_map().source_text(&doc_name).is_some())
+        {
+            if let Some(def) = compiler_analysis::goto_definition(
+                snapshot,
+                &doc_name,
+                (ident_start, ident_end),
+                &ident,
+            ) {
+                let Some(src) = snapshot.source_map().source_text(&def.name) else {
+                    // Best-effort: fall back to the older top-level lookup path.
+                    // This can happen if the snapshot is missing source text for the returned
+                    // location (e.g. stale/partial snapshots).
+                    return Ok(find_definition_in_snapshot(snapshot, &ident, Some(&doc_name))
+                        .map(GotoDefinitionResponse::Scalar));
+                };
+                let uri = match &def.name {
+                    SourceName::Path(p) => Url::from_file_path(p).ok(),
+                    SourceName::Virtual(_) => None,
+                };
+                if let Some(uri) = uri {
+                    let range = byte_range_to_range(&src, def.start, def.end);
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location { uri, range })));
+                }
+            }
+
+            if let Some(loc) = find_definition_in_snapshot(snapshot, &ident, Some(&doc_name)) {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+            }
+        }
+
+        for snapshot in &snapshots {
+            if let Some(loc) = find_definition_in_snapshot(snapshot, &ident, None) {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 fn compiler_diag_to_lsp(
@@ -453,11 +525,11 @@ fn symbol_to_document_symbol(
     }
     let range = byte_range_to_range(src, span.start, span.end);
 
-    let selection_range = source_map
+    let (selection_range, name_start) = source_map
         .lookup_span_bytes(sym.name_span)
         .filter(|s| &s.name == document)
-        .map(|s| byte_range_to_range(src, s.start, s.end))
-        .unwrap_or(range);
+        .map(|s| (byte_range_to_range(src, s.start, s.end), Some(s.start)))
+        .unwrap_or((range, None));
 
     let children = sym
         .children
@@ -465,10 +537,14 @@ fn symbol_to_document_symbol(
         .filter_map(|c| symbol_to_document_symbol(source_map, src, document, c))
         .collect();
 
+    let detail = name_start
+        .and_then(|start| doc_comment_for_symbol(src, start))
+        .map(|docs| summarize_doc_comment(&docs));
+
     #[allow(deprecated)]
     Some(DocumentSymbol {
         name: sym.name,
-        detail: None,
+        detail,
         kind: symbol_kind(sym.kind),
         tags: None,
         deprecated: None,
@@ -476,6 +552,57 @@ fn symbol_to_document_symbol(
         selection_range,
         children: Some(children),
     })
+}
+
+fn doc_comment_for_symbol(src: &str, symbol_name_start: usize) -> Option<String> {
+    let line_idx = byte_offset_to_position(src, symbol_name_start).line as usize;
+    let lines: Vec<&str> = src.lines().collect();
+    if line_idx == 0 || line_idx > lines.len() {
+        return None;
+    }
+
+    let mut docs = Vec::new();
+    let mut idx = line_idx;
+    while idx > 0 {
+        idx = idx.saturating_sub(1);
+        let line = lines.get(idx).copied().unwrap_or("");
+        let trimmed = line.trim_start();
+
+        if trimmed.is_empty() {
+            break;
+        }
+
+        let Some(rest) = trimmed
+            .strip_prefix("///")
+            .or_else(|| trimmed.strip_prefix("//!"))
+        else {
+            break;
+        };
+
+        docs.push(rest.trim_start().to_string());
+    }
+
+    docs.reverse();
+    if docs.is_empty() {
+        None
+    } else {
+        Some(docs.join("\n"))
+    }
+}
+
+fn summarize_doc_comment(docs: &str) -> String {
+    let first = docs.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return docs.trim().to_string();
+    }
+    const MAX: usize = 120;
+    if first.len() <= MAX {
+        first.to_string()
+    } else {
+        let mut out = first.chars().take(MAX).collect::<String>();
+        out.push_str("…");
+        out
+    }
 }
 
 fn symbol_kind(kind: compiler_analysis::SymbolKind) -> SymbolKind {
@@ -532,6 +659,113 @@ fn extract_ident_prefix(src: &str, pos: Position) -> String {
     src[start..offset].to_string()
 }
 
+fn extract_ident_at(src: &str, pos: Position) -> Option<(String, usize, usize)> {
+    let offset = position_to_byte_offset(src, pos);
+    let offset = clamp_to_boundary(src, offset);
+
+    let mut start = offset;
+    while start > 0 {
+        let Some((prev_idx, prev_ch)) = src[..start].char_indices().next_back() else {
+            break;
+        };
+        if is_ident_continue(prev_ch) {
+            start = prev_idx;
+        } else {
+            break;
+        }
+    }
+
+    let mut end = offset;
+    while end < src.len() {
+        let Some(ch) = src[end..].chars().next() else {
+            break;
+        };
+        if is_ident_continue(ch) {
+            end = end.saturating_add(ch.len_utf8());
+        } else {
+            break;
+        }
+    }
+
+    if start >= end {
+        return None;
+    }
+
+    let ident = &src[start..end];
+    let first = ident.chars().next()?;
+    if !is_ident_start(first) {
+        return None;
+    }
+
+    Some((ident.to_string(), start, end))
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || unicode_ident::is_xid_start(ch)
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || unicode_ident::is_xid_continue(ch)
+}
+
+fn find_definition_in_snapshot(
+    snapshot: &compiler_analysis::AnalysisSnapshot,
+    name: &str,
+    prefer_doc: Option<&SourceName>,
+) -> Option<Location> {
+    let source_map = snapshot.source_map();
+
+    let mut docs = source_map.source_names();
+    if let Some(prefer) = prefer_doc {
+        if let Some(idx) = docs.iter().position(|d| d == prefer) {
+            let preferred = docs.remove(idx);
+            docs.insert(0, preferred);
+        }
+    }
+
+    for doc in docs {
+        let Some(src) = source_map.source_text(&doc) else {
+            continue;
+        };
+        let symbols = compiler_analysis::document_symbols(snapshot, &doc);
+        let Some(sym) = find_symbol_by_name(symbols, name) else {
+            continue;
+        };
+
+        let Some(byte_range) = source_map.lookup_span_bytes(sym.name_span) else {
+            continue;
+        };
+        if byte_range.name != doc {
+            continue;
+        }
+
+        let uri = match &doc {
+            SourceName::Path(p) => Url::from_file_path(p).ok()?,
+            SourceName::Virtual(_) => continue,
+        };
+
+        let range = byte_range_to_range(&src, byte_range.start, byte_range.end);
+        return Some(Location { uri, range });
+    }
+
+    None
+}
+
+fn find_symbol_by_name(
+    symbols: Vec<compiler_analysis::Symbol>,
+    name: &str,
+) -> Option<compiler_analysis::Symbol> {
+    for sym in symbols {
+        if sym.name == name {
+            return Some(sym);
+        }
+        if let Some(found) = find_symbol_by_name(sym.children, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn rusk_keywords() -> Vec<&'static str> {
     vec![
         "as",
@@ -577,5 +811,18 @@ mod tests {
             character: src.len() as u32,
         };
         assert_eq!(extract_ident_prefix(src, pos), "ret");
+    }
+
+    #[test]
+    fn extract_ident_at_handles_unicode_identifiers() {
+        let src = "fn αβ() { () }\nfn main() { αβ(); }\n";
+        let pos = Position {
+            line: 1,
+            character: 12,
+        };
+        assert_eq!(
+            extract_ident_at(src, pos).as_ref().map(|(s, _, _)| s.as_str()),
+            Some("αβ")
+        );
     }
 }

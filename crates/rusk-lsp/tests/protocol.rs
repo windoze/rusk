@@ -4,8 +4,9 @@ use tower::Service;
 use tower::ServiceExt;
 use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::{
-    DidOpenTextDocumentParams, DocumentSymbolParams, InitializeParams, PublishDiagnosticsParams,
-    TextDocumentIdentifier, TextDocumentItem, Url,
+    DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, GotoDefinitionResponse,
+    InitializeParams, PublishDiagnosticsParams, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Url,
 };
 
 fn temp_file_path(name: &str) -> std::path::PathBuf {
@@ -250,4 +251,533 @@ async fn document_symbols_return_top_level_items() {
         names.contains(&"main".to_string()),
         "missing main symbol: {names:?}"
     );
+}
+
+#[tokio::test]
+async fn document_symbols_include_doc_comment_detail() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("symbols_docs.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "/// Doc for S\nstruct S { a: int }\n\n/// Doc for main\nfn main() { () }\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Request document symbols.
+    let req_params = DocumentSymbolParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let req = jsonrpc::Request::build("textDocument/documentSymbol")
+        .id(20i64)
+        .params(serde_json::to_value(req_params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("documentSymbol response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "documentSymbol failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<tower_lsp::lsp_types::DocumentSymbolResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(tower_lsp::lsp_types::DocumentSymbolResponse::Nested(symbols)) = decoded else {
+        panic!("expected Nested symbols, got {decoded:?}");
+    };
+
+    let sym_s = symbols
+        .iter()
+        .find(|s| s.name == "S")
+        .expect("struct symbol");
+    assert_eq!(sym_s.detail.as_deref(), Some("Doc for S"));
+
+    let sym_main = symbols
+        .iter()
+        .find(|s| s.name == "main")
+        .expect("main symbol");
+    assert_eq!(sym_main.detail.as_deref(), Some("Doc for main"));
+}
+
+#[tokio::test]
+async fn goto_definition_jumps_to_top_level_symbol() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("definition.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "fn foo() { () }\nfn main() { foo(); }\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    let position = tower_lsp::lsp_types::Position {
+        line: 1,
+        character: 12,
+    };
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/definition")
+        .id(3i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("definition response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "definition failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<GotoDefinitionResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(GotoDefinitionResponse::Scalar(loc)) = decoded else {
+        panic!("expected Scalar location, got {decoded:?}");
+    };
+
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(loc.range.start.character, 3);
+    assert_eq!(loc.range.end.line, 0);
+    assert_eq!(loc.range.end.character, 6);
+}
+
+#[tokio::test]
+async fn goto_definition_jumps_to_function_parameter() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("definition_param.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "fn foo(x: int) -> int {\n  x\n}\nfn main() { foo(1); }\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Position on the `x` in the function body: line 1, "  x".
+    let position = tower_lsp::lsp_types::Position {
+        line: 1,
+        character: 2,
+    };
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/definition")
+        .id(21i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("definition response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "definition failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<GotoDefinitionResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(GotoDefinitionResponse::Scalar(loc)) = decoded else {
+        panic!("expected Scalar location, got {decoded:?}");
+    };
+
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(loc.range.start.character, 7);
+    assert_eq!(loc.range.end.line, 0);
+    assert_eq!(loc.range.end.character, 8);
+}
+
+#[tokio::test]
+async fn goto_definition_jumps_to_generic_parameter() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("definition_generic.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "fn id<T>(x: T) -> T {\n  let y: T = x;\n  y\n}\nfn main() { id::<int>(1); }\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Position on the `T` in `let y: T = x;` (line 1).
+    let position = tower_lsp::lsp_types::Position {
+        line: 1,
+        character: 9,
+    };
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/definition")
+        .id(22i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("definition response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "definition failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<GotoDefinitionResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(GotoDefinitionResponse::Scalar(loc)) = decoded else {
+        panic!("expected Scalar location, got {decoded:?}");
+    };
+
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(loc.range.start.character, 6);
+    assert_eq!(loc.range.end.line, 0);
+    assert_eq!(loc.range.end.character, 7);
+}
+
+#[tokio::test]
+async fn goto_definition_jumps_to_struct_field() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("definition_struct_field.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "struct S { a: int, b: int }\nfn main() {\n  let s = S { a: 1, b: 2 };\n  s.a;\n}\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Position on the `a` in `s.a` (line 3, "  s.a;").
+    let position = tower_lsp::lsp_types::Position {
+        line: 3,
+        character: 4,
+    };
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/definition")
+        .id(23i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("definition response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "definition failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<GotoDefinitionResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(GotoDefinitionResponse::Scalar(loc)) = decoded else {
+        panic!("expected Scalar location, got {decoded:?}");
+    };
+
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(loc.range.start.character, 11);
+    assert_eq!(loc.range.end.line, 0);
+    assert_eq!(loc.range.end.character, 12);
+}
+
+#[tokio::test]
+async fn goto_definition_jumps_to_inherent_method() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("definition_inherent_method.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "struct S { a: int }\nimpl S {\n  fn get() -> int { self.a }\n}\nfn main() {\n  let s = S { a: 1 };\n  s.get();\n}\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Position on the `get` in `s.get()` (line 6, "  s.get();").
+    let position = tower_lsp::lsp_types::Position {
+        line: 6,
+        character: 5,
+    };
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/definition")
+        .id(24i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("definition response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "definition failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<GotoDefinitionResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(GotoDefinitionResponse::Scalar(loc)) = decoded else {
+        panic!("expected Scalar location, got {decoded:?}");
+    };
+
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 2);
+    assert_eq!(loc.range.start.character, 5);
+    assert_eq!(loc.range.end.line, 2);
+    assert_eq!(loc.range.end.character, 8);
+}
+
+#[tokio::test]
+async fn goto_definition_jumps_to_effect_interface_method() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    let path = temp_file_path("definition_effect_method.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "interface I {\n  fn m();\n}\nfn main() {\n  @I.m();\n}\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Position on the `m` in `@I.m()` (line 4, "  @I.m();").
+    let position = tower_lsp::lsp_types::Position {
+        line: 4,
+        character: 5,
+    };
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/definition")
+        .id(25i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("definition response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "definition failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<GotoDefinitionResponse> =
+        serde_json::from_value(result).expect("decode result");
+
+    let Some(GotoDefinitionResponse::Scalar(loc)) = decoded else {
+        panic!("expected Scalar location, got {decoded:?}");
+    };
+
+    assert_eq!(loc.uri, uri);
+    assert_eq!(loc.range.start.line, 1);
+    assert_eq!(loc.range.start.character, 5);
+    assert_eq!(loc.range.end.line, 1);
+    assert_eq!(loc.range.end.character, 6);
 }

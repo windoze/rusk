@@ -6,4 +6,5 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
-- Initial release
+- 改为 LSP 扩展：启动 `rusk-lsp`，提供 diagnostics/completion/document symbols
+- 保留语法高亮，并补充折叠标记配置

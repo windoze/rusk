@@ -14,12 +14,20 @@
   - 支持未保存的编辑器缓冲区（overlay source provider，无需落盘）
   - 将编译器内部的 UTF-8 字节 `Span` 转换为 LSP 需要的（0-based、UTF-16 code units）范围
 - `textDocument/documentSymbol`（顶层符号）
+  - 若符号上方存在 doc comment（`/// ...`），会把摘要写入 `DocumentSymbol.detail`
 - `textDocument/completion`（关键字补全）
+- `textDocument/definition`（best-effort：导航跳转）
+  - 顶层 item（函数 / struct / enum / interface / module）
+  - 函数参数与泛型参数
+  - struct 字段（`s.a`、`S { a: ... }`）
+  - inherent method（`s.m()`、`Type::m()`）
+  - enum 变体（`E::V`、`E::V(...)`、match pattern）
+  - `@I.m(...)` 中的 effect/interface 方法
 
 后续计划（见 `proposals/rusk-lsp.md`）：
 
 - hover 类型信息
-- go-to-definition
+- 更准确的 go-to-definition（基于语义解析/作用域，处理 shadowing 等）
 - 更好的错误累计（同一文件多个诊断）
 
 ## 运行方式
@@ -63,4 +71,3 @@ cargo install --path crates/rusk-lsp
 ## 示例
 
 `examples/lsp/` 提供了一个最小的多文件示例（`main.rusk` + `foo.rusk`）。
-

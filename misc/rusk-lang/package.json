@@ -1,8 +1,9 @@
 {
   "name": "rusk-lang",
-  "displayName": "Rusk Language Support",
-  "description": "Syntax highlighting for the Rusk programming language",
-  "version": "0.0.1",
+  "displayName": "Rusk (LSP)",
+  "description": "Rusk language support powered by rusk-lsp (diagnostics, completion, symbols, etc.)",
+  "version": "0.1.0",
+  "private": true,
   "repository": {
     "url": "https://github.com/windoze/rusk"
   },
@@ -12,17 +13,86 @@
   "categories": [
     "Programming Languages"
   ],
+  "activationEvents": [
+    "onLanguage:rusk",
+    "onCommand:rusk.restartServer"
+  ],
+  "main": "./out/extension.js",
   "contributes": {
-    "languages": [{
-      "id": "rusk",
-      "aliases": ["Rusk", "rusk"],
-      "extensions": [".rusk"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "rusk",
-      "scopeName": "source.rusk",
-      "path": "./syntaxes/rusk.tmLanguage"
-    }]
+    "languages": [
+      {
+        "id": "rusk",
+        "aliases": [
+          "Rusk",
+          "rusk"
+        ],
+        "extensions": [
+          ".rusk"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rusk",
+        "scopeName": "source.rusk",
+        "path": "./syntaxes/rusk.tmLanguage"
+      }
+    ],
+    "commands": [
+      {
+        "command": "rusk.restartServer",
+        "title": "Rusk: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "Rusk",
+      "properties": {
+        "rusk.lsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "rusk-lsp 可执行文件路径（留空则自动查找：workspace/target/*/rusk-lsp 或 PATH 中的 rusk-lsp）。"
+        },
+        "rusk.lsp.serverArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "传递给 rusk-lsp 的额外参数（例如 [\"--no-std\"]）。"
+        },
+        "rusk.lsp.entryFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "编译入口文件列表（对应 rusk-lsp initializationOptions.entryFiles）。为空时使用当前打开/修改文件作为诊断入口。"
+        },
+        "rusk.lsp.sysroot": {
+          "type": "string",
+          "default": "",
+          "description": "sysroot 目录（对应 rusk-lsp initializationOptions.sysroot）。留空表示使用 rusk-compiler 默认查找逻辑。"
+        },
+        "rusk.lsp.noStd": {
+          "type": "boolean",
+          "default": false,
+          "description": "禁用加载 sysroot/std（对应 rusk-lsp initializationOptions.noStd）。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.109.0",
+    "typescript": "^5.4.5"
   }
 }
