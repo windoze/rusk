@@ -157,7 +157,7 @@ This is a common early-stage design, but it increases:
 - Implement a JIT.
 - Implement a full optimizing compiler (inlining, LICM, etc.) before fixing data-structure overhead.
 - Break no-std support for `rusk-interpreter` or `rusk-mir`.
-- Preserve backward compatibility (MIR format, serialized modules, or crate APIs). At this stage we
+- Preserve backward compatibility (MIR format, serialized modules, or loaf APIs). At this stage we
   can change compiler/interpreter/MIR in lockstep and freely break interfaces to simplify and
   optimize.
 
@@ -212,7 +212,7 @@ Success criteria for Phase 0:
 Notes:
 
 - Criterion is an option, but a custom lightweight timer-based harness may be preferable to keep
-  no-std constraints out of core crates.
+  no-std constraints out of core loaves.
 
 ### Phase 1 — Interpreter: Eliminate Large MIR Clones
 
@@ -408,7 +408,7 @@ Backward compatibility is explicitly **not** a goal right now. That means:
 
 - We can change the MIR data model and interpreter/compiler implementation together.
 - We do not need upgrade paths for previously serialized MIR modules.
-- Public crate APIs are allowed to change if that unlocks a substantially simpler or faster design.
+- Public loaf APIs are allowed to change if that unlocks a substantially simpler or faster design.
 
 Practical guidelines to keep iteration sane even while breaking things:
 

@@ -109,13 +109,13 @@ fn main() {
 }
 
 #[test]
-fn nested_modules_must_use_crate_prefix_for_host_modules() {
+fn nested_modules_must_use_loaf_prefix_for_host_modules() {
     let mut options = CompileOptions::default();
     options
         .register_host_module("std", std_host_module())
         .unwrap();
 
-    // `std::...` is not in scope inside `mod m` unless you use `crate::std` or import it.
+    // `std::...` is not in scope inside `mod m` unless you use `loaf::std` or import it.
     let err = compile_to_bytecode_with_options(
         r#"
 mod m {
@@ -138,12 +138,12 @@ fn main() {
         "{err}"
     );
 
-    // `crate::std::...` resolves.
+    // `loaf::std::...` resolves.
     compile_to_bytecode_with_options(
         r#"
 mod m {
     pub fn f() {
-        crate::std::println("hi");
+        loaf::std::println("hi");
         ()
     }
 }
@@ -273,7 +273,7 @@ fn wrapper_modules_can_reexport_flat_host_modules_into_nested_namespaces() {
         r#"
 mod wasi {
     pub mod io {
-        pub use crate::_wasi_io_host::read;
+        pub use loaf::_wasi_io_host::read;
     }
 }
 

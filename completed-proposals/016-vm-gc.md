@@ -11,7 +11,7 @@ The key constraints:
 
 - **Moving/compaction-friendly references**: VM object references must not be raw pointers.
 - **No `unsafe` in the VM**: `crates/rusk-vm` keeps `#![forbid(unsafe_code)]`.
-- All `unsafe` needed for low-level heap management is **contained** inside a new GC crate.
+- All `unsafe` needed for low-level heap management is **contained** inside a new GC loaf.
 
 ---
 
@@ -39,7 +39,7 @@ We want a real GC heap with:
 1) Replace VM object references with **slot/handle style** references:
    - New VM ref type: `GcRef { index: u32, generation: u32 }` (name bikesheddable).
 
-2) Introduce a dedicated GC crate for the VM, with a safe public API:
+2) Introduce a dedicated GC loaf for the VM, with a safe public API:
    - e.g. `crates/rusk-gc` (name bikesheddable).
 
 3) Implement an Immix-inspired heap:
@@ -47,7 +47,7 @@ We want a real GC heap with:
    - line/block metadata + hole-filling allocation
    - optional selective defragmentation via evacuation (moving)
 
-4) Keep **all `unsafe` contained** within the GC crate:
+4) Keep **all `unsafe` contained** within the GC loaf:
    - `rusk-vm` remains `#![forbid(unsafe_code)]`.
 
 ---
@@ -65,9 +65,9 @@ We want a real GC heap with:
 
 ## Design Overview
 
-### New Crate Boundary
+### New Loaf Boundary
 
-Create a new workspace crate:
+Create a new workspace loaf:
 
 - `crates/rusk-gc/` — the only place `unsafe` is allowed.
 
@@ -176,7 +176,7 @@ VM heap objects contain owned Rust data (`String`, `Vec`, etc.). Therefore:
 - unreachable objects must have their destructors run during sweep
 - moved objects must not be dropped twice
 
-In practice, this implies the GC crate will store payloads in raw memory using something like:
+In practice, this implies the GC loaf will store payloads in raw memory using something like:
 
 - `ManuallyDrop<T>` / `MaybeUninit<T>`
 
@@ -225,7 +225,7 @@ Then `rusk-vm` implements `Trace` for its `Value` and `HeapValue` types, and cal
 `vm.heap.collect(&vm_roots)` at safe points.
 
 (This is similar to the existing `crates/rusk-interpreter/src/gc.rs` traits, but VM-oriented and
-implemented in a separate crate.)
+implemented in a separate loaf.)
 
 ---
 

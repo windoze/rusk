@@ -124,6 +124,6 @@
 ((identifier) @variable.builtin
   (#eq? @variable.builtin "self"))
 ((identifier) @variable.builtin
-  (#eq? @variable.builtin "crate"))
+  (#eq? @variable.builtin "loaf"))
 ((identifier) @variable.builtin
   (#eq? @variable.builtin "super"))

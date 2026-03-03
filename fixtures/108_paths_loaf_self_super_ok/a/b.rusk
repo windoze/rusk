@@ -3,7 +3,7 @@ fn helper() -> int {
 }
 
 pub fn calc() -> int {
-    let x = crate::root();
+    let x = loaf::root();
     let y = super::super::root();
     if x == y {
         x + super::a() + self::helper()
@@ -11,4 +11,3 @@ pub fn calc() -> int {
         0
     }
 }
-

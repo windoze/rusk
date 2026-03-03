@@ -6,13 +6,13 @@
 
 ---
 
-## 1. 术语与组件（你需要知道的 4 个 crate）
+## 1. 术语与组件（你需要知道的 4 个 loaf）
 
 从流程上看：
 
 `Rusk 源码 (.rusk)` → `字节码模块 ExecutableModule` → `VM 执行`
 
-对应到仓库 crate：
+对应到仓库 loaf：
 
 - `rusk-compiler`：解析/类型检查/降级到字节码（可直接编译文件到 `ExecutableModule`）
 - `rusk-bytecode`：字节码模块数据结构、校验、`.rbc` 编解码

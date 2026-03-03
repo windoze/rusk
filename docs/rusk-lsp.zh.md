@@ -72,7 +72,7 @@ cargo install --path crates/rusk-lsp
 
 注意：当当前文档位于 sysroot（例如 `sysroot/core/*.rusk` / `sysroot/std/*.rusk`）时，
 `rusk-lsp` 不会把该文件当作诊断入口（否则会导致 sysroot 被注入两次，出现诸如
-“module file ... loaded multiple times”、“`super` at crate root” 等假阳性错误）。
+“module file ... loaded multiple times”、“`super` at loaf root” 等假阳性错误）。
 此时会沿用最近一次触发过诊断的“非 sysroot 文件”作为入口；若尚未存在该入口，则仅清空
 sysroot 文件上的诊断并跳过本次重分析。
 

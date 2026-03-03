@@ -104,8 +104,8 @@ This proposal defines that boundary.
 - Allowing arbitrary VM heap objects (`struct/enum/array`) to cross the FFI boundary.
 - Allowing effects/continuations to cross host call frames (“yield across FFI”).
 - JIT/AOT native compilation (bytecode + small VM is the near-term target).
-- Preserving `no_std` constraints for the existing MIR crate and the current Rust MIR interpreter.
-  Once the bytecode VM becomes the primary approach for WASM/embedding, these crates can prioritize
+- Preserving `no_std` constraints for the existing MIR loaf and the current Rust MIR interpreter.
+  Once the bytecode VM becomes the primary approach for WASM/embedding, these loaves can prioritize
   simplicity and developer ergonomics over `no_std` compatibility.
 
 ---

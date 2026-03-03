@@ -1,6 +1,6 @@
 # 嵌入 Rusk 字节码虚拟机 (`rusk-vm`)
 
-本文档介绍了 `rusk-vm` crate 暴露的**字节码虚拟机嵌入 API**：
+本文档介绍了 `rusk-vm` loaf 暴露的**字节码虚拟机嵌入 API**：
 
 - 如何将 `.rusk` 编译为字节码 `rusk_bytecode::ExecutableModule`，
 - 如何从宿主应用程序中**嵌入**和**驱动**虚拟机实例，
@@ -14,7 +14,7 @@
 
 ## 目录
 
-1. [Crates 和层次](#crates-和层次)
+1. [Loaves 和层次](#loaves-和层次)
 2. [ABI 边界：`AbiType` / `AbiValue`](#abi-边界abitype--abivalue)
 3. [编译时原型（"存在什么"）](#编译时原型存在什么)
    - [宿主函数原型](#宿主函数原型)
@@ -40,7 +40,7 @@
 
 ---
 
-## Crates 和层次
+## Loaves 和层次
 
 从高层次来看，处理流程是：
 

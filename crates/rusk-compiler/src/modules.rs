@@ -107,7 +107,7 @@ impl ModulePath {
 
     pub(crate) fn display(&self) -> String {
         if self.segments.is_empty() {
-            "crate".to_string()
+            "loaf".to_string()
         } else {
             self.segments.join("::")
         }
@@ -1138,7 +1138,7 @@ impl ModuleResolver {
         }
 
         let head = segments[0].as_str();
-        if head == "crate" {
+        if head == "loaf" {
             return Ok((ModulePath::root(), 1));
         }
         if head == "self" {
@@ -1146,13 +1146,13 @@ impl ModuleResolver {
         }
         if head == "super" {
             let mut base = current.path.parent().ok_or_else(|| ResolveError {
-                message: "`super` at crate root".to_string(),
+                message: "`super` at loaf root".to_string(),
                 span,
             })?;
             let mut idx = 1;
             while idx < segments.len() && segments[idx].as_str() == "super" {
                 base = base.parent().ok_or_else(|| ResolveError {
-                    message: "`super` at crate root".to_string(),
+                    message: "`super` at loaf root".to_string(),
                     span,
                 })?;
                 idx += 1;

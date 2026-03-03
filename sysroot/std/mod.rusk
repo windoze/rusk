@@ -4,5 +4,5 @@
 
 pub mod json;
 
-pub use crate::_std_host::print;
-pub use crate::_std_host::println;
+pub use loaf::_std_host::print;
+pub use loaf::_std_host::println;

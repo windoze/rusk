@@ -1,6 +1,6 @@
 # Embedding the Rusk Bytecode VM (`rusk-vm`)
 
-This document describes the **bytecode VM embedding API** exposed by the `rusk-vm` crate:
+This document describes the **bytecode VM embedding API** exposed by the `rusk-vm` loaf:
 
 - how to compile `.rusk` into a bytecode `rusk_bytecode::ExecutableModule`,
 - how to **embed** and **drive** a VM instance from a host application,
@@ -15,7 +15,7 @@ editors, servers, or other runtimes.
 
 ## Table of Contents
 
-1. [Crates and layers](#crates-and-layers)
+1. [Loaves and layers](#loaves-and-layers)
 2. [ABI boundary: `AbiType` / `AbiValue`](#abi-boundary-abitype--abivalue)
 3. [Compile-time prototypes (“what exists”)](#compile-time-prototypes-what-exists)
    - [Host function prototypes](#host-function-prototypes)
@@ -41,7 +41,7 @@ editors, servers, or other runtimes.
 
 ---
 
-## Crates and layers
+## Loaves and layers
 
 At a high level the pipeline is:
 

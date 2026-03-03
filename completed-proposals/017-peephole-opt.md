@@ -63,10 +63,10 @@ bytecode 设计有一个关键事实：
 1) **编译器侧调用（推荐作为第一步）**  
    `crates/rusk-compiler` 在 `lower_mir_module_with_options(...)` 返回后，根据 `CompileOptions` 决定是否执行优化。
 
-2) **bytecode crate 内部调用**  
+2) **bytecode loaf 内部调用**  
    `crates/rusk-bytecode` 在 lowering 完成后（patch PC 之后）直接对每个 `Function.code` 运行优化。
 
-两者差异主要在“职责边界”，对实现影响不大。本提案更偏向 1)：让编译器显式控制优化级别，bytecode crate 保持更纯粹的 lowering 行为。
+两者差异主要在“职责边界”，对实现影响不大。本提案更偏向 1)：让编译器显式控制优化级别，bytecode loaf 保持更纯粹的 lowering 行为。
 
 ---
 
@@ -218,7 +218,7 @@ lowering 常见产生“跳板块”：
 
 建议分层测试：
 
-1) **单元测试（bytecode crate）**  
+1) **单元测试（bytecode loaf）**  
    - 构造小型 `Function { code: Vec<Instruction> }`，跑 optimizer 后断言：
      - target PC 全部有效
      - 指令序列满足期望（例如 trampoline folding 生效）

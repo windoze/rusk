@@ -25,7 +25,7 @@ Today there are two mismatches:
 2. **Hardcoded, platform-specific functions in the compiler**
    - As an example, `std::print` / `std::println` are inherently platform-dependent (stdout in a
      CLI, console logging in WASM, UART on embedded, etc.).
-   - Hardcoding these into the compiler crate makes the compiler less portable and makes it easy
+   - Hardcoding these into the compiler loaf makes the compiler less portable and makes it easy
      for the compiler’s “known functions” set to drift from what a given runtime actually provides.
 
 We need a clean, explicit, and reusable mechanism to:
@@ -171,23 +171,23 @@ pub fn compile_file_to_mir_with_options(
 How host module declarations should affect compilation:
 
 - **Name resolution**
-  - Host functions are always registered **inside a module**, not at the crate root.
-  - Registering a host module creates a module binding at the crate root with the requested
+  - Host functions are always registered **inside a module**, not at the loaf root.
+  - Registering a host module creates a module binding at the loaf root with the requested
     visibility.
   - Host modules behave like **normal modules** for privacy and path resolution:
     - they participate in the same `pub`/private accessibility rules as source-defined modules,
-    - from inside a nested module, accessing a host module at the crate root uses normal paths
-      (e.g. `crate::std::println` or `use crate::std;`), unless the language later adds an
+    - from inside a nested module, accessing a host module at the loaf root uses normal paths
+      (e.g. `loaf::std::println` or `use loaf::std;`), unless the language later adds an
       extern-prelude mechanism for host modules.
   - There is **no special-casing of `std`**. Any host module name (e.g. `std`, `wasi`, `env`,
     `device`) is treated the same way.
   - For simplicity (v1), **nested host modules are forbidden**: the host can only register
-    crate-root modules with a single identifier name (no `::` in the module name).
+    loaf-root modules with a single identifier name (no `::` in the module name).
     - If the host wants a nested namespace like `wasi::io`, the suggested pattern is:
       1. register a single flat host module name (e.g. `_wasi_io_host`) containing the raw host
          functions, and then
       2. provide a wrapper module in Rusk source that re-exports those functions into the desired
-         namespace (e.g. `mod wasi { pub mod io { pub use crate::_wasi_io_host::read; } }`).
+         namespace (e.g. `mod wasi { pub mod io { pub use loaf::_wasi_io_host::read; } }`).
   - Conflicts are **compile-time errors** because host module registration happens before compiling:
     - If the source program declares a module with the same name as a host module (either inline
       `mod std { ... }` or file module `mod std;`), that is an error.
@@ -253,7 +253,7 @@ installer(s).
 
 Two likely layouts:
 
-**Option A: One crate that defines both spec and installers**
+**Option A: One loaf that defines both spec and installers**
 
 - `crates/rusk-host/`
   - `core`: declarations + interpreter installers for `core::intrinsics::*`
@@ -270,7 +270,7 @@ Cons: may introduce unwanted dependencies unless carefully organized.
 - `crates/rusk-host-std-io/` (depends on spec + interpreter; provides print/println installers)
 
 Pros: cleaner layering; very portable.
-Cons: more crates.
+Cons: more loaves.
 
 Either way, a host set should be able to expose:
 
@@ -305,7 +305,7 @@ validate host ABI compatibility).
 
 Host function names should be structured as `<module path>::<name>` (at least one `::`).
 
-- This avoids polluting the crate root namespace with host-only functions.
+- This avoids polluting the loaf root namespace with host-only functions.
 - It keeps “standard library” style APIs as a *convention* (`std::*`) rather than something baked
   into the language.
 
@@ -366,4 +366,4 @@ The embedded host can:
 ## Open Questions
 
 - Do we want an “extern prelude” mechanism for host modules (like the built-in `core::...`) so
-  that host modules can be referenced as `std::...` from anywhere without `crate::` / `use`?
+  that host modules can be referenced as `std::...` from anywhere without `loaf::` / `use`?

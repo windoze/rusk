@@ -73,7 +73,7 @@ the compilation root for diagnostics.
 
 Note: files under the sysroot (e.g. `sysroot/core/*.rusk` / `sysroot/std/*.rusk`) are never used
 as the default diagnostic entry, because that would inject the sysroot twice and produce spurious
-errors such as “module file ... loaded multiple times” or “`super` at crate root”. When a sysroot
+errors such as “module file ... loaded multiple times” or “`super` at loaf root”. When a sysroot
 file triggers a re-analysis, `rusk-lsp` reuses the most recent non-sysroot trigger as the entry.
 If none exists yet, it clears diagnostics for the sysroot file and skips re-analysis.
 

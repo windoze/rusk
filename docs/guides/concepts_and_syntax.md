@@ -32,7 +32,7 @@ use util::strings::greet;
 
 - `mod name;` 负责把模块“编译进来”。
 - `use path::to::item` 负责把名字引入当前作用域，可用 `as` 起别名。
-- `crate::...` 表示从当前 crate 根开始的路径。
+- `loaf::...` 表示从当前 loaf 根开始的路径。
 
 示例可参考 `examples/11-modules/`。
 

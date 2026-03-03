@@ -122,7 +122,7 @@ Rusk 编译器会加载 `sysroot/` 目录作为“内建库”：
 
 1. 环境变量 `RUSK_SYSROOT`
 2. 当前工作目录下的 `./sysroot`
-3. `rusk-compiler` crate 相对路径下的 `../../sysroot`
+3. `rusk-compiler` loaf 相对路径下的 `../../sysroot`
 
 你也可以通过 CLI 显式指定：
 

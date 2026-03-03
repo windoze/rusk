@@ -100,7 +100,7 @@ fn expand_items_in_module(
 
 fn display_module_path(path: &[String]) -> String {
     if path.is_empty() {
-        "crate".to_string()
+        "loaf".to_string()
     } else {
         path.join("::")
     }

@@ -1,7 +1,6 @@
-// expect: compile_error `super` at crate root
+// expect: compile_error `super` at loaf root
 
 fn main() -> unit {
     super::main();
     ()
 }
-

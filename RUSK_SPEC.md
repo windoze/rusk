@@ -213,7 +213,7 @@ Notes:
 
 #### 3.2.6 Modules
 
-Rusk modules are Rust-like and form a tree rooted at the implicit crate root module `crate`.
+Rusk modules are Rust-like and form a tree rooted at the implicit loaf root module `loaf`.
 
 ```
 ModItem        := "mod" Ident ";"          // file/directory module (loaded by the module loader)
@@ -245,7 +245,7 @@ Notes:
 - `pub use ...;` is a public re-export. A public re-export requires the target item to already be
   public.
 - Paths may use Rust-like module anchors at the beginning:
-  - `crate::...` is absolute from the crate root.
+  - `loaf::...` is absolute from the loaf root.
   - `self::...` is relative to the current module.
   - `super::...` is relative to the parent module (multiple `super::super::...` are allowed).
 - The built-in module `core` is always available as `core::...`.

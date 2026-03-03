@@ -109,7 +109,7 @@ An LSP would move the feedback loop into the editor and unlock:
 
 ### Workspace structure
 
-Add a new workspace member crate:
+Add a new workspace member loaf:
 
 ```
 crates/
@@ -118,7 +118,7 @@ crates/
     src/main.rs
 ```
 
-Optionally add a second crate if we want a clean separation:
+Optionally add a second loaf if we want a clean separation:
 
 ```
 crates/
@@ -129,7 +129,7 @@ crates/
 
 #### Recommendation
 
-Start with **one new binary crate** (`rusk-lsp`) and a **new public analysis module** inside
+Start with **one new binary loaf** (`rusk-lsp`) and a **new public analysis module** inside
 `rusk-compiler` (e.g. `pub mod analysis`) that exposes only the minimal stable surface needed by
 the LSP:
 
@@ -139,7 +139,7 @@ the LSP:
 - `goto_definition(snapshot, position) -> Option<Location>`
 - etc.
 
-This avoids prematurely committing to a long-term crate split while keeping the LSP from reaching
+This avoids prematurely committing to a long-term loaf split while keeping the LSP from reaching
 into internal compiler modules directly.
 
 ### LSP implementation approach

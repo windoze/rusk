@@ -60,7 +60,7 @@ Last updated: 2026-02-14
 
 ## 1) Architecture: New Components and Their Boundaries
 
-### 1.1 Crates / modules to add (proposed)
+### 1.1 Loaves / modules to add (proposed)
 
 > Naming is a bikeshed; plan assumes these placeholders.
 
@@ -75,11 +75,11 @@ Last updated: 2026-02-14
   - Owns `Vm`, `StepResult`, `ContinuationHandle`, `AbiValue`, `VmError`, host import registration,
     external effect request/resume.
   - May reuse existing GC code from `crates/rusk-interpreter/src/gc` (either by factoring GC into a
-    shared crate, or temporarily duplicating until refactor is worth it).
+    shared loaf, or temporarily duplicating until refactor is worth it).
   - v0 recommendation: **`std`-only** for the VM runtime to prioritize simplicity (aligns with the
     proposal’s non-goal of preserving `no_std` constraints).
 
-> Alternative: combine into one crate (`rusk-bytecode`) with a `vm` module. If we do this, still
+> Alternative: combine into one loaf (`rusk-bytecode`) with a `vm` module. If we do this, still
 > keep the API split clean: “module + serialization” vs “runtime execution”.
 
 ### 1.2 Public API surface (Rust)
@@ -574,7 +574,7 @@ Each milestone includes explicit tests so we always have a green, check-pointed 
 
 Deliverables:
 
-- Create `rusk-bytecode` + `rusk-vm` crates (or equivalent modules).
+- Create `rusk-bytecode` + `rusk-vm` loaves (or equivalent modules).
 - Define:
   - `ExecutableModule` (in-memory IR)
   - `AbiValue` / `AbiType`
@@ -785,7 +785,7 @@ Tests:
 
 This section is intentionally redundant: it is a checklist to ensure coverage is not forgotten.
 
-### 8.1 New unit test modules (by crate)
+### 8.1 New unit test modules (by loaf)
 
 `crates/rusk-bytecode`
 
