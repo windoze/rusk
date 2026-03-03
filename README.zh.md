@@ -47,6 +47,8 @@ fn main() -> int {
 cargo run --bin rusk -- fixtures/020_arrays_get_set.rusk
 cargo run --bin ruskc -- fixtures/020_arrays_get_set.rusk
 cargo run --bin rusk -- fixtures/020_arrays_get_set.rbc
+cargo run --bin rusk -- fmt --check fixtures/020_arrays_get_set.rusk
+cargo run --bin rusk -- lint fixtures/020_arrays_get_set.rusk
 cargo test
 ```
 

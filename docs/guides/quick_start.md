@@ -32,6 +32,29 @@ cargo check
 cargo run --bin rusk -- examples/01-hello-world.rusk
 ```
 
+## 2.1 格式化与静态检查（可选）
+
+Rusk 提供两个基础的日常工具命令：
+
+- `rusk fmt`：格式化源码（默认会直接写回文件）
+- `rusk lint`：运行静态 lint（默认只给 warning，不会失败）
+
+常见用法：
+
+```sh
+# CI：检查是否已格式化（不写回）
+cargo run --bin rusk -- fmt --check examples/01-hello-world.rusk
+
+# 本地：直接格式化并写回
+cargo run --bin rusk -- fmt examples/01-hello-world.rusk
+
+# 运行 lints（warning 默认不会失败）
+cargo run --bin rusk -- lint examples/01-hello-world.rusk
+
+# CI：把 warning 当作 error（失败退出码）
+cargo run --bin rusk -- lint --deny-warnings examples/01-hello-world.rusk
+```
+
 该示例大致长这样：
 
 ```rusk

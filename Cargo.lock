@@ -498,6 +498,7 @@ dependencies = [
  "rusk-compiler",
  "rusk-host",
  "rusk-vm",
+ "serde_json",
 ]
 
 [[package]]

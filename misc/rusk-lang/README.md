@@ -18,6 +18,7 @@ Rusk 是一个实验性编程语言和运行时，使用 Rust 实现。它结合
 
 - 语法高亮：`.rusk` 文件关键字/操作符/注释/字符串等
 - 代码折叠：支持基于缩进/括号的折叠，并支持 `// region` / `// endregion` 折叠标记
+- 代码格式化：集成 `rusk fmt`，支持 VSCode 的 **Format Document** / **Format on Save**
 - 结构导航（tree-sitter，增量解析）：
   - Explorer 侧边栏提供 `Rusk Outline` 视图（类/枚举/接口/impl/方法/字段等）
   - `Rusk: Go to Symbol (Tree-sitter)` 命令（当前文件内符号快速跳转）
@@ -59,6 +60,21 @@ cargo install --path crates/rusk-lsp
 ### 3) 打开 `.rusk` 文件
 
 打开任何 `.rusk` 文件即可获得语法高亮，并启动 `rusk-lsp` 提供诊断等语言功能。
+
+### 4) 使用代码格式化（`rusk fmt`）
+
+本扩展的格式化功能通过调用 `rusk fmt --stdin` 实现（不是由 LSP 提供）。
+
+准备工作：
+
+- 在 rusk 仓库内构建 `rusk`：`cargo build --bin rusk`
+- 或全局安装：`cargo install --path . --bin rusk`
+
+然后在 VSCode 中：
+
+- 使用 **Format Document**（或启用 Format on Save）。
+- 若 VSCode 提示找不到 `rusk`，可在设置里指定：
+  - `rusk.fmt.ruskPath`
 
 提示：
 - 如果不配置 `rusk.lsp.entryFiles`，`rusk-lsp` 默认使用“当前打开/修改的文件”作为诊断入口。

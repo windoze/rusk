@@ -354,9 +354,19 @@ Deliverable:
 ## Open questions
 
 - Should `rusk fmt` be “format on error” tolerant (skip files that fail to parse) or strictly fail?
+
+We can add an option for that.
+
 - Do we want a `rusk check` subcommand as a thin alias for “compile-only, no execution”, to pair with
   `fmt` and `lint`?
+
+Yes, that would be a nice addition for CI scripts.
+
 - What is the right long-term home for these components?
   - separate crates (`rusk-fmt`, `rusk-lint`) vs. modules inside `rusk-compiler`
+
+Separate crates could allow for more focused dependencies and faster iteration.
+
 - How strongly do we want to commit to diagnostic *stability* (codes and wording) for tests/fixtures?
 
+We can start with a "fixed format" so downstream tools can parse diagnostics reliably, the wording can evolve but the structure should be stable.

@@ -1,4 +1,4 @@
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -16,6 +16,9 @@ let client: LanguageClient | undefined;
 let lspRunning = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const output = vscode.window.createOutputChannel("Rusk");
+  context.subscriptions.push(output);
+
   context.subscriptions.push(
     new vscode.Disposable(() => {
       void stopClient();
@@ -33,6 +36,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.languages.registerDocumentSymbolProvider(
       [{ language: "rusk" }],
       new RuskTreeSitterDocumentSymbolProvider(treeSitter, () => lspRunning),
+    ),
+  );
+
+  // Formatter: `rusk fmt --stdin` as VSCode document formatter.
+  context.subscriptions.push(
+    vscode.languages.registerDocumentFormattingEditProvider(
+      [{ language: "rusk" }],
+      new RuskDocumentFormattingProvider(output),
     ),
   );
 
@@ -171,6 +182,159 @@ function preflightServer(command: string): string | undefined {
     return undefined;
   }
   return command;
+}
+
+class RuskDocumentFormattingProvider
+  implements vscode.DocumentFormattingEditProvider
+{
+  constructor(private readonly output: vscode.OutputChannel) {}
+
+  async provideDocumentFormattingEdits(
+    document: vscode.TextDocument,
+    _options: vscode.FormattingOptions,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.TextEdit[]> {
+    const config = vscode.workspace.getConfiguration("rusk", document.uri);
+    const workspaceRoot = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath;
+
+    const ruskCommand = resolveFormatterCommand(config, workspaceRoot);
+    if (!ruskCommand) {
+      vscode.window.showErrorMessage(
+        [
+          "找不到 rusk 可执行文件，无法格式化。",
+          "请先构建/安装：",
+          "  - 在 rusk 仓库内：cargo build --bin rusk",
+          "  - 或全局安装：cargo install --path . --bin rusk",
+          "然后在设置中指定 `rusk.fmt.ruskPath`，或确保 PATH 中有 `rusk`。",
+        ].join("\n"),
+      );
+      return [];
+    }
+
+    const input = document.getText();
+    let res: { stdout: string; stderr: string; exitCode: number | null };
+    try {
+      res = await runRuskFmt(ruskCommand, workspaceRoot, input, token);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`rusk fmt 启动失败：${message}`);
+      this.output.show(true);
+      vscode.window.showErrorMessage("无法运行 rusk fmt，详情见 Output 面板中的 “Rusk”。");
+      return [];
+    }
+    if (token.isCancellationRequested) {
+      return [];
+    }
+
+    if (res.exitCode !== 0) {
+      const header = `rusk fmt 失败（exit=${res.exitCode ?? "null"}）`;
+      this.output.appendLine(header);
+      if (res.stderr.trim().length > 0) {
+        this.output.appendLine(res.stderr.trimEnd());
+      }
+      this.output.show(true);
+      vscode.window.showErrorMessage("rusk fmt 失败，详情见 Output 面板中的 “Rusk”。");
+      return [];
+    }
+
+    const formatted = res.stdout;
+    if (formatted.length === 0) {
+      this.output.appendLine("rusk fmt 返回空输出（stdout 为空），已跳过格式化。");
+      this.output.show(true);
+      return [];
+    }
+
+    if (formatted === input) {
+      return [];
+    }
+
+    const fullRange = new vscode.Range(
+      document.positionAt(0),
+      document.positionAt(input.length),
+    );
+    return [vscode.TextEdit.replace(fullRange, formatted)];
+  }
+}
+
+function resolveFormatterCommand(
+  config: vscode.WorkspaceConfiguration,
+  workspaceRoot: string | undefined,
+): string | undefined {
+  const configured = (config.get<string>("fmt.ruskPath") ?? "").trim();
+  if (configured.length > 0) {
+    const resolved = resolveMaybeRelativePath(configured, workspaceRoot);
+    if (!fs.existsSync(resolved)) {
+      return undefined;
+    }
+    return preflightRusk(resolved);
+  }
+
+  if (workspaceRoot) {
+    const candidates = [
+      path.join(workspaceRoot, "target", "debug", exeName("rusk")),
+      path.join(workspaceRoot, "target", "release", exeName("rusk")),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return preflightRusk(candidate);
+      }
+    }
+  }
+
+  // Fallback: rely on PATH lookup.
+  return preflightRusk("rusk");
+}
+
+function preflightRusk(command: string): string | undefined {
+  const res = spawnSync(command, ["--help"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (res.error && (res.error as NodeJS.ErrnoException).code === "ENOENT") {
+    return undefined;
+  }
+  return command;
+}
+
+async function runRuskFmt(
+  command: string,
+  cwd: string | undefined,
+  input: string,
+  token: vscode.CancellationToken,
+): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, ["fmt", "--stdin"], {
+      cwd,
+      windowsHide: true,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      resolve({ stdout, stderr, exitCode: code });
+    });
+
+    token.onCancellationRequested(() => {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+    });
+
+    child.stdin.end(input, "utf8");
+  });
 }
 
 function buildInitializationOptions(

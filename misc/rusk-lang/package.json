@@ -96,6 +96,11 @@
           "type": "boolean",
           "default": false,
           "description": "禁用加载 sysroot/std（对应 rusk-lsp initializationOptions.noStd）。"
+        },
+        "rusk.fmt.ruskPath": {
+          "type": "string",
+          "default": "",
+          "description": "rusk 可执行文件路径（用于格式化：`rusk fmt --stdin`）。留空则自动查找：workspace/target/*/rusk 或 PATH 中的 rusk。"
         }
       }
     }

@@ -21,3 +21,4 @@ rusk-compiler = { path = "crates/rusk-compiler" }
 rusk-host = { path = "crates/rusk-host" }
 rusk-vm = { path = "crates/rusk-vm" }
 rusk-bytecode = { path = "crates/rusk-bytecode" }
+serde_json = "1"

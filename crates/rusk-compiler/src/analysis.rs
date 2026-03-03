@@ -22,7 +22,11 @@ pub enum DiagnosticSeverity {
 pub struct Diagnostic {
     pub message: String,
     pub severity: DiagnosticSeverity,
+    pub code: Option<String>,
     pub span: Span,
+    pub label: Option<String>,
+    pub help: Option<String>,
+    pub notes: Vec<String>,
     pub source: Option<SourceName>,
     pub range: Option<SourceRange>,
     pub byte_range: Option<SourceByteRange>,
@@ -286,7 +290,11 @@ fn diagnostic_from_compile_error(err: CompileError, source_map: &SourceMap) -> D
     Diagnostic {
         message: err.message,
         severity: DiagnosticSeverity::Error,
+        code: None,
         span: err.span,
+        label: None,
+        help: None,
+        notes: Vec::new(),
         source,
         range,
         byte_range,

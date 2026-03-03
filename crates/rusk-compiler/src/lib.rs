@@ -39,4 +39,7 @@ pub mod source_map;
 /// Public analysis APIs intended for editor tooling (e.g. LSP).
 pub mod analysis;
 
+/// Developer tooling (formatter, linter, diagnostic rendering).
+pub mod tooling;
+
 // NOTE: MIR serialization APIs intentionally not exposed: MIR is an internal compiler IR.

@@ -7,6 +7,27 @@ pub struct Token {
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TriviaKind {
+    Whitespace,
+    LineComment,
+    BlockComment,
+    Shebang,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trivia {
+    pub kind: TriviaKind,
+    pub span: Span,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LexItem {
+    Token(Token),
+    Trivia(Trivia),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
     Eof,
@@ -143,7 +164,17 @@ impl<'a> Lexer<'a> {
 
     pub fn next_token(&mut self) -> Result<Token, LexError> {
         self.skip_ws_and_comments()?;
+        self.lex_token_at_current()
+    }
 
+    pub fn next_item(&mut self) -> Result<LexItem, LexError> {
+        if let Some(trivia) = self.next_trivia()? {
+            return Ok(LexItem::Trivia(trivia));
+        }
+        Ok(LexItem::Token(self.lex_token_at_current()?))
+    }
+
+    fn lex_token_at_current(&mut self) -> Result<Token, LexError> {
         let start = self.pos;
         let Some(ch) = self.peek_char() else {
             return Ok(Token {
@@ -347,6 +378,56 @@ impl<'a> Lexer<'a> {
             kind,
             span: self.span(start, self.pos),
         })
+    }
+
+    fn next_trivia(&mut self) -> Result<Option<Trivia>, LexError> {
+        if self.allow_shebang && self.pos == 0 && self.peek_str("#!") {
+            let start = self.pos;
+            self.skip_shebang_line();
+            let end = self.pos;
+            return Ok(Some(Trivia {
+                kind: TriviaKind::Shebang,
+                span: self.span(start, end),
+                text: self.src[start..end].to_string(),
+            }));
+        }
+
+        if self.peek_char().is_some_and(|c| c.is_whitespace()) {
+            let start = self.pos;
+            while self.peek_char().is_some_and(|c| c.is_whitespace()) {
+                self.bump_char();
+            }
+            let end = self.pos;
+            return Ok(Some(Trivia {
+                kind: TriviaKind::Whitespace,
+                span: self.span(start, end),
+                text: self.src[start..end].to_string(),
+            }));
+        }
+
+        if self.peek_str("//") {
+            let start = self.pos;
+            self.skip_line_comment();
+            let end = self.pos;
+            return Ok(Some(Trivia {
+                kind: TriviaKind::LineComment,
+                span: self.span(start, end),
+                text: self.src[start..end].to_string(),
+            }));
+        }
+
+        if self.peek_str("/*") {
+            let start = self.pos;
+            self.skip_block_comment()?;
+            let end = self.pos;
+            return Ok(Some(Trivia {
+                kind: TriviaKind::BlockComment,
+                span: self.span(start, end),
+                text: self.src[start..end].to_string(),
+            }));
+        }
+
+        Ok(None)
     }
 
     fn lex_ident_or_keyword(&mut self) -> Token {
@@ -1077,24 +1158,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_ws_and_comments(&mut self) -> Result<(), LexError> {
-        loop {
-            if self.allow_shebang && self.pos == 0 && self.peek_str("#!") {
-                self.skip_shebang_line();
-                continue;
-            }
-            while self.peek_char().is_some_and(|c| c.is_whitespace()) {
-                self.bump_char();
-            }
-            if self.peek_str("//") {
-                self.skip_line_comment();
-                continue;
-            }
-            if self.peek_str("/*") {
-                self.skip_block_comment()?;
-                continue;
-            }
-            break;
-        }
+        while self.next_trivia()?.is_some() {}
         Ok(())
     }
 
