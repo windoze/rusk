@@ -1,5 +1,7 @@
 # Rusk
 
+![Rusk logo](docs/assets/Rusk-256x256.png)
+
 Rusk is an experimental programming language and runtime, implemented in Rust.
 It aims to combine:
 

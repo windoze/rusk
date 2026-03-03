@@ -1,5 +1,7 @@
 # Rusk
 
+![Rusk logo](docs/assets/Rusk-256x256.png)
+
 Rusk 是一个实验性的编程语言和运行时，使用 Rust 实现。它的目标是结合：
 
 - **类 Rust 语法**（块表达式、`match`、显式可变性控制），以及
