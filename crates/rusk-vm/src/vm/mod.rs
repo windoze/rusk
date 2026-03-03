@@ -4,7 +4,7 @@ use rusk_bytecode::{EffectId, ExecutableModule, FunctionId, HostImportId, Method
 use rusk_gc::{GcHeap, GcRef, ImmixHeap, Trace, Tracer};
 use std::collections::HashMap;
 
-use crate::{AbiValue, HostFn, VmError, VmMetrics};
+use crate::{AbiArgs, AbiTypeOf, AbiValue, HostError, HostFn, VmError, VmMetrics};
 
 const VM_GC_TRIGGER_ALLOCATIONS: usize = 50_000;
 
@@ -861,6 +861,48 @@ impl Vm {
         }
         self.host_fns[idx] = Some(Box::new(host_fn));
         Ok(())
+    }
+
+    /// Registers a typed implementation for a host import declared in the loaded module.
+    ///
+    /// This is a convenience adapter over [`Vm::register_host_import`]:
+    /// - decodes `&[AbiValue]` into `Args`,
+    /// - calls the typed closure,
+    /// - converts the return value into [`AbiValue`].
+    ///
+    /// The handler signature is checked against the module-declared ABI signature at
+    /// registration time.
+    pub fn register_host_import_typed<Args, Ret>(
+        &mut self,
+        id: HostImportId,
+        mut f: impl FnMut(Args) -> Result<Ret, HostError> + 'static,
+    ) -> Result<(), VmError>
+    where
+        for<'a> Args: AbiArgs<'a>,
+        Ret: AbiTypeOf + Into<AbiValue>,
+    {
+        let Some(import) = self.module.host_import(id) else {
+            return Err(VmError::InvalidState {
+                message: format!("invalid host import id {}", id.0),
+            });
+        };
+
+        let expected_params = Args::abi_param_types();
+        let expected_ret = Ret::abi_type();
+        if import.sig.params != expected_params || import.sig.ret != expected_ret {
+            return Err(VmError::InvalidState {
+                message: format!(
+                    "host import `{}` signature mismatch: module declares ({:?}) -> {:?}, handler expects ({:?}) -> {:?}",
+                    import.name, import.sig.params, import.sig.ret, expected_params, expected_ret
+                ),
+            });
+        }
+
+        self.register_host_import(id, move |args: &[AbiValue]| {
+            let decoded = Args::decode(args)?;
+            let ret = f(decoded)?;
+            Ok(ret.into())
+        })
     }
 
     /// Interns (deduplicates) a runtime type representation and returns its [`TypeRepId`].

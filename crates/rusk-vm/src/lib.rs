@@ -3,12 +3,14 @@
 extern crate alloc;
 
 mod abi;
+mod effects;
 mod error;
 mod host;
 mod metrics;
 mod vm;
 
-pub use abi::AbiValue;
+pub use abi::{AbiArgs, AbiDecode, AbiDecodeError, AbiParamTypes, AbiTypeOf, AbiValue, Cont};
+pub use effects::{EffectDispatchTable, StepWithEffectsError, vm_step_with_effects};
 pub use error::{HostError, VmError};
 pub use host::HostFn;
 pub use metrics::VmMetrics;

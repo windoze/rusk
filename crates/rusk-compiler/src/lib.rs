@@ -25,8 +25,8 @@ pub use compiler::{
     compile_to_bytecode_with_options, compile_to_bytecode_with_options_and_metrics,
 };
 pub use host::{
-    CompileOptions, ExternalEffectDecl, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType,
-    HostVisibility,
+    CompileOptions, Cont, ExternalEffectDecl, HostFnSig, HostFunctionDecl, HostModuleBuilder,
+    HostModuleDecl, HostParamTypes, HostReturnType, HostType, HostTypeOf, HostVisibility,
 };
 pub use rusk_bytecode::OptLevel;
 

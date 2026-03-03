@@ -146,20 +146,13 @@ fn run_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 示例（更完整的写法见 `docs/embedding-vm.zh.md`）：
 
 ```rust
-use rusk_compiler::{CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility};
+use rusk_compiler::{CompileOptions, HostModuleDecl};
 
 options.register_host_module(
     "my_api",
-    HostModuleDecl {
-        visibility: HostVisibility::Public,
-        functions: vec![
-            HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "add".to_string(),
-                sig: HostFnSig { params: vec![HostType::Int, HostType::Int], ret: HostType::Int },
-            },
-        ],
-    },
+    HostModuleDecl::public()
+        .function::<(i64, i64), i64>("add")
+        .build(),
 )?;
 ```
 
@@ -203,13 +196,9 @@ fn main() -> int {
 ### 6.2 编译期：注册外部化 effect 的签名
 
 ```rust
-use rusk_compiler::{CompileOptions, HostFnSig, HostType};
+use rusk_compiler::CompileOptions;
 
-options.register_external_effect(
-    "HostFs",
-    "read_file",
-    HostFnSig { params: vec![HostType::String], ret: HostType::Bytes },
-)?;
+options.register_external_effect_typed::<(String,), Vec<u8>>("HostFs", "read_file")?;
 ```
 
 ### 6.3 运行期：处理 `StepResult::Request`
@@ -219,6 +208,9 @@ options.register_external_effect(
 - 读取 args（都是 ABI 值：`AbiValue::String`/`AbiValue::Bytes`/等）
 - 计算返回值
 - 恢复 VM（“把值送回 continuation”）
+
+推荐做法：启动时建立 `effect_id -> handler` 的稠密表（`rusk_vm::EffectDispatchTable`），这样 VM
+每次返回 `StepResult::Request` 时只需要 **一次索引** 就能找到对应 handler。
 
 具体的恢复 API 在 `docs/embedding-vm.zh.md` 有详细说明；核心概念是：宿主要么 **resume** 继续运行，要么让脚本失败（trap/取消）。
 

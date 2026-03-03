@@ -87,7 +87,7 @@ In Rust:
 ```rust
 use rusk_vm::AbiValue;
 
-let v = AbiValue::Int(123);
+let v: AbiValue = 123_i64.into();
 assert_eq!(v.ty(), rusk_bytecode::AbiType::Int);
 ```
 
@@ -124,24 +124,15 @@ Host function prototypes are grouped into **host modules** and passed to compila
 Example: declare a `std` module with `print` and `println`:
 
 ```rust
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-};
+use rusk_compiler::{CompileOptions, HostModuleDecl};
 
 let mut options = CompileOptions::default();
 
 options.register_host_module(
     "std",
-    HostModuleDecl {
-        visibility: HostVisibility::Public,
-        functions: vec![
-            HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "println".to_string(),
-                sig: HostFnSig { params: vec![HostType::String], ret: HostType::Unit },
-            },
-        ],
-    },
+    HostModuleDecl::public()
+        .function::<(String,), ()>("println")
+        .build(),
 )?;
 ```
 
@@ -203,14 +194,10 @@ fn main() -> int {
 #### 2) Register the externalized effect when compiling to bytecode
 
 ```rust
-use rusk_compiler::{CompileOptions, HostFnSig, HostType};
+use rusk_compiler::CompileOptions;
 
 let mut options = CompileOptions::default();
-options.register_external_effect(
-    "TestFfi",
-    "add",
-    HostFnSig { params: vec![HostType::Int, HostType::Int], ret: HostType::Int },
-)?;
+options.register_external_effect_typed::<(i64, i64), i64>("TestFfi", "add")?;
 ```
 
 #### ABI safety and signature matching
@@ -308,7 +295,8 @@ platform/OS arguments if necessary.
 Host imports are declared inside the bytecode module, and identified by a stable
 `rusk_bytecode::HostImportId`.
 
-At runtime, you must provide implementations via `Vm::register_host_import`.
+At runtime, you must provide implementations via `Vm::register_host_import` (low-level) or
+`Vm::register_host_import_typed` (recommended).
 
 #### Install by name
 
@@ -318,15 +306,12 @@ The ergonomic pattern is:
 2. Register a closure (or any `HostFn` implementation).
 
 ```rust
-use rusk_vm::{AbiValue, HostError, Vm};
+use rusk_vm::{HostError, Vm};
 
 if let Some(id) = module.host_import_id("std::println") {
-    vm.register_host_import(id, |args: &[AbiValue]| match args {
-        [AbiValue::String(s)] => {
-            println!("{s}");
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError { message: format!("std::println: bad args: {other:?}") }),
+    vm.register_host_import_typed(id, |(s,): (String,)| -> Result<(), HostError> {
+        println!("{s}");
+        Ok(())
     })?;
 }
 ```
@@ -410,10 +395,14 @@ On `Request`, the host receives:
 
 ### Host-side effect dispatch
 
-A common pattern is to resolve the effect name + signature from the module and then dispatch:
+A common pattern is to build a dense `EffectId -> handler` table once at startup and then dispatch
+by table index:
 
 ```rust
-use rusk_vm::{AbiValue, StepResult, vm_drop_continuation, vm_resume, vm_step};
+use rusk_vm::{EffectDispatchTable, StepResult, vm_resume, vm_step};
+
+let mut effects = EffectDispatchTable::new(&module);
+effects.register_typed::<(i64, i64), i64>(&module, "TestFfi", "add", |(a, b)| Ok(a + b))?;
 
 loop {
     match vm_step(&mut vm, None) {
@@ -421,18 +410,7 @@ loop {
         StepResult::Trap { message } => panic!("vm trapped: {message}"),
         StepResult::Yield { .. } => continue,
         StepResult::Request { effect_id, args, k } => {
-            let decl = module
-                .external_effect(effect_id)
-                .unwrap_or_else(|| panic!("unknown external effect id {}", effect_id.0));
-
-            let resume_value = match (decl.interface.as_str(), decl.method.as_str(), args.as_slice()) {
-                ("TestFfi", "add", [AbiValue::Int(a), AbiValue::Int(b)]) => AbiValue::Int(a + b),
-                other => {
-                    let _ = vm_drop_continuation(&mut vm, k);
-                    panic!("unhandled external effect request: {other:?}");
-                }
-            };
-
+            let resume_value = effects.dispatch(effect_id, &args)?;
             vm_resume(&mut vm, k, resume_value).expect("resume");
         }
     }
@@ -496,45 +474,20 @@ event loops, async runtimes, or other host-side scheduling mechanisms.
 
 ### Host functions with continuation signatures
 
-To declare host functions that accept or return continuations, use `HostType::Cont` in the
-signature:
+To declare host functions that accept or return continuations, use the `rusk_compiler::Cont<P, R>`
+type marker (corresponding to `cont(P) -> R`) in the typed signature builder:
 
 ```rust
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-};
+use rusk_compiler::{CompileOptions, Cont, HostModuleDecl};
 
 let mut options = CompileOptions::default();
 
 options.register_host_module(
     "host",
-    HostModuleDecl {
-        visibility: HostVisibility::Public,
-        functions: vec![
-            HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "store_cont".to_string(),
-                sig: HostFnSig {
-                    params: vec![HostType::Cont {
-                        param: Box::new(HostType::Int),
-                        ret: Box::new(HostType::Int),
-                    }],
-                    ret: HostType::Unit,
-                },
-            },
-            HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "take_cont".to_string(),
-                sig: HostFnSig {
-                    params: Vec::new(),
-                    ret: HostType::Cont {
-                        param: Box::new(HostType::Int),
-                        ret: Box::new(HostType::Int),
-                    },
-                },
-            },
-        ],
-    },
+    HostModuleDecl::public()
+        .function::<(Cont<i64, i64>,), ()>("store_cont")
+        .function::<(), Cont<i64, i64>>("take_cont")
+        .build(),
 )?;
 ```
 
@@ -566,17 +519,14 @@ automatically **pins** the continuation in an internal GC-rooted table and conve
 Where `ContinuationHandle` is an opaque, generation-checked handle:
 
 ```rust
-use rusk_vm::{AbiValue, ContinuationHandle};
+use rusk_vm::{Cont, HostError};
 
 // In a host import implementation:
 if let Some(id) = module.host_import_id("host::store_cont") {
-    vm.register_host_import(id, |args: &[AbiValue]| match args {
-        [AbiValue::Continuation(handle)] => {
-            // Store the handle in host state (e.g. a Vec or HashMap)
-            store_continuation_somewhere(*handle);
-            Ok(AbiValue::Unit)
-        }
-        _ => Err(/* ... */)
+    vm.register_host_import_typed(id, |(k,): (Cont<i64, i64>,)| -> Result<(), HostError> {
+        // Store the handle in host state (e.g. a Vec or HashMap)
+        store_continuation_somewhere(k.into_handle());
+        Ok(())
     })?;
 }
 ```
@@ -599,9 +549,9 @@ the VM looks up the pinned continuation and converts it back to `Value::Continua
 The host can directly resume a pinned continuation using:
 
 ```rust
-use rusk_vm::{vm_resume_pinned_continuation_tail, AbiValue};
+use rusk_vm::vm_resume_pinned_continuation_tail;
 
-vm_resume_pinned_continuation_tail(&mut vm, handle, AbiValue::Int(42))?;
+vm_resume_pinned_continuation_tail(&mut vm, handle, 42_i64.into())?;
 ```
 
 This is a **tail-resume** operation:
@@ -618,10 +568,10 @@ This is a **tail-resume** operation:
 Example host-side resume loop:
 
 ```rust
-use rusk_vm::{StepResult, vm_step, vm_resume_pinned_continuation_tail, AbiValue};
+use rusk_vm::{StepResult, vm_step, vm_resume_pinned_continuation_tail};
 
 // After storing a continuation handle from a host import call:
-vm_resume_pinned_continuation_tail(&mut vm, stored_handle, AbiValue::Int(42))?;
+vm_resume_pinned_continuation_tail(&mut vm, stored_handle, 42_i64.into())?;
 
 loop {
     match vm_step(&mut vm, None) {
@@ -708,14 +658,15 @@ evolve (this is a v0 runtime).
     `rusk-vm`, or extend the VM/ABI to support the types you need.
 
 - **“external effect … has non-ABI-safe signature for bytecode v0”**
-  - Symptom: `register_external_effect(...)` works but compiling to bytecode fails.
+  - Symptom: `register_external_effect(...)` / `register_external_effect_typed(...)` works but
+    compiling to bytecode fails.
   - Fix: restrict external effect signatures to ABI-safe primitives.
 
 ### Runtime traps
 
 - **“missing host import implementation: `<name>`”**
   - You compiled a module that imports a host function, but didn’t register it via
-    `Vm::register_host_import`.
+    `Vm::register_host_import` or `Vm::register_host_import_typed`.
 
 - **“vm is suspended; call resume/drop first”**
   - You received `StepResult::Request` and called `vm_step` again without resuming/cancelling.

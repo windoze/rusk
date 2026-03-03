@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use rusk_lsp::{RuskLanguageServer, RuskLspConfig};
+use tokio::time::{Duration, timeout};
 use tower::Service;
 use tower::ServiceExt;
 use tower_lsp::jsonrpc;
@@ -9,7 +10,6 @@ use tower_lsp::lsp_types::{
     PublishDiagnosticsParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
     Url,
 };
-use tokio::time::{Duration, timeout};
 
 fn temp_file_path(name: &str) -> std::path::PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,7 +31,6 @@ async fn init_service_with_params(
     service: &mut tower_lsp::LspService<RuskLanguageServer>,
     params: InitializeParams,
 ) -> tower_lsp::jsonrpc::Response {
-
     let req = jsonrpc::Request::build("initialize")
         .id(1i64)
         .params(serde_json::to_value(params).expect("serialize initialize"))
@@ -131,11 +130,8 @@ async fn opening_sysroot_file_without_entry_files_clears_diagnostics_instead_of_
 
     let root = temp_file_path("sysroot_workspace_root");
     std::fs::create_dir_all(root.join("sysroot/core")).expect("create sysroot/core dir");
-    std::fs::write(
-        root.join("sysroot/core/mod.rusk"),
-        "mod prelude;\n",
-    )
-    .expect("write sysroot core mod");
+    std::fs::write(root.join("sysroot/core/mod.rusk"), "mod prelude;\n")
+        .expect("write sysroot core mod");
     std::fs::write(
         root.join("sysroot/core/prelude.rusk"),
         "fn dummy() { () }\n",

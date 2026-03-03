@@ -27,6 +27,14 @@ pub struct HostError {
     pub message: String,
 }
 
+impl From<crate::AbiDecodeError> for HostError {
+    fn from(e: crate::AbiDecodeError) -> Self {
+        Self {
+            message: e.to_string(),
+        }
+    }
+}
+
 impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "host error: {}", self.message)
