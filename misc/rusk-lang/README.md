@@ -22,7 +22,8 @@ Rusk 是一个实验性编程语言和运行时，使用 Rust 实现。它结合
   - completion（补全；当前主要是关键字补全）
   - document symbols（文档符号）
   - goto definition（跳转到定义；best-effort，已支持顶层符号 + 参数/泛型 + struct 字段 + 方法 + enum 变体等）
-  - 未来将支持 hover / rename / find references 等（见仓库 `proposals/rusk-lsp.md`）
+  - hover（悬浮提示；best-effort：表达式类型 + 可解析到定义时的 doc comment）
+  - 未来将支持 rename / find references 等（见仓库 `proposals/rusk-lsp.md`）
 
 ## 使用方法
 
@@ -53,6 +54,13 @@ cargo install --path crates/rusk-lsp
 ### 3) 打开 `.rusk` 文件
 
 打开任何 `.rusk` 文件即可获得语法高亮，并启动 `rusk-lsp` 提供诊断等语言功能。
+
+提示：
+- 如果不配置 `rusk.lsp.entryFiles`，`rusk-lsp` 默认使用“当前打开/修改的文件”作为诊断入口。
+  当你打开的是 sysroot 文件（`sysroot/core/*` / `sysroot/std/*`）时，服务器会避免把它当作入口，
+  以免 std/core 被重复注入导致假阳性错误；此时会沿用最近一次的非 sysroot 文件作为入口。
+- 对于多文件工程，建议显式配置 `rusk.lsp.entryFiles` 指向真正的入口文件（例如 `main.rusk`），
+  这样打开任意模块文件都能得到更稳定的诊断结果。
 
 示例代码：
 

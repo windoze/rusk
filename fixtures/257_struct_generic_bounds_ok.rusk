@@ -1,14 +1,20 @@
 // expect: ok int 7
 
 interface MyHash {
+    /// hash is a method that returns an integer
     readonly fn hash() -> int;
 }
 
+/// MyEq is an interface
 interface MyEq {
     readonly fn eq(other: Self) -> bool;
 }
 
-struct Key { x: int }
+/// Key struct
+struct Key {
+    /// x is an integer field
+    x: int
+}
 
 impl MyHash for Key {
     readonly fn hash() -> int { 7 }
@@ -18,10 +24,16 @@ impl MyEq for Key {
     readonly fn eq(other: Self) -> bool { self.x == other.x }
 }
 
-struct Box<T: MyHash + MyEq> { v: T }
+struct Box<T: MyHash + MyEq> {
+    /// v is a generic field constrained by MyHash and MyEq
+    v: T
+}
 
 impl<T: MyHash + MyEq> Box<T> {
-    fn v_hash() -> int { MyHash::hash(self.v) }
+    /// v_hash is a method that returns the hash of v
+    fn v_hash() -> int {
+        MyHash::hash(self.v)
+    }
 }
 
 fn main() -> int {

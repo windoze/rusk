@@ -5,6 +5,7 @@ use rusk_compiler::source_map::SourceName;
 use rusk_compiler::vfs::SourceProvider;
 use rusk_host::std_io;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -12,8 +13,9 @@ use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, InitializeParams, InitializeResult, Location,
-    OneOf, Position, Range, ServerCapabilities, ServerInfo, SymbolKind,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
+    MarkupKind, OneOf, Position, Range, ServerCapabilities, ServerInfo, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
     TextDocumentSyncKind, Url, WorkDoneProgressOptions,
 };
@@ -31,6 +33,7 @@ struct ServerState {
     workspace_root: RwLock<Option<PathBuf>>,
     last_published: RwLock<HashSet<Url>>,
     snapshots: RwLock<Vec<compiler_analysis::AnalysisSnapshot>>,
+    last_user_trigger: RwLock<Option<PathBuf>>,
 }
 
 #[derive(Clone)]
@@ -81,6 +84,7 @@ impl RuskLanguageServer {
                 workspace_root: RwLock::new(None),
                 last_published: RwLock::new(HashSet::new()),
                 snapshots: RwLock::new(Vec::new()),
+                last_user_trigger: RwLock::new(None),
             }),
         }
     }
@@ -144,12 +148,136 @@ impl RuskLanguageServer {
         if !config.entry_files.is_empty() {
             return config.entry_files;
         }
-        trigger.into_iter().collect()
+
+        let Some(trigger) = trigger else {
+            return Vec::new();
+        };
+
+        if self.is_sysroot_file(&trigger) {
+            return self
+                .state
+                .last_user_trigger
+                .read()
+                .ok()
+                .and_then(|p| p.clone())
+                .into_iter()
+                .collect();
+        }
+
+        if let Ok(mut last) = self.state.last_user_trigger.write() {
+            *last = Some(trigger.clone());
+        }
+
+        vec![trigger]
+    }
+
+    fn is_sysroot_file(&self, path: &Path) -> bool {
+        let config = self
+            .state
+            .config
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+
+        let mut candidates = Vec::new();
+
+        if let Some(sysroot) = config.sysroot {
+            candidates.push(sysroot);
+        }
+
+        if let Some(val) = std::env::var_os("RUSK_SYSROOT")
+            && !val.is_empty()
+        {
+            candidates.push(PathBuf::from(val));
+        }
+
+        if let Some(workspace_sysroot) = self
+            .state
+            .workspace_root
+            .read()
+            .ok()
+            .and_then(|root| root.as_ref().map(|p| p.join("sysroot")))
+        {
+            candidates.push(workspace_sysroot);
+        }
+
+        // Best-effort: if the opened file lives under a directory literally named `sysroot`,
+        // treat that as a sysroot root. This helps when the client does not set `cwd` or root URI.
+        let key = OverlaySourceProvider::key_for_path(path);
+        if let Some(guessed) = key
+            .ancestors()
+            .find(|p| p.file_name() == Some(OsStr::new("sysroot")))
+            .map(|p| p.to_path_buf())
+        {
+            candidates.push(guessed);
+        }
+
+        // Fallback: rely on current working directory.
+        candidates.push(PathBuf::from("sysroot"));
+
+        for candidate in candidates {
+            if !candidate.is_dir() {
+                continue;
+            }
+
+            // Avoid treating an unrelated `sysroot/` folder as the standard library.
+            // The real Rusk sysroot must contain `core/mod.rusk`.
+            if !candidate.join("core").join("mod.rusk").is_file() {
+                continue;
+            }
+
+            let sysroot = OverlaySourceProvider::key_for_path(&candidate);
+            if key.starts_with(&sysroot) {
+                return true;
+            }
+        }
+        false
     }
 
     async fn reanalyze_and_publish(&self, trigger: Option<PathBuf>) {
-        let entry_files = self.entry_files_for_trigger(trigger);
+        let entry_files = self.entry_files_for_trigger(trigger.clone());
         if entry_files.is_empty() {
+            if let Some(trigger_path) = trigger
+                && self.is_sysroot_file(&trigger_path)
+            {
+                let prev_keys: HashSet<Url> = self
+                    .state
+                    .last_published
+                    .read()
+                    .ok()
+                    .map(|s| s.clone())
+                    .unwrap_or_default();
+
+                let mut to_clear: HashSet<Url> = prev_keys
+                    .iter()
+                    .filter_map(|uri| {
+                        uri.to_file_path()
+                            .ok()
+                            .filter(|p| self.is_sysroot_file(p))
+                            .and(Some(uri.clone()))
+                    })
+                    .collect();
+
+                if let Ok(uri) = Url::from_file_path(&trigger_path) {
+                    to_clear.insert(uri);
+                }
+
+                let mut to_clear: Vec<Url> = to_clear.into_iter().collect();
+                to_clear.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+                for uri in &to_clear {
+                    self.client
+                        .publish_diagnostics(uri.clone(), Vec::new(), None)
+                        .await;
+                }
+
+                if let Ok(mut last) = self.state.last_published.write() {
+                    for uri in &to_clear {
+                        last.remove(uri);
+                    }
+                }
+            }
             return;
         }
 
@@ -233,7 +361,21 @@ impl RuskLanguageServer {
 #[tower_lsp::async_trait]
 impl LanguageServer for RuskLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
-        let root_path = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok());
+        #[allow(deprecated)]
+        let root_path_fallback = params.root_path.as_ref().map(PathBuf::from);
+
+        let root_path = params
+            .root_uri
+            .as_ref()
+            .and_then(|u| u.to_file_path().ok())
+            .or_else(|| {
+                params
+                    .workspace_folders
+                    .as_ref()
+                    .and_then(|folders| folders.first())
+                    .and_then(|f| f.uri.to_file_path().ok())
+            })
+            .or(root_path_fallback);
 
         if let Ok(mut root) = self.state.workspace_root.write() {
             *root = root_path.clone();
@@ -274,6 +416,7 @@ impl LanguageServer for RuskLanguageServer {
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -434,8 +577,10 @@ impl LanguageServer for RuskLanguageServer {
                     // Best-effort: fall back to the older top-level lookup path.
                     // This can happen if the snapshot is missing source text for the returned
                     // location (e.g. stale/partial snapshots).
-                    return Ok(find_definition_in_snapshot(snapshot, &ident, Some(&doc_name))
-                        .map(GotoDefinitionResponse::Scalar));
+                    return Ok(
+                        find_definition_in_snapshot(snapshot, &ident, Some(&doc_name))
+                            .map(GotoDefinitionResponse::Scalar),
+                    );
                 };
                 let uri = match &def.name {
                     SourceName::Path(p) => Url::from_file_path(p).ok(),
@@ -443,7 +588,10 @@ impl LanguageServer for RuskLanguageServer {
                 };
                 if let Some(uri) = uri {
                     let range = byte_range_to_range(&src, def.start, def.end);
-                    return Ok(Some(GotoDefinitionResponse::Scalar(Location { uri, range })));
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri,
+                        range,
+                    })));
                 }
             }
 
@@ -459,6 +607,142 @@ impl LanguageServer for RuskLanguageServer {
         }
 
         Ok(None)
+    }
+
+    async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let Some(src) = self.get_overlay_text(&uri) else {
+            return Ok(None);
+        };
+
+        let offset = position_to_byte_offset(&src, pos);
+        let ident_info = extract_ident_at(&src, pos);
+
+        let Some(path) = uri.to_file_path().ok() else {
+            return Ok(None);
+        };
+        let key = OverlaySourceProvider::key_for_path(&path);
+        let doc_name = SourceName::Path(key);
+
+        let snapshots = self
+            .state
+            .snapshots
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+
+        let Some(snapshot) = snapshots
+            .iter()
+            .find(|s| s.source_map().source_text(&doc_name).is_some())
+        else {
+            return Ok(None);
+        };
+
+        let mut markdown_parts = Vec::new();
+        let mut range: Option<Range> = None;
+
+        let mut symbol_hover = false;
+        if let Some((ident, ident_start, ident_end)) = ident_info.as_ref() {
+            if range.is_none() {
+                range = Some(byte_range_to_range(&src, *ident_start, *ident_end));
+            }
+
+            if is_member_call_site(&src, *ident_start, *ident_end)
+                && let Some(def) = compiler_analysis::goto_definition(
+                    snapshot,
+                    &doc_name,
+                    (*ident_start, *ident_end),
+                    ident,
+                )
+            {
+                symbol_hover = true;
+                if let Some(def_src) = snapshot.source_map().source_text(&def.name) {
+                    let header = definition_header_line(&def_src, def.start)
+                        .unwrap_or_else(|| ident.to_string());
+                    markdown_parts.push(format!("```rusk\n{header}\n```"));
+                    if let Some(docs) = doc_comment_for_symbol(&def_src, def.start) {
+                        markdown_parts.push(docs);
+                    }
+                } else {
+                    markdown_parts.push(format!("```rusk\n{ident}\n```"));
+                }
+            }
+
+            if !symbol_hover
+                && let Some((kind, br)) =
+                    find_named_symbol_in_snapshot(snapshot, ident, Some(&doc_name))
+            {
+                symbol_hover = true;
+                let fallback_header = format!(
+                    "{} {}",
+                    match kind {
+                        compiler_analysis::SymbolKind::Function => "fn",
+                        compiler_analysis::SymbolKind::IntrinsicFunction => "intrinsic fn",
+                        compiler_analysis::SymbolKind::Struct => "struct",
+                        compiler_analysis::SymbolKind::Enum => "enum",
+                        compiler_analysis::SymbolKind::Interface => "interface",
+                        compiler_analysis::SymbolKind::Impl => "impl",
+                        compiler_analysis::SymbolKind::Module => "mod",
+                        compiler_analysis::SymbolKind::Use => "use",
+                    },
+                    ident
+                );
+
+                if let Some(def_src) = snapshot.source_map().source_text(&br.name) {
+                    let header = definition_header_line(&def_src, br.start)
+                        .unwrap_or_else(|| fallback_header.clone());
+                    markdown_parts.push(format!("```rusk\n{header}\n```"));
+                    if let Some(docs) = doc_comment_for_symbol(&def_src, br.start) {
+                        markdown_parts.push(docs);
+                    }
+                } else {
+                    markdown_parts.push(format!("```rusk\n{fallback_header}\n```"));
+                }
+            }
+        }
+
+        if !symbol_hover {
+            if let Some(info) = compiler_analysis::hover(snapshot, &doc_name, offset) {
+                let display = info.display.trim();
+                if !display.is_empty() {
+                    markdown_parts.push(format!("```rusk\n{display}\n```"));
+                }
+                if range.is_none()
+                    && let Some(br) = info.range
+                    && br.name == doc_name
+                {
+                    range = Some(byte_range_to_range(&src, br.start, br.end));
+                }
+            }
+
+            if let Some((ident, ident_start, ident_end)) = ident_info
+                && let Some(def) = compiler_analysis::goto_definition(
+                    snapshot,
+                    &doc_name,
+                    (ident_start, ident_end),
+                    &ident,
+                )
+                && let Some(def_src) = snapshot.source_map().source_text(&def.name)
+                && let Some(docs) = doc_comment_for_symbol(&def_src, def.start)
+            {
+                markdown_parts.push(docs);
+            }
+        }
+
+        if markdown_parts.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: markdown_parts.join("\n\n"),
+            }),
+            range,
+        }))
     }
 }
 
@@ -555,6 +839,32 @@ fn symbol_to_document_symbol(
 }
 
 fn doc_comment_for_symbol(src: &str, symbol_name_start: usize) -> Option<String> {
+    let symbol_name_start = clamp_to_boundary(src, symbol_name_start);
+
+    // Heuristic: only attach doc comments when the symbol name appears in an "item-like" context
+    // on its line. This avoids incorrectly attributing outer docs to inner names such as:
+    //
+    //   /// Struct docs
+    //   struct Key { x: int }   // hovering `x` should NOT show "Struct docs"
+    //
+    // or:
+    //
+    //   /// Function docs
+    //   fn f(x: int) { ... }    // hovering `x` should NOT show "Function docs"
+    let line_start = src[..symbol_name_start]
+        .rfind('\n')
+        .map(|i| i.saturating_add(1))
+        .unwrap_or(0);
+    let prefix = src[line_start..symbol_name_start].trim_end();
+    if prefix.chars().any(|ch| {
+        matches!(
+            ch,
+            '{' | '}' | '(' | ')' | '[' | ']' | ',' | '.' | ':' | ';' | '<' | '>' | '=' | '@' | '#'
+        )
+    }) {
+        return None;
+    }
+
     let line_idx = byte_offset_to_position(src, symbol_name_start).line as usize;
     let lines: Vec<&str> = src.lines().collect();
     if line_idx == 0 || line_idx > lines.len() {
@@ -600,7 +910,7 @@ fn summarize_doc_comment(docs: &str) -> String {
         first.to_string()
     } else {
         let mut out = first.chars().take(MAX).collect::<String>();
-        out.push_str("…");
+        out.push('…');
         out
     }
 }
@@ -708,25 +1018,73 @@ fn is_ident_continue(ch: char) -> bool {
     ch == '_' || unicode_ident::is_xid_continue(ch)
 }
 
-fn find_definition_in_snapshot(
+fn is_member_call_site(src: &str, ident_start: usize, ident_end: usize) -> bool {
+    let prefix = src[..ident_start].trim_end();
+    let suffix = src[ident_end..].trim_start();
+
+    let is_member_access = prefix.ends_with('.') || prefix.ends_with("::");
+    if !is_member_access {
+        return false;
+    }
+
+    suffix.starts_with('(') || suffix.starts_with("::<")
+}
+
+fn definition_header_line(src: &str, name_start: usize) -> Option<String> {
+    let name_start = clamp_to_boundary(src, name_start);
+
+    let line_start = src[..name_start]
+        .rfind('\n')
+        .map(|idx| idx.saturating_add(1))
+        .unwrap_or(0);
+    let line_end = src[name_start..]
+        .find('\n')
+        .map(|idx| name_start.saturating_add(idx))
+        .unwrap_or_else(|| src.len());
+
+    let line = src.get(line_start..line_end)?.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let mut header = line.to_string();
+    if let Some(brace) = header.find('{') {
+        let prefix = header[..brace].trim_end();
+        header = format!("{prefix} {{ … }}");
+    }
+
+    const MAX: usize = 160;
+    if header.chars().count() > MAX {
+        header = header.chars().take(MAX).collect::<String>();
+        header.push('…');
+    }
+
+    Some(header)
+}
+
+fn find_named_symbol_in_snapshot(
     snapshot: &compiler_analysis::AnalysisSnapshot,
     name: &str,
     prefer_doc: Option<&SourceName>,
-) -> Option<Location> {
+) -> Option<(
+    compiler_analysis::SymbolKind,
+    rusk_compiler::source_map::SourceByteRange,
+)> {
     let source_map = snapshot.source_map();
 
     let mut docs = source_map.source_names();
-    if let Some(prefer) = prefer_doc {
-        if let Some(idx) = docs.iter().position(|d| d == prefer) {
-            let preferred = docs.remove(idx);
-            docs.insert(0, preferred);
-        }
+    if let Some(prefer) = prefer_doc
+        && let Some(idx) = docs.iter().position(|d| d == prefer)
+    {
+        let preferred = docs.remove(idx);
+        docs.insert(0, preferred);
     }
 
     for doc in docs {
-        let Some(src) = source_map.source_text(&doc) else {
+        if source_map.source_text(&doc).is_none() {
             continue;
-        };
+        }
+
         let symbols = compiler_analysis::document_symbols(snapshot, &doc);
         let Some(sym) = find_symbol_by_name(symbols, name) else {
             continue;
@@ -739,16 +1097,28 @@ fn find_definition_in_snapshot(
             continue;
         }
 
-        let uri = match &doc {
-            SourceName::Path(p) => Url::from_file_path(p).ok()?,
-            SourceName::Virtual(_) => continue,
-        };
-
-        let range = byte_range_to_range(&src, byte_range.start, byte_range.end);
-        return Some(Location { uri, range });
+        return Some((sym.kind, byte_range));
     }
 
     None
+}
+
+fn find_definition_in_snapshot(
+    snapshot: &compiler_analysis::AnalysisSnapshot,
+    name: &str,
+    prefer_doc: Option<&SourceName>,
+) -> Option<Location> {
+    let (_kind, byte_range) = find_named_symbol_in_snapshot(snapshot, name, prefer_doc)?;
+    let source_map = snapshot.source_map();
+    let src = source_map.source_text(&byte_range.name)?;
+
+    let uri = match &byte_range.name {
+        SourceName::Path(p) => Url::from_file_path(p).ok()?,
+        SourceName::Virtual(_) => return None,
+    };
+
+    let range = byte_range_to_range(&src, byte_range.start, byte_range.end);
+    Some(Location { uri, range })
 }
 
 fn find_symbol_by_name(
@@ -821,7 +1191,9 @@ mod tests {
             character: 12,
         };
         assert_eq!(
-            extract_ident_at(src, pos).as_ref().map(|(s, _, _)| s.as_str()),
+            extract_ident_at(src, pos)
+                .as_ref()
+                .map(|(s, _, _)| s.as_str()),
             Some("αβ")
         );
     }

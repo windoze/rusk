@@ -16,6 +16,9 @@
 - `textDocument/documentSymbol`（顶层符号）
   - 若符号上方存在 doc comment（`/// ...`），会把摘要写入 `DocumentSymbol.detail`
 - `textDocument/completion`（关键字补全）
+- `textDocument/hover`（best-effort：悬浮提示）
+  - 对具备类型信息的表达式显示推断类型
+  - 当悬浮的名字可解析到带 doc comment 的定义时，会显示对应注释（`/// ...`）
 - `textDocument/definition`（best-effort：导航跳转）
   - 顶层 item（函数 / struct / enum / interface / module）
   - 函数参数与泛型参数
@@ -26,7 +29,6 @@
 
 后续计划（见 `proposals/rusk-lsp.md`）：
 
-- hover 类型信息
 - 更准确的 go-to-definition（基于语义解析/作用域，处理 shadowing 等）
 - 更好的错误累计（同一文件多个诊断）
 
@@ -67,6 +69,12 @@ cargo install --path crates/rusk-lsp
 ```
 
 如果未提供 `entryFiles`（或为空），`rusk-lsp` 会把当前打开/修改的文档当作诊断入口。
+
+注意：当当前文档位于 sysroot（例如 `sysroot/core/*.rusk` / `sysroot/std/*.rusk`）时，
+`rusk-lsp` 不会把该文件当作诊断入口（否则会导致 sysroot 被注入两次，出现诸如
+“module file ... loaded multiple times”、“`super` at crate root” 等假阳性错误）。
+此时会沿用最近一次触发过诊断的“非 sysroot 文件”作为入口；若尚未存在该入口，则仅清空
+sysroot 文件上的诊断并跳过本次重分析。
 
 ## 示例
 

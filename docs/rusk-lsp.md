@@ -16,6 +16,9 @@ Current MVP features:
 - `textDocument/documentSymbol` (top-level symbols)
   - includes a doc-comment summary in `DocumentSymbol.detail` when available (`/// ...`)
 - `textDocument/completion` (keyword completion)
+- `textDocument/hover` (best-effort hover)
+  - inferred type for expressions where type info is available
+  - includes doc comments when the hovered name resolves to a documented definition (`/// ...`)
 - `textDocument/definition` (best-effort navigation)
   - top-level items (functions / structs / enums / interfaces / modules)
   - function parameters + generic parameters
@@ -26,7 +29,6 @@ Current MVP features:
 
 Planned follow-ups (see `proposals/rusk-lsp.md`):
 
-- hover inferred type
 - more accurate go-to-definition (semantic resolution across scopes + shadowing)
 - better error accumulation / multiple diagnostics per file
 
@@ -68,6 +70,12 @@ Editors can provide configuration via `initialize.initializationOptions` (camelC
 
 If `entryFiles` is omitted (or empty), `rusk-lsp` treats the currently opened/changed document as
 the compilation root for diagnostics.
+
+Note: files under the sysroot (e.g. `sysroot/core/*.rusk` / `sysroot/std/*.rusk`) are never used
+as the default diagnostic entry, because that would inject the sysroot twice and produce spurious
+errors such as “module file ... loaded multiple times” or “`super` at crate root”. When a sysroot
+file triggers a re-analysis, `rusk-lsp` reuses the most recent non-sysroot trigger as the entry.
+If none exists yet, it clears diagnostics for the sysroot file and skips re-analysis.
 
 ## Example
 

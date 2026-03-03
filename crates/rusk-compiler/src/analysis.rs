@@ -2,8 +2,8 @@ use crate::ast::{
     Block, Expr, FieldName, ImplHeader, ImplItem, ImplMember, InterfaceMember, Item, MatchPat,
     ModKind, Path as AstPath, PathType, Pattern, Program, Stmt, StructBody,
 };
-use crate::modules::{DefKind, ModulePath};
 use crate::compiler::{CompileError, load_sysroot_items, reject_reserved_module_names};
+use crate::modules::{DefKind, ModulePath};
 use crate::source::Span;
 use crate::source_map::{SourceByteRange, SourceMap, SourceName, SourceRange};
 use crate::typeck::{FnTypeInfo, ProgramEnv, Ty, TyCon, TypeInfo};
@@ -200,12 +200,15 @@ pub fn goto_definition(
     let source_map = snapshot.source_map();
     let offset = ident_range.0;
 
-    if let Some(def_span) = find_generic_param_def(&snapshot.program.items, source_map, document, offset, ident)
+    if let Some(def_span) =
+        find_generic_param_def(&snapshot.program.items, source_map, document, offset, ident)
     {
         return source_map.lookup_span_bytes(def_span);
     }
 
-    if let Some(def_span) = find_param_def(&snapshot.program.items, source_map, document, offset, ident) {
+    if let Some(def_span) =
+        find_param_def(&snapshot.program.items, source_map, document, offset, ident)
+    {
         return source_map.lookup_span_bytes(def_span);
     }
 
@@ -223,6 +226,52 @@ pub fn goto_definition(
         ident,
     )?;
     source_map.lookup_span_bytes(def_span)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoverInfo {
+    /// A short display string for hover popups (typically an inferred type).
+    pub display: String,
+    /// The file-relative byte range that the hover applies to (best-effort).
+    pub range: Option<SourceByteRange>,
+}
+
+/// Best-effort hover query for editor tooling.
+///
+/// Currently returns the inferred type for the smallest expression containing `offset` within
+/// `document`, when type information is available.
+pub fn hover(
+    snapshot: &AnalysisSnapshot,
+    document: &SourceName,
+    offset: usize,
+) -> Option<HoverInfo> {
+    let (Some(env), Some(types)) = (&snapshot.env, &snapshot.types) else {
+        return None;
+    };
+
+    let source_map = snapshot.source_map();
+
+    let (fn_info, body) = find_fn_type_info_at_offset(
+        &snapshot.program.items,
+        &ModulePath::root(),
+        &snapshot.program.items,
+        source_map,
+        env,
+        types,
+        document,
+        offset,
+    )?;
+
+    let (expr_span, ty) =
+        find_smallest_typed_expr_in_block(source_map, document, offset, fn_info, body)?;
+    let range = source_map
+        .lookup_span_bytes(expr_span)
+        .filter(|r| &r.name == document);
+
+    Some(HoverInfo {
+        display: ty.to_string(),
+        range,
+    })
 }
 
 fn diagnostic_from_compile_error(err: CompileError, source_map: &SourceMap) -> Diagnostic {
@@ -284,8 +333,7 @@ fn find_generic_param_def_in_items(
     for item in items {
         match item {
             Item::Function(f) => {
-                if let Some(len) = container_len_if_contains(source_map, f.span, document, offset)
-                {
+                if let Some(len) = container_len_if_contains(source_map, f.span, document, offset) {
                     for gp in &f.generics {
                         if gp.name.name == ident {
                             update_best(best, len, gp.name.span);
@@ -294,8 +342,7 @@ fn find_generic_param_def_in_items(
                 }
             }
             Item::IntrinsicFn(f) => {
-                if let Some(len) = container_len_if_contains(source_map, f.span, document, offset)
-                {
+                if let Some(len) = container_len_if_contains(source_map, f.span, document, offset) {
                     for gp in &f.generics {
                         if gp.name.name == ident {
                             update_best(best, len, gp.name.span);
@@ -304,8 +351,7 @@ fn find_generic_param_def_in_items(
                 }
             }
             Item::Struct(s) => {
-                if let Some(len) = container_len_if_contains(source_map, s.span, document, offset)
-                {
+                if let Some(len) = container_len_if_contains(source_map, s.span, document, offset) {
                     for gp in &s.generics {
                         if gp.name.name == ident {
                             update_best(best, len, gp.name.span);
@@ -314,8 +360,7 @@ fn find_generic_param_def_in_items(
                 }
             }
             Item::Enum(e) => {
-                if let Some(len) = container_len_if_contains(source_map, e.span, document, offset)
-                {
+                if let Some(len) = container_len_if_contains(source_map, e.span, document, offset) {
                     for gp in &e.generics {
                         if gp.name.name == ident {
                             update_best(best, len, gp.name.span);
@@ -324,8 +369,7 @@ fn find_generic_param_def_in_items(
                 }
             }
             Item::Interface(i) => {
-                if let Some(len) = container_len_if_contains(source_map, i.span, document, offset)
-                {
+                if let Some(len) = container_len_if_contains(source_map, i.span, document, offset) {
                     for gp in &i.generics {
                         if gp.name.name == ident {
                             update_best(best, len, gp.name.span);
@@ -348,8 +392,7 @@ fn find_generic_param_def_in_items(
                 }
             }
             Item::Impl(i) => {
-                if let Some(len) = container_len_if_contains(source_map, i.span, document, offset)
-                {
+                if let Some(len) = container_len_if_contains(source_map, i.span, document, offset) {
                     for gp in &i.generics {
                         if gp.name.name == ident {
                             update_best(best, len, gp.name.span);
@@ -407,18 +450,16 @@ fn find_param_def_in_items(
         match item {
             Item::Function(f) => {
                 if let Some(len) = container_len_if_contains(source_map, f.span, document, offset)
+                    && let Some(span) = find_binding_in_params(&f.params, ident)
                 {
-                    if let Some(span) = find_binding_in_params(&f.params, ident) {
-                        update_best(best, len, span);
-                    }
+                    update_best(best, len, span);
                 }
             }
             Item::IntrinsicFn(f) => {
                 if let Some(len) = container_len_if_contains(source_map, f.span, document, offset)
+                    && let Some(span) = find_binding_in_params(&f.params, ident)
                 {
-                    if let Some(span) = find_binding_in_params(&f.params, ident) {
-                        update_best(best, len, span);
-                    }
+                    update_best(best, len, span);
                 }
             }
             Item::Interface(i) => {
@@ -428,10 +469,9 @@ fn find_param_def_in_items(
                     };
                     if let Some(len) =
                         container_len_if_contains(source_map, m.span, document, offset)
+                        && let Some(span) = find_binding_in_params(&m.params, ident)
                     {
-                        if let Some(span) = find_binding_in_params(&m.params, ident) {
-                            update_best(best, len, span);
-                        }
+                        update_best(best, len, span);
                     }
                 }
             }
@@ -442,10 +482,9 @@ fn find_param_def_in_items(
                     };
                     if let Some(len) =
                         container_len_if_contains(source_map, m.span, document, offset)
+                        && let Some(span) = find_binding_in_params(&m.params, ident)
                     {
-                        if let Some(span) = find_binding_in_params(&m.params, ident) {
-                            update_best(best, len, span);
-                        }
+                        update_best(best, len, span);
                     }
                 }
             }
@@ -490,12 +529,11 @@ fn find_binding_in_pattern(pat: &Pattern, ident: &str) -> Option<Span> {
                     return Some(span);
                 }
             }
-            if let Some(rest) = rest {
-                if let Some(binding) = &rest.binding
-                    && binding.name == ident
-                {
-                    return Some(binding.span);
-                }
+            if let Some(rest) = rest
+                && let Some(binding) = &rest.binding
+                && binding.name == ident
+            {
+                return Some(binding.span);
             }
             for p in suffix {
                 if let Some(span) = find_binding_in_pattern(p, ident) {
@@ -522,12 +560,11 @@ fn find_binding_in_pattern(pat: &Pattern, ident: &str) -> Option<Span> {
                     return Some(span);
                 }
             }
-            if let Some(rest) = rest {
-                if let Some(binding) = &rest.binding
-                    && binding.name == ident
-                {
-                    return Some(binding.span);
-                }
+            if let Some(rest) = rest
+                && let Some(binding) = &rest.binding
+                && binding.name == ident
+            {
+                return Some(binding.span);
             }
             for p in suffix {
                 if let Some(span) = find_binding_in_pattern(p, ident) {
@@ -561,6 +598,7 @@ fn find_member_or_method_def(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_member_or_method_def_in_items(
     items: &[Item],
     module: &ModulePath,
@@ -635,6 +673,84 @@ fn find_member_or_method_def_in_items(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
+fn find_fn_type_info_at_offset<'a>(
+    items: &'a [Item],
+    module: &ModulePath,
+    _program_items: &'a [Item],
+    source_map: &SourceMap,
+    env: &ProgramEnv,
+    types: &'a TypeInfo,
+    document: &SourceName,
+    offset: usize,
+) -> Option<(&'a FnTypeInfo, &'a Block)> {
+    for item in items {
+        match item {
+            Item::Function(f) => {
+                if container_len_if_contains(source_map, f.body.span, document, offset).is_some() {
+                    let fn_name = module.qualify(&f.name.name);
+                    if let Some(fn_info) = types.for_fn(&fn_name) {
+                        return Some((fn_info, &f.body));
+                    }
+                }
+            }
+            Item::Impl(imp) => {
+                let (iface_name, type_name) = resolve_impl_header_names(env, module, &imp.header);
+                for member in &imp.members {
+                    let ImplMember::Method(method) = member else {
+                        continue;
+                    };
+
+                    if container_len_if_contains(source_map, method.body.span, document, offset)
+                        .is_none()
+                    {
+                        continue;
+                    }
+
+                    let fn_name = match (&imp.header, iface_name.as_deref(), type_name.as_deref()) {
+                        (ImplHeader::Inherent { .. }, _iface, Some(ty)) => {
+                            format!("{ty}::{}", method.name.name)
+                        }
+                        (ImplHeader::InterfaceForType { .. }, Some(iface), Some(ty)) => {
+                            format!("impl::{iface}::for::{ty}::{}", method.name.name)
+                        }
+                        _ => module.qualify(&method.name.name),
+                    };
+
+                    if let Some(fn_info) = types.for_fn(&fn_name) {
+                        return Some((fn_info, &method.body));
+                    }
+                }
+            }
+            Item::Mod(m) => {
+                if let ModKind::Inline { items: inner } = &m.kind {
+                    let child = module.child(&m.name.name);
+                    if let Some(found) = find_fn_type_info_at_offset(
+                        inner,
+                        &child,
+                        _program_items,
+                        source_map,
+                        env,
+                        types,
+                        document,
+                        offset,
+                    ) {
+                        return Some(found);
+                    }
+                }
+            }
+            Item::Interface(_)
+            | Item::Struct(_)
+            | Item::Enum(_)
+            | Item::IntrinsicFn(_)
+            | Item::Use(_)
+            | Item::Derive(_) => {}
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn find_in_impl_item(
     module: &ModulePath,
     imp: &ImplItem,
@@ -654,7 +770,9 @@ fn find_in_impl_item(
         };
 
         let fn_name = match (&imp.header, iface_name.as_deref(), type_name.as_deref()) {
-            (ImplHeader::Inherent { .. }, _iface, Some(ty)) => format!("{ty}::{}", method.name.name),
+            (ImplHeader::Inherent { .. }, _iface, Some(ty)) => {
+                format!("{ty}::{}", method.name.name)
+            }
             (ImplHeader::InterfaceForType { .. }, Some(iface), Some(ty)) => {
                 format!("impl::{iface}::for::{ty}::{}", method.name.name)
             }
@@ -680,6 +798,223 @@ fn find_in_impl_item(
     None
 }
 
+#[derive(Clone, Debug)]
+struct HoverTypeCandidate {
+    len: usize,
+    span: Span,
+    ty: Ty,
+}
+
+fn update_hover_type_candidate(
+    best: &mut Option<HoverTypeCandidate>,
+    len: usize,
+    span: Span,
+    ty: &Ty,
+) {
+    match best {
+        None => {
+            *best = Some(HoverTypeCandidate {
+                len,
+                span,
+                ty: ty.clone(),
+            });
+        }
+        Some(existing) if len < existing.len => {
+            *best = Some(HoverTypeCandidate {
+                len,
+                span,
+                ty: ty.clone(),
+            });
+        }
+        Some(_) => {}
+    }
+}
+
+fn find_smallest_typed_expr_in_block(
+    source_map: &SourceMap,
+    document: &SourceName,
+    offset: usize,
+    fn_info: &FnTypeInfo,
+    block: &Block,
+) -> Option<(Span, Ty)> {
+    let mut best: Option<HoverTypeCandidate> = None;
+    find_smallest_typed_expr_in_block_acc(source_map, document, offset, fn_info, block, &mut best);
+    best.map(|b| (b.span, b.ty))
+}
+
+fn find_smallest_typed_expr_in_block_acc(
+    source_map: &SourceMap,
+    document: &SourceName,
+    offset: usize,
+    fn_info: &FnTypeInfo,
+    block: &Block,
+    best: &mut Option<HoverTypeCandidate>,
+) {
+    for stmt in &block.stmts {
+        find_smallest_typed_expr_in_stmt(source_map, document, offset, fn_info, stmt, best);
+    }
+    if let Some(tail) = block.tail.as_deref() {
+        find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, tail, best);
+    }
+}
+
+fn find_smallest_typed_expr_in_stmt(
+    source_map: &SourceMap,
+    document: &SourceName,
+    offset: usize,
+    fn_info: &FnTypeInfo,
+    stmt: &Stmt,
+    best: &mut Option<HoverTypeCandidate>,
+) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(init) = init {
+                find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, init, best);
+            }
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(value) = value {
+                find_smallest_typed_expr_in_expr(
+                    source_map, document, offset, fn_info, value, best,
+                );
+            }
+        }
+        Stmt::Expr { expr, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, expr, best);
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+    }
+}
+
+fn find_smallest_typed_expr_in_expr(
+    source_map: &SourceMap,
+    document: &SourceName,
+    offset: usize,
+    fn_info: &FnTypeInfo,
+    expr: &Expr,
+    best: &mut Option<HoverTypeCandidate>,
+) {
+    let Some(len) = container_len_if_contains(source_map, expr.span(), document, offset) else {
+        return;
+    };
+
+    if let Some(ty) = fn_info.expr_types.get(&expr.span()) {
+        update_hover_type_candidate(best, len, expr.span(), ty);
+    }
+
+    match expr {
+        Expr::Call { callee, args, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, callee, best);
+            for a in args {
+                find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, a, best);
+            }
+        }
+        Expr::Field { base, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, base, best);
+        }
+        Expr::StructLit { fields, .. } => {
+            for (name, value) in fields {
+                if let Some(name_len) =
+                    container_len_if_contains(source_map, name.span, document, offset)
+                    && let Some(ty) = fn_info.expr_types.get(&value.span())
+                {
+                    update_hover_type_candidate(best, name_len, name.span, ty);
+                }
+                find_smallest_typed_expr_in_expr(
+                    source_map, document, offset, fn_info, value, best,
+                );
+            }
+        }
+        Expr::EffectCall { args, .. } => {
+            for a in args {
+                find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, a, best);
+            }
+        }
+        Expr::If {
+            cond,
+            then_block,
+            else_branch,
+            ..
+        } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, cond, best);
+            find_smallest_typed_expr_in_block_acc(
+                source_map, document, offset, fn_info, then_block, best,
+            );
+            if let Some(else_expr) = else_branch.as_deref() {
+                find_smallest_typed_expr_in_expr(
+                    source_map, document, offset, fn_info, else_expr, best,
+                );
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            find_smallest_typed_expr_in_expr(
+                source_map, document, offset, fn_info, scrutinee, best,
+            );
+            for arm in arms {
+                find_smallest_typed_expr_in_expr(
+                    source_map, document, offset, fn_info, &arm.body, best,
+                );
+            }
+        }
+        Expr::Loop { body, .. } | Expr::Lambda { body, .. } => {
+            find_smallest_typed_expr_in_block_acc(
+                source_map, document, offset, fn_info, body, best,
+            );
+        }
+        Expr::Block { block, .. } => {
+            find_smallest_typed_expr_in_block_acc(
+                source_map, document, offset, fn_info, block, best,
+            );
+        }
+        Expr::While { cond, body, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, cond, best);
+            find_smallest_typed_expr_in_block_acc(
+                source_map, document, offset, fn_info, body, best,
+            );
+        }
+        Expr::For { iter, body, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, iter, best);
+            find_smallest_typed_expr_in_block_acc(
+                source_map, document, offset, fn_info, body, best,
+            );
+        }
+        Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
+            for item in items {
+                find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, item, best);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, base, best);
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, index, best);
+        }
+        Expr::Unary { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::AsQuestion { expr, .. }
+        | Expr::Is { expr, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, expr, best);
+        }
+        Expr::Binary { left, right, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, left, best);
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, right, best);
+        }
+        Expr::Assign { target, value, .. } => {
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, target, best);
+            find_smallest_typed_expr_in_expr(source_map, document, offset, fn_info, value, best);
+        }
+        Expr::Path { .. }
+        | Expr::Unit { .. }
+        | Expr::Bool { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Char { .. }
+        | Expr::String { .. }
+        | Expr::Bytes { .. } => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn find_in_fn_body(
     module: &ModulePath,
     program_items: &[Item],
@@ -704,6 +1039,7 @@ fn find_in_fn_body(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_in_block(
     module: &ModulePath,
     program_items: &[Item],
@@ -746,6 +1082,7 @@ fn find_in_block(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_in_stmt(
     module: &ModulePath,
     program_items: &[Item],
@@ -814,6 +1151,7 @@ fn find_in_stmt(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_in_expr(
     module: &ModulePath,
     program_items: &[Item],
@@ -849,10 +1187,9 @@ fn find_in_expr(
             if let Expr::Path { path, .. } = callee.as_ref()
                 && let Some(last) = path.segments.last()
                 && span_matches_range(source_map, document, last.span, ident_range)
+                && let Some(span) = resolve_path_last_segment(program_items, env, module, path)
             {
-                if let Some(span) = resolve_path_last_segment(program_items, env, module, path) {
-                    return Some(span);
-                }
+                return Some(span);
             }
 
             if let Some(span) = find_in_expr(
@@ -891,13 +1228,7 @@ fn find_in_expr(
                 && let Some(fn_info) = fn_info
             {
                 let recv_ty = fn_info.expr_types.get(&base.span()).cloned()?;
-                return resolve_field_access(
-                    program_items,
-                    env,
-                    module,
-                    &recv_ty,
-                    &field.name,
-                );
+                return resolve_field_access(program_items, env, module, &recv_ty, &field.name);
             }
             find_in_expr(
                 module,
@@ -911,10 +1242,25 @@ fn find_in_expr(
                 base,
             )
         }
-        Expr::StructLit { type_path, fields, .. } => {
+        Expr::StructLit {
+            type_path, fields, ..
+        } => {
+            if let Some(last) = type_path.segments.last()
+                && span_matches_range(source_map, document, last.span, ident_range)
+                && let Some(span) =
+                    resolve_nominal_type_name_span(program_items, env, module, type_path)
+            {
+                return Some(span);
+            }
             for (name, value) in fields {
                 if span_matches_range(source_map, document, name.span, ident_range) {
-                    return resolve_struct_field_by_path(program_items, env, module, type_path, &name.name);
+                    return resolve_struct_field_by_path(
+                        program_items,
+                        env,
+                        module,
+                        type_path,
+                        &name.name,
+                    );
                 }
                 if let Some(span) = find_in_expr(
                     module,
@@ -959,6 +1305,45 @@ fn find_in_expr(
             None
         }
         Expr::Path { path, .. } => {
+            if path.segments.len() >= 2 {
+                // Support go-to-definition on the qualifier segment of a qualified call, e.g.
+                // `MyHash::hash(x)` when the cursor is on `MyHash`.
+                for idx in 0..path.segments.len().saturating_sub(1) {
+                    let seg = path.segments.get(idx)?;
+                    if !span_matches_range(source_map, document, seg.span, ident_range) {
+                        continue;
+                    }
+
+                    let prefix_names: Vec<String> = path.segments[..=idx]
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    let Some((kind, fqn)) = env
+                        .modules
+                        .try_resolve_type_fqn(module, &prefix_names, path.span)
+                        .ok()
+                        .flatten()
+                    else {
+                        continue;
+                    };
+
+                    let span = match kind {
+                        DefKind::Struct => {
+                            find_struct_name_span(program_items, &ModulePath::root(), &fqn)
+                        }
+                        DefKind::Enum => {
+                            find_enum_name_span(program_items, &ModulePath::root(), &fqn)
+                        }
+                        DefKind::Interface => {
+                            find_interface_name_span(program_items, &ModulePath::root(), &fqn)
+                        }
+                    };
+                    if let Some(span) = span {
+                        return Some(span);
+                    }
+                }
+            }
+
             if let Some(last) = path.segments.last()
                 && span_matches_range(source_map, document, last.span, ident_range)
             {
@@ -966,7 +1351,9 @@ fn find_in_expr(
             }
             None
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             if let Some(span) = find_in_expr(
                 module,
                 program_items,
@@ -1108,7 +1495,9 @@ fn find_in_expr(
                 body,
             )
         }
-        Expr::For { pat, iter, body, .. } => {
+        Expr::For {
+            pat, iter, body, ..
+        } => {
             if let Some(span) = find_in_pattern(
                 module,
                 program_items,
@@ -1175,7 +1564,18 @@ fn find_in_expr(
             }
             None
         }
-        Expr::Index { base, index, .. } => {
+        Expr::Index { base, index, .. } => find_in_expr(
+            module,
+            program_items,
+            source_map,
+            env,
+            document,
+            ident_range,
+            ident,
+            fn_info,
+            base,
+        )
+        .or_else(|| {
             find_in_expr(
                 module,
                 program_items,
@@ -1185,22 +1585,9 @@ fn find_in_expr(
                 ident_range,
                 ident,
                 fn_info,
-                base,
+                index,
             )
-            .or_else(|| {
-                find_in_expr(
-                    module,
-                    program_items,
-                    source_map,
-                    env,
-                    document,
-                    ident_range,
-                    ident,
-                    fn_info,
-                    index,
-                )
-            })
-        }
+        }),
         Expr::Unary { expr, .. } => find_in_expr(
             module,
             program_items,
@@ -1212,61 +1599,7 @@ fn find_in_expr(
             fn_info,
             expr,
         ),
-        Expr::Binary { left, right, .. } => {
-            find_in_expr(
-                module,
-                program_items,
-                source_map,
-                env,
-                document,
-                ident_range,
-                ident,
-                fn_info,
-                left,
-            )
-            .or_else(|| {
-                find_in_expr(
-                    module,
-                    program_items,
-                    source_map,
-                    env,
-                    document,
-                    ident_range,
-                    ident,
-                    fn_info,
-                    right,
-                )
-            })
-        }
-        Expr::Assign { target, value, .. } => {
-            find_in_expr(
-                module,
-                program_items,
-                source_map,
-                env,
-                document,
-                ident_range,
-                ident,
-                fn_info,
-                target,
-            )
-            .or_else(|| {
-                find_in_expr(
-                    module,
-                    program_items,
-                    source_map,
-                    env,
-                    document,
-                    ident_range,
-                    ident,
-                    fn_info,
-                    value,
-                )
-            })
-        }
-        Expr::As { expr, .. }
-        | Expr::AsQuestion { expr, .. }
-        | Expr::Is { expr, .. } => find_in_expr(
+        Expr::Binary { left, right, .. } => find_in_expr(
             module,
             program_items,
             source_map,
@@ -1275,8 +1608,58 @@ fn find_in_expr(
             ident_range,
             ident,
             fn_info,
-            expr,
-        ),
+            left,
+        )
+        .or_else(|| {
+            find_in_expr(
+                module,
+                program_items,
+                source_map,
+                env,
+                document,
+                ident_range,
+                ident,
+                fn_info,
+                right,
+            )
+        }),
+        Expr::Assign { target, value, .. } => find_in_expr(
+            module,
+            program_items,
+            source_map,
+            env,
+            document,
+            ident_range,
+            ident,
+            fn_info,
+            target,
+        )
+        .or_else(|| {
+            find_in_expr(
+                module,
+                program_items,
+                source_map,
+                env,
+                document,
+                ident_range,
+                ident,
+                fn_info,
+                value,
+            )
+        }),
+        Expr::As { expr, .. } | Expr::AsQuestion { expr, .. } | Expr::Is { expr, .. } => {
+            find_in_expr(
+                module,
+                program_items,
+                source_map,
+                env,
+                document,
+                ident_range,
+                ident,
+                fn_info,
+                expr,
+            )
+        }
         Expr::Lambda { body, .. } => find_in_block(
             module,
             program_items,
@@ -1298,6 +1681,7 @@ fn find_in_expr(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_in_pattern(
     module: &ModulePath,
     program_items: &[Item],
@@ -1305,15 +1689,20 @@ fn find_in_pattern(
     env: &ProgramEnv,
     document: &SourceName,
     ident_range: (usize, usize),
-    ident: &str,
+    _ident: &str,
     pat: &Pattern,
 ) -> Option<Span> {
     match pat {
         Pattern::Struct {
-            type_path,
-            fields,
-            ..
+            type_path, fields, ..
         } => {
+            if let Some(last) = type_path.segments.last()
+                && span_matches_range(source_map, document, last.span, ident_range)
+                && let Some(span) =
+                    resolve_nominal_type_name_span(program_items, env, module, type_path)
+            {
+                return Some(span);
+            }
             for (field, subpat) in fields {
                 if span_matches_range(source_map, document, field.span, ident_range) {
                     return resolve_struct_field_by_path(
@@ -1331,7 +1720,7 @@ fn find_in_pattern(
                     env,
                     document,
                     ident_range,
-                    ident,
+                    _ident,
                     subpat,
                 ) {
                     return Some(span);
@@ -1345,6 +1734,13 @@ fn find_in_pattern(
             fields,
             ..
         } => {
+            if let Some(last) = enum_path.segments.last()
+                && span_matches_range(source_map, document, last.span, ident_range)
+                && let Some(span) =
+                    resolve_nominal_type_name_span(program_items, env, module, enum_path)
+            {
+                return Some(span);
+            }
             if span_matches_range(source_map, document, variant.span, ident_range) {
                 return resolve_enum_variant_by_path(
                     program_items,
@@ -1362,7 +1758,7 @@ fn find_in_pattern(
                     env,
                     document,
                     ident_range,
-                    ident,
+                    _ident,
                     p,
                 ) {
                     return Some(span);
@@ -1384,19 +1780,18 @@ fn find_in_pattern(
                     env,
                     document,
                     ident_range,
-                    ident,
+                    _ident,
                     p,
                 ) {
                     return Some(span);
                 }
             }
-            if let Some(rest) = rest {
-                if let Some(binding) = &rest.binding
-                    && span_matches_range(source_map, document, binding.span, ident_range)
-                {
-                    // Rest patterns bind a local name, not a member definition.
-                    return Some(binding.span);
-                }
+            if let Some(rest) = rest
+                && let Some(binding) = &rest.binding
+                && span_matches_range(source_map, document, binding.span, ident_range)
+            {
+                // Rest patterns bind a local name, not a member definition.
+                return Some(binding.span);
             }
             for p in suffix {
                 if let Some(span) = find_in_pattern(
@@ -1406,7 +1801,7 @@ fn find_in_pattern(
                     env,
                     document,
                     ident_range,
-                    ident,
+                    _ident,
                     p,
                 ) {
                     return Some(span);
@@ -1428,18 +1823,17 @@ fn find_in_pattern(
                     env,
                     document,
                     ident_range,
-                    ident,
+                    _ident,
                     p,
                 ) {
                     return Some(span);
                 }
             }
-            if let Some(rest) = rest {
-                if let Some(binding) = &rest.binding
-                    && span_matches_range(source_map, document, binding.span, ident_range)
-                {
-                    return Some(binding.span);
-                }
+            if let Some(rest) = rest
+                && let Some(binding) = &rest.binding
+                && span_matches_range(source_map, document, binding.span, ident_range)
+            {
+                return Some(binding.span);
             }
             for p in suffix {
                 if let Some(span) = find_in_pattern(
@@ -1449,7 +1843,7 @@ fn find_in_pattern(
                     env,
                     document,
                     ident_range,
-                    ident,
+                    _ident,
                     p,
                 ) {
                     return Some(span);
@@ -1465,7 +1859,7 @@ fn find_in_pattern(
                 env,
                 document,
                 ident_range,
-                ident,
+                _ident,
                 p,
             )
         }),
@@ -1494,7 +1888,11 @@ fn resolve_impl_header_names(
     }
 }
 
-fn resolve_path_type_name(env: &ProgramEnv, module: &ModulePath, path: &PathType) -> Option<String> {
+fn resolve_path_type_name(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    path: &PathType,
+) -> Option<String> {
     let segments: Vec<String> = path.segments.iter().map(|s| s.name.name.clone()).collect();
     env.modules
         .resolve_type_fqn(module, &segments, path.span)
@@ -1518,6 +1916,24 @@ fn resolve_struct_field_by_path(
         return None;
     }
     find_struct_field_name_span(program_items, &ModulePath::root(), env, &fqn, field)
+}
+
+fn resolve_nominal_type_name_span(
+    program_items: &[Item],
+    env: &ProgramEnv,
+    module: &ModulePath,
+    type_path: &AstPath,
+) -> Option<Span> {
+    let segments: Vec<String> = type_path.segments.iter().map(|s| s.name.clone()).collect();
+    let (kind, fqn) = env
+        .modules
+        .resolve_type_fqn(module, &segments, type_path.span)
+        .ok()?;
+    match kind {
+        DefKind::Struct => find_struct_name_span(program_items, &ModulePath::root(), &fqn),
+        DefKind::Enum => find_enum_name_span(program_items, &ModulePath::root(), &fqn),
+        DefKind::Interface => find_interface_name_span(program_items, &ModulePath::root(), &fqn),
+    }
 }
 
 fn resolve_enum_variant_by_path(
@@ -1580,14 +1996,11 @@ fn resolve_path_last_segment(
     let last = last.first()?;
     let prefix_names: Vec<String> = prefix.iter().map(|s| s.name.clone()).collect();
 
-    let Some((kind, fqn)) = env
+    let (kind, fqn) = env
         .modules
         .try_resolve_type_fqn(module, &prefix_names, path.span)
         .ok()
-        .flatten()
-    else {
-        return None;
-    };
+        .flatten()?;
 
     match kind {
         DefKind::Enum => {
@@ -1611,12 +2024,9 @@ fn resolve_path_last_segment(
             &fqn,
             &last.name,
         ),
-        DefKind::Interface => find_interface_method_name_span(
-            program_items,
-            &ModulePath::root(),
-            &fqn,
-            &last.name,
-        ),
+        DefKind::Interface => {
+            find_interface_method_name_span(program_items, &ModulePath::root(), &fqn, &last.name)
+        }
     }
 }
 
@@ -1633,7 +2043,7 @@ fn resolve_field_access(
 
 fn resolve_method_call(
     program_items: &[Item],
-    source_map: &SourceMap,
+    _source_map: &SourceMap,
     env: &ProgramEnv,
     module: &ModulePath,
     recv_ty: &Ty,
@@ -1642,7 +2052,7 @@ fn resolve_method_call(
     match recv_ty {
         Ty::Readonly(inner) => resolve_method_call(
             program_items,
-            source_map,
+            _source_map,
             env,
             module,
             inner.as_ref(),
@@ -1659,13 +2069,18 @@ fn resolve_method_call(
             )
         }
         Ty::App(TyCon::Named(type_name), _args) => {
-            if let Some(span) =
-                find_inherent_method_name_span(program_items, &ModulePath::root(), env, type_name, method)
-            {
+            if let Some(span) = find_inherent_method_name_span(
+                program_items,
+                &ModulePath::root(),
+                env,
+                type_name,
+                method,
+            ) {
                 return Some(span);
             }
 
-            let origin_iface = select_unique_accessible_origin_iface(env, module, type_name, method)?;
+            let origin_iface =
+                select_unique_accessible_origin_iface(env, module, type_name, method)?;
             let fn_name = env
                 .interface_methods
                 .get(&(type_name.clone(), origin_iface.clone(), method.to_string()))?
@@ -1686,7 +2101,12 @@ fn resolve_method_call(
             }
 
             // Fallback: default methods have no explicit impl method item.
-            find_interface_method_name_span(program_items, &ModulePath::root(), &origin_iface, method)
+            find_interface_method_name_span(
+                program_items,
+                &ModulePath::root(),
+                &origin_iface,
+                method,
+            )
         }
         _ => None,
     }
@@ -1779,6 +2199,29 @@ fn find_struct_field_name_span(
     None
 }
 
+fn find_struct_name_span(items: &[Item], module: &ModulePath, struct_fqn: &str) -> Option<Span> {
+    for item in items {
+        match item {
+            Item::Struct(s) => {
+                let fqn = module.qualify(&s.name.name);
+                if fqn == struct_fqn {
+                    return Some(s.name.span);
+                }
+            }
+            Item::Mod(m) => {
+                if let ModKind::Inline { items: inner } = &m.kind {
+                    let child = module.child(&m.name.name);
+                    if let Some(span) = find_struct_name_span(inner, &child, struct_fqn) {
+                        return Some(span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn find_enum_variant_name_span(
     items: &[Item],
     module: &ModulePath,
@@ -1805,6 +2248,29 @@ fn find_enum_variant_name_span(
                     if let Some(span) =
                         find_enum_variant_name_span(inner, &child, enum_fqn, variant)
                     {
+                        return Some(span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_enum_name_span(items: &[Item], module: &ModulePath, enum_fqn: &str) -> Option<Span> {
+    for item in items {
+        match item {
+            Item::Enum(e) => {
+                let fqn = module.qualify(&e.name.name);
+                if fqn == enum_fqn {
+                    return Some(e.name.span);
+                }
+            }
+            Item::Mod(m) => {
+                if let ModKind::Inline { items: inner } = &m.kind {
+                    let child = module.child(&m.name.name);
+                    if let Some(span) = find_enum_name_span(inner, &child, enum_fqn) {
                         return Some(span);
                     }
                 }
@@ -1844,6 +2310,29 @@ fn find_interface_method_name_span(
                     if let Some(span) =
                         find_interface_method_name_span(inner, &child, iface_fqn, method)
                     {
+                        return Some(span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_interface_name_span(items: &[Item], module: &ModulePath, iface_fqn: &str) -> Option<Span> {
+    for item in items {
+        match item {
+            Item::Interface(i) => {
+                let fqn = module.qualify(&i.name.name);
+                if fqn == iface_fqn {
+                    return Some(i.name.span);
+                }
+            }
+            Item::Mod(m) => {
+                if let ModKind::Inline { items: inner } = &m.kind {
+                    let child = module.child(&m.name.name);
+                    if let Some(span) = find_interface_name_span(inner, &child, iface_fqn) {
                         return Some(span);
                     }
                 }
