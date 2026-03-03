@@ -4,6 +4,7 @@
 
 - 语法高亮（TextMate grammar）
 - 基于 `rusk-lsp` 的 Language Server Protocol（LSP）功能
+- 基于 **tree-sitter-rusk** 的增量语法树（用于结构导航）
 
 ## 关于 Rusk
 
@@ -17,6 +18,10 @@ Rusk 是一个实验性编程语言和运行时，使用 Rust 实现。它结合
 
 - 语法高亮：`.rusk` 文件关键字/操作符/注释/字符串等
 - 代码折叠：支持基于缩进/括号的折叠，并支持 `// region` / `// endregion` 折叠标记
+- 结构导航（tree-sitter，增量解析）：
+  - Explorer 侧边栏提供 `Rusk Outline` 视图（类/枚举/接口/impl/方法/字段等）
+  - `Rusk: Go to Symbol (Tree-sitter)` 命令（当前文件内符号快速跳转）
+  - 当 `rusk-lsp` 未运行/启动失败时，tree-sitter 还会作为 fallback 为 VSCode 内置 Outline/Breadcrumbs 提供符号
 - LSP（由 `rusk-lsp` 提供，具体能力取决于服务器实现）：
   - diagnostics（错误提示）
   - completion（补全；当前主要是关键字补全）
@@ -70,6 +75,16 @@ fn main() -> int {
     xs[1] = 99;
     xs[1]
 }
+```
+
+## 开发：更新 tree-sitter 解析器（可选）
+
+本扩展内置了 `tree-sitter/rusk.wasm`（由仓库内 `misc/tree-sitter-rusk` 生成），用于增量解析与结构导航。
+
+当你修改了 `misc/tree-sitter-rusk/grammar.js` 后，可以在本目录执行：
+
+```sh
+npm run build:tree-sitter-wasm
 ```
 
 ## 相关链接

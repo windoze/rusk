@@ -123,4 +123,4 @@ fn f(readonly (a, ..rest, b): (int, int, int)) -> int {
               wildcard: (wildcard))
             body: (primary_expression_no_block
               (literal
-                (int_literal))))))))))
+                (int_literal)))))))))

@@ -1,0 +1,184 @@
+==================
+Items
+==================
+
+#! /usr/bin/env rusk
+
+use core::ops::Add;
+
+pub intrinsic fn panic(msg: string) -> !;
+
+pub struct Point<T> { x: T, y: T }
+struct UserId(int);
+
+enum Option<T> { Some(T), None }
+
+interface MyHash {
+  readonly fn hash() -> int;
+  static fn new() -> int;
+  type Item;
+}
+
+impl<T> Point<T> {
+  fn get() -> int { 1 }
+}
+
+impl MyHash for UserId {
+  type Item = int;
+  readonly fn hash() -> int { 7 }
+}
+
+mod foo {
+  fn inner() { () }
+}
+
+mod bar;
+
+derive Serialize + Deserialize for Point;
+
+---
+
+(source_file
+  (shebang)
+  (use_item
+    path: (path_expression
+      head: (identifier)
+      segment: (identifier)
+      segment: (type_identifier)))
+  (intrinsic_function_item
+    visibility: (visibility)
+    name: (identifier)
+    parameters: (parameters
+      (parameter_list
+        parameter: (parameter
+          pattern: (binding_pattern
+            name: (identifier))
+          type: (type_atom
+            (primitive_type)))))
+    return_type: (return_type
+      type: (type_atom
+        (primitive_type))))
+  (struct_item
+    visibility: (visibility)
+    name: (type_identifier)
+    type_parameters: (generic_parameters
+      parameter: (generic_parameter
+        name: (type_identifier)))
+    (named_struct_body
+      (field_declarations
+        field: (field_declaration
+          name: (identifier)
+          type: (type_atom
+            (path_type
+              (path_type_segment
+                name: (type_identifier)))))
+        field: (field_declaration
+          name: (identifier)
+          type: (type_atom
+            (path_type
+              (path_type_segment
+                name: (type_identifier))))))))
+  (struct_item
+    name: (type_identifier)
+    (newtype_struct_body
+      type: (type_atom
+        (primitive_type))))
+  (enum_item
+    name: (type_identifier)
+    type_parameters: (generic_parameters
+      parameter: (generic_parameter
+        name: (type_identifier)))
+    (enum_variant
+      name: (type_identifier)
+      fields: (tuple_type_list
+        (type_list
+          type: (type_atom
+            (path_type
+              (path_type_segment
+                name: (type_identifier)))))))
+    (enum_variant
+      name: (type_identifier)))
+  (interface_item
+    name: (type_identifier)
+    body: (interface_body
+      (interface_member
+        (interface_method
+          name: (identifier)
+          parameters: (parameters)
+          return_type: (return_type
+            type: (type_atom
+              (primitive_type)))))
+      (interface_member
+        (interface_method
+          name: (identifier)
+          parameters: (parameters)
+          return_type: (return_type
+            type: (type_atom
+              (primitive_type)))))
+      (interface_member
+        (associated_type_declaration
+          name: (type_identifier)))))
+  (impl_item
+    type_parameters: (generic_parameters
+      parameter: (generic_parameter
+        name: (type_identifier)))
+    header: (impl_header
+      type: (path_type_no_assoc_bindings
+        (path_type_segment
+          name: (type_identifier)
+          type_arguments: (generic_arguments
+            argument: (type_atom
+              (path_type
+                (path_type_segment
+                  name: (type_identifier))))))))
+    (impl_member
+      (impl_method
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (return_type
+          type: (type_atom
+            (primitive_type)))
+        body: (block
+          tail: (primary_expression
+            (literal
+              (int_literal)))))))
+  (impl_item
+    header: (impl_header
+      interface: (path_type_no_assoc_bindings
+        (path_type_segment
+          name: (type_identifier)))
+      type: (path_type_no_assoc_bindings
+        (path_type_segment
+          name: (type_identifier))))
+    (impl_member
+      (impl_associated_type
+        name: (type_identifier)
+        type: (type_atom
+          (primitive_type))))
+    (impl_member
+      (impl_method
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (return_type
+          type: (type_atom
+            (primitive_type)))
+        body: (block
+          tail: (primary_expression
+            (literal
+              (int_literal)))))))
+  (module_item
+    name: (identifier)
+    body: (module_body
+      (function_item
+        name: (identifier)
+        parameters: (parameters)
+        body: (block
+          tail: (primary_expression
+            (literal
+              (unit_literal)))))))
+  (module_item
+    name: (identifier))
+  (derive_item
+    derive: (type_identifier)
+    derive: (type_identifier)
+    target: (type_identifier)))

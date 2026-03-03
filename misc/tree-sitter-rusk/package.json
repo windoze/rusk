@@ -14,13 +14,14 @@
     "rusk"
   ],
   "devDependencies": {
-    "tree-sitter-cli": "^0.24.3"
+    "tree-sitter-cli": "^0.26.6"
   },
   "files": [
     "grammar.js",
     "src",
     "queries",
-    "corpus"
+    "test/corpus",
+    "tree-sitter.json"
   ],
   "scripts": {
     "generate": "tree-sitter generate",

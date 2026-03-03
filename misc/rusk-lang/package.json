@@ -15,7 +15,9 @@
   ],
   "activationEvents": [
     "onLanguage:rusk",
-    "onCommand:rusk.restartServer"
+    "onCommand:rusk.restartServer",
+    "onCommand:rusk.gotoSymbol",
+    "onCommand:rusk.showOutline"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -43,8 +45,24 @@
       {
         "command": "rusk.restartServer",
         "title": "Rusk: Restart Language Server"
+      },
+      {
+        "command": "rusk.gotoSymbol",
+        "title": "Rusk: Go to Symbol (Tree-sitter)"
+      },
+      {
+        "command": "rusk.showOutline",
+        "title": "Rusk: Show Outline View (Tree-sitter)"
       }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "rusk.outline",
+          "name": "Rusk Outline"
+        }
+      ]
+    },
     "configuration": {
       "title": "Rusk",
       "properties": {
@@ -83,12 +101,14 @@
     }
   },
   "scripts": {
+    "build:tree-sitter-wasm": "npx -p tree-sitter-cli@0.24.7 tree-sitter build --wasm --docker -o tree-sitter/rusk.wasm ../tree-sitter-rusk",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^9.0.1",
+    "web-tree-sitter": "^0.26.6"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

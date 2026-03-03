@@ -235,4 +235,4 @@ fn main() -> int {
           (argument_list_items
             argument: (primary_expression
               (literal
-                (int_literal))))))))))
+                (int_literal)))))))))

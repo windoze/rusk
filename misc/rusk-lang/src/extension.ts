@@ -6,15 +6,34 @@ import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+  State,
 } from "vscode-languageclient/node";
+import { RuskOutlineView, registerRuskRevealCommand } from "./ruskOutline";
+import { RuskTreeSitterDocumentSymbolProvider } from "./ruskDocumentSymbols";
+import { RuskTreeSitter } from "./treeSitter";
 
 let client: LanguageClient | undefined;
+let lspRunning = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(
     new vscode.Disposable(() => {
       void stopClient();
     }),
+  );
+
+  // tree-sitter：用于增量语法树 + 结构导航（Outline 视图、Go to Symbol）。
+  const treeSitter = new RuskTreeSitter(context);
+  const outline = new RuskOutlineView(treeSitter, context);
+  registerRuskRevealCommand(context);
+  context.subscriptions.push(treeSitter, outline);
+
+  // 仅在 LSP 未运行时提供 DocumentSymbol（供 VSCode 内置 Outline/Breadcrumbs 使用），避免与 LSP 重复。
+  context.subscriptions.push(
+    vscode.languages.registerDocumentSymbolProvider(
+      [{ language: "rusk" }],
+      new RuskTreeSitterDocumentSymbolProvider(treeSitter, () => lspRunning),
+    ),
   );
 
   const startOrRestart = async () => {
@@ -63,7 +82,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       clientOptions,
     );
 
-    await client.start();
+    // 记录 LSP 状态，供 tree-sitter fallback 决策使用。
+    lspRunning = client.state === State.Running;
+    client.onDidChangeState((e) => {
+      lspRunning = e.newState === State.Running;
+    });
+
+    try {
+      await client.start();
+    } catch (err) {
+      lspRunning = false;
+      throw err;
+    }
   };
 
   context.subscriptions.push(
@@ -99,6 +129,7 @@ async function stopClient(): Promise<void> {
   }
   const toStop = client;
   client = undefined;
+  lspRunning = false;
   await toStop.stop();
 }
 
