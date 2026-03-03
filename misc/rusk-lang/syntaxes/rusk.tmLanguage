@@ -156,10 +156,10 @@
 				</dict>
 			</array>
 		</dict>
-		<key>constants</key>
-		<dict>
-			<key>patterns</key>
-			<array>
+			<key>constants</key>
+			<dict>
+				<key>patterns</key>
+				<array>
 				<dict>
 					<key>comment</key>
 					<string>Boolean constants</string>
@@ -168,12 +168,34 @@
 					<key>name</key>
 					<string>constant.language.boolean.rusk</string>
 				</dict>
-			</array>
-		</dict>
-		<key>strings</key>
-		<dict>
-			<key>patterns</key>
-			<array>
+				</array>
+			</dict>
+			<key>fstring-interpolation</key>
+			<dict>
+				<key>comment</key>
+				<string>Formatted string interpolation: supports nested braces via recursion</string>
+				<key>begin</key>
+				<string>\{</string>
+				<key>end</key>
+				<string>\}</string>
+				<key>name</key>
+				<string>meta.interpolation.rusk</string>
+				<key>patterns</key>
+				<array>
+					<dict>
+						<key>include</key>
+						<string>#fstring-interpolation</string>
+					</dict>
+					<dict>
+						<key>include</key>
+						<string>$self</string>
+					</dict>
+				</array>
+			</dict>
+			<key>strings</key>
+			<dict>
+				<key>patterns</key>
+				<array>
 				<dict>
 					<key>comment</key>
 					<string>Formatted string literal</string>
@@ -183,37 +205,26 @@
 					<string>"</string>
 					<key>name</key>
 					<string>string.quoted.double.fstring.rusk</string>
-					<key>patterns</key>
-					<array>
-						<dict>
-							<key>match</key>
-							<string>\\(\\|"|n|r|t|0|u\{[0-9a-fA-F]+\})</string>
-							<key>name</key>
-							<string>constant.character.escape.rusk</string>
-						</dict>
-						<dict>
-							<key>begin</key>
-							<string>\{</string>
-							<key>end</key>
-							<string>\}</string>
-							<key>name</key>
-							<string>meta.interpolation.rusk</string>
-							<key>patterns</key>
-							<array>
-								<dict>
-									<key>include</key>
-									<string>$self</string>
-								</dict>
-							</array>
-						</dict>
-						<dict>
-							<key>match</key>
-							<string>\{\{|\}\}</string>
-							<key>name</key>
-							<string>constant.character.escape.rusk</string>
-						</dict>
-					</array>
-				</dict>
+						<key>patterns</key>
+						<array>
+							<dict>
+								<key>match</key>
+								<string>\\(\\|"|n|r|t|0|u\{[0-9a-fA-F]+\})</string>
+								<key>name</key>
+								<string>constant.character.escape.rusk</string>
+							</dict>
+							<dict>
+								<key>match</key>
+								<string>\{\{|\}\}</string>
+								<key>name</key>
+								<string>constant.character.escape.rusk</string>
+							</dict>
+							<dict>
+								<key>include</key>
+								<string>#fstring-interpolation</string>
+							</dict>
+						</array>
+					</dict>
 				<dict>
 					<key>comment</key>
 					<string>Byte string literal</string>

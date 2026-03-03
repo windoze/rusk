@@ -939,6 +939,83 @@ async fn hover_shows_inferred_type_information() {
 }
 
 #[tokio::test]
+async fn hover_inside_formatted_string_interpolation_returns_type_info() {
+    let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
+        RuskLanguageServer::new(client, RuskLspConfig::default())
+    });
+
+    let init_resp = init_service(&mut service).await;
+    assert!(init_resp.is_ok(), "initialize failed: {init_resp:?}");
+    notify(&mut service, "initialized", serde_json::json!({})).await;
+
+    let path = temp_file_path("hover_fstring_interp.rusk");
+    let uri = Url::from_file_path(&path).expect("uri");
+    let src = "fn main() -> string {\n  let x = 1;\n  f\"hello {x}\"\n}\n";
+
+    let open = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rusk".to_string(),
+            version: 1,
+            text: src.to_string(),
+        },
+    };
+    notify(
+        &mut service,
+        "textDocument/didOpen",
+        serde_json::to_value(open).expect("serialize open"),
+    )
+    .await;
+
+    // Keep socket in scope to avoid blocking client->server notifications when the channel fills.
+    let _socket = &mut socket;
+
+    // Hover on the `x` inside `f"hello {x}"` (line 2, `x` is at character 11).
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 2,
+                character: 11,
+            },
+        },
+        work_done_progress_params: Default::default(),
+    };
+
+    let req = jsonrpc::Request::build("textDocument/hover")
+        .id(36i64)
+        .params(serde_json::to_value(params).expect("serialize request"))
+        .finish();
+
+    let resp = service
+        .ready()
+        .await
+        .expect("ready")
+        .call(req)
+        .await
+        .expect("hover response")
+        .expect("must return response");
+
+    assert!(resp.is_ok(), "hover failed: {resp:?}");
+    let result = resp.result().cloned().expect("result json");
+    let decoded: Option<Hover> = serde_json::from_value(result).expect("decode result");
+
+    let Some(hover) = decoded else {
+        panic!("expected hover result, got None");
+    };
+
+    let hover_text = match hover.contents {
+        HoverContents::Markup(markup) => markup.value,
+        other => panic!("expected Markup hover contents, got: {other:?}"),
+    };
+
+    assert!(
+        hover_text.contains("int"),
+        "expected type info for `x` inside f-string interpolation, got: {hover_text:?}"
+    );
+}
+
+#[tokio::test]
 async fn hover_on_struct_literal_field_name_prefers_field_value_type() {
     let (mut service, mut socket) = tower_lsp::LspService::new(|client| {
         RuskLanguageServer::new(client, RuskLspConfig::default())
