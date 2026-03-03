@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+.DS_Store
+*.log
+
+# tree-sitter generated artifacts (optional to commit)
+src/parser.c
+src/grammar.json
+src/node-types.json
+src/tree_sitter/
+

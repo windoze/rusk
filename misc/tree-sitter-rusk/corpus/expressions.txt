@@ -1,0 +1,238 @@
+==================
+Expressions
+==================
+
+fn main() -> int {
+  let x = 1 + 2 * 3;
+  let y = x as int;
+  let z = x is int;
+  let a = [1, 2, 3][0];
+  let t = (1, 2,);
+  let p = Point { x: 1, y: 2 };
+  let s = f"hello {x} {{world}}";
+  if x > 0 { x } else { 0 };
+  match x {
+    0 => 0,
+    @MyHash.hash(k) -> cont => { 1 },
+    _ => x,
+  };
+  loop { break; }
+  while x > 0 { break; }
+  for i in [1, 2] { i; }
+  @MyHash.hash(x);
+  (|n: int| { n })(1)
+}
+
+---
+
+(source_file
+  (function_item
+    name: (identifier)
+    parameters: (parameters)
+    return_type: (return_type
+      type: (type_atom
+        (primitive_type)))
+    body: (block
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (binary_expression
+          left: (primary_expression
+            (literal
+              (int_literal)))
+          right: (binary_expression
+            left: (primary_expression
+              (literal
+                (int_literal)))
+            right: (primary_expression
+              (literal
+                (int_literal))))))
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (as_expression
+          value: (primary_expression
+            (path_expression
+              head: (identifier)))
+          type: (type_atom
+            (primitive_type))))
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (is_expression
+          value: (primary_expression
+            (path_expression
+              head: (identifier)))
+          type: (type_atom
+            (primitive_type))))
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (index_expression
+          base: (primary_expression
+            (array_expression
+              item: (primary_expression
+                (literal
+                  (int_literal)))
+              item: (primary_expression
+                (literal
+                  (int_literal)))
+              item: (primary_expression
+                (literal
+                  (int_literal)))))
+          index: (primary_expression
+            (literal
+              (int_literal)))))
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (primary_expression
+          (tuple_expression
+            first: (primary_expression
+              (literal
+                (int_literal)))
+            (argument_list_items
+              argument: (primary_expression
+                (literal
+                  (int_literal)))))))
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (primary_expression
+          (struct_literal
+            type: (struct_type_path
+              name: (type_identifier))
+            field: (struct_field_init
+              name: (identifier)
+              value: (primary_expression
+                (literal
+                  (int_literal))))
+            field: (struct_field_init
+              name: (identifier)
+              value: (primary_expression
+                (literal
+                  (int_literal)))))))
+      (let_statement
+        pattern: (binding_pattern
+          name: (identifier))
+        value: (primary_expression
+          (literal
+            (formatted_string_literal
+              (formatted_string_text)
+              (interpolation
+                expression: (primary_expression
+                  (path_expression
+                    head: (identifier))))
+              (formatted_string_text)
+              (formatted_string_escape_brace)
+              (formatted_string_text)
+              (formatted_string_escape_brace)))))
+      (expression_statement
+        (if_expression
+          condition: (binary_expression_no_struct_lit
+            left: (primary_expression_no_struct_lit
+              (path_expression
+                head: (identifier)))
+            right: (primary_expression_no_struct_lit
+              (literal
+                (int_literal))))
+          consequence: (block
+            tail: (primary_expression
+              (path_expression
+                head: (identifier))))
+          alternative: (block
+            tail: (primary_expression
+              (literal
+                (int_literal))))))
+      (expression_statement
+        (match_expression
+          scrutinee: (primary_expression_no_struct_lit
+            (path_expression
+              head: (identifier)))
+          (match_arm
+            pattern: (literal_pattern
+              (int_literal))
+            body: (primary_expression_no_block
+              (literal
+                (int_literal))))
+          (match_arm
+            pattern: (effect_pattern
+              interface: (path_type
+                (path_type_segment
+                  name: (type_identifier)))
+              method: (identifier)
+              argument: (binding_pattern
+                name: (identifier))
+              continuation: (identifier))
+            body: (block
+              tail: (primary_expression
+                (literal
+                  (int_literal)))))
+          (match_arm
+            pattern: (wildcard_pattern
+              wildcard: (wildcard))
+            body: (primary_expression_no_block
+              (path_expression
+                head: (identifier))))))
+      (expression_statement
+        (loop_expression
+          body: (block
+            (break_statement))))
+      (expression_statement
+        (while_expression
+          condition: (binary_expression_no_struct_lit
+            left: (primary_expression_no_struct_lit
+              (path_expression
+                head: (identifier)))
+            right: (primary_expression_no_struct_lit
+              (literal
+                (int_literal))))
+          body: (block
+            (break_statement))))
+      (expression_statement
+        (for_expression
+          pattern: (binding_pattern
+            name: (identifier))
+          iterable: (primary_expression_no_struct_lit
+            (array_expression
+              item: (primary_expression
+                (literal
+                  (int_literal)))
+              item: (primary_expression
+                (literal
+                  (int_literal)))))
+          body: (block
+            (expression_statement
+              (non_block_primary_expression
+                (path_expression
+                  head: (identifier)))))))
+      (expression_statement
+        (non_block_primary_expression
+          (effect_call
+            interface: (path_type
+              (path_type_segment
+                name: (type_identifier)))
+            method: (identifier)
+            arguments: (argument_list
+              (argument_list_items
+                argument: (primary_expression
+                  (path_expression
+                    head: (identifier))))))))
+      tail: (call_expression
+        function: (primary_expression
+          (parenthesized_expression
+            (primary_expression
+              (lambda_expression
+                parameter: (lambda_parameter
+                  name: (identifier)
+                  type: (type_atom
+                    (primitive_type)))
+                body: (block
+                  tail: (primary_expression
+                    (path_expression
+                      head: (identifier))))))))
+        arguments: (argument_list
+          (argument_list_items
+            argument: (primary_expression
+              (literal
+                (int_literal))))))))))

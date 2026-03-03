@@ -1,0 +1,31 @@
+{
+  "grammars": [
+    {
+      "name": "rusk",
+      "camelcase": "Rusk",
+      "scope": "source.rusk",
+      "path": ".",
+      "file-types": [
+        "rusk"
+      ],
+      "highlights": "queries/highlights.scm",
+      "folds": "queries/folds.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Rusk grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/windoze/rusk"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true
+  }
+}

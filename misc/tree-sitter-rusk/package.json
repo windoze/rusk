@@ -1,0 +1,29 @@
+{
+  "name": "tree-sitter-rusk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rusk grammar for tree-sitter",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/windoze/rusk"
+  },
+  "keywords": [
+    "tree-sitter",
+    "parser",
+    "rusk"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.24.3"
+  },
+  "files": [
+    "grammar.js",
+    "src",
+    "queries",
+    "corpus"
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  }
+}

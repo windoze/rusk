@@ -1,0 +1,126 @@
+==================
+Patterns
+==================
+
+fn f(readonly (a, ..rest, b): (int, int, int)) -> int {
+  let (x, y,) = (1, 2);
+  let [h, ..t] = [1, 2, 3];
+  match x {
+    (..k) => 0,
+    Foo::Bar(n) => n,
+    Foo::Baz => 1,
+    Point { x: a, .. } => a,
+    _ => 2,
+  }
+}
+
+---
+
+(source_file
+  (function_item
+    name: (identifier)
+    parameters: (parameters
+      (parameter_list
+        parameter: (parameter
+          pattern: (tuple_pattern
+            (pattern_tuple
+              item: (binding_pattern
+                name: (identifier))
+              item: (rest_pattern
+                name: (identifier))
+              item: (binding_pattern
+                name: (identifier))))
+          type: (type_atom
+            (tuple_type
+              type: (type_atom
+                (primitive_type))
+              type: (type_atom
+                (primitive_type))
+              type: (type_atom
+                (primitive_type)))))))
+    return_type: (return_type
+      type: (type_atom
+        (primitive_type)))
+    body: (block
+      (let_statement
+        pattern: (tuple_pattern
+          (pattern_tuple
+            item: (binding_pattern
+              name: (identifier))
+            item: (binding_pattern
+              name: (identifier))))
+        value: (primary_expression
+          (tuple_expression
+            first: (primary_expression
+              (literal
+                (int_literal)))
+            (argument_list_items
+              argument: (primary_expression
+                (literal
+                  (int_literal)))))))
+      (let_statement
+        pattern: (array_pattern
+          item: (binding_pattern
+            name: (identifier))
+          item: (rest_pattern
+            name: (identifier)))
+        value: (primary_expression
+          (array_expression
+            item: (primary_expression
+              (literal
+                (int_literal)))
+            item: (primary_expression
+              (literal
+                (int_literal)))
+            item: (primary_expression
+              (literal
+                (int_literal))))))
+      (expression_statement
+        (match_expression
+          scrutinee: (primary_expression_no_struct_lit
+            (path_expression
+              head: (identifier)))
+          (match_arm
+            pattern: (tuple_pattern
+              rest: (rest_pattern
+                name: (identifier)))
+            body: (primary_expression_no_block
+              (literal
+                (int_literal))))
+          (match_arm
+            pattern: (constructor_pattern
+              path: (path_expression
+                head: (type_identifier)
+                segment: (type_identifier))
+              arguments: (pattern_arguments
+                argument: (binding_pattern
+                  name: (identifier))))
+            body: (primary_expression_no_block
+              (path_expression
+                head: (identifier))))
+          (match_arm
+            pattern: (enum_pattern
+              path: (qualified_identifier
+                head: (type_identifier)
+                segment: (type_identifier)))
+            body: (primary_expression_no_block
+              (literal
+                (int_literal))))
+          (match_arm
+            pattern: (struct_pattern
+              type: (struct_type_path
+                name: (type_identifier))
+              field: (struct_pattern_field
+                name: (identifier)
+                pattern: (binding_pattern
+                  name: (identifier)))
+              field: (struct_pattern_field))
+            body: (primary_expression_no_block
+              (path_expression
+                head: (identifier))))
+          (match_arm
+            pattern: (wildcard_pattern
+              wildcard: (wildcard))
+            body: (primary_expression_no_block
+              (literal
+                (int_literal))))))))))
