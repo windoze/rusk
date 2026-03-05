@@ -1,0 +1,10 @@
+// expect: ok int 3
+
+mod abi {
+    pub extern fn sum_pair(p: (int, int)) -> int;
+}
+
+fn main() -> int {
+    abi::sum_pair((1, 2))
+}
+

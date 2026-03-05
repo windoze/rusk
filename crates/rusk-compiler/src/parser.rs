@@ -107,6 +107,7 @@ impl<'a> Parser<'a> {
         let vis = self.parse_visibility()?;
         match self.lookahead.kind {
             TokenKind::KwFn => Ok(Item::Function(self.parse_fn_item(vis)?)),
+            TokenKind::KwExtern => Ok(Item::ExternFn(self.parse_extern_fn_item(vis)?)),
             TokenKind::KwIntrinsic => Ok(Item::IntrinsicFn(self.parse_intrinsic_fn_item(vis)?)),
             TokenKind::KwStatic => {
                 Err(self.error_here("`static fn` is only allowed inside `impl` blocks"))
@@ -176,6 +177,70 @@ impl<'a> Parser<'a> {
             body,
             span: Span::new(start, end),
         })
+    }
+
+    fn parse_extern_fn_item(&mut self, vis: Visibility) -> Result<ExternFnItem, ParseError> {
+        let start = self.expect(TokenKind::KwExtern)?.span.start;
+        self.expect(TokenKind::KwFn)?;
+        let name = self.expect_ident()?;
+
+        // v1: no generics on `extern fn`.
+        let generics = self.parse_generic_params()?;
+        if !generics.is_empty() {
+            return Err(ParseError {
+                message: "`extern fn` must not be generic".to_string(),
+                span: name.span,
+            });
+        }
+
+        self.expect(TokenKind::LParen)?;
+        let params = if matches!(self.lookahead.kind, TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_extern_param_list()?
+        };
+        let rparen = self.expect(TokenKind::RParen)?;
+
+        if !matches!(self.lookahead.kind, TokenKind::Arrow) {
+            return Err(ParseError {
+                message: "`extern fn` must have an explicit return type (use `-> unit`)"
+                    .to_string(),
+                span: rparen.span,
+            });
+        }
+        self.bump()?; // `->`
+        let ret = self.parse_type()?;
+
+        let semi = self.expect(TokenKind::Semi)?;
+        let end = semi.span.end;
+        Ok(ExternFnItem {
+            vis,
+            name,
+            params,
+            ret,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_extern_param_list(&mut self) -> Result<Vec<ExternParam>, ParseError> {
+        let mut params = Vec::new();
+        loop {
+            let name = self.expect_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            let span = Span::new(name.span.start, ty.span().end);
+            params.push(ExternParam { name, ty, span });
+
+            if matches!(self.lookahead.kind, TokenKind::Comma) {
+                self.bump()?;
+                if matches!(self.lookahead.kind, TokenKind::RParen) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        Ok(params)
     }
 
     fn parse_intrinsic_fn_item(&mut self, vis: Visibility) -> Result<IntrinsicFnItem, ParseError> {

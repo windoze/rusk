@@ -1,5 +1,9 @@
+mod js {
+    pub extern fn log(s: string) -> unit;
+    pub extern fn add_int(a: int, b: int) -> int;
+}
+
 fn main() -> int {
     js::log("hello from Rusk (via host import)");
     js::add_int(40, 2)
 }
-

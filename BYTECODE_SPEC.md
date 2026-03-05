@@ -112,23 +112,37 @@ values in a readonly view when appropriate (i.e. references are re-tagged as rea
 
 ## 3. ABI boundary (VM ↔ host)
 
-The embedding boundary is intentionally small and uses ABI-safe primitives plus opaque continuation
-handles.
+The embedding boundary is intentionally small and uses ABI-safe primitives plus opaque composite
+references and continuation handles.
 
 ### 3.1 `AbiType`
 
 The bytecode-level ABI supports:
 
-- `unit`
-- `bool`
-- `int`
-- `float`
-- `string`
-- `bytes`
-- `continuation` (opaque handle)
+- leaf primitives:
+  - `unit`
+  - `bool`
+  - `int`
+  - `float`
+  - `byte`
+  - `char`
+  - `string`
+  - `bytes`
+  - `continuation` (opaque handle)
+- composite shapes:
+  - `array(T)`
+  - `tuple(T0, T1, ...)`
+  - `struct(TypeId)` (nominal; Rusk-defined)
+  - `enum(TypeId)` (nominal; Rusk-defined)
 
-`continuation` does not encode parameter/return types at the bytecode ABI level; it is an opaque
-runtime handle only meaningful within the VM instance it came from.
+Notes:
+
+- `continuation` does not encode parameter/return types at the bytecode ABI level; it is an opaque
+  runtime handle only meaningful within the VM instance it came from.
+- Composite ABI values are represented at runtime as **opaque VM references** (handles) plus ABI
+  type information (for arrays/tuples) and `TypeId` (for structs/enums).
+- For v1, nominal ABI types are monomorphic at the boundary: generic structs/enums (values with
+  runtime type arguments) must not cross the boundary.
 
 These are the only types allowed in:
 
@@ -645,7 +659,7 @@ The current intrinsic set includes:
 
 ---
 
-## 10. `.rbc` serialization format (v0.13)
+## 10. `.rbc` serialization format (v0.14)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -699,7 +713,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `13`
+- minor = `14`
 
 The reference decoder requires an **exact** version match.
 
@@ -739,11 +753,35 @@ After the header, the module is encoded as:
     - each `iface` is a `TypeId` naming an interface
 19. `struct_layouts_len: len`
 20. `struct_layouts: repeat struct_layouts_len times { type_id: u32, fields_len: len, fields: [string; fields_len] }`
-21. `external_effects_len: len`
-22. `external_effects: [ExternalEffectDecl; external_effects_len]`
-23. `entry: u32` (FunctionId)
+21. `abi_schemas_len: len`
+22. `abi_schemas: repeat abi_schemas_len times { type_id: u32, kind: u8, ... }`
+23. `external_effects_len: len`
+24. `external_effects: [ExternalEffectDecl; external_effects_len]`
+25. `entry: u32` (FunctionId)
 
 The decoder rejects trailing bytes after the module.
+
+#### ABI schemas (`abi_schemas`)
+
+`abi_schemas` is an optional, sparse table keyed by `TypeId` that describes nominal ABI-exposed
+structs/enums for host-side reflection and validation.
+
+Encoding:
+
+- `abi_schemas_len: len` counts only present entries.
+- Each entry starts with `type_id: u32` (the `TypeId` key), followed by `kind: u8`:
+  - `1`: struct schema
+  - `2`: enum schema
+
+Struct schema (`kind = 1`):
+
+- `fields_len: len`
+- `fields: repeat fields_len times { name: string, ty: AbiType }`
+
+Enum schema (`kind = 2`):
+
+- `variants_len: len`
+- `variants: repeat variants_len times { name: string, fields_len: len, fields: [AbiType; fields_len] }`
 
 ### 10.5 Tagged enums
 
@@ -751,15 +789,25 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 #### `AbiType` (`u8`)
 
-| Tag | Variant |
-| --- | ------- |
-| 0 | `Unit` |
-| 1 | `Bool` |
-| 2 | `Int` |
-| 3 | `Float` |
-| 4 | `String` |
-| 5 | `Bytes` |
-| 6 | `Continuation` |
+`AbiType` is a **recursive encoding** (it is no longer a single `u8` tag).
+
+Tags (v0.14):
+
+| Tag | Variant | Payload |
+| --- | ------- | ------- |
+| 0 | `Unit` | — |
+| 1 | `Bool` | — |
+| 2 | `Int` | — |
+| 3 | `Float` | — |
+| 4 | `String` | — |
+| 5 | `Bytes` | — |
+| 6 | `Continuation` | — |
+| 7 | `Byte` | — |
+| 8 | `Char` | — |
+| 9 | `Array` | nested `AbiType` (element type) |
+| 10 | `Tuple` | `len` + repeated `AbiType` |
+| 11 | `Struct` | `TypeId(u32)` |
+| 12 | `Enum` | `TypeId(u32)` |
 
 #### Bytecode `ConstValue` (`u8`)
 
@@ -914,7 +962,7 @@ Intrinsics use `u16` tags `0..=71`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.13):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.14):
 
 - `0`: `Const`
 - `1`: `Copy`

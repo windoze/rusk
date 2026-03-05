@@ -1,6 +1,9 @@
 // expect: ok string "ab"
 
+mod test {
+    pub extern fn concat_string(a: string, b: string) -> string;
+}
+
 fn main() -> string {
     test::concat_string("a", "b")
 }
-

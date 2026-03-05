@@ -212,7 +212,6 @@ fn bytecode_fixtures() {
     }
 
     let mut options = CompileOptions::default();
-    common::register_test_host_module(&mut options);
     common::register_test_external_effects(&mut options);
 
     for case in cases {
@@ -251,6 +250,7 @@ fn bytecode_fixtures() {
                     panic!("fixture {}: vm init failed: {e}", entry_path.display())
                 });
                 common::install_test_host_fns_vm(&module, &mut vm);
+                common::install_complex_abi_host_fns_vm(&module, &mut vm);
                 common::install_core_host_fns_vm(&module, &mut vm);
                 let got = run_to_completion(&module, &mut vm).unwrap_or_else(|e| {
                     panic!("fixture {}: runtime failed: {e}", entry_path.display())

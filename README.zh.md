@@ -12,10 +12,10 @@ Rusk 是一个实验性的编程语言和运行时，使用 Rust 实现。它的
 
 Rusk 设计为可嵌入式（CLI、WASM、嵌入式设备），因此 I/O 和平台集成通过**宿主函数**提供：
 
-- **编译器**在编译前会获得宿主*原型*（名称 + 签名），以便名称解析和类型检查能够成功。
+- 宿主导入在 **Rusk 源码中**用 `extern fn` 声明（可以写在程序里，也可以写在 sysroot 的模块里，例如 `std`），以便名称解析与类型检查能够成功。
 - **运行时**（VM）在运行时会获得具体的宿主实现；如果模块声明的宿主导入未安装，它会在执行时 trap。
 
-在本仓库中，`rusk` CLI 注册了一个最小的宿主定义的 `std` 模块，包含 `std::print(string) -> unit` 和 `std::println(string) -> unit`。
+在本仓库中，sysroot 的 `std` 模块用 `extern fn` 声明了 `std::print(string) -> unit` 与 `std::println(string) -> unit`，`rusk` CLI 会通过 `rusk_host::std_io::install_vm` 安装对应实现。
 
 ## 语言特性
 
@@ -39,7 +39,7 @@ fn main() -> int {
 - `crates/rusk-mir/`：编译器内部的 MIR 数据结构（不是运行时后端）
 - `crates/rusk-bytecode/`：字节码模块 + `.rbc` 序列化 + verifier
 - `crates/rusk-vm/`：字节码 VM 运行时（step API、宿主导入、效应）
-- `crates/rusk-host/`：可重用的宿主模块声明 + 安装器（例如 `std::print`）
+- `crates/rusk-host/`：可选的宿主集成辅助（主要用于在运行时安装宿主导入实现，例如 `std::print`）
 - `crates/rusk-lsp/`：Language Server Protocol（LSP）语言服务器，用于编辑器集成
 - `fixtures/` 和 `tests/`：可执行的测试夹具和回归测试
 

@@ -46,7 +46,7 @@ contexts:
       scope: keyword.control.rusk
 
     # Declaration keywords
-    - match: '\b(pub|use|mod|fn|cont|let|const|readonly|static|struct|enum|interface|impl)\b'
+    - match: '\b(pub|use|mod|fn|extern|intrinsic|cont|let|const|readonly|static|derive|struct|enum|interface|impl|type)\b'
       scope: keyword.other.rusk
 
     # Type-related keywords

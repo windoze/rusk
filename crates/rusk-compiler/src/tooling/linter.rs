@@ -126,6 +126,7 @@ fn lint_item(item: &Item, diags: &mut Vec<Diagnostic>, source_map: &SourceMap) {
             lint_suspicious_comparisons_in_block(&f.body, diags, source_map);
             lint_redundant_else_in_block(&f.body, diags, source_map);
         }
+        Item::ExternFn(_) => {}
         Item::IntrinsicFn(_) => {}
         Item::Struct(_) => {}
         Item::Enum(_) => {}

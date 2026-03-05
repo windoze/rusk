@@ -1,78 +1,33 @@
-use rusk_bytecode::AbiType;
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-    compile_file_to_bytecode_with_options, compile_to_bytecode, compile_to_bytecode_with_options,
-};
+use rusk_bytecode::{AbiType, HostFnSig};
+use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
 use rusk_vm::{StepResult, Vm, vm_step};
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn std_host_module() -> HostModuleDecl {
-    HostModuleDecl {
-        visibility: HostVisibility::Public,
-        functions: vec![HostFunctionDecl {
-            visibility: HostVisibility::Public,
-            name: "println".to_string(),
-            sig: HostFnSig {
-                params: vec![HostType::String],
-                ret: HostType::Unit,
-            },
-        }],
-    }
-}
 
 #[test]
-fn std_is_not_built_in_without_host_registration() {
-    let err = compile_to_bytecode(
-        r#"
-fn main() {
-    std::println("hi");
+fn extern_fn_declaration_records_host_import_signature() {
+    let src = r#"
+mod host {
+    pub extern fn println(s: string) -> unit;
+}
+
+fn main() -> unit {
+    host::println("hi");
     ()
 }
-"#,
-    )
-    .unwrap_err();
-    assert!(
-        err.message.contains("unknown value `std::println`"),
-        "{err}"
-    );
-}
+"#;
 
-#[test]
-fn registering_nested_host_module_is_rejected() {
-    let mut options = CompileOptions::default();
-    let err = options
-        .register_host_module("wasi::io", std_host_module())
-        .unwrap_err();
-    assert!(
-        err.contains("nested host modules are not supported"),
-        "{err}"
-    );
-}
+    let options = CompileOptions {
+        load_std: false,
+        ..Default::default()
+    };
+    let module = compile_to_bytecode_with_options(src, &options).expect("compile");
 
-#[test]
-fn compiles_with_host_module_and_records_host_imports() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module("std", std_host_module())
-        .unwrap();
-
-    let module = compile_to_bytecode_with_options(
-        r#"
-fn main() {
-    std::println("hi");
-    ()
-}
-"#,
-        &options,
-    )
-    .unwrap();
-
-    let import_id = module.host_import_id("std::println").unwrap();
-    let sig = &module.host_import(import_id).unwrap().sig;
+    let import_id = module
+        .host_import_id("host::println")
+        .expect("host::println");
+    let sig = &module.host_import(import_id).expect("host import").sig;
     assert_eq!(
         sig,
-        &rusk_bytecode::HostFnSig {
+        &HostFnSig {
             params: vec![AbiType::String],
             ret: AbiType::Unit,
         }
@@ -80,22 +35,56 @@ fn main() {
 }
 
 #[test]
-fn vm_traps_if_declared_host_missing() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module("std", std_host_module())
-        .unwrap();
+fn extern_fn_in_nested_modules_uses_full_path_name() {
+    let src = r#"
+mod wasi {
+    pub mod io {
+        pub extern fn read(path: string) -> string;
+    }
+}
 
-    let module = compile_to_bytecode_with_options(
-        r#"
-fn main() {
-    std::println("hi");
+fn main() -> string {
+    wasi::io::read("x")
+}
+"#;
+
+    let options = CompileOptions {
+        load_std: false,
+        ..Default::default()
+    };
+    let module = compile_to_bytecode_with_options(src, &options).expect("compile");
+
+    let import_id = module
+        .host_import_id("wasi::io::read")
+        .expect("wasi::io::read");
+    let sig = &module.host_import(import_id).expect("host import").sig;
+    assert_eq!(
+        sig,
+        &HostFnSig {
+            params: vec![AbiType::String],
+            ret: AbiType::String,
+        }
+    );
+}
+
+#[test]
+fn vm_traps_if_declared_host_import_missing() {
+    let src = r#"
+mod host {
+    pub extern fn println(s: string) -> unit;
+}
+
+fn main() -> unit {
+    host::println("hi");
     ()
 }
-"#,
-        &options,
-    )
-    .unwrap();
+"#;
+
+    let options = CompileOptions {
+        load_std: false,
+        ..Default::default()
+    };
+    let module = compile_to_bytecode_with_options(src, &options).expect("compile");
 
     let mut vm = Vm::new(module).expect("vm init");
     let got = vm_step(&mut vm, None);
@@ -103,185 +92,34 @@ fn main() {
         panic!("expected trap, got {got:?}");
     };
     assert!(
-        message.contains("missing host import implementation") && message.contains("std::println"),
+        message.contains("missing host import implementation") && message.contains("host::println"),
         "{message}"
     );
 }
 
 #[test]
-fn nested_modules_must_use_loaf_prefix_for_host_modules() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module("std", std_host_module())
-        .unwrap();
+fn extern_fn_visibility_is_enforced() {
+    let src = r#"
+mod host {
+    extern fn secret(s: string) -> unit;
 
-    // `std::...` is not in scope inside `mod m` unless you use `loaf::std` or import it.
-    let err = compile_to_bytecode_with_options(
-        r#"
-mod m {
-    pub fn f() {
-        std::println("hi");
+    pub fn ok() -> unit {
+        secret("hi");
         ()
     }
 }
 
-fn main() {
-    m::f();
+fn main() -> unit {
+    host::ok();
+    host::secret("no");
     ()
 }
-"#,
-        &options,
-    )
-    .unwrap_err();
-    assert!(
-        err.message.contains("unknown value `std::println`"),
-        "{err}"
-    );
+"#;
 
-    // `loaf::std::...` resolves.
-    compile_to_bytecode_with_options(
-        r#"
-mod m {
-    pub fn f() {
-        loaf::std::println("hi");
-        ()
-    }
-}
-
-fn main() {
-    m::f();
-    ()
-}
-"#,
-        &options,
-    )
-    .unwrap();
-}
-
-#[test]
-fn host_module_conflicts_with_source_module_inline() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module("std", std_host_module())
-        .unwrap();
-
-    let err = compile_to_bytecode_with_options(
-        r#"
-mod std {}
-fn main() { () }
-"#,
-        &options,
-    )
-    .unwrap_err();
-    assert!(
-        err.message
-            .contains("host module `std` conflicts with an existing source module"),
-        "{err}"
-    );
-}
-
-#[test]
-fn host_module_conflicts_with_source_module_file() {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("rusk_host_module_test_{ts}"));
-    fs::create_dir_all(&dir).unwrap();
-
-    let main_path = dir.join("main.rusk");
-    let std_path = dir.join("std.rusk");
-
-    fs::write(
-        &main_path,
-        r#"
-mod std;
-fn main() { () }
-"#,
-    )
-    .unwrap();
-    fs::write(&std_path, "pub fn dummy() { () }\n").unwrap();
-
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module("std", std_host_module())
-        .unwrap();
-
-    let err = compile_file_to_bytecode_with_options(&main_path, &options).unwrap_err();
-    assert!(
-        err.message
-            .contains("host module `std` conflicts with an existing source module"),
-        "{err}"
-    );
-}
-
-#[test]
-fn host_function_visibility_is_enforced() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "std",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![HostFunctionDecl {
-                    visibility: HostVisibility::Private,
-                    name: "print".to_string(),
-                    sig: HostFnSig {
-                        params: vec![HostType::String],
-                        ret: HostType::Unit,
-                    },
-                }],
-            },
-        )
-        .unwrap();
-
-    let err = compile_to_bytecode_with_options(
-        r#"
-fn main() {
-    std::print("hi");
-    ()
-}
-"#,
-        &options,
-    )
-    .unwrap_err();
-    assert!(err.message.contains("`print` is private"), "{err}");
-}
-
-#[test]
-fn wrapper_modules_can_reexport_flat_host_modules_into_nested_namespaces() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "_wasi_io_host",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "read".to_string(),
-                    sig: HostFnSig {
-                        params: vec![HostType::String],
-                        ret: HostType::String,
-                    },
-                }],
-            },
-        )
-        .unwrap();
-
-    compile_to_bytecode_with_options(
-        r#"
-mod wasi {
-    pub mod io {
-        pub use loaf::_wasi_io_host::read;
-    }
-}
-
-fn main() -> string {
-    wasi::io::read("x")
-}
-"#,
-        &options,
-    )
-    .unwrap();
+    let options = CompileOptions {
+        load_std: false,
+        ..Default::default()
+    };
+    let err = compile_to_bytecode_with_options(src, &options).unwrap_err();
+    assert!(err.message.contains("`secret` is private"), "{err}");
 }

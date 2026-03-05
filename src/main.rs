@@ -99,14 +99,11 @@ fn main() {
         }
         Some("rusk") => {
             // 编译 .rusk 文件
-            let mut options = CompileOptions {
+            let options = CompileOptions {
                 sysroot,
                 load_std,
                 ..Default::default()
             };
-            if load_std {
-                std_io::register_host_module(&mut options);
-            }
             match compile_file_to_bytecode_with_options(&input_path, &options) {
                 Ok(m) => m,
                 Err(e) => {

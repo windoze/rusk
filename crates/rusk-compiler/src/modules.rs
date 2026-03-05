@@ -1,5 +1,4 @@
 use crate::ast::{Item, ModItem, ModKind, Program, UseItem, Visibility};
-use crate::host::{HostModuleDecl, HostVisibility};
 use crate::parser::{ParseError, Parser};
 use crate::source::Span;
 use crate::source_map::{SourceMap, SourceName};
@@ -171,16 +170,12 @@ pub(crate) struct ModuleResolver {
 }
 
 impl ModuleResolver {
-    pub(crate) fn build(
-        program: &Program,
-        host_modules: &[(String, HostModuleDecl)],
-    ) -> Result<Self, ResolveError> {
+    pub(crate) fn build(program: &Program) -> Result<Self, ResolveError> {
         let mut resolver = Self::default();
         resolver.collect_module(&ModulePath::root(), &program.items)?;
 
         resolver.inject_builtin_option()?;
         resolver.inject_core_binding_into_all_scopes()?;
-        resolver.inject_host_modules(host_modules)?;
         resolver.resolve_all_uses()?;
         resolver.apply_core_prelude_auto_import()?;
         Ok(resolver)
@@ -291,6 +286,44 @@ impl ModuleResolver {
                 Item::Mod(m) => self.collect_mod_item(&mut scope, path, m)?,
                 Item::Use(u) => scope.pending_uses.push(u.clone()),
                 Item::Function(f) => {
+                    let local_name = f.name.name.clone();
+                    let full_name = path.qualify(&local_name);
+                    if scope.values.contains_key(&local_name) {
+                        return Err(ResolveError {
+                            message: format!(
+                                "duplicate function `{local_name}` in {}",
+                                path.display()
+                            ),
+                            span: f.name.span,
+                        });
+                    }
+                    scope.values.insert(
+                        local_name,
+                        Binding {
+                            vis: f.vis,
+                            defining_module: path.clone(),
+                            span: f.name.span,
+                            target: BindingTarget::Function(full_name.clone()),
+                        },
+                    );
+                    if self
+                        .defs
+                        .insert(
+                            full_name.clone(),
+                            DefDecl {
+                                vis: f.vis,
+                                defining_module: path.clone(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(ResolveError {
+                            message: format!("duplicate function `{full_name}`"),
+                            span: f.name.span,
+                        });
+                    }
+                }
+                Item::ExternFn(f) => {
                     let local_name = f.name.name.clone();
                     let full_name = path.qualify(&local_name);
                     if scope.values.contains_key(&local_name) {
@@ -626,159 +659,6 @@ impl ModuleResolver {
                         target: target.clone(),
                     },
                 );
-            }
-        }
-
-        Ok(())
-    }
-
-    fn inject_host_modules(
-        &mut self,
-        host_modules: &[(String, HostModuleDecl)],
-    ) -> Result<(), ResolveError> {
-        let root_path = ModulePath::root();
-        if !self.scopes.contains_key(&root_path) {
-            return Err(ResolveError {
-                message: "internal error: missing root module scope".to_string(),
-                span: Span::new(0, 0),
-            });
-        }
-
-        for (module_name, decl) in host_modules {
-            if module_name.is_empty() {
-                return Err(ResolveError {
-                    message: "host module name cannot be empty".to_string(),
-                    span: Span::new(0, 0),
-                });
-            }
-            if module_name.contains("::") {
-                return Err(ResolveError {
-                    message: format!(
-                        "nested host modules are not supported: `{module_name}` contains `::`"
-                    ),
-                    span: Span::new(0, 0),
-                });
-            }
-            if module_name == "core" {
-                return Err(ResolveError {
-                    message: "host module name `core` is reserved".to_string(),
-                    span: Span::new(0, 0),
-                });
-            }
-            if self
-                .scopes
-                .get(&root_path)
-                .is_some_and(|scope| scope.modules.contains_key(module_name))
-            {
-                return Err(ResolveError {
-                    message: format!(
-                        "host module `{module_name}` conflicts with an existing source module"
-                    ),
-                    span: Span::new(0, 0),
-                });
-            }
-
-            let module_vis = match decl.visibility {
-                HostVisibility::Private => Visibility::Private,
-                HostVisibility::Public => Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-            };
-            let module_path = root_path.child(module_name);
-
-            {
-                let root_scope = self
-                    .scopes
-                    .get_mut(&root_path)
-                    .ok_or_else(|| ResolveError {
-                        message: "internal error: missing root module scope".to_string(),
-                        span: Span::new(0, 0),
-                    })?;
-                root_scope.modules.insert(
-                    module_name.clone(),
-                    Binding {
-                        vis: module_vis,
-                        defining_module: root_path.clone(),
-                        span: Span::new(0, 0),
-                        target: BindingTarget::Module(module_path.clone()),
-                    },
-                );
-            }
-
-            if self
-                .defs
-                .insert(
-                    module_path.fqn(),
-                    DefDecl {
-                        vis: module_vis,
-                        defining_module: root_path.clone(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(ResolveError {
-                    message: format!("duplicate module `{}`", module_path.fqn()),
-                    span: Span::new(0, 0),
-                });
-            }
-
-            let mut scope = ModuleScope {
-                path: module_path.clone(),
-                modules: BTreeMap::new(),
-                types: BTreeMap::new(),
-                values: BTreeMap::new(),
-                pending_uses: Vec::new(),
-            };
-
-            for func in &decl.functions {
-                let func_vis = match func.visibility {
-                    HostVisibility::Private => Visibility::Private,
-                    HostVisibility::Public => Visibility::Public {
-                        span: Span::new(0, 0),
-                    },
-                };
-
-                if scope.values.contains_key(&func.name) {
-                    return Err(ResolveError {
-                        message: format!("duplicate host function `{module_name}::{}`", func.name),
-                        span: Span::new(0, 0),
-                    });
-                }
-
-                let fqn = format!("{module_name}::{}", func.name);
-                scope.values.insert(
-                    func.name.clone(),
-                    Binding {
-                        vis: func_vis,
-                        defining_module: module_path.clone(),
-                        span: Span::new(0, 0),
-                        target: BindingTarget::Function(fqn.clone()),
-                    },
-                );
-
-                if self
-                    .defs
-                    .insert(
-                        fqn.clone(),
-                        DefDecl {
-                            vis: func_vis,
-                            defining_module: module_path.clone(),
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(ResolveError {
-                        message: format!("duplicate function `{fqn}`"),
-                        span: Span::new(0, 0),
-                    });
-                }
-            }
-
-            if self.scopes.insert(module_path, scope).is_some() {
-                return Err(ResolveError {
-                    message: format!("duplicate host module `{module_name}`"),
-                    span: Span::new(0, 0),
-                });
             }
         }
 

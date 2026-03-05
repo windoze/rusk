@@ -1,5 +1,6 @@
 use core::marker::PhantomData;
-use rusk_bytecode::AbiType;
+use rusk_bytecode::{AbiType, TypeId};
+use rusk_gc::GcRef;
 
 use crate::vm::ContinuationHandle;
 
@@ -18,6 +19,10 @@ pub enum AbiValue {
     Int(i64),
     /// A 64-bit floating point number.
     Float(f64),
+    /// An unsigned 8-bit integer.
+    Byte(u8),
+    /// A Unicode scalar value.
+    Char(char),
     /// A UTF-8 string.
     String(String),
     /// An arbitrary byte buffer.
@@ -26,6 +31,134 @@ pub enum AbiValue {
     ///
     /// The handle is only meaningful within the VM instance it came from.
     Continuation(ContinuationHandle),
+    /// A reference to a VM array object.
+    Array(AbiArrayRef),
+    /// A reference to a VM tuple object.
+    Tuple(AbiTupleRef),
+    /// A reference to a VM struct object.
+    Struct(AbiStructRef),
+    /// A reference to a VM enum object.
+    Enum(AbiEnumRef),
+}
+
+/// An opaque, VM-validated reference to an array object, carrying an ABI element type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiArrayRef {
+    handle: GcRef,
+    readonly: bool,
+    elem_ty: Box<AbiType>,
+}
+
+impl AbiArrayRef {
+    pub(crate) fn new(handle: GcRef, readonly: bool, elem_ty: AbiType) -> Self {
+        Self {
+            handle,
+            readonly,
+            elem_ty: Box::new(elem_ty),
+        }
+    }
+
+    pub(crate) fn handle(&self) -> GcRef {
+        self.handle
+    }
+
+    pub(crate) fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    pub fn elem_ty(&self) -> &AbiType {
+        &self.elem_ty
+    }
+}
+
+/// An opaque, VM-validated reference to a tuple object, carrying ABI element types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiTupleRef {
+    handle: GcRef,
+    readonly: bool,
+    item_tys: Vec<AbiType>,
+}
+
+impl AbiTupleRef {
+    pub(crate) fn new(handle: GcRef, readonly: bool, item_tys: Vec<AbiType>) -> Self {
+        Self {
+            handle,
+            readonly,
+            item_tys,
+        }
+    }
+
+    pub(crate) fn handle(&self) -> GcRef {
+        self.handle
+    }
+
+    pub(crate) fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    pub fn item_tys(&self) -> &[AbiType] {
+        &self.item_tys
+    }
+}
+
+/// An opaque, VM-validated reference to a struct object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiStructRef {
+    handle: GcRef,
+    readonly: bool,
+    type_id: TypeId,
+}
+
+impl AbiStructRef {
+    pub(crate) fn new(handle: GcRef, readonly: bool, type_id: TypeId) -> Self {
+        Self {
+            handle,
+            readonly,
+            type_id,
+        }
+    }
+
+    pub(crate) fn handle(&self) -> GcRef {
+        self.handle
+    }
+
+    pub(crate) fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+}
+
+/// An opaque, VM-validated reference to an enum object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiEnumRef {
+    handle: GcRef,
+    readonly: bool,
+    type_id: TypeId,
+}
+
+impl AbiEnumRef {
+    pub(crate) fn new(handle: GcRef, readonly: bool, type_id: TypeId) -> Self {
+        Self {
+            handle,
+            readonly,
+            type_id,
+        }
+    }
+
+    pub(crate) fn handle(&self) -> GcRef {
+        self.handle
+    }
+
+    pub(crate) fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
 }
 
 impl AbiValue {
@@ -36,9 +169,15 @@ impl AbiValue {
             Self::Bool(_) => AbiType::Bool,
             Self::Int(_) => AbiType::Int,
             Self::Float(_) => AbiType::Float,
+            Self::Byte(_) => AbiType::Byte,
+            Self::Char(_) => AbiType::Char,
             Self::String(_) => AbiType::String,
             Self::Bytes(_) => AbiType::Bytes,
             Self::Continuation(_) => AbiType::Continuation,
+            Self::Array(r) => AbiType::Array(Box::new(r.elem_ty.as_ref().clone())),
+            Self::Tuple(r) => AbiType::Tuple(r.item_tys.clone()),
+            Self::Struct(r) => AbiType::Struct(r.type_id),
+            Self::Enum(r) => AbiType::Enum(r.type_id),
         }
     }
 
@@ -71,6 +210,18 @@ impl From<i64> for AbiValue {
 impl From<f64> for AbiValue {
     fn from(v: f64) -> Self {
         Self::Float(v)
+    }
+}
+
+impl From<u8> for AbiValue {
+    fn from(v: u8) -> Self {
+        Self::Byte(v)
+    }
+}
+
+impl From<char> for AbiValue {
+    fn from(v: char) -> Self {
+        Self::Char(v)
     }
 }
 
@@ -234,6 +385,18 @@ impl AbiTypeOf for f64 {
     }
 }
 
+impl AbiTypeOf for u8 {
+    fn abi_type() -> AbiType {
+        AbiType::Byte
+    }
+}
+
+impl AbiTypeOf for char {
+    fn abi_type() -> AbiType {
+        AbiType::Char
+    }
+}
+
 impl AbiTypeOf for String {
     fn abi_type() -> AbiType {
         AbiType::String
@@ -294,6 +457,24 @@ impl AbiDecode for f64 {
     fn decode(value: &AbiValue) -> Result<Self, AbiDecodeError> {
         match value {
             AbiValue::Float(v) => Ok(*v),
+            other => Err(AbiDecodeError::value_mismatch(Self::abi_type(), other.ty())),
+        }
+    }
+}
+
+impl AbiDecode for u8 {
+    fn decode(value: &AbiValue) -> Result<Self, AbiDecodeError> {
+        match value {
+            AbiValue::Byte(v) => Ok(*v),
+            other => Err(AbiDecodeError::value_mismatch(Self::abi_type(), other.ty())),
+        }
+    }
+}
+
+impl AbiDecode for char {
+    fn decode(value: &AbiValue) -> Result<Self, AbiDecodeError> {
+        match value {
+            AbiValue::Char(v) => Ok(*v),
             other => Err(AbiDecodeError::value_mismatch(Self::abi_type(), other.ty())),
         }
     }

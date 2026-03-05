@@ -1,3 +1,8 @@
+mod js {
+    pub extern fn log(s: string) -> unit;
+    pub extern fn store_cont(k: cont(int) -> int) -> unit;
+}
+
 interface E { fn boom() -> int; }
 
 fn main() -> int {

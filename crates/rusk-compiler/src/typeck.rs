@@ -1,10 +1,10 @@
 use crate::ast::{
-    BinaryOp, BindingKind, Block, EnumItem, Expr, FieldName, FnItem, FnItemKind, GenericParam,
-    Ident, ImplHeader, ImplItem, ImplMember, InterfaceItem, InterfaceMember, IntrinsicFnItem, Item,
-    MatchArm, MatchPat, MethodReceiverKind, Param, PatLiteral, Pattern, PrimType, Program,
-    StructItem, TypeExpr, UnaryOp, Visibility,
+    BinaryOp, BindingKind, Block, EnumItem, Expr, ExternFnItem, FieldName, FnItem, FnItemKind,
+    GenericParam, Ident, ImplHeader, ImplItem, ImplMember, InterfaceItem, InterfaceMember,
+    IntrinsicFnItem, Item, MatchArm, MatchPat, MethodReceiverKind, Param, PatLiteral, Pattern,
+    PrimType, Program, StructItem, TypeExpr, UnaryOp, Visibility,
 };
-use crate::host::{CompileOptions, HostVisibility};
+use crate::host::CompileOptions;
 use crate::modules::{ModulePath, ModuleResolver};
 use crate::source::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -449,9 +449,9 @@ impl TypeInfo {
 
 pub(crate) fn build_env(
     program: &Program,
-    options: &CompileOptions,
+    _options: &CompileOptions,
 ) -> Result<ProgramEnv, TypeError> {
-    let modules = ModuleResolver::build(program, &options.host_modules).map_err(|e| TypeError {
+    let modules = ModuleResolver::build(program).map_err(|e| TypeError {
         message: e.message,
         span: e.span,
     })?;
@@ -461,7 +461,6 @@ pub(crate) fn build_env(
         ..Default::default()
     };
     add_prelude(&mut env);
-    add_host_modules(&mut env, options)?;
 
     // First pass: declare interfaces (so later passes can validate bounds against them).
     walk_module_items(
@@ -515,6 +514,7 @@ pub(crate) fn build_env(
                 }
                 declare_function_sig(&mut env, module, &[], f, Some(full_name))
             }
+            Item::ExternFn(f) => declare_extern_fn_sig(&mut env, module, f),
             Item::IntrinsicFn(f) => declare_intrinsic_fn_sig(&mut env, module, f),
             _ => Ok(()),
         },
@@ -531,6 +531,17 @@ pub(crate) fn build_env(
         },
     )?;
 
+    // ABI eligibility pass: validate `extern fn` signatures now that struct/enum definitions are
+    // fully populated.
+    walk_module_items(
+        &program.items,
+        &ModulePath::root(),
+        &mut |module, item| match item {
+            Item::ExternFn(f) => validate_extern_fn_abi_sig(&env, module, f),
+            _ => Ok(()),
+        },
+    )?;
+
     // Sixth pass: process impl items (declare method signatures + interface method table).
     walk_module_items(
         &program.items,
@@ -542,82 +553,6 @@ pub(crate) fn build_env(
     )?;
 
     Ok(env)
-}
-
-fn add_host_modules(env: &mut ProgramEnv, options: &CompileOptions) -> Result<(), TypeError> {
-    for (module_name, module) in &options.host_modules {
-        let defining_module = ModulePath::root().child(module_name);
-        for func in &module.functions {
-            let full_name = format!("{module_name}::{}", func.name);
-            if env.functions.contains_key(&full_name) {
-                return Err(TypeError {
-                    message: format!("duplicate function `{full_name}`"),
-                    span: Span::new(0, 0),
-                });
-            }
-
-            let vis = match func.visibility {
-                HostVisibility::Private => Visibility::Private,
-                HostVisibility::Public => Visibility::Public {
-                    span: Span::new(0, 0),
-                },
-            };
-
-            let params = func
-                .sig
-                .params
-                .iter()
-                .map(ty_from_host_type)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|message| TypeError {
-                    message: format!("host function `{full_name}`: {message}"),
-                    span: Span::new(0, 0),
-                })?;
-            let ret = ty_from_host_type(&func.sig.ret).map_err(|message| TypeError {
-                message: format!("host function `{full_name}`: {message}"),
-                span: Span::new(0, 0),
-            })?;
-
-            env.functions.insert(
-                full_name.clone(),
-                FnSig {
-                    name: full_name,
-                    vis,
-                    defining_module: defining_module.clone(),
-                    generics: Vec::new(),
-                    params,
-                    ret,
-                    span: Span::new(0, 0),
-                },
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn ty_from_host_type(ty: &crate::host::HostType) -> Result<Ty, String> {
-    match ty {
-        crate::host::HostType::Any => Err("unsupported host type: `any`".to_string()),
-        crate::host::HostType::Unit => Ok(Ty::Unit),
-        crate::host::HostType::Bool => Ok(Ty::Bool),
-        crate::host::HostType::Int => Ok(Ty::Int),
-        crate::host::HostType::Float => Ok(Ty::Float),
-        crate::host::HostType::String => Ok(Ty::String),
-        crate::host::HostType::Bytes => Ok(Ty::Bytes),
-        crate::host::HostType::Cont { param, ret } => Ok(Ty::Cont {
-            param: Box::new(ty_from_host_type(param)?),
-            ret: Box::new(ty_from_host_type(ret)?),
-        }),
-        crate::host::HostType::TypeRep => Err("unsupported host type: `typerep`".to_string()),
-        crate::host::HostType::Array(elem) => Ok(Ty::Array(Box::new(ty_from_host_type(elem)?))),
-        crate::host::HostType::Tuple(items) => Ok(Ty::Tuple(
-            items
-                .iter()
-                .map(ty_from_host_type)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-    }
 }
 
 fn walk_module_items(
@@ -1379,6 +1314,181 @@ fn declare_function_sig(
         },
     );
     Ok(())
+}
+
+fn declare_extern_fn_sig(
+    env: &mut ProgramEnv,
+    module: &ModulePath,
+    func: &ExternFnItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&func.name.name);
+    if env.functions.contains_key(&name) {
+        return Err(TypeError {
+            message: format!("duplicate function `{name}`"),
+            span: func.name.span,
+        });
+    }
+
+    let generics: Vec<GenericParamInfo> = Vec::new();
+    let scope = GenericScope::new(&generics)?;
+
+    let mut params = Vec::with_capacity(func.params.len());
+    for p in &func.params {
+        let ty = lower_type_expr(env, module, &scope, &p.ty)?;
+        if contains_self_type(&ty) {
+            return Err(TypeError {
+                message: "`Self` can only be used in interface or instance-method contexts"
+                    .to_string(),
+                span: p.ty.span(),
+            });
+        }
+        validate_assoc_projs_in_ty(env, &ty, p.ty.span())?;
+        validate_value_ty(env, &ty, p.ty.span())?;
+        params.push(ty);
+    }
+
+    let ret = lower_type_expr(env, module, &scope, &func.ret)?;
+    if contains_self_type(&ret) {
+        return Err(TypeError {
+            message: "`Self` can only be used in interface or instance-method contexts".to_string(),
+            span: func.ret.span(),
+        });
+    }
+    validate_assoc_projs_in_ty(env, &ret, func.ret.span())?;
+    validate_value_ty(env, &ret, func.ret.span())?;
+
+    env.functions.insert(
+        name.clone(),
+        FnSig {
+            name,
+            vis: func.vis,
+            defining_module: module.clone(),
+            generics,
+            params,
+            ret,
+            span: func.span,
+        },
+    );
+    Ok(())
+}
+
+fn validate_extern_fn_abi_sig(
+    env: &ProgramEnv,
+    module: &ModulePath,
+    func: &ExternFnItem,
+) -> Result<(), TypeError> {
+    let name = module.qualify(&func.name.name);
+    let Some(sig) = env.functions.get(&name) else {
+        return Err(TypeError {
+            message: format!("internal error: missing signature for extern fn `{name}`"),
+            span: func.name.span,
+        });
+    };
+    if sig.params.len() != func.params.len() {
+        return Err(TypeError {
+            message: format!("internal error: extern fn `{name}` param length mismatch"),
+            span: func.span,
+        });
+    }
+
+    for (param_ty, param) in sig.params.iter().zip(func.params.iter()) {
+        validate_abi_eligible_ty(env, param_ty, param.ty.span()).map_err(|message| TypeError {
+            message: format!("extern fn `{name}`: {message}"),
+            span: param.ty.span(),
+        })?;
+    }
+    validate_abi_eligible_ty(env, &sig.ret, func.ret.span()).map_err(|message| TypeError {
+        message: format!("extern fn `{name}`: {message}"),
+        span: func.ret.span(),
+    })?;
+    Ok(())
+}
+
+pub(crate) fn validate_abi_eligible_ty(
+    env: &ProgramEnv,
+    ty: &Ty,
+    span: Span,
+) -> Result<(), String> {
+    fn walk(env: &ProgramEnv, ty: &Ty, visiting: &mut HashSet<String>) -> Result<(), String> {
+        use TyCon::Named;
+
+        match ty {
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Byte
+            | Ty::Char
+            | Ty::String
+            | Ty::Bytes => Ok(()),
+            Ty::Cont { param, ret } => {
+                walk(env, param, visiting)?;
+                walk(env, ret, visiting)?;
+                Ok(())
+            }
+            Ty::Array(elem) => walk(env, elem, visiting),
+            Ty::Tuple(items) => {
+                for item in items {
+                    walk(env, item, visiting)?;
+                }
+                Ok(())
+            }
+            Ty::Readonly(inner) => walk(env, inner, visiting),
+            Ty::App(Named(name), args) => {
+                if !args.is_empty() {
+                    return Err(format!(
+                        "type `{name}` with type arguments is not ABI-eligible in v1"
+                    ));
+                }
+                // Struct and enum types are allowed only when *they* are ABI-eligible.
+                if let Some(def) = env.structs.get(name) {
+                    if !def.generics.is_empty() {
+                        return Err(format!("generic struct `{name}` is not ABI-eligible in v1"));
+                    }
+                    if !visiting.insert(name.clone()) {
+                        return Ok(());
+                    }
+                    for (_field, field_ty) in &def.fields {
+                        walk(env, field_ty, visiting)?;
+                    }
+                    visiting.remove(name);
+                    return Ok(());
+                }
+                if let Some(def) = env.enums.get(name) {
+                    if !def.generics.is_empty() {
+                        return Err(format!("generic enum `{name}` is not ABI-eligible in v1"));
+                    }
+                    if !visiting.insert(name.clone()) {
+                        return Ok(());
+                    }
+                    for fields in def.variants.values() {
+                        for field_ty in fields {
+                            walk(env, field_ty, visiting)?;
+                        }
+                    }
+                    visiting.remove(name);
+                    return Ok(());
+                }
+                Err(format!(
+                    "type `{name}` is not ABI-eligible (expected a struct or enum)"
+                ))
+            }
+            Ty::Never => Err("type `!` is not ABI-eligible".to_string()),
+            Ty::Fn { .. } => Err("function types are not ABI-eligible".to_string()),
+            Ty::Iface { .. } => Err("interface types are not ABI-eligible".to_string()),
+            Ty::AssocProj { .. } => {
+                Err("associated type projections are not ABI-eligible".to_string())
+            }
+            Ty::SelfType => Err("type `Self` is not ABI-eligible".to_string()),
+            Ty::Gen(_) | Ty::Var(_) | Ty::App(TyCon::Gen(_), _) | Ty::App(TyCon::Var(_), _) => {
+                Err("generic/inference types are not ABI-eligible".to_string())
+            }
+        }
+    }
+
+    let _ = span;
+    let mut visiting = HashSet::new();
+    walk(env, ty, &mut visiting)
 }
 
 #[derive(Clone, Debug)]

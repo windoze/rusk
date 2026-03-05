@@ -1,0 +1,10 @@
+// expect: ok int 6
+
+mod abi {
+    pub extern fn sum_ints(xs: [int]) -> int;
+}
+
+fn main() -> int {
+    abi::sum_ints([1, 2, 3])
+}
+

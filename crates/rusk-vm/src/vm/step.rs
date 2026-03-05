@@ -120,9 +120,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 );
             }
 
-            let ret = match ret.try_to_abi(&vm.heap, &mut vm.pinned_continuations) {
-                Ok(Some(ret)) => ret,
-                Ok(None) => return trap(vm, format!("non-ABI-safe return value ({})", ret.kind())),
+            let ret = match vm.with_host_context(|cx| cx.value_to_abi_infer(&ret)) {
+                Ok(ret) => ret,
                 Err(msg) => return trap(vm, msg),
             };
             vm.state = VmState::Done { value: ret.clone() };
@@ -2426,38 +2425,31 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     );
                 }
 
-                let mut abi_args = Vec::with_capacity(arg_values.len());
-                for (v, expected) in arg_values.iter().zip(effect.sig.params.iter()) {
-                    let abi = match v.try_to_abi(&vm.heap, &mut vm.pinned_continuations) {
-                        Ok(Some(abi)) => abi,
-                        Ok(None) => {
-                            return trap(
-                                vm,
-                                format!(
-                                    "external effect `{}.{}` arg type mismatch: expected {:?}, got {}",
-                                    effect.interface,
-                                    effect.method,
-                                    expected,
-                                    v.kind()
-                                ),
-                            );
-                        }
-                        Err(msg) => return trap(vm, msg),
-                    };
-                    if abi.ty() != *expected {
-                        return trap(
-                            vm,
+                let abi_args = (|| -> Result<Vec<AbiValue>, String> {
+                    let mut cx = HostContext::new(
+                        &vm.module,
+                        &mut vm.heap,
+                        &mut vm.gc_allocations_since_collect,
+                        &mut vm.pinned_continuations,
+                    );
+                    let mut abi_args = Vec::with_capacity(arg_values.len());
+                    for (idx, (v, expected)) in
+                        arg_values.iter().zip(effect.sig.params.iter()).enumerate()
+                    {
+                        let abi = cx.value_to_abi(v, expected).map_err(|msg| {
                             format!(
-                                "external effect `{}.{}` arg type mismatch: expected {:?}, got {:?}",
-                                effect.interface,
-                                effect.method,
-                                expected,
-                                abi.ty()
-                            ),
-                        );
+                                "external effect `{}.{}` arg {idx} conversion failed: {msg}",
+                                effect.interface, effect.method
+                            )
+                        })?;
+                        abi_args.push(abi);
                     }
-                    abi_args.push(abi);
-                }
+                    Ok(abi_args)
+                })();
+                let abi_args = match abi_args {
+                    Ok(v) => v,
+                    Err(msg) => return trap(vm, msg),
+                };
 
                 // Continuation handles are generational: any subsequent `resume`/`drop` bumps the
                 // generation counter so stale handles from earlier suspensions are rejected.
@@ -2468,6 +2460,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                 vm.state = VmState::Suspended {
                     k: k.clone(),
                     perform_dst: *dst,
+                    expected_ret: effect.sig.ret.clone(),
                 };
                 return StepResult::Request {
                     effect_id: effect_id_u32,
@@ -2714,11 +2707,8 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                     Err(msg) => return trap(vm, msg),
                 };
 
-                let ret = match v.try_to_abi(&vm.heap, &mut vm.pinned_continuations) {
-                    Ok(Some(ret)) => ret,
-                    Ok(None) => {
-                        return trap(vm, format!("non-ABI-safe return value ({})", v.kind()));
-                    }
+                let ret = match vm.with_host_context(|cx| cx.value_to_abi_infer(&v)) {
+                    Ok(ret) => ret,
                     Err(msg) => return trap(vm, msg),
                 };
                 vm.state = VmState::Done { value: ret.clone() };

@@ -5,8 +5,8 @@ use core::marker::PhantomData;
 /// A host function signature used by the compiler front-end.
 ///
 /// Host signatures are used for:
-/// - validating declared host imports in user code and sysroot modules
-/// - lowering host calls into MIR/bytecode with an ABI-safe boundary
+/// - declaring external effect operations to the compiler
+/// - validating ABI safety for VM/host boundaries
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostFnSig {
     /// Parameter types.
@@ -17,7 +17,8 @@ pub struct HostFnSig {
 
 /// A typed delimited continuation marker (`cont(P) -> R`) for host signatures.
 ///
-/// This is a compile-time-only helper used by [`HostFnSig::of`] and the host module builder APIs.
+/// This is a compile-time-only helper used by [`HostFnSig::of`] and typed external-effect
+/// declarations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cont<P, R>(PhantomData<fn(P) -> R>);
 
@@ -30,8 +31,18 @@ pub enum HostType {
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
+    /// A nominal struct type defined in the program/sysroot.
+    ///
+    /// This is identified by fully-qualified name (e.g. `"foo::Point"`).
+    Struct(String),
+    /// A nominal enum type defined in the program/sysroot.
+    ///
+    /// This is identified by fully-qualified name (e.g. `"core::result::Result"`).
+    Enum(String),
     /// A one-shot delimited continuation value (`cont(P) -> R`).
     ///
     /// This is typechecked at compile time, but lowers to an opaque ABI handle at the VM/host
@@ -74,6 +85,18 @@ impl HostTypeOf for i64 {
 impl HostTypeOf for f64 {
     fn host_type() -> HostType {
         HostType::Float
+    }
+}
+
+impl HostTypeOf for u8 {
+    fn host_type() -> HostType {
+        HostType::Byte
+    }
+}
+
+impl HostTypeOf for char {
+    fn host_type() -> HostType {
+        HostType::Char
     }
 }
 
@@ -151,46 +174,10 @@ where
     }
 }
 
-/// Visibility of a host-declared item (function/module).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostVisibility {
-    /// Not exported; only usable within the declaring module.
-    Private,
-    /// Exported; usable from other modules.
-    Public,
-}
-
-/// A declared host function in a host module.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostFunctionDecl {
-    /// Function visibility.
-    pub visibility: HostVisibility,
-    /// Module-local function name (e.g. `"println"`).
-    pub name: String,
-    /// Function signature.
-    pub sig: HostFnSig,
-}
-
-/// A host module declaration made available to the compiler during compilation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostModuleDecl {
-    /// Module visibility.
-    pub visibility: HostVisibility,
-    /// Functions declared by this module.
-    pub functions: Vec<HostFunctionDecl>,
-}
-
-/// Builder for [`HostModuleDecl`].
-#[derive(Clone, Debug)]
-pub struct HostModuleBuilder {
-    visibility: HostVisibility,
-    functions: Vec<HostFunctionDecl>,
-}
-
 impl HostFnSig {
     /// Constructs a host signature from Rust types.
     ///
-    /// This is intentionally restricted to ABI-safe types (bytecode v0).
+    /// This is intentionally restricted to ABI-safe types.
     pub fn of<Args, Ret>() -> Self
     where
         Args: HostParamTypes,
@@ -203,63 +190,7 @@ impl HostFnSig {
     }
 }
 
-impl HostModuleDecl {
-    /// Starts building a public host module declaration.
-    pub fn public() -> HostModuleBuilder {
-        HostModuleBuilder {
-            visibility: HostVisibility::Public,
-            functions: Vec::new(),
-        }
-    }
-
-    /// Starts building a private host module declaration.
-    pub fn private() -> HostModuleBuilder {
-        HostModuleBuilder {
-            visibility: HostVisibility::Private,
-            functions: Vec::new(),
-        }
-    }
-}
-
-impl HostModuleBuilder {
-    /// Adds a function declaration with visibility defaulting to the module visibility.
-    pub fn function<Args, Ret>(self, name: impl Into<String>) -> Self
-    where
-        Args: HostParamTypes,
-        Ret: HostReturnType,
-    {
-        let visibility = self.visibility;
-        self.function_with_visibility::<Args, Ret>(visibility, name)
-    }
-
-    /// Adds a function declaration with explicit visibility.
-    pub fn function_with_visibility<Args, Ret>(
-        mut self,
-        visibility: HostVisibility,
-        name: impl Into<String>,
-    ) -> Self
-    where
-        Args: HostParamTypes,
-        Ret: HostReturnType,
-    {
-        self.functions.push(HostFunctionDecl {
-            visibility,
-            name: name.into(),
-            sig: HostFnSig::of::<Args, Ret>(),
-        });
-        self
-    }
-
-    /// Completes the builder.
-    pub fn build(self) -> HostModuleDecl {
-        HostModuleDecl {
-            visibility: self.visibility,
-            functions: self.functions,
-        }
-    }
-}
-
-/// A declaration of an externalized effect operation (for bytecode v0).
+/// A declaration of an externalized effect operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalEffectDecl {
     /// Effect interface name (e.g. `"console::IO"`).
@@ -282,8 +213,6 @@ pub struct CompileOptions {
     pub sysroot: Option<PathBuf>,
     /// Whether to load `sysroot/std` (if present).
     pub load_std: bool,
-    /// Declared host modules available for import (name -> declaration).
-    pub host_modules: Vec<(String, HostModuleDecl)>,
     /// Declared external effects available for `perform`/`resume` at runtime.
     pub external_effects: Vec<ExternalEffectDecl>,
 }
@@ -294,45 +223,16 @@ impl Default for CompileOptions {
             opt_level: rusk_bytecode::OptLevel::default(),
             sysroot: None,
             load_std: true,
-            host_modules: Vec::new(),
             external_effects: Vec::new(),
         }
     }
 }
 
 impl CompileOptions {
-    /// Registers a host module declaration under `module_name`.
-    ///
-    /// Host modules are used to back sysroot-provided functionality and/or embedder-provided APIs.
-    pub fn register_host_module(
-        &mut self,
-        module_name: impl Into<String>,
-        module: HostModuleDecl,
-    ) -> Result<(), String> {
-        let module_name = module_name.into();
-        if module_name.is_empty() {
-            return Err("host module name cannot be empty".to_string());
-        }
-        if module_name.contains("::") {
-            return Err(format!(
-                "nested host modules are not supported: `{module_name}` contains `::`"
-            ));
-        }
-        if self
-            .host_modules
-            .iter()
-            .any(|(name, _)| name == &module_name)
-        {
-            return Err(format!("duplicate host module `{module_name}`"));
-        }
-        self.host_modules.push((module_name, module));
-        Ok(())
-    }
-
     /// Registers an external effect operation declaration.
     ///
     /// The compiler uses this to assign stable `EffectId`s and to validate ABI safety for the
-    /// bytecode v0 boundary.
+    /// VM/host boundary.
     pub fn register_external_effect(
         &mut self,
         interface: impl Into<String>,
@@ -410,21 +310,13 @@ mod tests {
     }
 
     #[test]
-    fn host_module_builder_defaults_function_visibility() {
-        let module = HostModuleDecl::public()
-            .function::<(String,), ()>("print")
-            .function::<(String,), ()>("println")
-            .build();
-
-        assert_eq!(module.visibility, HostVisibility::Public);
-        assert_eq!(module.functions.len(), 2);
-        assert_eq!(module.functions[0].visibility, HostVisibility::Public);
-        assert_eq!(module.functions[0].name, "print".to_string());
+    fn host_fn_sig_of_byte_and_char() {
+        let sig = HostFnSig::of::<(u8, char), u8>();
         assert_eq!(
-            module.functions[0].sig,
+            sig,
             HostFnSig {
-                params: vec![HostType::String],
-                ret: HostType::Unit
+                params: vec![HostType::Byte, HostType::Char],
+                ret: HostType::Byte
             }
         );
     }

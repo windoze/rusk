@@ -88,9 +88,10 @@ fn main() {
     }
     let (module, compile_metrics) = match extension {
         Some("rusk") => {
-            let mut options = CompileOptions::default();
-            std_io::register_host_module(&mut options);
-            options.opt_level = opt_level;
+            let options = CompileOptions {
+                opt_level,
+                ..Default::default()
+            };
             match compile_file_to_bytecode_with_options_and_metrics(input_path, &options) {
                 Ok(v) => v,
                 Err(e) => {

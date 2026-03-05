@@ -1,0 +1,12 @@
+// expect: ok int 42
+
+struct Point { x: int, y: int }
+
+mod abi {
+    pub extern fn make_point(x: int, y: int) -> super::Point;
+}
+
+fn main() -> int {
+    let p = abi::make_point(40, 2);
+    p.x + p.y
+}

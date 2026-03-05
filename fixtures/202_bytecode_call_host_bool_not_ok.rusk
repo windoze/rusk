@@ -1,6 +1,9 @@
 // expect: ok bool false
 
+mod test {
+    pub extern fn bool_not(v: bool) -> bool;
+}
+
 fn main() -> bool {
     test::bool_not(true)
 }
-

@@ -1,7 +1,4 @@
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-    compile_to_bytecode_with_options,
-};
+use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,37 +28,12 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
-fn std_host_module() -> HostModuleDecl {
-    HostModuleDecl {
-        visibility: HostVisibility::Public,
-        functions: vec![
-            HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "print".to_string(),
-                sig: HostFnSig {
-                    params: vec![HostType::String],
-                    ret: HostType::Unit,
-                },
-            },
-            HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "println".to_string(),
-                sig: HostFnSig {
-                    params: vec![HostType::String],
-                    ret: HostType::Unit,
-                },
-            },
-        ],
-    }
-}
-
 #[test]
-fn std_sysroot_is_loaded_when_std_host_is_declared() {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module("_std_host", std_host_module())
-        .unwrap();
-
+fn std_sysroot_is_loaded_when_load_std_is_enabled() {
+    let options = CompileOptions {
+        load_std: true,
+        ..Default::default()
+    };
     let module = compile_to_bytecode_with_options(
         r#"
 fn main() {
@@ -74,8 +46,8 @@ fn main() {
     .unwrap();
 
     assert!(
-        module.host_import_id("_std_host::println").is_some(),
-        "expected `_std_host::println` host import to exist"
+        module.host_import_id("std::println").is_some(),
+        "expected `std::println` host import to exist"
     );
 }
 

@@ -1,0 +1,18 @@
+// expect: ok int 81
+
+mod abi {
+    pub extern fn xor_byte(a: byte, b: byte) -> byte;
+    pub extern fn next_char(c: char) -> char;
+}
+
+fn main() -> int {
+    let a: byte = 10;
+    let b: byte = 5;
+    let x = abi::xor_byte(a, b);
+
+    let c: char = 'A';
+    let d = abi::next_char(c);
+
+    core::intrinsics::byte_to_int(x) + core::intrinsics::char_to_int(d)
+}
+

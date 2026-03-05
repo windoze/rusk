@@ -51,6 +51,15 @@ function symbolFromItem(
         "intrinsic",
       );
 
+    case "extern_function_item":
+      return mkSymbolFromNamedItem(
+        document,
+        node,
+        "name",
+        vscode.SymbolKind.Function,
+        "extern",
+      );
+
     case "struct_item": {
       const sym = mkSymbolFromNamedItem(
         document,
@@ -275,4 +284,3 @@ function utf8ByteLengthOfCodePoint(codePoint: number): number {
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
-

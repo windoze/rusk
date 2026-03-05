@@ -1,0 +1,9 @@
+// expect: compile_error type `Box` with type arguments is not ABI-eligible in v1
+
+struct Box<T> { x: T }
+
+mod host {
+    pub extern fn take(b: super::Box<int>) -> unit;
+}
+
+fn main() -> unit { () }

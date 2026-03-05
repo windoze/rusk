@@ -10,11 +10,12 @@ mod metrics;
 mod vm;
 
 pub use abi::{AbiArgs, AbiDecode, AbiDecodeError, AbiParamTypes, AbiTypeOf, AbiValue, Cont};
+pub use abi::{AbiArrayRef, AbiEnumRef, AbiStructRef, AbiTupleRef};
 pub use effects::{EffectDispatchTable, StepWithEffectsError, vm_step_with_effects};
 pub use error::{HostError, VmError};
 pub use host::HostFn;
 pub use metrics::VmMetrics;
 pub use vm::{
-    ContinuationHandle, StepResult, TypeRepId, Vm, vm_drop_continuation,
+    ContinuationHandle, HostContext, StepResult, TypeRepId, Vm, vm_drop_continuation,
     vm_drop_pinned_continuation, vm_resume, vm_resume_pinned_continuation_tail, vm_step,
 };

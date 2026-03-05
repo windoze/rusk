@@ -6,7 +6,7 @@ This document describes the **bytecode VM embedding API** exposed by the `rusk-v
 - how to **embed** and **drive** a VM instance from a host application,
 - how to install **host functions** (imports),
 - how to declare and handle **externalized effects** (effects that “bubble” to the host), and
-- how to set up **compiler-visible prototypes** so compilation/typechecking can succeed.
+- how to declare **host imports** / **externalized effects** so compilation/typechecking can succeed.
 
 The bytecode VM is designed as a small, step-driven runtime suitable for embedding into CLIs,
 editors, servers, or other runtimes.
@@ -17,8 +17,8 @@ editors, servers, or other runtimes.
 
 1. [Loaves and layers](#loaves-and-layers)
 2. [ABI boundary: `AbiType` / `AbiValue`](#abi-boundary-abitype--abivalue)
-3. [Compile-time prototypes (“what exists”)](#compile-time-prototypes-what-exists)
-   - [Host function prototypes](#host-function-prototypes)
+3. [Compile-time declarations (“what exists”)](#compile-time-declarations-what-exists)
+   - [Host imports (`extern fn`)](#host-imports-extern-fn)
    - [External effect declarations](#external-effect-declarations)
 4. [Producing a bytecode module](#producing-a-bytecode-module)
    - [Compile from source](#compile-from-source)
@@ -54,8 +54,8 @@ In this repo, that corresponds to:
 - `rusk-bytecode` (`rusk_bytecode`): the bytecode module data model (`ExecutableModule`), verifier,
   and `.rbc` encode/decode.
 - `rusk-vm` (`rusk_vm`): a small bytecode interpreter with a **step API** and a strict VM/host ABI.
-- `rusk-host` (`rusk_host`): optional helpers for defining host-module prototypes + installing
-  matching runtime implementations (example: `std::print`, `std::println`).
+- `rusk-host` (`rusk_host`): optional helpers for installing runtime host import implementations
+  (example: `std::print`, `std::println`).
 
 This document focuses on embedding `rusk-vm`.
 
@@ -70,17 +70,24 @@ On the host side you deal with:
 - `rusk_vm::AbiValue`: runtime values that can cross the boundary.
 - `rusk_bytecode::AbiType`: the type-level view of those values, stored in bytecode signatures.
 
-### ABI-safe primitives (v0)
+### ABI value set (v1)
 
 The current bytecode VM ABI supports:
 
-- `unit`
-- `bool`
-- `int` (signed 64-bit)
-- `float` (IEEE-754 `f64`)
-- `string` (UTF-8)
-- `bytes` (`Vec<u8>`)
-- `continuation` (opaque continuation handles; see [Pinned Continuations](#pinned-continuations-host-storable-continuation-handles))
+- leaf primitives:
+  - `unit`
+  - `bool`
+  - `int` (signed 64-bit)
+  - `float` (IEEE-754 `f64`)
+  - `byte` (unsigned 8-bit)
+  - `char` (Unicode scalar value)
+  - `string` (UTF-8)
+  - `bytes` (`Vec<u8>`)
+  - `continuation` (opaque continuation handles; see [Pinned Continuations](#pinned-continuations-host-storable-continuation-handles))
+- composite values (as opaque VM references):
+  - `array(T)` / `[T]`
+  - `tuple(T0, T1, ...)` / `(T0, T1, ...)`
+  - Rusk-defined `struct`s and `enum`s
 
 In Rust:
 
@@ -91,80 +98,92 @@ let v: AbiValue = 123_i64.into();
 assert_eq!(v.ty(), rusk_bytecode::AbiType::Int);
 ```
 
+### Composite ABI values: `HostContext`
+
+Composite values cross the VM/host boundary as **opaque VM references**, not deep-copied Rust
+structures. To inspect or construct composite values, host code uses a `HostContext` that borrows
+VM state (heap + module metadata) for the duration of a host call or effect dispatch.
+
 ### What this means for embeddings
 
-- **Host imports** (host functions called via `call`) can only take/return ABI-safe primitives.
-- **Externalized effects** (handled via `StepResult::Request`) can only take/return ABI-safe
-  primitives.
-- If you need richer payloads, the current pattern is to encode them into `bytes` (or `string`).
-
-This is a deliberate constraint for v0: it keeps embeddings simple and makes `.rbc` modules
-portable.
+- **Host imports** and **externalized effects** can take/return any ABI type above, but signatures
+  are strict: mismatches trap.
+- Composite ABI values are **VM-local handles**: they are only meaningful within the `Vm` instance
+  they came from, and must be accessed through `HostContext`.
+- v1 limitations:
+  - nominal ABI types must be monomorphic at the boundary (no generic struct/enum values),
+  - host-defined nominal types are out of scope.
 
 ---
 
-## Compile-time prototypes (“what exists”)
+## Compile-time declarations (“what exists”)
 
 Rusk is designed to be embedded: platform integration is provided by host-defined surfaces.
 
-There are **two distinct “registration” phases**:
+There are **two distinct phases**:
 
-1. **Compiler-visible prototypes** (names + signatures): required so *compilation* can resolve and
-   typecheck calls.
-2. **Runtime implementations**: required so *execution* can succeed.
+1. **Compile-time declarations** (required so compilation can resolve and typecheck calls):
+   - **Host imports** are declared in Rusk source via `extern fn` items.
+   - **Externalized effects** are declared to the compiler via `CompileOptions` (in addition to
+     the `interface` definition in source).
+2. **Runtime implementations** (required so execution can succeed):
+   - Host imports must be installed into the VM.
+   - Externalized effects must be handled when the VM returns `StepResult::Request`.
 
-If you skip (1), compilation fails. If you skip (2), the VM traps at runtime when a missing import
-is called.
+If you skip compile-time declarations, compilation fails. If you skip runtime implementations, the
+VM traps at runtime when a missing import/effect handler is hit.
 
-### Host function prototypes
+### Host imports (`extern fn`)
 
-Host function prototypes are grouped into **host modules** and passed to compilation via
-`rusk_compiler::CompileOptions`.
+Host imports are declared in Rusk source using `extern fn` items inside normal modules.
 
-Example: declare a `std` module with `print` and `println`:
-
-```rust
-use rusk_compiler::{CompileOptions, HostModuleDecl};
-
-let mut options = CompileOptions::default();
-
-options.register_host_module(
-    "std",
-    HostModuleDecl::public()
-        .function::<(String,), ()>("println")
-        .build(),
-)?;
-```
-
-In a Rusk program, those are called like normal functions:
+Example: declare a host import and call it:
 
 ```rusk
+mod host {
+    pub extern fn println(s: string) -> unit;
+}
+
 fn main() -> unit {
-    std::println("hello from rusk");
+    host::println("hello from rusk");
+    ()
 }
 ```
 
-#### ABI safety for bytecode
+Rules (v1):
 
-For programs you intend to run on `rusk-vm`, **host prototypes must be ABI-safe**:
+- `extern fn` must end with `;` and **must** have an explicit return type (`-> unit` is allowed).
+- `extern fn` is **not generic** in v1.
+- Parameter/return types must be **ABI-eligible** for bytecode.
 
-- Allowed: `unit`, `bool`, `int`, `float`, `string`, `bytes`
-- Not currently ABI-safe for bytecode v0: `any`, `typerep`, arrays, tuples, and other composites
+#### ABI eligibility for bytecode
 
-If a program calls a host import that isn’t ABI-safe, `compile_*_to_bytecode_with_options(...)`
-fails with a message like:
+For programs you intend to run on `rusk-vm`, host import signatures must use ABI-eligible types:
+
+- leaf primitives: `unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`
+- `continuation` (`cont(P) -> R`) values (as opaque handles)
+- composites:
+  - arrays (`[T]`)
+  - tuples (`(T0, T1, ...)`)
+  - monomorphic (non-generic) structs/enums defined in the module/sysroot
+
+If a program declares a host import with a non-ABI-eligible type, compilation fails while
+producing bytecode with an error like:
 
 > `host import '<name>' is not ABI-safe for bytecode v0`
 
-#### Recommended: use `rusk-host` to keep prototypes and implementations aligned
+#### Recommended: declare imports in sysroot, install via `rusk-host`
 
-This repository provides `rusk-host` helpers to avoid drift between “what the compiler thinks
-exists” and “what the runtime actually provides”.
+This repository uses sysroot modules (e.g. `std`) to provide the `extern fn` declarations, and
+`rusk-host` to provide runtime installers.
 
-For example, `rusk_host::std_io` contains:
+For example, install standard I/O host imports at runtime:
 
-- `std_io::register_host_module(&mut CompileOptions)` (compiler prototypes)
-- `std_io::install_vm(&ExecutableModule, &mut Vm)` (runtime implementations for `rusk-vm`)
+```rust
+use rusk_host::std_io;
+
+std_io::install_vm(&module, &mut vm);
+```
 
 ---
 
@@ -204,8 +223,8 @@ options.register_external_effect_typed::<(i64, i64), i64>("TestFfi", "add")?;
 
 Important notes:
 
-- For bytecode v0, external effect signatures must also be ABI-safe (same primitive set as host
-  imports). The compiler will reject non-ABI-safe signatures when compiling to bytecode.
+- External effect signatures must also be ABI-safe (same ABI type set as host imports). The
+  compiler will reject non-ABI-safe signatures when compiling to bytecode.
 - The compiler currently does **not** typecheck that your registered external-effect signature
   matches the interface method signature in the program. Keep them aligned (ideally define them in
   one place in your embedding codebase).
@@ -220,11 +239,9 @@ The simplest embedding approach is “compile then run”:
 
 ```rust
 use rusk_compiler::{CompileOptions, compile_file_to_bytecode_with_options};
-use rusk_host::std_io;
 use std::path::Path;
 
-let mut options = CompileOptions::default();
-std_io::register_host_module(&mut options);
+let options = CompileOptions::default();
 
 let module = compile_file_to_bytecode_with_options(Path::new("path/to/program.rusk"), &options)?;
 ```
@@ -297,6 +314,10 @@ Host imports are declared inside the bytecode module, and identified by a stable
 
 At runtime, you must provide implementations via `Vm::register_host_import` (low-level) or
 `Vm::register_host_import_typed` (recommended).
+
+`register_host_import_typed` is most convenient for ABI primitives and continuations. For composite
+ABI values (`array`/`tuple`/`struct`/`enum`), use the low-level `register_host_import` API: host
+functions receive a `&mut HostContext` for safe inspection and construction.
 
 #### Install by name
 
@@ -410,7 +431,9 @@ loop {
         StepResult::Trap { message } => panic!("vm trapped: {message}"),
         StepResult::Yield { .. } => continue,
         StepResult::Request { effect_id, args, k } => {
-            let resume_value = effects.dispatch(effect_id, &args)?;
+            let resume_value = vm
+                .with_host_context(|cx| effects.dispatch(cx, effect_id, &args))
+                .expect("dispatch");
             vm_resume(&mut vm, k, resume_value).expect("resume");
         }
     }
@@ -443,7 +466,9 @@ Current external-effect behavior has intentional v0 limits:
 - **Non-generic effects only.** The VM currently only externalizes effects where the performed
   interface has **no runtime type arguments** (i.e. no `interface Foo<T> { ... }` externalization
   yet).
-- **ABI-safe args/return only.** Use `bytes` or `string` to encode complex values.
+- **ABI-safe args/return only.** Externalized effects are restricted to the VM/host ABI type set
+  (same as host imports). Composite values cross as opaque VM references; use `bytes`/`string` if
+  you need to transfer host-defined structured data.
 - **One outstanding request per VM.** While suspended, the VM cannot make progress until the host
   resumes or cancels it.
 
@@ -474,26 +499,24 @@ event loops, async runtimes, or other host-side scheduling mechanisms.
 
 ### Host functions with continuation signatures
 
-To declare host functions that accept or return continuations, use the `rusk_compiler::Cont<P, R>`
-type marker (corresponding to `cont(P) -> R`) in the typed signature builder:
+To declare host functions that accept or return continuations, declare them as host imports in
+Rusk source using the `cont(P) -> R` type:
 
-```rust
-use rusk_compiler::{CompileOptions, Cont, HostModuleDecl};
-
-let mut options = CompileOptions::default();
-
-options.register_host_module(
-    "host",
-    HostModuleDecl::public()
-        .function::<(Cont<i64, i64>,), ()>("store_cont")
-        .function::<(), Cont<i64, i64>>("take_cont")
-        .build(),
-)?;
+```rusk
+mod host {
+    pub extern fn store_cont(k: cont(int) -> int) -> unit;
+    pub extern fn take_cont() -> cont(int) -> int;
+}
 ```
 
 In Rusk code, these host functions can be called naturally:
 
 ```rusk
+mod host {
+    pub extern fn store_cont(k: cont(int) -> int) -> unit;
+    pub extern fn take_cont() -> cont(int) -> int;
+}
+
 interface E { fn boom() -> int; }
 
 fn main() -> int {
@@ -650,17 +673,20 @@ evolve (this is a v0 runtime).
 
 - **Unknown host function**
   - Symptom: compilation fails during name resolution/typechecking.
-  - Fix: register the function’s prototype in `CompileOptions` via `register_host_module(...)`.
+  - Fix: ensure the function is declared as an `extern fn` that is visible to the program (either
+    in the program itself, or in loaded sysroot modules like `std`). For `std::*`, ensure
+    `CompileOptions.load_std = true`.
 
 - **“host import … is not ABI-safe for bytecode v0”**
   - Symptom: compilation fails while producing bytecode.
-  - Fix: restrict host function signatures to ABI-safe primitives for code meant to run on
-    `rusk-vm`, or extend the VM/ABI to support the types you need.
+  - Fix: restrict host import signatures to ABI-eligible types for code meant to run on `rusk-vm`
+    (primitives + continuations + composites), or encode the value into `bytes`/`string`.
 
 - **“external effect … has non-ABI-safe signature for bytecode v0”**
   - Symptom: `register_external_effect(...)` / `register_external_effect_typed(...)` works but
     compiling to bytecode fails.
-  - Fix: restrict external effect signatures to ABI-safe primitives.
+  - Fix: restrict external effect signatures to ABI-eligible types, or encode the value into
+    `bytes`/`string`.
 
 ### Runtime traps
 

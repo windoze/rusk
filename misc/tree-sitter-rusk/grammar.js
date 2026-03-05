@@ -49,6 +49,7 @@ module.exports = grammar({
     _item: ($) =>
       choice(
         $.function_item,
+        $.extern_function_item,
         $.intrinsic_function_item,
         $.struct_item,
         $.enum_item,
@@ -81,6 +82,17 @@ module.exports = grammar({
         field("type_parameters", optional($.generic_parameters)),
         field("parameters", $.parameters),
         field("return_type", optional($.return_type)),
+        ";",
+      ),
+
+    extern_function_item: ($) =>
+      seq(
+        optional(field("visibility", $.visibility)),
+        "extern",
+        "fn",
+        field("name", $._identifier),
+        field("parameters", $.extern_parameters),
+        field("return_type", $.return_type),
         ";",
       ),
 
@@ -944,6 +956,13 @@ module.exports = grammar({
         ":",
         field("type", $._type),
       ),
+
+    extern_parameters: ($) => seq("(", optional($.extern_parameter_list), ")"),
+
+    extern_parameter_list: ($) => commaSep1(field("parameter", $.extern_parameter)),
+
+    extern_parameter: ($) =>
+      seq(field("name", $._identifier), ":", field("type", $._type)),
 
     path_type_no_assoc_bindings: ($) =>
       seq($.path_type_segment, repeat(seq("::", $.path_type_segment))),

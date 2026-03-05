@@ -547,7 +547,6 @@ pub fn compile_to_bytecode(source: &str) -> Result<rusk_bytecode::ExecutableModu
 }
 
 const SYSROOT_ENV: &str = "RUSK_SYSROOT";
-const STD_HOST_MODULE: &str = "_std_host";
 
 fn resolve_sysroot_dir(options: &CompileOptions) -> Result<PathBuf, CompileError> {
     if let Some(path) = &options.sysroot {
@@ -603,12 +602,7 @@ pub(crate) fn load_sysroot_items(
     let mut out = Vec::new();
     out.push(synthesize_sysroot_module("core", core_program.items));
 
-    let want_std = options.load_std
-        && options
-            .host_modules
-            .iter()
-            .any(|(name, _decl)| name == STD_HOST_MODULE);
-    if want_std {
+    if options.load_std {
         let std_entry = sysroot.join("std").join("mod.rusk");
         if std_entry.is_file() {
             let std_program = loader
@@ -643,7 +637,7 @@ pub(crate) fn reject_reserved_module_names(items: &[Item]) -> Result<(), Compile
     visit_items(items)
 }
 
-/// Compiles a single Rusk source file into MIR with host-module declarations.
+/// Compiles a single Rusk source file into MIR, including sysroot items.
 pub fn compile_to_mir_with_options(
     source: &str,
     options: &CompileOptions,
@@ -677,18 +671,18 @@ pub fn compile_to_bytecode_with_options(
     crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
-        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
-            return Err(CompileError::new(
+        let sig = mir_host_sig_from_frontend_host_sig(&decl.sig).map_err(|message| {
+            CompileError::new(
                 format!(
-                    "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
+                    "external effect `{}`.`{}` has non-ABI-safe signature: {message}",
                     decl.interface, decl.method
                 ),
                 Span::new(0, 0),
-            ));
-        };
+            )
+        })?;
         lower_options
             .external_effects
-            .push(rusk_bytecode::ExternalEffectDecl {
+            .push(crate::bytecode_lower::MirExternalEffectDecl {
                 interface: decl.interface.clone(),
                 method: decl.method.clone(),
                 sig,
@@ -719,18 +713,18 @@ pub fn compile_to_bytecode_with_options_and_metrics(
 
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
-        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
-            return Err(CompileError::new(
+        let sig = mir_host_sig_from_frontend_host_sig(&decl.sig).map_err(|message| {
+            CompileError::new(
                 format!(
-                    "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
+                    "external effect `{}`.`{}` has non-ABI-safe signature: {message}",
                     decl.interface, decl.method
                 ),
                 Span::new(0, 0),
-            ));
-        };
+            )
+        })?;
         lower_options
             .external_effects
-            .push(rusk_bytecode::ExternalEffectDecl {
+            .push(crate::bytecode_lower::MirExternalEffectDecl {
                 interface: decl.interface.clone(),
                 method: decl.method.clone(),
                 sig,
@@ -753,29 +747,62 @@ pub fn compile_to_bytecode_with_options_and_metrics(
     Ok((module, metrics))
 }
 
-fn abi_type_from_host_type(ty: &crate::host::HostType) -> Option<rusk_bytecode::AbiType> {
+fn mir_host_type_from_frontend_host_type(
+    ty: &crate::host::HostType,
+) -> Result<rusk_mir::HostType, String> {
     use crate::host::HostType as H;
-    use rusk_bytecode::AbiType as A;
+    use rusk_mir::HostType as M;
 
-    match ty {
-        H::Unit => Some(A::Unit),
-        H::Bool => Some(A::Bool),
-        H::Int => Some(A::Int),
-        H::Float => Some(A::Float),
-        H::String => Some(A::String),
-        H::Bytes => Some(A::Bytes),
-        H::Cont { .. } => Some(A::Continuation),
-        H::Any | H::TypeRep | H::Array(_) | H::Tuple(_) => None,
-    }
+    Ok(match ty {
+        H::Unit => M::Unit,
+        H::Bool => M::Bool,
+        H::Int => M::Int,
+        H::Float => M::Float,
+        H::Byte => M::Byte,
+        H::Char => M::Char,
+        H::String => M::String,
+        H::Bytes => M::Bytes,
+        H::Struct(name) => {
+            if name.is_empty() {
+                return Err("struct type name cannot be empty".to_string());
+            }
+            M::Struct(name.clone())
+        }
+        H::Enum(name) => {
+            if name.is_empty() {
+                return Err("enum type name cannot be empty".to_string());
+            }
+            M::Enum(name.clone())
+        }
+        H::Cont { param, ret } => M::Cont {
+            param: Box::new(mir_host_type_from_frontend_host_type(param)?),
+            ret: Box::new(mir_host_type_from_frontend_host_type(ret)?),
+        },
+        H::Array(elem) => M::Array(Box::new(mir_host_type_from_frontend_host_type(elem)?)),
+        H::Tuple(items) => M::Tuple(
+            items
+                .iter()
+                .map(mir_host_type_from_frontend_host_type)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        H::Any | H::TypeRep => {
+            return Err(format!(
+                "type {ty:?} is not ABI-safe across the VM/host boundary"
+            ));
+        }
+    })
 }
 
-fn abi_sig_from_host_sig(sig: &crate::host::HostFnSig) -> Option<rusk_bytecode::HostFnSig> {
-    let mut params = Vec::with_capacity(sig.params.len());
-    for ty in &sig.params {
-        params.push(abi_type_from_host_type(ty)?);
-    }
-    let ret = abi_type_from_host_type(&sig.ret)?;
-    Some(rusk_bytecode::HostFnSig { params, ret })
+fn mir_host_sig_from_frontend_host_sig(
+    sig: &crate::host::HostFnSig,
+) -> Result<rusk_mir::HostFnSig, String> {
+    let params = sig
+        .params
+        .iter()
+        .map(mir_host_type_from_frontend_host_type)
+        .collect::<Result<Vec<_>, _>>()?;
+    let ret = mir_host_type_from_frontend_host_type(&sig.ret)?;
+    Ok(rusk_mir::HostFnSig { params, ret })
 }
 
 /// Compiles a single Rusk source string into MIR, returning pipeline timing metrics.
@@ -880,18 +907,18 @@ pub fn compile_file_to_bytecode_with_options(
     crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
-        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
-            return Err(CompileError::new(
+        let sig = mir_host_sig_from_frontend_host_sig(&decl.sig).map_err(|message| {
+            CompileError::new(
                 format!(
-                    "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
+                    "external effect `{}`.`{}` has non-ABI-safe signature: {message}",
                     decl.interface, decl.method
                 ),
                 Span::new(0, 0),
-            ));
-        };
+            )
+        })?;
         lower_options
             .external_effects
-            .push(rusk_bytecode::ExternalEffectDecl {
+            .push(crate::bytecode_lower::MirExternalEffectDecl {
                 interface: decl.interface.clone(),
                 method: decl.method.clone(),
                 sig,
@@ -922,18 +949,18 @@ pub fn compile_file_to_bytecode_with_options_and_metrics(
 
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
-        let Some(sig) = abi_sig_from_host_sig(&decl.sig) else {
-            return Err(CompileError::new(
+        let sig = mir_host_sig_from_frontend_host_sig(&decl.sig).map_err(|message| {
+            CompileError::new(
                 format!(
-                    "external effect `{}`.`{}` has non-ABI-safe signature for bytecode v0",
+                    "external effect `{}`.`{}` has non-ABI-safe signature: {message}",
                     decl.interface, decl.method
                 ),
                 Span::new(0, 0),
-            ));
-        };
+            )
+        })?;
         lower_options
             .external_effects
-            .push(rusk_bytecode::ExternalEffectDecl {
+            .push(crate::bytecode_lower::MirExternalEffectDecl {
                 interface: decl.interface.clone(),
                 method: decl.method.clone(),
                 sig,

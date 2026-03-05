@@ -205,8 +205,7 @@ fn std_json_fixtures() {
         );
     }
 
-    let mut options = CompileOptions::default();
-    std_io::register_host_module(&mut options);
+    let options = CompileOptions::default();
 
     for case in cases {
         let (entry_path, source, module) = match &case.kind {

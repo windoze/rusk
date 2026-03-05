@@ -10,49 +10,56 @@ pub fn vm_resume(vm: &mut Vm, k: ContinuationHandle, value: AbiValue) -> Result<
             message: "vm re-entered during host call".to_string(),
         });
     }
-    match &vm.state {
+    let (dst, expected_ret) = match &vm.state {
         VmState::Suspended {
             k: want,
             perform_dst,
+            expected_ret,
         } => {
             if want != &k {
                 return Err(VmError::InvalidContinuation {
                     message: "continuation handle mismatch".to_string(),
                 });
             }
-
-            let dst = *perform_dst;
-            vm.state = VmState::Running;
-            vm.continuation_generation = vm.continuation_generation.wrapping_add(1);
-
-            if let Some(dst) = dst {
-                let Some(frame) = vm.frames.last_mut() else {
-                    return Err(VmError::InvalidState {
-                        message: "resume with empty stack".to_string(),
-                    });
-                };
-                let v = Value::from_abi(
-                    &mut vm.heap,
-                    &mut vm.gc_allocations_since_collect,
-                    &vm.pinned_continuations,
-                    &value,
-                )
-                .map_err(|message| VmError::InvalidState {
-                    message: format!("resume value conversion failed: {message}"),
-                })?;
-                write_value(frame, dst, v).map_err(|message| VmError::InvalidState {
-                    message: format!("resume dst write failed: {message}"),
-                })?;
-            }
-
-            Ok(())
+            (*perform_dst, expected_ret.clone())
         }
         VmState::Running | VmState::Done { .. } | VmState::Trapped { .. } => {
-            Err(VmError::InvalidState {
+            return Err(VmError::InvalidState {
                 message: "vm is not suspended".to_string(),
-            })
+            });
         }
+    };
+
+    let got_ret = value.ty();
+    if got_ret != expected_ret {
+        return Err(VmError::InvalidState {
+            message: format!(
+                "resume value type mismatch: expected {:?}, got {:?}",
+                expected_ret, got_ret
+            ),
+        });
     }
+
+    if let Some(dst) = dst {
+        let v = vm
+            .with_host_context(|cx| cx.value_from_abi(&value))
+            .map_err(|message| VmError::InvalidState {
+                message: format!("resume value conversion failed: {message}"),
+            })?;
+
+        let Some(frame) = vm.frames.last_mut() else {
+            return Err(VmError::InvalidState {
+                message: "resume with empty stack".to_string(),
+            });
+        };
+        write_value(frame, dst, v).map_err(|message| VmError::InvalidState {
+            message: format!("resume dst write failed: {message}"),
+        })?;
+    }
+
+    vm.state = VmState::Running;
+    vm.continuation_generation = vm.continuation_generation.wrapping_add(1);
+    Ok(())
 }
 
 /// Cancels a suspended VM by dropping the continuation handle.
@@ -145,15 +152,11 @@ pub fn vm_resume_pinned_continuation_tail(
 
     // Convert the resume argument before consuming the one-shot continuation state so we don't
     // invalidate `k` on conversion failure.
-    let v = Value::from_abi(
-        &mut vm.heap,
-        &mut vm.gc_allocations_since_collect,
-        &vm.pinned_continuations,
-        &value,
-    )
-    .map_err(|message| VmError::InvalidState {
-        message: format!("resume value conversion failed: {message}"),
-    })?;
+    let v = vm
+        .with_host_context(|cx| cx.value_from_abi(&value))
+        .map_err(|message| VmError::InvalidState {
+            message: format!("resume value conversion failed: {message}"),
+        })?;
 
     let Some(mut cont) = token.take_state() else {
         return Err(VmError::InvalidContinuation {

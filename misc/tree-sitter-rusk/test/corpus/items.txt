@@ -8,6 +8,8 @@ use core::ops::Add;
 
 pub intrinsic fn panic(msg: string) -> !;
 
+pub extern fn println(s: string) -> unit;
+
 pub struct Point<T> { x: T, y: T }
 struct UserId(int);
 
@@ -53,6 +55,18 @@ derive Serialize + Deserialize for Point;
         parameter: (parameter
           pattern: (binding_pattern
             name: (identifier))
+          type: (type_atom
+            (primitive_type)))))
+    return_type: (return_type
+      type: (type_atom
+        (primitive_type))))
+  (extern_function_item
+    visibility: (visibility)
+    name: (identifier)
+    parameters: (extern_parameters
+      (extern_parameter_list
+        parameter: (extern_parameter
+          name: (identifier)
           type: (type_atom
             (primitive_type)))))
     return_type: (return_type

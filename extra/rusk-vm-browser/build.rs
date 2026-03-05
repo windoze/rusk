@@ -1,4 +1,4 @@
-use rusk_compiler::{CompileOptions, HostFnSig, HostModuleDecl, HostType, HostVisibility};
+use rusk_compiler::{CompileOptions, HostFnSig, HostType};
 use std::path::PathBuf;
 
 fn main() {
@@ -20,55 +20,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../fixtures/256_typerep_never_typearg_runtime_error.rusk");
 
     let mut options = CompileOptions::default();
-
-    options
-        .register_host_module(
-            "test",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![
-                    rusk_compiler::HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "add_int".to_string(),
-                        sig: HostFnSig {
-                            params: vec![HostType::Int, HostType::Int],
-                            ret: HostType::Int,
-                        },
-                    },
-                    rusk_compiler::HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "bytes_eq".to_string(),
-                        sig: HostFnSig {
-                            params: vec![HostType::Bytes, HostType::Bytes],
-                            ret: HostType::Bool,
-                        },
-                    },
-                    rusk_compiler::HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "store_cont".to_string(),
-                        sig: HostFnSig {
-                            params: vec![HostType::Cont {
-                                param: Box::new(HostType::Int),
-                                ret: Box::new(HostType::Int),
-                            }],
-                            ret: HostType::Unit,
-                        },
-                    },
-                    rusk_compiler::HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "take_cont".to_string(),
-                        sig: HostFnSig {
-                            params: Vec::new(),
-                            ret: HostType::Cont {
-                                param: Box::new(HostType::Int),
-                                ret: Box::new(HostType::Int),
-                            },
-                        },
-                    },
-                ],
-            },
-        )
-        .expect("register test host module");
 
     options
         .register_external_effect(

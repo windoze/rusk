@@ -1,7 +1,4 @@
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-    compile_to_bytecode_with_options,
-};
+use rusk_compiler::{CompileOptions, HostFnSig, HostType, compile_to_bytecode_with_options};
 use rusk_vm::{
     AbiValue, ContinuationHandle, HostError, StepResult, Vm, vm_drop_pinned_continuation,
     vm_resume, vm_resume_pinned_continuation_tail, vm_step,
@@ -9,14 +6,8 @@ use rusk_vm::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn compile_with_host_continuations(
-    src: &str,
-    host_module: HostModuleDecl,
-) -> rusk_bytecode::ExecutableModule {
+fn compile_with_host_continuations(src: &str) -> rusk_bytecode::ExecutableModule {
     let mut options = CompileOptions::default();
-    options
-        .register_host_module("host", host_module)
-        .expect("register host module");
 
     options
         .register_external_effect(
@@ -34,12 +25,12 @@ fn compile_with_host_continuations(
 
 #[test]
 fn host_can_store_multiple_pinned_continuations_and_resume_after_gc() {
-    let cont_string_to_string = HostType::Cont {
-        param: Box::new(HostType::String),
-        ret: Box::new(HostType::String),
-    };
-
     let src = r#"
+        mod host {
+            pub extern fn store_cont(k: cont(string) -> string) -> unit;
+            pub extern fn pop_cont() -> cont(string) -> string;
+        }
+
         interface E { fn boom() -> string; }
         interface TestFfi { fn yield() -> unit; }
 
@@ -67,59 +58,28 @@ fn host_can_store_multiple_pinned_continuations_and_resume_after_gc() {
         }
     "#;
 
-    let module = compile_with_host_continuations(
-        src,
-        HostModuleDecl {
-            visibility: HostVisibility::Public,
-            functions: vec![
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "store_cont".to_string(),
-                    sig: HostFnSig {
-                        params: vec![cont_string_to_string.clone()],
-                        ret: HostType::Unit,
-                    },
-                },
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "pop_cont".to_string(),
-                    sig: HostFnSig {
-                        params: Vec::new(),
-                        ret: cont_string_to_string,
-                    },
-                },
-            ],
-        },
-    );
+    let module = compile_with_host_continuations(src);
 
     let stored: Rc<RefCell<Vec<ContinuationHandle>>> = Rc::new(RefCell::new(Vec::new()));
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
     let store_id = module.host_import_id("host::store_cont").expect("store id");
     let stored_for_store = Rc::clone(&stored);
-    vm.register_host_import(store_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Continuation(k)] => {
-            stored_for_store.borrow_mut().push(k.clone());
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError {
-            message: format!("host::store_cont: bad args: {other:?}"),
-        }),
-    })
+    vm.register_host_import_typed(
+        store_id,
+        move |(k,): (ContinuationHandle,)| -> Result<(), HostError> {
+            stored_for_store.borrow_mut().push(k);
+            Ok(())
+        },
+    )
     .expect("register store");
 
     let pop_id = module.host_import_id("host::pop_cont").expect("pop id");
     let stored_for_pop = Rc::clone(&stored);
-    vm.register_host_import(pop_id, move |args: &[AbiValue]| match args {
-        [] => {
-            let k = stored_for_pop.borrow_mut().pop().ok_or_else(|| HostError {
-                message: "host::pop_cont: empty".to_string(),
-            })?;
-            Ok(AbiValue::Continuation(k))
-        }
-        other => Err(HostError {
-            message: format!("host::pop_cont: bad args: {other:?}"),
-        }),
+    vm.register_host_import_typed(pop_id, move |()| -> Result<ContinuationHandle, HostError> {
+        stored_for_pop.borrow_mut().pop().ok_or_else(|| HostError {
+            message: "host::pop_cont: empty".to_string(),
+        })
     })
     .expect("register pop");
 
@@ -163,12 +123,12 @@ fn host_can_store_multiple_pinned_continuations_and_resume_after_gc() {
 
 #[test]
 fn dropping_a_pinned_continuation_invalidates_the_handle() {
-    let cont_string_to_string = HostType::Cont {
-        param: Box::new(HostType::String),
-        ret: Box::new(HostType::String),
-    };
-
     let src = r#"
+        mod host {
+            pub extern fn store_cont(k: cont(string) -> string) -> unit;
+            pub extern fn pop_cont() -> cont(string) -> string;
+        }
+
         interface E { fn boom() -> string; }
         interface TestFfi { fn yield() -> unit; }
 
@@ -190,59 +150,28 @@ fn dropping_a_pinned_continuation_invalidates_the_handle() {
         }
     "#;
 
-    let module = compile_with_host_continuations(
-        src,
-        HostModuleDecl {
-            visibility: HostVisibility::Public,
-            functions: vec![
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "store_cont".to_string(),
-                    sig: HostFnSig {
-                        params: vec![cont_string_to_string.clone()],
-                        ret: HostType::Unit,
-                    },
-                },
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "pop_cont".to_string(),
-                    sig: HostFnSig {
-                        params: Vec::new(),
-                        ret: cont_string_to_string,
-                    },
-                },
-            ],
-        },
-    );
+    let module = compile_with_host_continuations(src);
 
     let stored: Rc<RefCell<Vec<ContinuationHandle>>> = Rc::new(RefCell::new(Vec::new()));
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
     let store_id = module.host_import_id("host::store_cont").expect("store id");
     let stored_for_store = Rc::clone(&stored);
-    vm.register_host_import(store_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Continuation(k)] => {
-            stored_for_store.borrow_mut().push(k.clone());
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError {
-            message: format!("host::store_cont: bad args: {other:?}"),
-        }),
-    })
+    vm.register_host_import_typed(
+        store_id,
+        move |(k,): (ContinuationHandle,)| -> Result<(), HostError> {
+            stored_for_store.borrow_mut().push(k);
+            Ok(())
+        },
+    )
     .expect("register store");
 
     let pop_id = module.host_import_id("host::pop_cont").expect("pop id");
     let stored_for_pop = Rc::clone(&stored);
-    vm.register_host_import(pop_id, move |args: &[AbiValue]| match args {
-        [] => {
-            let k = stored_for_pop.borrow_mut().pop().ok_or_else(|| HostError {
-                message: "host::pop_cont: empty".to_string(),
-            })?;
-            Ok(AbiValue::Continuation(k))
-        }
-        other => Err(HostError {
-            message: format!("host::pop_cont: bad args: {other:?}"),
-        }),
+    vm.register_host_import_typed(pop_id, move |()| -> Result<ContinuationHandle, HostError> {
+        stored_for_pop.borrow_mut().pop().ok_or_else(|| HostError {
+            message: "host::pop_cont: empty".to_string(),
+        })
     })
     .expect("register pop");
 
@@ -268,12 +197,12 @@ fn dropping_a_pinned_continuation_invalidates_the_handle() {
 
 #[test]
 fn reusing_a_consumed_pinned_continuation_handle_traps() {
-    let cont_int_to_int = HostType::Cont {
-        param: Box::new(HostType::Int),
-        ret: Box::new(HostType::Int),
-    };
-
     let src = r#"
+        mod host {
+            pub extern fn store(k: cont(int) -> int) -> unit;
+            pub extern fn peek() -> cont(int) -> int;
+        }
+
         interface E { fn boom() -> int; }
         interface TestFfi { fn yield() -> unit; }
 
@@ -293,60 +222,32 @@ fn reusing_a_consumed_pinned_continuation_handle_traps() {
         }
     "#;
 
-    let module = compile_with_host_continuations(
-        src,
-        HostModuleDecl {
-            visibility: HostVisibility::Public,
-            functions: vec![
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "store".to_string(),
-                    sig: HostFnSig {
-                        params: vec![cont_int_to_int.clone()],
-                        ret: HostType::Unit,
-                    },
-                },
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "peek".to_string(),
-                    sig: HostFnSig {
-                        params: Vec::new(),
-                        ret: cont_int_to_int,
-                    },
-                },
-            ],
-        },
-    );
+    let module = compile_with_host_continuations(src);
 
     let stored: Rc<RefCell<Option<ContinuationHandle>>> = Rc::new(RefCell::new(None));
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
     let store_id = module.host_import_id("host::store").expect("store id");
     let stored_for_store = Rc::clone(&stored);
-    vm.register_host_import(store_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Continuation(k)] => {
-            *stored_for_store.borrow_mut() = Some(k.clone());
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError {
-            message: format!("host::store: bad args: {other:?}"),
-        }),
-    })
+    vm.register_host_import_typed(
+        store_id,
+        move |(k,): (ContinuationHandle,)| -> Result<(), HostError> {
+            *stored_for_store.borrow_mut() = Some(k);
+            Ok(())
+        },
+    )
     .expect("register store");
 
     let peek_id = module.host_import_id("host::peek").expect("peek id");
     let stored_for_peek = Rc::clone(&stored);
-    vm.register_host_import(peek_id, move |args: &[AbiValue]| match args {
-        [] => {
-            let k = stored_for_peek.borrow().clone().ok_or_else(|| HostError {
+    vm.register_host_import_typed(
+        peek_id,
+        move |()| -> Result<ContinuationHandle, HostError> {
+            stored_for_peek.borrow().clone().ok_or_else(|| HostError {
                 message: "host::peek: empty".to_string(),
-            })?;
-            Ok(AbiValue::Continuation(k))
-        }
-        other => Err(HostError {
-            message: format!("host::peek: bad args: {other:?}"),
-        }),
-    })
+            })
+        },
+    )
     .expect("register peek");
 
     let got = vm_step(&mut vm, None);
@@ -367,12 +268,11 @@ fn reusing_a_consumed_pinned_continuation_handle_traps() {
 
 #[test]
 fn host_can_tail_resume_a_pinned_continuation_directly() {
-    let cont_int_to_int = HostType::Cont {
-        param: Box::new(HostType::Int),
-        ret: Box::new(HostType::Int),
-    };
-
     let src = r#"
+        mod host {
+            pub extern fn store(k: cont(int) -> int) -> unit;
+        }
+
         interface E { fn boom() -> int; }
 
         fn main() -> int {
@@ -383,35 +283,20 @@ fn host_can_tail_resume_a_pinned_continuation_directly() {
         }
     "#;
 
-    let module = compile_with_host_continuations(
-        src,
-        HostModuleDecl {
-            visibility: HostVisibility::Public,
-            functions: vec![HostFunctionDecl {
-                visibility: HostVisibility::Public,
-                name: "store".to_string(),
-                sig: HostFnSig {
-                    params: vec![cont_int_to_int],
-                    ret: HostType::Unit,
-                },
-            }],
-        },
-    );
+    let module = compile_with_host_continuations(src);
 
     let stored: Rc<RefCell<Option<ContinuationHandle>>> = Rc::new(RefCell::new(None));
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
     let store_id = module.host_import_id("host::store").expect("store id");
     let stored_for_store = Rc::clone(&stored);
-    vm.register_host_import(store_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Continuation(k)] => {
-            *stored_for_store.borrow_mut() = Some(k.clone());
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError {
-            message: format!("host::store: bad args: {other:?}"),
-        }),
-    })
+    vm.register_host_import_typed(
+        store_id,
+        move |(k,): (ContinuationHandle,)| -> Result<(), HostError> {
+            *stored_for_store.borrow_mut() = Some(k);
+            Ok(())
+        },
+    )
     .expect("register store");
 
     // Run to completion without resuming in-language; the continuation is stored on the host.
@@ -447,12 +332,13 @@ fn host_can_tail_resume_a_pinned_continuation_directly() {
 
 #[test]
 fn host_tail_resume_splices_onto_the_running_stack_and_discards_return_value() {
-    let cont_int_to_int = HostType::Cont {
-        param: Box::new(HostType::Int),
-        ret: Box::new(HostType::Int),
-    };
-
     let src = r#"
+        mod host {
+            pub extern fn store(k: cont(int) -> int) -> unit;
+            pub extern fn set(x: int) -> unit;
+            pub extern fn get() -> int;
+        }
+
         interface E { fn boom() -> int; }
 
         fn capture() -> unit {
@@ -476,38 +362,7 @@ fn host_tail_resume_splices_onto_the_running_stack_and_discards_return_value() {
         }
     "#;
 
-    let module = compile_with_host_continuations(
-        src,
-        HostModuleDecl {
-            visibility: HostVisibility::Public,
-            functions: vec![
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "store".to_string(),
-                    sig: HostFnSig {
-                        params: vec![cont_int_to_int],
-                        ret: HostType::Unit,
-                    },
-                },
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "set".to_string(),
-                    sig: HostFnSig {
-                        params: vec![HostType::Int],
-                        ret: HostType::Unit,
-                    },
-                },
-                HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "get".to_string(),
-                    sig: HostFnSig {
-                        params: Vec::new(),
-                        ret: HostType::Int,
-                    },
-                },
-            ],
-        },
-    );
+    let module = compile_with_host_continuations(src);
 
     let stored: Rc<RefCell<Option<ContinuationHandle>>> = Rc::new(RefCell::new(None));
     let last_set: Rc<RefCell<i64>> = Rc::new(RefCell::new(0));
@@ -516,37 +371,27 @@ fn host_tail_resume_splices_onto_the_running_stack_and_discards_return_value() {
 
     let store_id = module.host_import_id("host::store").expect("store id");
     let stored_for_store = Rc::clone(&stored);
-    vm.register_host_import(store_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Continuation(k)] => {
-            *stored_for_store.borrow_mut() = Some(k.clone());
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError {
-            message: format!("host::store: bad args: {other:?}"),
-        }),
-    })
+    vm.register_host_import_typed(
+        store_id,
+        move |(k,): (ContinuationHandle,)| -> Result<(), HostError> {
+            *stored_for_store.borrow_mut() = Some(k);
+            Ok(())
+        },
+    )
     .expect("register store");
 
     let set_id = module.host_import_id("host::set").expect("set id");
     let last_set_for_set = Rc::clone(&last_set);
-    vm.register_host_import(set_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Int(n)] => {
-            *last_set_for_set.borrow_mut() = *n;
-            Ok(AbiValue::Unit)
-        }
-        other => Err(HostError {
-            message: format!("host::set: bad args: {other:?}"),
-        }),
+    vm.register_host_import_typed(set_id, move |(n,): (i64,)| -> Result<(), HostError> {
+        *last_set_for_set.borrow_mut() = n;
+        Ok(())
     })
     .expect("register set");
 
     let get_id = module.host_import_id("host::get").expect("get id");
     let last_set_for_get = Rc::clone(&last_set);
-    vm.register_host_import(get_id, move |args: &[AbiValue]| match args {
-        [] => Ok(AbiValue::Int(*last_set_for_get.borrow())),
-        other => Err(HostError {
-            message: format!("host::get: bad args: {other:?}"),
-        }),
+    vm.register_host_import_typed(get_id, move |()| -> Result<i64, HostError> {
+        Ok(*last_set_for_get.borrow())
     })
     .expect("register get");
 

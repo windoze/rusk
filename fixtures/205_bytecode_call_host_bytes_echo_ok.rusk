@@ -1,6 +1,10 @@
 // expect: ok bool true
 
+mod test {
+    pub extern fn bytes_echo(b: bytes) -> bytes;
+    pub extern fn bytes_eq(a: bytes, b: bytes) -> bool;
+}
+
 fn main() -> bool {
     test::bytes_eq(test::bytes_echo(b"hi"), b"hi")
 }
-

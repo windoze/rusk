@@ -13,6 +13,11 @@
 //
 // 备注：宿主也可以选择不把句柄交回 Rusk，而是直接用 VM API 恢复它（例如 `vm_resume_pinned_continuation_tail`）。
 
+mod host {
+    pub extern fn store_cont(k: cont(int) -> int) -> unit;
+    pub extern fn take_cont() -> cont(int) -> int;
+}
+
 interface E { fn boom() -> int; }
 
 fn main() -> int {

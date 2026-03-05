@@ -36,13 +36,21 @@ pub struct TypeId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct MethodId(pub u32);
 
-/// A VM/host boundary ABI type (v0): builtin primitives plus opaque continuation handles.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A VM/host boundary ABI type.
+///
+/// This describes the shapes that can cross the VM ↔ host boundary for:
+/// - host imports (`CallTarget::Host`)
+/// - externalized effects (`StepResult::Request` / `vm_resume`)
+///
+/// Nominal types (`Struct` / `Enum`) refer to entries in the module's `type_names` table.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbiType {
     Unit,
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
     /// An opaque one-shot continuation handle (`cont(P) -> R`).
@@ -50,6 +58,30 @@ pub enum AbiType {
     /// The parameter/return types are a compile-time surface only; at the ABI boundary this is
     /// represented as an opaque handle.
     Continuation,
+    Array(Box<AbiType>),
+    Tuple(Vec<AbiType>),
+    Struct(TypeId),
+    Enum(TypeId),
+}
+
+/// Optional ABI schema metadata for nominal types, used by the host for reflection and by the VM
+/// for validating host-constructed composite values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbiSchema {
+    Struct { fields: Vec<AbiStructField> },
+    Enum { variants: Vec<AbiEnumVariant> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiStructField {
+    pub name: String,
+    pub ty: AbiType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiEnumVariant {
+    pub name: String,
+    pub fields: Vec<AbiType>,
 }
 
 /// A host import signature restricted to [`AbiType`].
@@ -714,6 +746,12 @@ pub struct ExecutableModule {
     /// `struct_layouts[type_id] = Some([field_name...])` for struct types.
     pub struct_layouts: Vec<Option<Vec<String>>>,
 
+    /// Optional ABI schema metadata indexed by `TypeId`.
+    ///
+    /// This is emitted for ABI-relevant nominal types (structs/enums) so the host can inspect and
+    /// construct values safely.
+    pub abi_schemas: Vec<Option<AbiSchema>>,
+
     pub external_effects: Vec<ExternalEffectDecl>,
     pub external_effect_ids: BTreeMap<(String, String), EffectId>,
 
@@ -738,6 +776,7 @@ impl ExecutableModule {
             assoc_type_dispatch: Vec::new(),
             interface_impls: Vec::new(),
             struct_layouts: Vec::new(),
+            abi_schemas: Vec::new(),
             external_effects: Vec::new(),
             external_effect_ids: BTreeMap::new(),
             entry: FunctionId(0),
@@ -824,6 +863,7 @@ impl ExecutableModule {
         self.assoc_type_dispatch.push(Vec::new());
         self.interface_impls.push(Vec::new());
         self.struct_layouts.push(None);
+        self.abi_schemas.push(None);
         Ok(id)
     }
 

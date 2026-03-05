@@ -227,17 +227,21 @@ fn core_intrinsic_host_sig(name: &str) -> Option<rusk_mir::HostFnSig> {
     }
 }
 
-fn host_fn_sig_from_fn_sig(sig: &typeck::FnSig) -> Result<rusk_mir::HostFnSig, String> {
+fn host_fn_sig_from_fn_sig(
+    env: &ProgramEnv,
+    sig: &typeck::FnSig,
+) -> Result<rusk_mir::HostFnSig, String> {
     let params = sig
         .params
         .iter()
-        .map(host_type_from_ty)
+        .map(|ty| host_type_from_ty(env, ty))
         .collect::<Result<Vec<_>, _>>()?;
-    let ret = host_type_from_ty(&sig.ret)?;
+    let ret = host_type_from_ty(env, &sig.ret)?;
     Ok(rusk_mir::HostFnSig { params, ret })
 }
 
-fn host_type_from_ty(ty: &Ty) -> Result<rusk_mir::HostType, String> {
+fn host_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Result<rusk_mir::HostType, String> {
+    use crate::typeck::TyCon;
     use rusk_mir::HostType;
 
     match ty {
@@ -245,20 +249,38 @@ fn host_type_from_ty(ty: &Ty) -> Result<rusk_mir::HostType, String> {
         Ty::Bool => Ok(HostType::Bool),
         Ty::Int => Ok(HostType::Int),
         Ty::Float => Ok(HostType::Float),
+        Ty::Byte => Ok(HostType::Byte),
+        Ty::Char => Ok(HostType::Char),
         Ty::String => Ok(HostType::String),
         Ty::Bytes => Ok(HostType::Bytes),
         Ty::Cont { param, ret } => Ok(HostType::Cont {
-            param: Box::new(host_type_from_ty(param)?),
-            ret: Box::new(host_type_from_ty(ret)?),
+            param: Box::new(host_type_from_ty(env, param)?),
+            ret: Box::new(host_type_from_ty(env, ret)?),
         }),
-        Ty::Readonly(inner) => host_type_from_ty(inner),
-        Ty::Array(elem) => Ok(HostType::Array(Box::new(host_type_from_ty(elem)?))),
+        Ty::Readonly(inner) => host_type_from_ty(env, inner),
+        Ty::Array(elem) => Ok(HostType::Array(Box::new(host_type_from_ty(env, elem)?))),
         Ty::Tuple(items) => Ok(HostType::Tuple(
             items
                 .iter()
-                .map(host_type_from_ty)
+                .map(|ty| host_type_from_ty(env, ty))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        Ty::App(TyCon::Named(name), args) => {
+            if !args.is_empty() {
+                return Err(format!(
+                    "unsupported host type: `{name}` with type arguments is not ABI-eligible in v1"
+                ));
+            }
+            if env.structs.contains_key(name) {
+                Ok(HostType::Struct(name.clone()))
+            } else if env.enums.contains_key(name) {
+                Ok(HostType::Enum(name.clone()))
+            } else {
+                Err(format!(
+                    "unsupported host type: `{name}` (expected struct or enum)"
+                ))
+            }
+        }
         other => Err(format!("unsupported host type: {other:?}")),
     }
 }
@@ -287,6 +309,7 @@ impl Compiler {
         self.populate_static_interface_dispatch_table()?;
         self.populate_interface_impl_table();
         self.populate_struct_layouts();
+        self.populate_abi_schemas()?;
         self.populate_host_imports()?;
         self.resolve_call_targets()?;
         self.inline_tiny_functions()?;
@@ -1580,6 +1603,69 @@ impl Compiler {
             });
     }
 
+    fn populate_abi_schemas(&mut self) -> Result<(), CompileError> {
+        use crate::typeck::{Ty, TyCon};
+        use rusk_mir::{AbiEnumVariant, AbiSchema, AbiStructField};
+
+        let span0 = Span::new(0, 0);
+
+        for (type_name, def) in &self.env.structs {
+            let ty = Ty::App(TyCon::Named(type_name.clone()), Vec::new());
+            if crate::typeck::validate_abi_eligible_ty(&self.env, &ty, span0).is_err() {
+                continue;
+            }
+            let mut fields = Vec::with_capacity(def.fields.len());
+            for (field_name, field_ty) in &def.fields {
+                let host_ty = host_type_from_ty(&self.env, field_ty).map_err(|message| {
+                    CompileError::new(
+                        format!(
+                            "internal error: ABI schema for struct `{type_name}` field `{field_name}`: {message}"
+                        ),
+                        span0,
+                    )
+                })?;
+                fields.push(AbiStructField {
+                    name: field_name.clone(),
+                    ty: host_ty,
+                });
+            }
+            self.module
+                .abi_schemas
+                .insert(type_name.clone(), AbiSchema::Struct { fields });
+        }
+
+        for (type_name, def) in &self.env.enums {
+            let ty = Ty::App(TyCon::Named(type_name.clone()), Vec::new());
+            if crate::typeck::validate_abi_eligible_ty(&self.env, &ty, span0).is_err() {
+                continue;
+            }
+            let mut variants = Vec::with_capacity(def.variants.len());
+            for (variant_name, field_tys) in &def.variants {
+                let mut fields = Vec::with_capacity(field_tys.len());
+                for (idx, field_ty) in field_tys.iter().enumerate() {
+                    let host_ty = host_type_from_ty(&self.env, field_ty).map_err(|message| {
+                        CompileError::new(
+                            format!(
+                                "internal error: ABI schema for enum `{type_name}` variant `{variant_name}` field {idx}: {message}"
+                            ),
+                            span0,
+                        )
+                    })?;
+                    fields.push(host_ty);
+                }
+                variants.push(AbiEnumVariant {
+                    name: variant_name.clone(),
+                    fields,
+                });
+            }
+            self.module
+                .abi_schemas
+                .insert(type_name.clone(), AbiSchema::Enum { variants });
+        }
+
+        Ok(())
+    }
+
     fn populate_host_imports(&mut self) -> Result<(), CompileError> {
         let mut used = BTreeSet::<String>::new();
 
@@ -1606,7 +1692,7 @@ impl Compiler {
                         Span::new(0, 0),
                     )
                 })?;
-                host_fn_sig_from_fn_sig(fn_sig).map_err(|message| {
+                host_fn_sig_from_fn_sig(&self.env, fn_sig).map_err(|message| {
                     CompileError::new(
                         format!("internal error: host import signature for `{name}`: {message}"),
                         Span::new(0, 0),
@@ -2754,6 +2840,7 @@ impl Compiler {
                 Item::Function(func) => {
                     self.compile_real_function(module, func, None)?;
                 }
+                Item::ExternFn(_) => {}
                 Item::IntrinsicFn(_) => {}
                 Item::Impl(imp) => {
                     self.compile_impl_item(module, imp)?;

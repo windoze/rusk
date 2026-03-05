@@ -17,13 +17,14 @@ a small VM.
 Rusk is designed to be embedded (CLI, WASM, embedded devices), so I/O and platform integration are
 provided via **host functions**:
 
-- The **compiler** is given host *prototypes* (names + signatures) before compilation, so name
-  resolution and typechecking can succeed.
+- Host imports are **declared in Rusk source** via `extern fn` items (either in the program itself
+  or in sysroot modules like `std`), so name resolution and typechecking can succeed.
 - The **runtime** (VM) is given concrete host implementations at runtime; it will trap if the
   module declares host imports that are not installed.
 
-In this repo, the `rusk` CLI registers a minimal host-defined `std` module with
-`std::print(string) -> unit` and `std::println(string) -> unit`.
+In this repo, the sysroot `std` module declares `std::print(string) -> unit` and
+`std::println(string) -> unit` as host imports, and the `rusk` CLI installs implementations via
+`rusk_host::std_io::install_vm`.
 
 ## The Language
 
@@ -49,7 +50,7 @@ fn main() -> int {
 - `crates/rusk-mir/`: compiler-internal MIR data structures (not a runtime backend)
 - `crates/rusk-bytecode/`: bytecode module + `.rbc` serialization + verifier
 - `crates/rusk-vm/`: bytecode VM runtime (step API, host imports, effects)
-- `crates/rusk-host/`: reusable host-module declarations + installers (e.g. `std::print`)
+- `crates/rusk-host/`: optional helpers for installing runtime host import implementations (e.g. `std::print`)
 - `crates/rusk-lsp/`: Language Server Protocol (LSP) server for editor integration
 - `fixtures/` and `tests/`: executable fixtures and regression tests
 

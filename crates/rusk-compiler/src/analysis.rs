@@ -349,6 +349,7 @@ fn find_generic_param_def_in_items(
                     }
                 }
             }
+            Item::ExternFn(_) => {}
             Item::IntrinsicFn(f) => {
                 if let Some(len) = container_len_if_contains(source_map, f.span, document, offset) {
                     for gp in &f.generics {
@@ -463,6 +464,7 @@ fn find_param_def_in_items(
                     update_best(best, len, span);
                 }
             }
+            Item::ExternFn(_) => {}
             Item::IntrinsicFn(f) => {
                 if let Some(len) = container_len_if_contains(source_map, f.span, document, offset)
                     && let Some(span) = find_binding_in_params(&f.params, ident)
@@ -671,6 +673,7 @@ fn find_member_or_method_def_in_items(
                 }
             }
             Item::Interface(_)
+            | Item::ExternFn(_)
             | Item::Struct(_)
             | Item::Enum(_)
             | Item::IntrinsicFn(_)
@@ -748,6 +751,7 @@ fn find_fn_type_info_at_offset<'a>(
                 }
             }
             Item::Interface(_)
+            | Item::ExternFn(_)
             | Item::Struct(_)
             | Item::Enum(_)
             | Item::IntrinsicFn(_)
@@ -2485,6 +2489,17 @@ fn collect_symbols(
     for item in items {
         match item {
             Item::Function(f) => {
+                if span_in_document(source_map, f.span, document) {
+                    out.push(Symbol {
+                        name: f.name.name.clone(),
+                        kind: SymbolKind::Function,
+                        span: f.span,
+                        name_span: f.name.span,
+                        children: Vec::new(),
+                    });
+                }
+            }
+            Item::ExternFn(f) => {
                 if span_in_document(source_map, f.span, document) {
                     out.push(Symbol {
                         name: f.name.name.clone(),

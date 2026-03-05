@@ -1,8 +1,5 @@
 use rusk_bytecode::to_bytes;
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-    compile_file_to_bytecode_with_options,
-};
+use rusk_compiler::{CompileOptions, HostFnSig, HostType, compile_file_to_bytecode_with_options};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,33 +39,7 @@ fn build_host_imports(examples_dir: &Path) {
     let src = dir.join("program.rusk");
     let out = dir.join("program.rbc");
 
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "js",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![
-                    HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "log".to_string(),
-                        sig: HostFnSig {
-                            params: vec![HostType::String],
-                            ret: HostType::Unit,
-                        },
-                    },
-                    HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "add_int".to_string(),
-                        sig: HostFnSig {
-                            params: vec![HostType::Int, HostType::Int],
-                            ret: HostType::Int,
-                        },
-                    },
-                ],
-            },
-        )
-        .expect("register js host module");
+    let options = CompileOptions::default();
 
     write_bytes(&out, compile_example(&src, &options));
 }
@@ -79,23 +50,6 @@ fn build_counter(examples_dir: &Path) {
     let out = dir.join("program.rbc");
 
     let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "dom",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "set_text".to_string(),
-                    sig: HostFnSig {
-                        params: vec![HostType::String, HostType::String],
-                        ret: HostType::Unit,
-                    },
-                }],
-            },
-        )
-        .expect("register dom host module");
-
     options
         .register_external_effect(
             "Dom",
@@ -115,38 +69,7 @@ fn build_continuations(examples_dir: &Path) {
     let src = dir.join("program.rusk");
     let out = dir.join("program.rbc");
 
-    let cont_int_to_int = HostType::Cont {
-        param: Box::new(HostType::Int),
-        ret: Box::new(HostType::Int),
-    };
-
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "js",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![
-                    HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "log".to_string(),
-                        sig: HostFnSig {
-                            params: vec![HostType::String],
-                            ret: HostType::Unit,
-                        },
-                    },
-                    HostFunctionDecl {
-                        visibility: HostVisibility::Public,
-                        name: "store_cont".to_string(),
-                        sig: HostFnSig {
-                            params: vec![cont_int_to_int.clone()],
-                            ret: HostType::Unit,
-                        },
-                    },
-                ],
-            },
-        )
-        .expect("register js host module");
+    let options = CompileOptions::default();
 
     write_bytes(&out, compile_example(&src, &options));
 }

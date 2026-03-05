@@ -1,5 +1,6 @@
 use crate::abi::AbiValue;
 use crate::error::HostError;
+use crate::vm::HostContext;
 
 /// A host function callable by the VM.
 ///
@@ -8,14 +9,14 @@ use crate::error::HostError;
 /// [`AbiValue`] (or an [`HostError`]) according to the declared ABI signature.
 pub trait HostFn: 'static {
     /// Calls the host function with ABI values provided by the VM.
-    fn call(&mut self, args: &[AbiValue]) -> Result<AbiValue, HostError>;
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError>;
 }
 
 impl<F> HostFn for F
 where
-    F: for<'a> FnMut(&'a [AbiValue]) -> Result<AbiValue, HostError> + 'static,
+    F: for<'vm> FnMut(&mut HostContext<'vm>, &[AbiValue]) -> Result<AbiValue, HostError> + 'static,
 {
-    fn call(&mut self, args: &[AbiValue]) -> Result<AbiValue, HostError> {
-        self(args)
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        self(cx, args)
     }
 }

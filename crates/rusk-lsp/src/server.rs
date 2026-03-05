@@ -3,7 +3,6 @@ use crate::text::{byte_offset_to_position, byte_range_to_range, position_to_byte
 use rusk_compiler::analysis as compiler_analysis;
 use rusk_compiler::source_map::SourceName;
 use rusk_compiler::vfs::SourceProvider;
-use rusk_host::std_io;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
@@ -126,15 +125,12 @@ impl RuskLanguageServer {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let mut options = rusk_compiler::CompileOptions {
+
+        rusk_compiler::CompileOptions {
             sysroot: config.sysroot,
             load_std: config.load_std,
             ..Default::default()
-        };
-        if options.load_std {
-            std_io::register_host_module(&mut options);
         }
-        options
     }
 
     fn entry_files_for_trigger(&self, trigger: Option<PathBuf>) -> Vec<PathBuf> {

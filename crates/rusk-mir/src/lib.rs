@@ -85,6 +85,13 @@ pub struct Module {
     #[cfg_attr(feature = "serde", serde(default))]
     pub struct_layouts: BTreeMap<String, Vec<String>>,
 
+    /// Optional ABI schema metadata for nominal types (`struct` / `enum`) used at the VM/host
+    /// boundary.
+    ///
+    /// Keys are fully-qualified type names (matching `type_names` in the lowered bytecode module).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub abi_schemas: BTreeMap<String, AbiSchema>,
+
     /// Declared host function imports required by this module.
     ///
     /// Execution uses `HostImportId` indexing into this table (see [`CallTarget::Host`]).
@@ -243,8 +250,14 @@ pub enum HostType {
     Bool,
     Int,
     Float,
+    Byte,
+    Char,
     String,
     Bytes,
+    /// A nominal struct type defined in the module (identified by fully-qualified name).
+    Struct(String),
+    /// A nominal enum type defined in the module (identified by fully-qualified name).
+    Enum(String),
     /// A one-shot delimited continuation value (`cont(P) -> R`).
     ///
     /// This is a tooling/typechecking surface and lowers to an opaque ABI handle.
@@ -256,6 +269,29 @@ pub enum HostType {
     TypeRep,
     Array(Box<HostType>),
     Tuple(Vec<HostType>),
+}
+
+/// Optional ABI schema metadata for nominal types, emitted for host reflection and VM-side
+/// validation of host-constructed composite values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum AbiSchema {
+    Struct { fields: Vec<AbiStructField> },
+    Enum { variants: Vec<AbiEnumVariant> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct AbiStructField {
+    pub name: String,
+    pub ty: HostType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct AbiEnumVariant {
+    pub name: String,
+    pub fields: Vec<HostType>,
 }
 
 /// A compile-time type constructor used to build runtime [`Type::TypeRep`] values.

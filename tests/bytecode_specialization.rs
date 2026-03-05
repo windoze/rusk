@@ -1,35 +1,15 @@
-use rusk_compiler::{
-    CompileOptions, HostFnSig, HostFunctionDecl, HostModuleDecl, HostType, HostVisibility,
-    compile_to_bytecode_with_options,
-};
+use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
 use rusk_vm::{AbiValue, HostError, StepResult, Vm, vm_step};
 use std::cell::Cell;
 use std::rc::Rc;
 
-fn options_with_specialization_host_import() -> CompileOptions {
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "spec",
-            HostModuleDecl {
-                visibility: HostVisibility::Public,
-                functions: vec![HostFunctionDecl {
-                    visibility: HostVisibility::Public,
-                    name: "id_int".to_string(),
-                    sig: HostFnSig {
-                        params: vec![HostType::Int],
-                        ret: HostType::Int,
-                    },
-                }],
-            },
-        )
-        .unwrap();
-    options
-}
-
 #[test]
 fn generic_specialization_dispatches_to_host_impl_for_exact_type_args() {
     let src = r#"
+        mod spec {
+            pub extern fn id_int(x: int) -> int;
+        }
+
         fn id<T>(x: T) -> T {
             let _ = core::intrinsics::unit_eq((), ());
             x
@@ -39,8 +19,8 @@ fn generic_specialization_dispatches_to_host_impl_for_exact_type_args() {
 
         fn main() -> int { id(123) }
     "#;
-    let module = compile_to_bytecode_with_options(src, &options_with_specialization_host_import())
-        .expect("compile");
+    let options = CompileOptions::default();
+    let module = compile_to_bytecode_with_options(src, &options).expect("compile");
 
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
@@ -50,14 +30,9 @@ fn generic_specialization_dispatches_to_host_impl_for_exact_type_args() {
     let host_id = module
         .host_import_id("spec::id_int")
         .expect("host import id");
-    vm.register_host_import(host_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Int(v)] => {
-            calls_cell.set(calls_cell.get() + 1);
-            Ok(AbiValue::Int(*v))
-        }
-        other => Err(HostError {
-            message: format!("spec::id_int: bad args: {other:?}"),
-        }),
+    vm.register_host_import_typed(host_id, move |(v,): (i64,)| -> Result<i64, HostError> {
+        calls_cell.set(calls_cell.get() + 1);
+        Ok(v)
     })
     .expect("register host import");
 
@@ -81,6 +56,10 @@ fn generic_specialization_dispatches_to_host_impl_for_exact_type_args() {
 #[test]
 fn generic_specialization_falls_back_when_type_args_do_not_match() {
     let src = r#"
+        mod spec {
+            pub extern fn id_int(x: int) -> int;
+        }
+
         fn id<T>(x: T) -> T {
             let _ = core::intrinsics::unit_eq((), ());
             x
@@ -90,8 +69,8 @@ fn generic_specialization_falls_back_when_type_args_do_not_match() {
 
         fn main() -> string { id("ok") }
     "#;
-    let module = compile_to_bytecode_with_options(src, &options_with_specialization_host_import())
-        .expect("compile");
+    let options = CompileOptions::default();
+    let module = compile_to_bytecode_with_options(src, &options).expect("compile");
 
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
@@ -101,14 +80,9 @@ fn generic_specialization_falls_back_when_type_args_do_not_match() {
     let host_id = module
         .host_import_id("spec::id_int")
         .expect("host import id");
-    vm.register_host_import(host_id, move |args: &[AbiValue]| match args {
-        [AbiValue::Int(v)] => {
-            calls_cell.set(calls_cell.get() + 1);
-            Ok(AbiValue::Int(*v))
-        }
-        other => Err(HostError {
-            message: format!("spec::id_int: bad args: {other:?}"),
-        }),
+    vm.register_host_import_typed(host_id, move |(v,): (i64,)| -> Result<i64, HostError> {
+        calls_cell.set(calls_cell.get() + 1);
+        Ok(v)
     })
     .expect("register host import");
 

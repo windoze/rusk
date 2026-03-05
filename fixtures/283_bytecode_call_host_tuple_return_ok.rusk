@@ -1,0 +1,14 @@
+// expect: ok int 7
+
+mod abi {
+    pub extern fn make_pair(a: int, b: int) -> (int, int);
+}
+
+fn main() -> int {
+    let p = abi::make_pair(3, 4);
+    match p {
+        (a, b) => a + b
+        _ => 0
+    }
+}
+

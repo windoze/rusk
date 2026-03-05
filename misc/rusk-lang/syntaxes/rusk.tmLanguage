@@ -112,7 +112,7 @@
 					<key>comment</key>
 					<string>Declaration keywords</string>
 					<key>match</key>
-					<string>\b(pub|use|mod|fn|cont|let|const|readonly|static|struct|enum|interface|impl)\b</string>
+					<string>\b(pub|use|mod|fn|extern|intrinsic|cont|let|const|readonly|static|derive|struct|enum|interface|impl|type)\b</string>
 					<key>name</key>
 					<string>keyword.other.rusk</string>
 				</dict>

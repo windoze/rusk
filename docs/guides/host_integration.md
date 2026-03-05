@@ -17,7 +17,7 @@
 - `rusk-compiler`：解析/类型检查/降级到字节码（可直接编译文件到 `ExecutableModule`）
 - `rusk-bytecode`：字节码模块数据结构、校验、`.rbc` 编解码
 - `rusk-vm`：字节码虚拟机（可步进驱动）
-- `rusk-host`：可选的“宿主集成辅助”模块（例如标准 I/O 的注册与安装）
+- `rusk-host`：可选的“宿主集成辅助”模块（例如标准 I/O 的运行时安装）
 
 ---
 
@@ -38,10 +38,12 @@ fn main() {
 
 这里的 `std::println` 在本仓库里是 **宿主函数导入**。要让它可用，你需要做两件事：
 
-1. **编译期**：把模块与签名注册给编译器（让类型检查知道“存在什么”）
-2. **运行期**：把同名/同签名的实现安装到 VM（让调用真的能执行）
+1. **编译期**：让脚本能“看见”它的声明（`extern fn`）
+   - 通常做法：加载 sysroot 的 `std` 模块（`CompileOptions.load_std = true`，默认就是 `true`）。
+   - 或者：你在自己的 Rusk 源码/库里声明一组 `extern fn`（例如 `mod my_api { pub extern fn ...; }`）。
+2. **运行期**：把同名导入的实现安装到 VM（让调用真的能执行）
 
-推荐做法：复用 `rusk-host` 提供的配套工具（见下文）。
+推荐做法：把“声明”放到 sysroot（或项目内的公共 Rusk 模块），把“实现安装”放到 Rust 侧（可复用 `rusk-host` 的 installer）。
 
 ### 2.2 外部化 effect（外部效果）
 
@@ -64,20 +66,21 @@ StepResult::Request { effect_id, args, ... }
 
 ## 3. ABI 边界：哪些值可以跨 VM/宿主边界？
 
-当前字节码 v0 的 ABI 表面是刻意做小的：跨 VM/宿主边界只允许这些基础类型：
+字节码 VM 的 ABI 表面是刻意做小的，但已经支持比“仅 primitives”更复杂的值跨边界。
 
-- `unit`
-- `bool`
-- `int`
-- `float`
-- `string`（UTF-8）
-- `bytes`（字节序列）
+跨 VM/宿主边界允许：
+
+- 基础类型：`unit` / `bool` / `int` / `float` / `byte` / `char` / `string` / `bytes` / `continuation`
+- 复合类型：数组/元组/结构体/枚举
+  - 这些复合值在 ABI 上是 **VM 句柄/引用**，不会被深拷贝成 Rust 结构体；
+  - 宿主需要通过 `rusk_vm::HostContext` 来安全地读取/构造它们；
+  - v1 限制：名义类型（struct/enum）跨边界必须是单态（不能带类型实参的泛型实例）。
 
 这意味着：
 
-- 宿主函数的参数/返回值必须是上述类型（否则编译为字节码会失败）
-- 外部化 effect 的参数/返回值也必须是上述类型
-- 如果你需要传更复杂的数据，一般做法是编码为 `bytes` 或 `string`（例如 JSON/msgpack/protobuf 等）
+- 宿主导入（host imports）的参数/返回值必须是 ABI 安全的类型集合（否则编译为字节码会失败）。
+- 外部化 effect 的参数/返回值也必须是 ABI 安全的类型集合。
+- 如果你希望跨语言传递“宿主自定义数据结构”，仍然建议编码成 `bytes`/`string`（例如 JSON/msgpack/protobuf），因为“宿主定义名义类型”目前不在范围内。
 
 ---
 
@@ -92,16 +95,19 @@ use rusk_vm::{Vm, StepResult, vm_step};
 use std::path::Path;
 
 fn run_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    // 1) 编译期：配置 sysroot / std / 宿主模块原型
-    let mut options = CompileOptions::default();
-    std_io::register_host_module(&mut options); // 提供 std::print/std::println 的“原型”
+    // 1) 编译期：配置 sysroot / std / 外部化 effects（如需要）
+    //
+    // 宿主导入（例如 std::println）的“原型/声明”来自 Rusk 源码中的 `extern fn`：
+    // - 默认会加载 sysroot/std（CompileOptions.load_std = true）
+    // - 或者由你的程序/库自己声明
+    let options = CompileOptions::default();
 
     let module = compile_file_to_bytecode_with_options(path, &options)?;
 
     // 2) 创建 VM（main() 或 main(argv: [string]) 都支持）
     let mut vm = Vm::new(module.clone());
 
-    // 3) 运行期：安装宿主函数实现（与上面注册的原型要对齐）
+    // 3) 运行期：安装宿主函数实现（与脚本中声明的 `extern fn` 要对齐）
     std_io::install_vm(&module, &mut vm);
 
     // 4) 步进驱动执行
@@ -137,34 +143,25 @@ fn run_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 ## 5. 如何提供宿主函数（host imports）
 
-宿主函数需要“编译期原型 + 运行期实现”两步。
+宿主函数需要“编译期声明（extern fn）+ 运行期实现”两步。
 
-### 5.1 编译期：注册模块原型
+### 5.1 编译期：在 Rusk 源码里声明 `extern fn`
 
-你可以直接使用 `CompileOptions::register_host_module(...)` 注册模块与函数签名；更推荐用 `rusk-host` 保持声明与实现一致。
-
-示例（更完整的写法见 `docs/embedding-vm.zh.md`）：
-
-```rust
-use rusk_compiler::{CompileOptions, HostModuleDecl};
-
-options.register_host_module(
-    "my_api",
-    HostModuleDecl::public()
-        .function::<(i64, i64), i64>("add")
-        .build(),
-)?;
-```
-
-然后 Rusk 侧就可以写：
+在脚本或公共库里写：
 
 ```rusk
+mod my_api {
+    pub extern fn add(a: int, b: int) -> int;
+}
+
 fn main() -> int {
     my_api::add(1, 2)
 }
 ```
 
-### 5.2 运行期：安装实现
+如果你希望“所有脚本都默认可用”的宿主导入，推荐把这些 `extern fn` 声明放到 sysroot 模块里（类似本仓库的 `std`），并在编译时开启 `CompileOptions.load_std`。
+
+### 5.2 运行期：安装实现（install）
 
 运行时安装的方式取决于你选择的集成层（`rusk-host` 或自行实现）。核心思想是：
 
@@ -173,7 +170,6 @@ fn main() -> int {
 
 最简单的做法是模仿 `rusk_host::std_io` 的实现模式：
 
-- `*_::register_host_module(&mut CompileOptions)`：注册声明
 - `*_::install_vm(&ExecutableModule, &mut Vm)`：把实现装到 VM 上
 
 ---

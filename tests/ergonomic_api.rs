@@ -1,4 +1,4 @@
-use rusk_compiler::{CompileOptions, HostModuleDecl, compile_to_bytecode_with_options};
+use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
 use rusk_vm::{
     AbiValue, EffectDispatchTable, StepResult, Vm, vm_resume, vm_step, vm_step_with_effects,
 };
@@ -22,21 +22,16 @@ fn run_to_completion(vm: &mut Vm) -> Result<AbiValue, String> {
 #[test]
 fn typed_host_import_roundtrip() {
     let src = r#"
+mod host {
+    pub extern fn add(a: int, b: int) -> int;
+}
+
 fn main() -> int {
     host::add(40, 2)
 }
 "#;
 
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "host",
-            HostModuleDecl::public()
-                .function::<(i64, i64), i64>("add")
-                .build(),
-        )
-        .unwrap();
-
+    let options = CompileOptions::default();
     let module = compile_to_bytecode_with_options(src, &options).expect("compile");
     let mut vm = Vm::new(module.clone()).expect("vm init");
 
@@ -53,21 +48,16 @@ fn main() -> int {
 #[test]
 fn register_host_import_typed_rejects_signature_mismatch() {
     let src = r#"
+mod host {
+    pub extern fn add(a: int, b: int) -> int;
+}
+
 fn main() -> int {
     host::add(1, 2)
 }
 "#;
 
-    let mut options = CompileOptions::default();
-    options
-        .register_host_module(
-            "host",
-            HostModuleDecl::public()
-                .function::<(i64, i64), i64>("add")
-                .build(),
-        )
-        .unwrap();
-
+    let options = CompileOptions::default();
     let module = compile_to_bytecode_with_options(src, &options).expect("compile");
     let mut vm = Vm::new(module.clone()).expect("vm init");
     let id = module
@@ -111,7 +101,9 @@ fn main() -> int {
 
     let got = match vm_step(&mut vm, None) {
         StepResult::Request { effect_id, args, k } => {
-            let resume_value = effects.dispatch(effect_id, &args).expect("dispatch");
+            let resume_value = vm
+                .with_host_context(|cx| effects.dispatch(cx, effect_id, &args))
+                .expect("dispatch");
             vm_resume(&mut vm, k, resume_value).expect("resume");
             run_to_completion(&mut vm).expect("run")
         }

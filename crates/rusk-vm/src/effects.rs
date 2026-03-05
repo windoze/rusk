@@ -1,7 +1,8 @@
 use rusk_bytecode::{EffectId, ExecutableModule};
 
 use crate::{
-    AbiArgs, AbiTypeOf, AbiValue, HostError, HostFn, StepResult, Vm, VmError, vm_resume, vm_step,
+    AbiArgs, AbiTypeOf, AbiValue, HostContext, HostError, HostFn, StepResult, Vm, VmError,
+    vm_resume, vm_step,
 };
 
 /// A dense `EffectId -> handler` dispatch table for externalized effects.
@@ -68,19 +69,22 @@ impl EffectDispatchTable {
             ));
         }
 
-        self.handlers[idx] = Some(Box::new(move |args: &[AbiValue]| {
-            // VM already validated ABI types for externalized effect args, but we still decode
-            // into host-friendly Rust types here.
-            let decoded = Args::decode(args)?;
-            let ret = f(decoded)?;
-            Ok(ret.into())
-        }));
+        self.handlers[idx] = Some(Box::new(
+            move |_cx: &mut HostContext<'_>, args: &[AbiValue]| {
+                // VM already validated ABI types for externalized effect args, but we still decode
+                // into host-friendly Rust types here.
+                let decoded = Args::decode(args)?;
+                let ret = f(decoded)?;
+                Ok(ret.into())
+            },
+        ));
         Ok(())
     }
 
     /// Dispatches a single external effect request by `effect_id`.
     pub fn dispatch(
         &mut self,
+        cx: &mut HostContext<'_>,
         effect_id: EffectId,
         args: &[AbiValue],
     ) -> Result<AbiValue, HostError> {
@@ -102,7 +106,7 @@ impl EffectDispatchTable {
                 ),
             });
         };
-        handler.call(args)
+        handler.call(cx, args)
     }
 }
 
@@ -162,14 +166,18 @@ pub fn vm_step_with_effects(
                 return Ok(step);
             }
             StepResult::Request { effect_id, args, k } => {
-                let resume_value = effects.dispatch(effect_id, &args).map_err(|error| {
-                    StepWithEffectsError::Dispatch {
-                        effect_id,
-                        args,
-                        k: k.clone(),
-                        error,
-                    }
-                })?;
+                let resume_value =
+                    match vm.with_host_context(|cx| effects.dispatch(cx, effect_id, &args)) {
+                        Ok(v) => v,
+                        Err(error) => {
+                            return Err(StepWithEffectsError::Dispatch {
+                                effect_id,
+                                args,
+                                k: k.clone(),
+                                error,
+                            });
+                        }
+                    };
                 vm_resume(vm, k.clone(), resume_value).map_err(|error| {
                     StepWithEffectsError::Resume {
                         effect_id,

@@ -1,6 +1,10 @@
 // expect: ok bool true
 
+mod test {
+    pub extern fn float_mul(a: float, b: float) -> float;
+    pub extern fn float_eq(a: float, b: float) -> bool;
+}
+
 fn main() -> bool {
     test::float_eq(test::float_mul(2.0, 3.0), 6.0)
 }
-

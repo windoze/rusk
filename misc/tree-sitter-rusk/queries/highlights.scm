@@ -11,6 +11,7 @@
   "as"
   "is"
   "fn"
+  "extern"
   "intrinsic"
   "cont"
   "let"
@@ -107,6 +108,7 @@
 (type_identifier) @type
 
 (function_item name: [(identifier) (type_identifier)] @function)
+(extern_function_item name: [(identifier) (type_identifier)] @function)
 (intrinsic_function_item name: [(identifier) (type_identifier)] @function)
 
 (struct_item name: [(identifier) (type_identifier)] @type)

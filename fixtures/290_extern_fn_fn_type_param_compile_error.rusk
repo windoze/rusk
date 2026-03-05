@@ -1,0 +1,8 @@
+// expect: compile_error function types are not ABI-eligible
+
+mod host {
+    pub extern fn call(f: fn(int) -> int) -> int;
+}
+
+fn main() -> int { 0 }
+

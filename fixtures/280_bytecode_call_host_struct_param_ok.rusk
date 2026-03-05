@@ -1,0 +1,11 @@
+// expect: ok int 3
+
+struct Point { x: int, y: int }
+
+mod abi {
+    pub extern fn sum_point(p: super::Point) -> int;
+}
+
+fn main() -> int {
+    abi::sum_point(Point { x: 1, y: 2 })
+}

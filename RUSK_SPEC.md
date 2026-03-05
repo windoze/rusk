@@ -99,7 +99,7 @@ The grammar below is descriptive and intended to be unambiguous for implementati
 ```
 Program        := Item* ;
 
-Item           := Visibility? (FnItem | StructItem | EnumItem | InterfaceItem | ImplItem | ModItem | UseItem | DeriveItem) ;
+Item           := Visibility? (ExternFnItem | FnItem | StructItem | EnumItem | InterfaceItem | ImplItem | ModItem | UseItem | DeriveItem) ;
 
 Visibility     := "pub" ;
 ```
@@ -121,6 +121,28 @@ Notes:
 - `readonly` on a parameter means the parameter is a readonly view (attempting to mutate through it traps).
 - Parameters may use destructuring patterns; if a parameter pattern does not match at runtime, the function traps.
 - If `ReturnType` is omitted, it defaults to `unit` (i.e., `fn f(...) { ... }` is sugar for `fn f(...) -> unit { ... }`).
+
+#### 3.2.1.1 External host functions (`extern fn`)
+
+Rusk allows declaring host-provided functions directly in source using `extern fn` items.
+These are **declarations only** (no body) and are lowered to bytecode host imports.
+
+```
+ExternFnItem    := "extern" "fn" Ident "(" ExternParamList? ")" "->" Type ";" ;
+ExternParamList := ExternParam ("," ExternParam)* (",")? ;
+ExternParam     := Ident ":" Type ;
+```
+
+Notes (current / v1):
+
+- `extern fn` declarations must have an explicit return type (`-> unit` for unit return).
+- `extern fn` declarations must not be generic (monomorphic signatures only).
+- The parameter list is name + type only (no patterns, no `readonly` parameter modifier).
+- The declared signature must be **ABI-eligible** for VM/host boundaries (see `BYTECODE_SPEC.md` §3):
+  - allowed leaves: `unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`, `cont(P) -> R`
+  - allowed composites: arrays (`[T]`), tuples (`(T0, T1, ...)`), structs, enums
+  - v1 limitation: nominal types must be monomorphic at the boundary (no type arguments on ABI-exposed structs/enums)
+- The host import name is the function’s fully-qualified path (e.g. `std::println`).
 
 #### 3.2.2 Structs
 

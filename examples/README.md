@@ -24,13 +24,13 @@ cargo run --bin rusk -- examples/01-hello-world.rbc
 
 注意事项：
 
-- 大多数示例会使用 `std::print` / `std::println`。在本仓库中它们是由 `rusk` CLI 注册的**宿主函数**
-  （不属于 `core`），并且 `std` 只是一个对宿主模块的源码包装层。
-  - 默认情况下，`rusk` 会加载 `std` 并安装标准 I/O 宿主函数。
-  - 使用 `--no-std` 运行时将不会加载 `std`，这些函数也就不可用。
+- 大多数示例会使用 `std::print` / `std::println`。在本仓库中它们是 `std` sysroot 模块里声明的宿主导入
+  （`extern fn`）；运行时由宿主提供实现。
+  - 默认情况下，`rusk` 会加载 `std` 并通过 `rusk_host::std_io::install_vm` 安装标准 I/O 实现。
+  - 使用 `--no-std` 运行时将不会加载 `std`，这些符号也就不可用。
 - 语言规范见 `RUSK_SPEC.md`，MIR 规范见 `MIR_SPEC.md`，字节码规范见 `BYTECODE_SPEC.md`。
 - `25-host-stored-continuations.rusk` 需要额外的宿主模块 `host`（默认 CLI 不提供），用于演示更底层的
-  VM/宿主交互；其余示例默认都可以直接运行。
+  VM/宿主交互（需要宿主额外实现 `host::store_cont` / `host::take_cont`）；其余示例默认都可以直接运行。
 
 ## 索引（由易到难）
 

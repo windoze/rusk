@@ -1,6 +1,9 @@
 // expect: ok unit
 
+mod test {
+    pub extern fn unit() -> unit;
+}
+
 fn main() -> unit {
     test::unit()
 }
-

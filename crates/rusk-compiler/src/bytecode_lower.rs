@@ -40,28 +40,111 @@ impl core::fmt::Display for LowerError {
 #[cfg(feature = "std")]
 impl std::error::Error for LowerError {}
 
-fn abi_type_from_host_type(ty: &rusk_mir::HostType) -> Option<AbiType> {
+fn abi_type_from_host_type(
+    out: &mut ExecutableModule,
+    ty: &rusk_mir::HostType,
+) -> Result<Option<AbiType>, LowerError> {
     use rusk_mir::HostType as H;
 
-    match ty {
+    Ok(match ty {
         H::Unit => Some(AbiType::Unit),
         H::Bool => Some(AbiType::Bool),
         H::Int => Some(AbiType::Int),
         H::Float => Some(AbiType::Float),
+        H::Byte => Some(AbiType::Byte),
+        H::Char => Some(AbiType::Char),
         H::String => Some(AbiType::String),
         H::Bytes => Some(AbiType::Bytes),
+        H::Struct(name) => Some(AbiType::Struct(
+            out.intern_type(name.clone()).map_err(LowerError::new)?,
+        )),
+        H::Enum(name) => Some(AbiType::Enum(
+            out.intern_type(name.clone()).map_err(LowerError::new)?,
+        )),
         H::Cont { .. } => Some(AbiType::Continuation),
-        H::Any | H::TypeRep | H::Array(_) | H::Tuple(_) => None,
-    }
+        H::Array(elem) => {
+            let Some(elem) = abi_type_from_host_type(out, elem)? else {
+                return Ok(None);
+            };
+            Some(AbiType::Array(Box::new(elem)))
+        }
+        H::Tuple(items) => {
+            let mut out_items = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(item) = abi_type_from_host_type(out, item)? else {
+                    return Ok(None);
+                };
+                out_items.push(item);
+            }
+            Some(AbiType::Tuple(out_items))
+        }
+        H::Any | H::TypeRep => None,
+    })
 }
 
-fn abi_sig_from_host_sig(sig: &rusk_mir::HostFnSig) -> Option<HostFnSig> {
+fn abi_sig_from_host_sig(
+    out: &mut ExecutableModule,
+    sig: &rusk_mir::HostFnSig,
+) -> Result<Option<HostFnSig>, LowerError> {
     let mut params = Vec::with_capacity(sig.params.len());
     for ty in &sig.params {
-        params.push(abi_type_from_host_type(ty)?);
+        let Some(abi_ty) = abi_type_from_host_type(out, ty)? else {
+            return Ok(None);
+        };
+        params.push(abi_ty);
     }
-    let ret = abi_type_from_host_type(&sig.ret)?;
-    Some(HostFnSig { params, ret })
+    let Some(ret) = abi_type_from_host_type(out, &sig.ret)? else {
+        return Ok(None);
+    };
+    Ok(Some(HostFnSig { params, ret }))
+}
+
+fn lower_abi_schema(
+    out: &mut ExecutableModule,
+    schema: &rusk_mir::AbiSchema,
+) -> Result<rusk_bytecode::AbiSchema, LowerError> {
+    use rusk_bytecode::{AbiEnumVariant, AbiSchema, AbiStructField};
+
+    Ok(match schema {
+        rusk_mir::AbiSchema::Struct { fields } => {
+            let mut out_fields = Vec::with_capacity(fields.len());
+            for field in fields {
+                let Some(ty) = abi_type_from_host_type(out, &field.ty)? else {
+                    return Err(LowerError::new(format!(
+                        "abi schema field `{}` is not ABI-safe for bytecode",
+                        field.name
+                    )));
+                };
+                out_fields.push(AbiStructField {
+                    name: field.name.clone(),
+                    ty,
+                });
+            }
+            AbiSchema::Struct { fields: out_fields }
+        }
+        rusk_mir::AbiSchema::Enum { variants } => {
+            let mut out_variants = Vec::with_capacity(variants.len());
+            for variant in variants {
+                let mut fields = Vec::with_capacity(variant.fields.len());
+                for (idx, field_ty) in variant.fields.iter().enumerate() {
+                    let Some(ty) = abi_type_from_host_type(out, field_ty)? else {
+                        return Err(LowerError::new(format!(
+                            "abi schema enum variant `{}` field {idx} is not ABI-safe for bytecode",
+                            variant.name
+                        )));
+                    };
+                    fields.push(ty);
+                }
+                out_variants.push(AbiEnumVariant {
+                    name: variant.name.clone(),
+                    fields,
+                });
+            }
+            AbiSchema::Enum {
+                variants: out_variants,
+            }
+        }
+    })
 }
 
 fn lower_type_rep_lit(
@@ -307,7 +390,14 @@ pub fn lower_mir_module(mir: &rusk_mir::Module) -> Result<ExecutableModule, Lowe
 
 #[derive(Clone, Debug, Default)]
 pub struct LowerOptions {
-    pub external_effects: Vec<ExternalEffectDecl>,
+    pub external_effects: Vec<MirExternalEffectDecl>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirExternalEffectDecl {
+    pub interface: String,
+    pub method: String,
+    pub sig: rusk_mir::HostFnSig,
 }
 
 pub fn lower_mir_module_with_options(
@@ -317,8 +407,21 @@ pub fn lower_mir_module_with_options(
     let mut out = ExecutableModule::default();
 
     for decl in &options.external_effects {
-        out.add_external_effect(decl.clone())
-            .map_err(LowerError::new)?;
+        let sig = match abi_sig_from_host_sig(&mut out, &decl.sig)? {
+            Some(sig) => sig,
+            None => {
+                return Err(LowerError::new(format!(
+                    "external effect `{}.{}` has non-ABI-safe signature for bytecode",
+                    decl.interface, decl.method
+                )));
+            }
+        };
+        out.add_external_effect(ExternalEffectDecl {
+            interface: decl.interface.clone(),
+            method: decl.method.clone(),
+            sig,
+        })
+        .map_err(LowerError::new)?;
     }
     let external_effect_ids = out.external_effect_ids.clone();
 
@@ -329,8 +432,9 @@ pub fn lower_mir_module_with_options(
         if core_intrinsic(import.name.as_str()).is_some() {
             continue;
         }
-        let Some(sig) = abi_sig_from_host_sig(&import.sig) else {
-            continue;
+        let sig = match abi_sig_from_host_sig(&mut out, &import.sig)? {
+            Some(sig) => sig,
+            None => continue,
         };
         let id = out
             .add_host_import(HostImport {
@@ -401,6 +505,18 @@ pub fn lower_mir_module_with_options(
         let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
         out.set_struct_layout(type_id, fields.clone())
             .map_err(LowerError::new)?;
+    }
+
+    for (ty, schema) in &mir.abi_schemas {
+        let type_id = out.intern_type(ty.clone()).map_err(LowerError::new)?;
+        let schema = lower_abi_schema(&mut out, schema)?;
+        let idx: usize = type_id.0 as usize;
+        let Some(slot) = out.abi_schemas.get_mut(idx) else {
+            return Err(LowerError::new(
+                "internal error: abi schema table index out of range",
+            ));
+        };
+        *slot = Some(schema);
     }
 
     for ((ty, iface, assoc), id) in &mir.assoc_type_reps {

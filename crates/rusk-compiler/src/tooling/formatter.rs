@@ -707,6 +707,7 @@ fn token_text(kind: &TokenKind) -> String {
         TokenKind::KwAs => "as".to_string(),
         TokenKind::KwIs => "is".to_string(),
         TokenKind::KwFn => "fn".to_string(),
+        TokenKind::KwExtern => "extern".to_string(),
         TokenKind::KwIntrinsic => "intrinsic".to_string(),
         TokenKind::KwCont => "cont".to_string(),
         TokenKind::KwLet => "let".to_string(),

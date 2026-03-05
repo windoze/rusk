@@ -535,7 +535,6 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "rusk-compiler",
- "rusk-host",
  "serde",
  "serde_json",
  "tokio",

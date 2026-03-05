@@ -87,6 +87,7 @@ fn expand_items_in_module(
             }
             // Items that don't affect expansion.
             Item::Function(_)
+            | Item::ExternFn(_)
             | Item::IntrinsicFn(_)
             | Item::Struct(_)
             | Item::Enum(_)

@@ -1,0 +1,8 @@
+// expect: compile_error must not be generic
+
+mod host {
+    pub extern fn f<T>(x: int) -> unit;
+}
+
+fn main() -> unit { () }
+

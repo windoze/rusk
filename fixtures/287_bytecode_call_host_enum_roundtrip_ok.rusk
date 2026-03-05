@@ -1,0 +1,16 @@
+// expect: ok int 7
+
+enum Shape {
+    Rect(int, int),
+    Unit,
+}
+
+mod abi {
+    pub extern fn make_rect(w: int, h: int) -> super::Shape;
+    pub extern fn shape_sum(s: super::Shape) -> int;
+}
+
+fn main() -> int {
+    let s = abi::make_rect(3, 4);
+    abi::shape_sum(s)
+}

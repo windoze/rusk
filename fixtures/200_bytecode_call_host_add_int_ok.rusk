@@ -1,6 +1,9 @@
 // expect: ok int 3
 
+mod test {
+    pub extern fn add_int(a: int, b: int) -> int;
+}
+
 fn main() -> int {
     test::add_int(1, 2)
 }
-

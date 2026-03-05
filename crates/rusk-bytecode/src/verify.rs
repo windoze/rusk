@@ -4,8 +4,8 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 
 use crate::{
-    CallTarget, ConstValue, EffectSpec, ExecutableModule, Function, FunctionId, Instruction,
-    MethodId, Reg, TypeId, TypeRepLit,
+    AbiSchema, AbiType, CallTarget, ConstValue, EffectSpec, ExecutableModule, Function, FunctionId,
+    Instruction, MethodId, Reg, TypeId, TypeRepLit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +82,18 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         });
     }
 
+    // Validate host import ABI signatures (including nominal TypeIds).
+    for import in &module.host_imports {
+        for (idx, ty) in import.sig.params.iter().enumerate() {
+            validate_abi_type(module, ty).map_err(|e| VerifyError {
+                message: format!("host import `{}` param {idx}: {}", import.name, e),
+            })?;
+        }
+        validate_abi_type(module, &import.sig.ret).map_err(|e| VerifyError {
+            message: format!("host import `{}` return: {}", import.name, e),
+        })?;
+    }
+
     let mut expected_external_effect_ids = BTreeMap::new();
     for (idx, decl) in module.external_effects.iter().enumerate() {
         let id = crate::EffectId(idx as u32);
@@ -99,6 +111,24 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         return Err(VerifyError {
             message: "external_effect_ids map does not match external_effects table".to_string(),
         });
+    }
+
+    // Validate external effect ABI signatures (including nominal TypeIds).
+    for decl in &module.external_effects {
+        for (idx, ty) in decl.sig.params.iter().enumerate() {
+            validate_abi_type(module, ty).map_err(|e| VerifyError {
+                message: format!(
+                    "external effect `{}.{}` param {idx}: {}",
+                    decl.interface, decl.method, e
+                ),
+            })?;
+        }
+        validate_abi_type(module, &decl.sig.ret).map_err(|e| VerifyError {
+            message: format!(
+                "external effect `{}.{}` return: {}",
+                decl.interface, decl.method, e
+            ),
+        })?;
     }
 
     // Parallel tables must match the type table.
@@ -148,6 +178,15 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
             ),
         });
     }
+    if module.abi_schemas.len() != types_len {
+        return Err(VerifyError {
+            message: format!(
+                "abi_schemas length {} does not match type_names length {}",
+                module.abi_schemas.len(),
+                types_len
+            ),
+        });
+    }
 
     // Recompute interning maps and ensure they match the stored ones.
     let mut expected_type_ids = BTreeMap::new();
@@ -168,6 +207,69 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         return Err(VerifyError {
             message: "type_ids map does not match type_names table".to_string(),
         });
+    }
+
+    // Validate ABI schemas (when present) are internally consistent.
+    for (idx, schema) in module.abi_schemas.iter().enumerate() {
+        let Some(schema) = schema else {
+            continue;
+        };
+        let type_id = TypeId(idx as u32);
+        match schema {
+            AbiSchema::Struct { fields } => {
+                let Some(Some(layout)) = module.struct_layouts.get(idx) else {
+                    let name = module.type_name(type_id).unwrap_or("<unknown>");
+                    return Err(VerifyError {
+                        message: format!(
+                            "abi_schemas[{}] is Struct but type id {} (`{name}`) has no struct_layout",
+                            idx, type_id.0
+                        ),
+                    });
+                };
+                if fields.len() != layout.len() {
+                    let name = module.type_name(type_id).unwrap_or("<unknown>");
+                    return Err(VerifyError {
+                        message: format!(
+                            "abi schema for struct id {} (`{name}`) has {} fields but struct_layout has {}",
+                            type_id.0,
+                            fields.len(),
+                            layout.len()
+                        ),
+                    });
+                }
+                for (field_idx, (field, layout_name)) in
+                    fields.iter().zip(layout.iter()).enumerate()
+                {
+                    if field.name != *layout_name {
+                        let name = module.type_name(type_id).unwrap_or("<unknown>");
+                        return Err(VerifyError {
+                            message: format!(
+                                "abi schema for struct id {} (`{name}`) field {field_idx} name mismatch: schema has `{}`, layout has `{}`",
+                                type_id.0, field.name, layout_name
+                            ),
+                        });
+                    }
+                    validate_abi_type(module, &field.ty).map_err(|e| VerifyError {
+                        message: format!(
+                            "abi schema for struct id {} field `{}`: {}",
+                            type_id.0, field.name, e
+                        ),
+                    })?;
+                }
+            }
+            AbiSchema::Enum { variants } => {
+                for variant in variants {
+                    for (field_idx, field_ty) in variant.fields.iter().enumerate() {
+                        validate_abi_type(module, field_ty).map_err(|e| VerifyError {
+                            message: format!(
+                                "abi schema for enum id {} variant `{}` field {field_idx}: {}",
+                                type_id.0, variant.name, e
+                            ),
+                        })?;
+                    }
+                }
+            }
+        }
     }
 
     let mut expected_method_ids = BTreeMap::new();
@@ -366,6 +468,59 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
     verify_call_return_arities(module, &return_arities)?;
 
     Ok(())
+}
+
+fn validate_abi_type(module: &ExecutableModule, ty: &AbiType) -> Result<(), String> {
+    match ty {
+        AbiType::Unit
+        | AbiType::Bool
+        | AbiType::Int
+        | AbiType::Float
+        | AbiType::Byte
+        | AbiType::Char
+        | AbiType::String
+        | AbiType::Bytes
+        | AbiType::Continuation => Ok(()),
+        AbiType::Array(elem) => validate_abi_type(module, elem),
+        AbiType::Tuple(items) => {
+            for item in items {
+                validate_abi_type(module, item)?;
+            }
+            Ok(())
+        }
+        AbiType::Struct(type_id) => {
+            let idx = type_id.0 as usize;
+            if idx >= module.type_names.len() {
+                return Err(format!(
+                    "invalid struct type id {} (type_names={})",
+                    type_id.0,
+                    module.type_names.len()
+                ));
+            }
+            match module.struct_layouts.get(idx) {
+                Some(Some(_layout)) => {}
+                _ => {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiType::Struct refers to non-struct type id {} (`{name}`)",
+                        type_id.0
+                    ));
+                }
+            }
+            Ok(())
+        }
+        AbiType::Enum(type_id) => {
+            let idx = type_id.0 as usize;
+            if idx >= module.type_names.len() {
+                return Err(format!(
+                    "invalid enum type id {} (type_names={})",
+                    type_id.0,
+                    module.type_names.len()
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn compute_return_arities(module: &ExecutableModule) -> Result<Vec<usize>, VerifyError> {

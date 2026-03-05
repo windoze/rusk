@@ -2,7 +2,6 @@ use rusk_bytecode::to_bytes;
 use rusk_compiler::analysis as compiler_analysis;
 use rusk_compiler::tooling::diagnostics as tooling_diagnostics;
 use rusk_compiler::{CompileError, CompileOptions, compile_file_to_bytecode_with_options};
-use rusk_host::std_io;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -21,8 +20,7 @@ fn main() {
     }
 
     let input_path = Path::new(&path);
-    let mut options = CompileOptions::default();
-    std_io::register_host_module(&mut options);
+    let options = CompileOptions::default();
     let module = match compile_file_to_bytecode_with_options(input_path, &options) {
         Ok(m) => m,
         Err(e) => {

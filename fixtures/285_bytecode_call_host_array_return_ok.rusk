@@ -1,0 +1,11 @@
+// expect: ok int 6
+
+mod abi {
+    pub extern fn make_ints() -> [int];
+}
+
+fn main() -> int {
+    let xs = abi::make_ints();
+    xs[0] + xs[1] + xs[2]
+}
+

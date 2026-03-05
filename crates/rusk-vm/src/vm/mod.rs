@@ -1,6 +1,8 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use rusk_bytecode::{EffectId, ExecutableModule, FunctionId, HostImportId, MethodId, TypeId};
+use rusk_bytecode::{
+    AbiType, EffectId, ExecutableModule, FunctionId, HostImportId, MethodId, TypeId,
+};
 use rusk_gc::{GcHeap, GcRef, ImmixHeap, Trace, Tracer};
 use std::collections::HashMap;
 
@@ -8,9 +10,11 @@ use crate::{AbiArgs, AbiTypeOf, AbiValue, HostError, HostFn, VmError, VmMetrics}
 
 const VM_GC_TRIGGER_ALLOCATIONS: usize = 50_000;
 
+mod host_context;
 mod resume;
 mod step;
 
+pub use host_context::HostContext;
 pub use resume::vm_resume_pinned_continuation_tail;
 pub use resume::{vm_drop_continuation, vm_drop_pinned_continuation, vm_resume};
 pub use step::vm_step;
@@ -410,48 +414,6 @@ impl Value {
             other => other,
         }
     }
-
-    fn from_abi(
-        heap: &mut ImmixHeap<HeapValue>,
-        gc_allocations_since_collect: &mut usize,
-        pinned_continuations: &PinnedContinuations,
-        v: &AbiValue,
-    ) -> Result<Self, String> {
-        Ok(match v {
-            AbiValue::Unit => Value::Unit,
-            AbiValue::Bool(b) => Value::Bool(*b),
-            AbiValue::Int(n) => Value::Int(*n),
-            AbiValue::Float(x) => Value::Float(*x),
-            AbiValue::String(s) => alloc_string(heap, gc_allocations_since_collect, s.clone())?,
-            AbiValue::Bytes(b) => alloc_bytes(heap, gc_allocations_since_collect, b.clone())?,
-            AbiValue::Continuation(h) => {
-                Value::Continuation(pinned_continuations.resolve(h.clone())?)
-            }
-        })
-    }
-
-    fn try_to_abi(
-        &self,
-        heap: &ImmixHeap<HeapValue>,
-        pinned_continuations: &mut PinnedContinuations,
-    ) -> Result<Option<AbiValue>, String> {
-        Ok(Some(match self {
-            Value::Unit => AbiValue::Unit,
-            Value::Bool(b) => AbiValue::Bool(*b),
-            Value::Int(n) => AbiValue::Int(*n),
-            Value::Float(x) => AbiValue::Float(*x),
-            Value::String(s) => AbiValue::String(s.as_str(heap)?.to_string()),
-            Value::Bytes(b) => AbiValue::Bytes(b.as_slice(heap)?.to_vec()),
-            Value::Continuation(k) => AbiValue::Continuation(pinned_continuations.pin(k.clone())?),
-            Value::Byte(_)
-            | Value::Char(_)
-            | Value::TypeRep(_)
-            | Value::Ref(_)
-            | Value::Function(_) => {
-                return Ok(None);
-            }
-        }))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -594,6 +556,7 @@ enum VmState {
     Suspended {
         k: ContinuationHandle,
         perform_dst: Option<rusk_bytecode::Reg>,
+        expected_ret: AbiType,
     },
     Done {
         value: AbiValue,
@@ -898,11 +861,26 @@ impl Vm {
             });
         }
 
-        self.register_host_import(id, move |args: &[AbiValue]| {
+        self.register_host_import(id, move |_cx: &mut HostContext<'_>, args: &[AbiValue]| {
             let decoded = Args::decode(args)?;
             let ret = f(decoded)?;
             Ok(ret.into())
         })
+    }
+
+    /// Runs `f` with a temporary [`HostContext`] borrowing this VM.
+    ///
+    /// This is primarily intended for:
+    /// - implementing external effects (`StepResult::Request`) handlers, and
+    /// - inspecting composite ABI values (e.g. `StepResult::Done`) from host code.
+    pub fn with_host_context<R>(&mut self, f: impl FnOnce(&mut HostContext<'_>) -> R) -> R {
+        let mut cx = HostContext::new(
+            &self.module,
+            &mut self.heap,
+            &mut self.gc_allocations_since_collect,
+            &mut self.pinned_continuations,
+        );
+        f(&mut cx)
     }
 
     /// Interns (deduplicates) a runtime type representation and returns its [`TypeRepId`].
@@ -3171,6 +3149,13 @@ fn call_host_import(
         ));
     };
 
+    let mut cx = HostContext::new(
+        module,
+        heap,
+        gc_allocations_since_collect,
+        pinned_continuations,
+    );
+
     let mut abi_args = Vec::with_capacity(args.len());
     for (arg_reg, expected) in args.iter().zip(import.sig.params.iter()) {
         let src_idx: usize = (*arg_reg).try_into().unwrap_or(usize::MAX);
@@ -3180,30 +3165,14 @@ fn call_host_import(
                 import.name
             ));
         };
-        let Some(abi) = v
-            .try_to_abi(heap, pinned_continuations)
-            .map_err(|msg| format!("host call `{}` arg conversion: {msg}", import.name))?
-        else {
-            return Err(format!(
-                "host call `{}` arg type mismatch: expected {:?}, got {}",
-                import.name,
-                expected,
-                v.kind()
-            ));
-        };
-        if abi.ty() != *expected {
-            return Err(format!(
-                "host call `{}` arg type mismatch: expected {:?}, got {:?}",
-                import.name,
-                expected,
-                abi.ty()
-            ));
-        }
+        let abi = cx
+            .value_to_abi(&v, expected)
+            .map_err(|msg| format!("host call `{}` arg conversion: {msg}", import.name))?;
         abi_args.push(abi);
     }
 
     *in_host_call = true;
-    let call_result = host_fn.call(&abi_args);
+    let call_result = host_fn.call(&mut cx, &abi_args);
     *in_host_call = false;
 
     let abi_ret = match call_result {
@@ -3223,13 +3192,9 @@ fn call_host_import(
     }
 
     if let Some(dst) = dst {
-        let ret = Value::from_abi(
-            heap,
-            gc_allocations_since_collect,
-            pinned_continuations,
-            &abi_ret,
-        )
-        .map_err(|msg| format!("host call `{}` return conversion: {msg}", import.name))?;
+        let ret = cx
+            .value_from_abi(&abi_ret)
+            .map_err(|msg| format!("host call `{}` return conversion: {msg}", import.name))?;
         write_value(frame, dst, ret)
             .map_err(|msg| format!("host call `{}` dst: {msg}", import.name))?;
     }
@@ -3385,11 +3350,8 @@ mod tests {
         module.entry = main;
 
         let mut vm = Vm::new(module).unwrap();
-        vm.register_host_import(add_id, |args: &[AbiValue]| match args {
-            [AbiValue::Int(a), AbiValue::Int(b)] => Ok(AbiValue::Int(a + b)),
-            other => Err(crate::HostError {
-                message: format!("bad args: {other:?}"),
-            }),
+        vm.register_host_import_typed(add_id, |(a, b): (i64, i64)| -> Result<i64, HostError> {
+            Ok(a + b)
         })
         .unwrap();
 
@@ -3435,14 +3397,14 @@ mod tests {
         module.entry = main;
 
         let mut vm = Vm::new(module).unwrap();
-        vm.register_host_import(add_id, |_args: &[AbiValue]| Ok(AbiValue::Int(0)))
+        vm.register_host_import_typed(add_id, |(_a,): (i64,)| -> Result<i64, HostError> { Ok(0) })
             .unwrap();
 
         let got = vm_step(&mut vm, None);
         let StepResult::Trap { message } = got else {
             panic!("expected trap, got {got:?}");
         };
-        assert!(message.contains("arg type mismatch"), "{message}");
+        assert!(message.contains("abi type mismatch"), "{message}");
     }
 
     #[test]
@@ -3479,8 +3441,10 @@ mod tests {
         module.entry = main;
 
         let mut vm = Vm::new(module).unwrap();
-        vm.register_host_import(add_id, |_args: &[AbiValue]| Ok(AbiValue::Int(0)))
-            .unwrap();
+        vm.register_host_import_typed(add_id, |(_a, _b): (i64, i64)| -> Result<i64, HostError> {
+            Ok(0)
+        })
+        .unwrap();
 
         let got = vm_step(&mut vm, None);
         let StepResult::Trap { message } = got else {

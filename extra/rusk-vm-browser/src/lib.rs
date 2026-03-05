@@ -2,11 +2,38 @@
 
 use js_sys::{Array, BigInt, Function, Object, Reflect, Uint8Array};
 use rusk_bytecode::{AbiType, EffectId, ExecutableModule, HostImportId};
-use rusk_vm::{AbiValue, ContinuationHandle, HostError, VmError};
+use rusk_vm::{AbiValue, ContinuationHandle, HostContext, HostError, VmError};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991; // 2^53 - 1
+
+thread_local! {
+    /// A process-wide ABI value table used to round-trip composite ABI values through JS.
+    ///
+    /// Composite ABI values (array/tuple/struct/enum) are opaque VM references with private
+    /// internals, so we store them in Rust and hand JS a small `{ tag: "abiRef", abiId: ... }`
+    /// object that can be passed back to the VM.
+    static ABI_REF_TABLE: RefCell<HashMap<u32, AbiValue>> = RefCell::new(HashMap::new());
+    static NEXT_ABI_REF_ID: Cell<u32> = Cell::new(1);
+}
+
+fn store_abi_ref(value: AbiValue) -> u32 {
+    ABI_REF_TABLE.with(|table| {
+        NEXT_ABI_REF_ID.with(|next| {
+            let id = next.get();
+            next.set(id.wrapping_add(1));
+            table.borrow_mut().insert(id, value);
+            id
+        })
+    })
+}
+
+fn load_abi_ref(id: u32) -> Option<AbiValue> {
+    ABI_REF_TABLE.with(|table| table.borrow().get(&id).cloned())
+}
 
 #[wasm_bindgen]
 pub struct Vm {
@@ -57,13 +84,13 @@ impl Vm {
 
             let params = Array::new();
             for ty in &import.sig.params {
-                params.push(&abi_type_to_js(*ty));
+                params.push(&abi_type_to_js(&self.module, ty));
             }
             let _ = Reflect::set(&obj, &JsValue::from_str("params"), &params.into());
             let _ = Reflect::set(
                 &obj,
                 &JsValue::from_str("ret"),
-                &abi_type_to_js(import.sig.ret),
+                &abi_type_to_js(&self.module, &import.sig.ret),
             );
 
             out.push(&obj);
@@ -96,13 +123,13 @@ impl Vm {
 
             let params = Array::new();
             for ty in &eff.sig.params {
-                params.push(&abi_type_to_js(*ty));
+                params.push(&abi_type_to_js(&self.module, ty));
             }
             let _ = Reflect::set(&obj, &JsValue::from_str("params"), &params.into());
             let _ = Reflect::set(
                 &obj,
                 &JsValue::from_str("ret"),
-                &abi_type_to_js(eff.sig.ret),
+                &abi_type_to_js(&self.module, &eff.sig.ret),
             );
 
             out.push(&obj);
@@ -241,7 +268,11 @@ struct JsHostFn {
 }
 
 impl rusk_vm::HostFn for JsHostFn {
-    fn call(&mut self, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+    fn call(
+        &mut self,
+        _cx: &mut HostContext<'_>,
+        args: &[AbiValue],
+    ) -> Result<AbiValue, HostError> {
         let js_args = Array::new();
         for arg in args {
             js_args.push(&abi_value_to_js(arg));
@@ -266,16 +297,68 @@ impl rusk_vm::HostFn for JsHostFn {
     }
 }
 
-fn abi_type_to_js(ty: AbiType) -> JsValue {
-    JsValue::from_str(match ty {
-        AbiType::Unit => "unit",
-        AbiType::Bool => "bool",
-        AbiType::Int => "int",
-        AbiType::Float => "float",
-        AbiType::String => "string",
-        AbiType::Bytes => "bytes",
-        AbiType::Continuation => "continuation",
-    })
+fn abi_type_to_js(module: &ExecutableModule, ty: &AbiType) -> JsValue {
+    match ty {
+        AbiType::Unit => JsValue::from_str("unit"),
+        AbiType::Bool => JsValue::from_str("bool"),
+        AbiType::Int => JsValue::from_str("int"),
+        AbiType::Float => JsValue::from_str("float"),
+        AbiType::Byte => JsValue::from_str("byte"),
+        AbiType::Char => JsValue::from_str("char"),
+        AbiType::String => JsValue::from_str("string"),
+        AbiType::Bytes => JsValue::from_str("bytes"),
+        AbiType::Continuation => JsValue::from_str("continuation"),
+        AbiType::Array(elem) => {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &JsValue::from_str("tag"), &JsValue::from_str("array"));
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("elem"),
+                &abi_type_to_js(module, elem.as_ref()),
+            );
+            obj.into()
+        }
+        AbiType::Tuple(items) => {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &JsValue::from_str("tag"), &JsValue::from_str("tuple"));
+            let arr = Array::new();
+            for item in items {
+                arr.push(&abi_type_to_js(module, item));
+            }
+            let _ = Reflect::set(&obj, &JsValue::from_str("items"), &arr.into());
+            obj.into()
+        }
+        AbiType::Struct(type_id) => {
+            let obj = Object::new();
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("tag"),
+                &JsValue::from_str("struct"),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("typeId"),
+                &JsValue::from_f64(type_id.0 as f64),
+            );
+            if let Some(name) = module.type_name(*type_id) {
+                let _ = Reflect::set(&obj, &JsValue::from_str("name"), &JsValue::from_str(name));
+            }
+            obj.into()
+        }
+        AbiType::Enum(type_id) => {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &JsValue::from_str("tag"), &JsValue::from_str("enum"));
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("typeId"),
+                &JsValue::from_f64(type_id.0 as f64),
+            );
+            if let Some(name) = module.type_name(*type_id) {
+                let _ = Reflect::set(&obj, &JsValue::from_str("name"), &JsValue::from_str(name));
+            }
+            obj.into()
+        }
+    }
 }
 
 fn abi_value_to_js(v: &AbiValue) -> JsValue {
@@ -284,6 +367,26 @@ fn abi_value_to_js(v: &AbiValue) -> JsValue {
         AbiValue::Bool(b) => JsValue::from_bool(*b),
         AbiValue::Int(n) => JsValue::from(BigInt::from(*n)),
         AbiValue::Float(x) => JsValue::from_f64(*x),
+        AbiValue::Byte(b) => {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &JsValue::from_str("tag"), &JsValue::from_str("byte"));
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("value"),
+                &JsValue::from_f64((*b) as f64),
+            );
+            obj.into()
+        }
+        AbiValue::Char(c) => {
+            let obj = Object::new();
+            let _ = Reflect::set(&obj, &JsValue::from_str("tag"), &JsValue::from_str("char"));
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("value"),
+                &JsValue::from_str(&c.to_string()),
+            );
+            obj.into()
+        }
         AbiValue::String(s) => JsValue::from_str(s),
         AbiValue::Bytes(b) => Uint8Array::from(b.as_slice()).into(),
         AbiValue::Continuation(k) => {
@@ -297,6 +400,31 @@ fn abi_value_to_js(v: &AbiValue) -> JsValue {
                 &obj,
                 &JsValue::from_str("generation"),
                 &JsValue::from_f64(k.generation as f64),
+            );
+            obj.into()
+        }
+        AbiValue::Array(_) | AbiValue::Tuple(_) | AbiValue::Struct(_) | AbiValue::Enum(_) => {
+            // Composite ABI values are opaque VM references; store them in Rust and hand JS a
+            // stable ref id that can be passed back to the VM.
+            let (kind, cloned) = match v {
+                AbiValue::Array(_) => ("array", v.clone()),
+                AbiValue::Tuple(_) => ("tuple", v.clone()),
+                AbiValue::Struct(_) => ("struct", v.clone()),
+                AbiValue::Enum(_) => ("enum", v.clone()),
+                _ => unreachable!(),
+            };
+            let id = store_abi_ref(cloned);
+            let obj = Object::new();
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("tag"),
+                &JsValue::from_str("abiRef"),
+            );
+            let _ = Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str(kind));
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("abiId"),
+                &JsValue::from_f64(id as f64),
             );
             obj.into()
         }
@@ -330,6 +458,45 @@ fn js_to_abi_value(v: JsValue) -> Result<AbiValue, String> {
         return Ok(AbiValue::Bytes(bytes.to_vec()));
     }
     if v.is_object() {
+        let tag_v = Reflect::get(&v, &JsValue::from_str("tag")).unwrap_or(JsValue::UNDEFINED);
+        if let Some(tag) = tag_v.as_string() {
+            match tag.as_str() {
+                "byte" => {
+                    let value_v =
+                        Reflect::get(&v, &JsValue::from_str("value")).unwrap_or(JsValue::UNDEFINED);
+                    let n = js_to_u32(&value_v).map_err(|e| format!("byte.value: {e}"))?;
+                    let b: u8 = n
+                        .try_into()
+                        .map_err(|_| "byte.value: out of range for u8".to_string())?;
+                    return Ok(AbiValue::Byte(b));
+                }
+                "char" => {
+                    let value_v =
+                        Reflect::get(&v, &JsValue::from_str("value")).unwrap_or(JsValue::UNDEFINED);
+                    let s = value_v
+                        .as_string()
+                        .ok_or_else(|| "char.value: expected string".to_string())?;
+                    let mut chars = s.chars();
+                    let c = chars
+                        .next()
+                        .ok_or_else(|| "char.value: must not be empty".to_string())?;
+                    if chars.next().is_some() {
+                        return Err("char.value: must be a single Unicode scalar value".to_string());
+                    }
+                    return Ok(AbiValue::Char(c));
+                }
+                "abiRef" => {
+                    let id_v =
+                        Reflect::get(&v, &JsValue::from_str("abiId")).unwrap_or(JsValue::UNDEFINED);
+                    let id = js_to_u32(&id_v).map_err(|e| format!("abiRef.abiId: {e}"))?;
+                    return load_abi_ref(id).ok_or_else(|| {
+                        format!("unknown abiRef id {id} (value is no longer available)")
+                    });
+                }
+                _ => {}
+            }
+        }
+
         // Continuation handle object: `{ index: u32, generation: u32 }`.
         let index_v = Reflect::get(&v, &JsValue::from_str("index")).unwrap_or(JsValue::UNDEFINED);
         let gen_v =

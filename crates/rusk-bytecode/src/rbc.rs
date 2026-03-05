@@ -17,14 +17,15 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::{
-    AbiType, CallTarget, ConstValue, EffectId, EffectSpec, ExecutableModule, ExternalEffectDecl,
-    Function, FunctionId, HandlerClause, HostFnSig, HostImport, HostImportId, Instruction,
-    Intrinsic, MethodId, Pattern, Reg, SwitchCase, TypeId, TypeRepLit,
+    AbiEnumVariant, AbiSchema, AbiStructField, AbiType, CallTarget, ConstValue, EffectId,
+    EffectSpec, ExecutableModule, ExternalEffectDecl, Function, FunctionId, HandlerClause,
+    HostFnSig, HostImport, HostImportId, Instruction, Intrinsic, MethodId, Pattern, Reg,
+    SwitchCase, TypeId, TypeRepLit,
 };
 
 const MAGIC: &[u8; 8] = b"RUSKBC0\0";
 const VERSION_MAJOR: u16 = 0;
-const VERSION_MINOR: u16 = 13;
+const VERSION_MINOR: u16 = 14;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
@@ -282,6 +283,42 @@ impl Encoder {
             }
         }
 
+        // ABI schemas (sparse encoding).
+        let schema_len = module
+            .abi_schemas
+            .iter()
+            .filter(|schema| schema.is_some())
+            .count();
+        self.write_len(schema_len)?;
+        for (type_index, schema) in module.abi_schemas.iter().enumerate() {
+            let Some(schema) = schema.as_ref() else {
+                continue;
+            };
+            let type_id = TypeId(type_index as u32);
+            self.write_u32(type_id.0);
+            match schema {
+                AbiSchema::Struct { fields } => {
+                    self.write_u8(1); // struct
+                    self.write_len(fields.len())?;
+                    for AbiStructField { name, ty } in fields {
+                        self.write_string(name)?;
+                        self.write_abi_type(ty)?;
+                    }
+                }
+                AbiSchema::Enum { variants } => {
+                    self.write_u8(2); // enum
+                    self.write_len(variants.len())?;
+                    for AbiEnumVariant { name, fields } in variants {
+                        self.write_string(name)?;
+                        self.write_len(fields.len())?;
+                        for ty in fields {
+                            self.write_abi_type(ty)?;
+                        }
+                    }
+                }
+            }
+        }
+
         // External effects.
         self.write_len(module.external_effects.len())?;
         for decl in &module.external_effects {
@@ -304,25 +341,62 @@ impl Encoder {
         Ok(())
     }
 
-    fn write_abi_type(&mut self, ty: &AbiType) {
-        let tag: u8 = match ty {
-            AbiType::Unit => 0,
-            AbiType::Bool => 1,
-            AbiType::Int => 2,
-            AbiType::Float => 3,
-            AbiType::String => 4,
-            AbiType::Bytes => 5,
-            AbiType::Continuation => 6,
-        };
-        self.write_u8(tag);
+    fn write_abi_type(&mut self, ty: &AbiType) -> Result<(), EncodeError> {
+        // NOTE: This is a recursive encoding. Keep it in sync with `read_abi_type`.
+        //
+        // v0.14 tags:
+        // 0  Unit
+        // 1  Bool
+        // 2  Int
+        // 3  Float
+        // 4  String
+        // 5  Bytes
+        // 6  Continuation
+        // 7  Byte
+        // 8  Char
+        // 9  Array
+        // 10 Tuple
+        // 11 Struct
+        // 12 Enum
+        match ty {
+            AbiType::Unit => self.write_u8(0),
+            AbiType::Bool => self.write_u8(1),
+            AbiType::Int => self.write_u8(2),
+            AbiType::Float => self.write_u8(3),
+            AbiType::String => self.write_u8(4),
+            AbiType::Bytes => self.write_u8(5),
+            AbiType::Continuation => self.write_u8(6),
+            AbiType::Byte => self.write_u8(7),
+            AbiType::Char => self.write_u8(8),
+            AbiType::Array(elem) => {
+                self.write_u8(9);
+                self.write_abi_type(elem)?;
+            }
+            AbiType::Tuple(items) => {
+                self.write_u8(10);
+                self.write_len(items.len())?;
+                for item in items {
+                    self.write_abi_type(item)?;
+                }
+            }
+            AbiType::Struct(type_id) => {
+                self.write_u8(11);
+                self.write_u32(type_id.0);
+            }
+            AbiType::Enum(type_id) => {
+                self.write_u8(12);
+                self.write_u32(type_id.0);
+            }
+        }
+        Ok(())
     }
 
     fn write_host_fn_sig(&mut self, sig: &HostFnSig) -> Result<(), EncodeError> {
         self.write_len(sig.params.len())?;
         for ty in &sig.params {
-            self.write_abi_type(ty);
+            self.write_abi_type(ty)?;
         }
-        self.write_abi_type(&sig.ret);
+        self.write_abi_type(&sig.ret)?;
         Ok(())
     }
 
@@ -1337,6 +1411,58 @@ impl<'a> Decoder<'a> {
             *slot = Some(fields);
         }
 
+        // ABI schemas.
+        let mut abi_schemas: Vec<Option<AbiSchema>> = Vec::with_capacity(type_len);
+        abi_schemas.resize_with(type_len, || None);
+        let schema_len = self.read_len()?;
+        for _ in 0..schema_len {
+            let type_id = TypeId(self.read_u32()?);
+            let idx: usize = type_id
+                .0
+                .try_into()
+                .map_err(|_| self.err("type id overflow".to_string()))?;
+            let Some(slot) = abi_schemas.get_mut(idx) else {
+                return Err(self.err(format!("invalid TypeId {} in abi schemas", type_id.0)));
+            };
+            if slot.is_some() {
+                return Err(self.err(format!(
+                    "duplicate abi schema entry for TypeId {}",
+                    type_id.0
+                )));
+            }
+            let tag = self.read_u8()?;
+            let schema = match tag {
+                1 => {
+                    let field_len = self.read_len()?;
+                    let mut fields = Vec::with_capacity(field_len);
+                    for _ in 0..field_len {
+                        let name = self.read_string()?;
+                        let ty = self.read_abi_type()?;
+                        fields.push(AbiStructField { name, ty });
+                    }
+                    AbiSchema::Struct { fields }
+                }
+                2 => {
+                    let variant_len = self.read_len()?;
+                    let mut variants = Vec::with_capacity(variant_len);
+                    for _ in 0..variant_len {
+                        let name = self.read_string()?;
+                        let field_len = self.read_len()?;
+                        let mut fields = Vec::with_capacity(field_len);
+                        for _ in 0..field_len {
+                            fields.push(self.read_abi_type()?);
+                        }
+                        variants.push(AbiEnumVariant { name, fields });
+                    }
+                    AbiSchema::Enum { variants }
+                }
+                other => {
+                    return Err(self.err(format!("invalid AbiSchema tag {other}")));
+                }
+            };
+            *slot = Some(schema);
+        }
+
         // External effects.
         let eff_len = self.read_len()?;
         let mut external_effects = Vec::with_capacity(eff_len);
@@ -1390,6 +1516,7 @@ impl<'a> Decoder<'a> {
             assoc_type_dispatch,
             interface_impls,
             struct_layouts,
+            abi_schemas,
             external_effects,
             external_effect_ids,
             entry,
@@ -1414,7 +1541,8 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_abi_type(&mut self) -> Result<AbiType, DecodeError> {
-        match self.read_u8()? {
+        let tag = self.read_u8()?;
+        match tag {
             0 => Ok(AbiType::Unit),
             1 => Ok(AbiType::Bool),
             2 => Ok(AbiType::Int),
@@ -1422,6 +1550,19 @@ impl<'a> Decoder<'a> {
             4 => Ok(AbiType::String),
             5 => Ok(AbiType::Bytes),
             6 => Ok(AbiType::Continuation),
+            7 => Ok(AbiType::Byte),
+            8 => Ok(AbiType::Char),
+            9 => Ok(AbiType::Array(Box::new(self.read_abi_type()?))),
+            10 => {
+                let len = self.read_len()?;
+                let mut items = Vec::with_capacity(len);
+                for _ in 0..len {
+                    items.push(self.read_abi_type()?);
+                }
+                Ok(AbiType::Tuple(items))
+            }
+            11 => Ok(AbiType::Struct(TypeId(self.read_u32()?))),
+            12 => Ok(AbiType::Enum(TypeId(self.read_u32()?))),
             other => Err(self.err(format!("invalid AbiType tag {other}"))),
         }
     }

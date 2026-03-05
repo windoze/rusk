@@ -367,6 +367,9 @@ match compute() {
 1. **宿主函数（host imports）**：像 `std::println("...")` 这样直接调用宿主导入函数。
 2. **外部化 effects**：让未处理的 `@I.m(...)` 不在 VM 内陷阱，而是“冒泡到宿主”，由宿主决定如何恢复（`StepResult::Request`）。
 
-两者都受一个强约束：跨 VM/宿主边界的值必须是 ABI 安全的基本类型集合（`unit/bool/int/float/string/bytes`）。
+两者都受一个强约束：跨 VM/宿主边界的值必须是 ABI 安全的集合：
+
+- 基础类型：`unit/bool/int/float/byte/char/string/bytes/continuation`
+- 复合类型：`array/tuple/struct/enum`（以 VM 句柄/引用的形式跨边界；宿主侧需要通过 `HostContext` 来读取/构造；名义类型在 v1 仅支持单态/无类型实参）
 
 具体做法见 `docs/guides/host_integration.md` 与更完整的 `docs/embedding-vm.zh.md`。
