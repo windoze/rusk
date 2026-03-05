@@ -417,15 +417,14 @@ fn format_tokens(src: &str, options: &FormatOptions) -> Result<String, ParseErro
                                 blank_line(&mut out, &mut at_line_start);
                             }
 
-                            if let Some((control_kind, stmt_indent)) = control_stmt {
-                                if closed_kind == BlockKind::Control(control_kind)
-                                    && indent == stmt_indent
-                                {
-                                    if !matches!(next.as_ref(), Some(TokenKind::RBrace)) {
-                                        blank_line(&mut out, &mut at_line_start);
-                                    }
-                                    control_stmt = None;
+                            if let Some((control_kind, stmt_indent)) = control_stmt
+                                && closed_kind == BlockKind::Control(control_kind)
+                                && indent == stmt_indent
+                            {
+                                if !matches!(next.as_ref(), Some(TokenKind::RBrace)) {
+                                    blank_line(&mut out, &mut at_line_start);
                                 }
+                                control_stmt = None;
                             }
                         }
                         None => newline(&mut out, &mut at_line_start),
@@ -513,14 +512,14 @@ fn format_tokens(src: &str, options: &FormatOptions) -> Result<String, ParseErro
                     prev_token = Some(tok.clone());
                     newline(&mut out, &mut at_line_start);
 
-                    if let Some((_control_kind, stmt_indent)) = control_stmt {
-                        if indent == stmt_indent {
-                            let next = peek_next_token_kind(&items, i + 1);
-                            if next.is_some_and(|k| !matches!(k, TokenKind::RBrace)) {
-                                blank_line(&mut out, &mut at_line_start);
-                            }
-                            control_stmt = None;
+                    if let Some((_control_kind, stmt_indent)) = control_stmt
+                        && indent == stmt_indent
+                    {
+                        let next = peek_next_token_kind(&items, i + 1);
+                        if next.is_some_and(|k| !matches!(k, TokenKind::RBrace)) {
+                            blank_line(&mut out, &mut at_line_start);
                         }
+                        control_stmt = None;
                     }
 
                     let in_item_container = block_stack.last().is_none()
