@@ -1,8 +1,8 @@
 use rusk_compiler::{
     CompileMetrics, CompileOptions, compile_file_to_bytecode_with_options_and_metrics,
 };
-use rusk_host::std_io;
-use rusk_vm::{AbiValue, StepResult, Vm, vm_step};
+use rusk_host::{std_async, std_io};
+use rusk_vm::{AbiValue, StepResult, Vm};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,6 +90,7 @@ fn main() {
         Some("rusk") => {
             let mut options = CompileOptions::default();
             std_io::register_host_module(&mut options);
+            std_async::register(&mut options);
             options.opt_level = opt_level;
             match compile_file_to_bytecode_with_options_and_metrics(input_path, &options) {
                 Ok(v) => v,
@@ -141,6 +142,12 @@ fn main() {
     let mut last_result: Option<AbiValue> = None;
     let mut agg_metrics = rusk_vm::VmMetrics::default();
 
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("tokio runtime");
+    let local = tokio::task::LocalSet::new();
+
     for run_index in 0..total_runs {
         let mut vm = match entry_fn.param_count {
             0 => Vm::new(module.clone()),
@@ -154,13 +161,24 @@ fn main() {
             process::exit(1);
         });
         std_io::install_vm(&module, &mut vm);
+        let mut host_async = std_async::TokioHostAsync::new();
+        host_async.install_vm(&module, &mut vm);
         if metrics {
             vm.enable_metrics(true);
             vm.reset_metrics();
         }
 
         let run_start = Instant::now();
-        let step = vm_step(&mut vm, None);
+        let step = local.block_on(&rt, async {
+            loop {
+                let step =
+                    std_async::vm_step_with_wait_next(&module, &mut vm, &mut host_async).await;
+                match step {
+                    StepResult::Yield { .. } => continue,
+                    other => return other,
+                }
+            }
+        });
         let run_time = run_start.elapsed();
         let run_metrics = if metrics {
             Some(vm.take_metrics())

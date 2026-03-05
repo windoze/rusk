@@ -548,6 +548,210 @@ pub fn compile_to_bytecode(source: &str) -> Result<rusk_bytecode::ExecutableModu
 
 const SYSROOT_ENV: &str = "RUSK_SYSROOT";
 const STD_HOST_MODULE: &str = "_std_host";
+const ASYNC_ENTRY_WRAPPER_FN: &str = "__rusk_async_entry";
+const STD_ASYNC_RUN_FN: &str = "std::async::run";
+const STD_ASYNC_RUN_ARGV_FN: &str = "std::async::run_argv";
+
+fn maybe_inject_async_entry_wrapper(
+    mir: &mut Module,
+    options: &CompileOptions,
+) -> Result<(), CompileError> {
+    // Only inject when `std` is loaded (host declared `_std_host`) and the sysroot provides
+    // `std::async::run`.
+    let want_std = options.load_std
+        && options
+            .host_modules
+            .iter()
+            .any(|(name, _decl)| name == STD_HOST_MODULE);
+    if !want_std {
+        return Ok(());
+    }
+    if mir.function_id(STD_ASYNC_RUN_FN).is_none() {
+        return Ok(());
+    }
+    if mir.function_id(ASYNC_ENTRY_WRAPPER_FN).is_some() {
+        return Ok(());
+    }
+
+    let Some(main_id) = mir.function_id("main") else {
+        return Ok(());
+    };
+    let Some(main_fn) = mir.function(main_id) else {
+        return Ok(());
+    };
+    let main_params = main_fn.params.clone();
+    let main_ret_type = main_fn.ret_type.clone();
+
+    let param_count = main_params.len();
+    if param_count > 1 {
+        // `main` validation should reject this, but keep injection best-effort and non-fatal.
+        return Ok(());
+    }
+
+    // `std::async::{run,run_argv}` expects the entry function as a *function value* (`fn(...) -> T`),
+    // which in Rusk is represented as an internal `$Closure { func, env }` struct. Wrap the `main`
+    // function item into a closure value by calling through `$wrap::main` (env is ignored).
+    //
+    // This mirrors `Compiler::ensure_fn_value_wrapper` + `lower_path_expr` logic, but we do it
+    // here so the wrapper injection remains self-contained.
+    let main_wrapper_name = "$wrap::main".to_string();
+    if mir.function_id(main_wrapper_name.as_str()).is_none() {
+        let env_local = Local(0);
+        let mut wrapper_params = Vec::with_capacity(param_count + 1);
+        wrapper_params.push(Param {
+            local: env_local,
+            mutability: Mutability::Mutable,
+            ty: Some(Type::Array),
+        });
+
+        let mut forwarded_args = Vec::with_capacity(param_count);
+        for (idx, p) in main_params.iter().enumerate() {
+            let local = Local(idx + 1);
+            wrapper_params.push(Param {
+                local,
+                mutability: p.mutability,
+                ty: p.ty.clone(),
+            });
+            forwarded_args.push(Operand::Local(local));
+        }
+
+        let wrapper_ret_local = Local(param_count + 1);
+        mir.add_function(Function {
+            name: main_wrapper_name.clone(),
+            params: wrapper_params,
+            ret_type: main_ret_type.clone(),
+            locals: param_count + 2,
+            blocks: vec![BasicBlock {
+                label: "block0".to_string(),
+                params: vec![],
+                instructions: vec![Instruction::Call {
+                    dst: Some(wrapper_ret_local),
+                    func: "main".to_string(),
+                    args: forwarded_args,
+                }],
+                terminator: Terminator::Return {
+                    value: Operand::Local(wrapper_ret_local),
+                },
+            }],
+        })
+        .map_err(|message| CompileError::new(message, Span::new(0, 0)))?;
+    }
+
+    let mut params = Vec::with_capacity(param_count);
+    for (idx, p) in main_params.iter().enumerate() {
+        params.push(Param {
+            local: Local(idx),
+            mutability: p.mutability,
+            ty: p.ty.clone(),
+        });
+    }
+
+    let callee = if param_count == 0 {
+        STD_ASYNC_RUN_FN.to_string()
+    } else {
+        STD_ASYNC_RUN_ARGV_FN.to_string()
+    };
+
+    let Some(callee_id) = mir.function_id(callee.as_str()) else {
+        return Ok(());
+    };
+    let Some(callee_fn) = mir.function(callee_id) else {
+        return Ok(());
+    };
+
+    let generic_param_count = callee_fn
+        .params
+        .iter()
+        .take_while(|p| matches!(p.ty, Some(Type::TypeRep)))
+        .count();
+    if generic_param_count != 1 {
+        // The sysroot `std::async::{run,run_argv}` entry wrappers are expected to have exactly one
+        // reified generic type parameter (the return type `T`). Keep injection best-effort and
+        // skip if the signature doesn't match.
+        return Ok(());
+    }
+
+    let ret_rep = match main_ret_type.as_ref().unwrap_or(&Type::Unit) {
+        Type::Unit => TypeRepLit::Unit,
+        Type::Never => TypeRepLit::Never,
+        Type::Bool => TypeRepLit::Bool,
+        Type::Int => TypeRepLit::Int,
+        Type::Float => TypeRepLit::Float,
+        Type::Byte => TypeRepLit::Byte,
+        Type::Char => TypeRepLit::Char,
+        Type::String => TypeRepLit::String,
+        Type::Bytes => TypeRepLit::Bytes,
+        Type::Array => TypeRepLit::Array,
+        Type::Tuple(n) => TypeRepLit::Tuple(*n),
+        Type::Struct(name) => TypeRepLit::Struct(name.clone()),
+        Type::Enum(name) => TypeRepLit::Enum(name.clone()),
+        Type::Interface(name) => TypeRepLit::Interface(name.clone()),
+        Type::Fn => TypeRepLit::Fn,
+        Type::Cont => TypeRepLit::Cont,
+        Type::TypeRep => {
+            // `typerep` itself is not currently reifiable as a `TypeRepLit` base. Skip injection
+            // in this unusual case.
+            return Ok(());
+        }
+    };
+
+    // Locals:
+    // - params: `0..param_count`
+    // - `env_local`: empty closure env array
+    // - `closure_local`: `$Closure { func, env }`
+    // - `ret_local`: result of `std::async::run(...)`
+    let env_local = Local(param_count);
+    let closure_local = Local(param_count + 1);
+    let ret_local = Local(param_count + 2);
+
+    mir.add_function(Function {
+        name: ASYNC_ENTRY_WRAPPER_FN.to_string(),
+        params,
+        ret_type: main_ret_type.clone(),
+        locals: param_count + 3,
+        blocks: vec![BasicBlock {
+            label: "block0".to_string(),
+            params: vec![],
+            instructions: vec![
+                Instruction::MakeArray {
+                    dst: env_local,
+                    items: Vec::new(),
+                },
+                Instruction::MakeStruct {
+                    dst: closure_local,
+                    type_name: INTERNAL_CLOSURE_STRUCT.to_string(),
+                    type_args: Vec::new(),
+                    fields: vec![
+                        (
+                            CLOSURE_FIELD_FUNC.to_string(),
+                            Operand::Literal(ConstValue::Function(main_wrapper_name)),
+                        ),
+                        (CLOSURE_FIELD_ENV.to_string(), Operand::Local(env_local)),
+                    ],
+                },
+                Instruction::Call {
+                    dst: Some(ret_local),
+                    func: callee,
+                    args: {
+                        let mut args = Vec::with_capacity(3);
+                        args.push(Operand::Literal(ConstValue::TypeRep(ret_rep)));
+                        args.push(Operand::Local(closure_local));
+                        if param_count == 1 {
+                            args.push(Operand::Local(Local(0)));
+                        }
+                        args
+                    },
+                },
+            ],
+            terminator: Terminator::Return {
+                value: Operand::Local(ret_local),
+            },
+        }],
+    })
+    .map_err(|message| CompileError::new(message, Span::new(0, 0)))?;
+
+    Ok(())
+}
 
 fn resolve_sysroot_dir(options: &CompileOptions) -> Result<PathBuf, CompileError> {
     if let Some(path) = &options.sysroot {
@@ -674,6 +878,7 @@ pub fn compile_to_bytecode_with_options(
     options: &CompileOptions,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
     let mut mir = compile_to_mir_with_options(source, options)?;
+    maybe_inject_async_entry_wrapper(&mut mir, options)?;
     crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
@@ -712,6 +917,7 @@ pub fn compile_to_bytecode_with_options_and_metrics(
     let total_start = Instant::now();
 
     let (mut mir, mut metrics) = compile_to_mir_with_options_and_metrics(source, options)?;
+    maybe_inject_async_entry_wrapper(&mut mir, options)?;
 
     let mir_opt_start = Instant::now();
     crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
@@ -877,6 +1083,7 @@ pub fn compile_file_to_bytecode_with_options(
     options: &CompileOptions,
 ) -> Result<rusk_bytecode::ExecutableModule, CompileError> {
     let mut mir = compile_file_to_mir_with_options(entry_path, options)?;
+    maybe_inject_async_entry_wrapper(&mut mir, options)?;
     crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);
     let mut lower_options = crate::bytecode_lower::LowerOptions::default();
     for decl in &options.external_effects {
@@ -915,6 +1122,7 @@ pub fn compile_file_to_bytecode_with_options_and_metrics(
     let total_start = Instant::now();
 
     let (mut mir, mut metrics) = compile_file_to_mir_with_options_and_metrics(entry_path, options)?;
+    maybe_inject_async_entry_wrapper(&mut mir, options)?;
 
     let mir_opt_start = Instant::now();
     crate::mir_opt::optimize_mir_module(&mut mir, options.opt_level);

@@ -22,8 +22,11 @@ provided via **host functions**:
 - The **runtime** (VM) is given concrete host implementations at runtime; it will trap if the
   module declares host imports that are not installed.
 
-In this repo, the `rusk` CLI registers a minimal host-defined `std` module with
-`std::print(string) -> unit` and `std::println(string) -> unit`.
+In this repo, the `rusk` CLI registers two host modules that back the sysroot `std` wrapper:
+
+- `_std_host`: `std::print(string) -> unit` and `std::println(string) -> unit`
+- `_std_host_async`: Tokio-backed async ops used by `std::async` and `std::time` (and `std::http`
+  when the `rusk-host` Cargo feature `http` is enabled)
 
 ## The Language
 

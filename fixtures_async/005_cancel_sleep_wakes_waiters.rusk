@@ -1,0 +1,26 @@
+// expect: ok int 1
+
+fn main() -> int {
+    let cell = [0];
+    let s = std::time::sleep_ms(1000);
+
+    let h = std::async::spawn {
+        match s.await() {
+            Result::Ok(_) => { cell[0] = 0; () }
+            Result::Err(std::time::Error::Cancelled) => { cell[0] = 1; () }
+            Result::Err(_) => { cell[0] = 2; () }
+        }
+    };
+
+    // Ensure the spawned task reaches the await point.
+    std::async::yield();
+
+    let cancelled = s.cancel();
+    if !cancelled {
+        // Unexpected: cancellation should succeed while the timer is pending.
+        return 2;
+    };
+
+    let _ = h.await();
+    cell[0]
+}

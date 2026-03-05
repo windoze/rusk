@@ -1,0 +1,20 @@
+// expect: ok int 1
+
+fn main() -> int {
+    let h = std::async::spawn {
+        // Make the task yield once so joining can block.
+        std::async::yield();
+        ()
+    };
+
+    // Let the spawned task start and park itself.
+    std::async::yield();
+
+    let r1 = h.await();
+    let r2 = h.await();
+
+    match (r1, r2) {
+        (Result::Ok(_), Result::Ok(_)) => 1,
+        _ => 0,
+    }
+}

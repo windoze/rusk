@@ -1,0 +1,565 @@
+// Cooperative single-VM async runtime.
+//
+// Key idea:
+// - All user-facing async operations are ordinary method calls that may trigger effects.
+// - Host async operations are started eagerly via synchronous host imports (`_std_host_async`).
+// - The VM only suspends at the host boundary via one externalized effect:
+//   `@std::async::_HostAsync.wait_next() -> int` (wait for any host op completion).
+//
+// This keeps the host/VM ABI surface small while still enabling single-VM multitasking via a
+// pure in-language scheduler (effects + delimited continuations).
+
+pub interface Future {
+    type Output;
+
+    fn await() -> Self::Output;
+
+    // Default: non-cancellable futures just return false.
+    fn cancel() -> bool { false }
+}
+
+pub struct JoinHandle(int);
+
+pub enum TaskError {
+    Cancelled,
+}
+
+impl Future for JoinHandle {
+    type Output = Result<unit, TaskError>;
+
+    fn await() -> Self::Output {
+        @_Scheduler.await_task(self.0)
+    }
+
+    fn cancel() -> bool {
+        @_Scheduler.cancel_task(self.0)
+    }
+}
+
+pub fn spawn(f: fn() -> unit) -> JoinHandle {
+    JoinHandle(@_Scheduler.spawn(f))
+}
+
+// Scheduling hint. No fairness guarantees are made.
+pub fn yield() -> unit {
+    @_Scheduler.yield()
+}
+
+// Internal: handled in-language by the scheduler installed by `run` / `run_argv`.
+pub interface _Scheduler {
+    fn yield() -> unit;
+    fn spawn(f: fn() -> unit) -> int;
+    fn await_task(task_id: int) -> Result<unit, TaskError>;
+    fn cancel_task(task_id: int) -> bool;
+    fn await_host(op_id: int) -> bytes;
+    fn cancel_host(op_id: int) -> bool;
+}
+
+// Internal: externalized to the host as a single "wait for any completion" operation.
+pub interface _HostAsync {
+    fn wait_next() -> int;
+}
+
+struct HostWaiter {
+    task_id: int,
+    k: cont(bytes) -> unit,
+}
+
+struct JoinWaiter {
+    task_id: int,
+    k: cont(Result<unit, TaskError>) -> unit,
+}
+
+enum BlockedOn {
+    None,
+    Host(int), // op_id
+    Join(int), // task_id
+}
+
+struct TaskEntry {
+    done: Option<Result<unit, TaskError>>,
+    join_waiters: [JoinWaiter],
+    cancel_requested: bool,
+    blocked: BlockedOn,
+}
+
+enum MainEntry<T> {
+    NoArg(fn() -> T),
+    Argv(fn([string]) -> T, [string]),
+}
+
+enum Runnable {
+    Main,
+    TaskStart(int, fn() -> unit),
+    ResumeUnit(int, cont(unit) -> unit),
+    ResumeBytes(int, cont(bytes) -> unit, bytes),
+    ResumeJoin(int, cont(Result<unit, TaskError>) -> unit, Result<unit, TaskError>),
+}
+
+struct State<T> {
+    main: MainEntry<T>,
+    main_result: Option<T>,
+
+    next_task_id: int,
+    tasks: core::map::Map<int, TaskEntry>,
+
+    run_queue: [Runnable],
+    host_waiters: core::map::Map<int, [HostWaiter]>,
+    host_cached: core::map::Map<int, bytes>,
+
+    current_task_id: int,
+}
+
+impl<T> State<T> {
+    static fn new(main: MainEntry<T>) -> State<T> {
+        State {
+            main: main,
+            main_result: Option::None,
+            next_task_id: 1,
+            tasks: core::map::Map::new(),
+            run_queue: [],
+            host_waiters: core::map::Map::new(),
+            host_cached: core::map::Map::new(),
+            current_task_id: 0,
+        }
+    }
+
+    fn pop_runnable() -> Option<Runnable> {
+        if self.run_queue.len() == 0 {
+            return Option::None;
+        };
+        Option::Some(self.run_queue.remove(0))
+    }
+
+    fn enqueue(r: Runnable) -> unit {
+        self.run_queue.push(r);
+        ()
+    }
+
+    fn task_entry_default() -> TaskEntry {
+        TaskEntry {
+            done: Option::None,
+            join_waiters: [],
+            cancel_requested: false,
+            blocked: BlockedOn::None,
+        }
+    }
+
+    fn task_cancel_requested(task_id: int) -> bool {
+        match self.tasks.get(task_id) {
+            Option::Some(e) => e.cancel_requested,
+            Option::None => false,
+        }
+    }
+
+    fn task_done(task_id: int) -> Option<Result<unit, TaskError>> {
+        match self.tasks.remove(task_id) {
+            Option::None => Option::None,
+            Option::Some(entry) => {
+                let done = entry.done;
+                let _ = self.tasks.insert(task_id, entry);
+                done
+            }
+        }
+    }
+
+    fn task_set_blocked(task_id: int, blocked: BlockedOn) -> unit {
+        match self.tasks.remove(task_id) {
+            Option::None => (),
+            Option::Some(entry) => {
+                entry.blocked = blocked;
+                let _ = self.tasks.insert(task_id, entry);
+                ()
+            }
+        }
+    }
+
+    fn task_complete(task_id: int, res: Result<unit, TaskError>) -> unit {
+        match self.tasks.remove(task_id) {
+            Option::None => (),
+            Option::Some(entry) => {
+                // Cache completion for sharable joins.
+                entry.done = Option::Some(res);
+                entry.blocked = BlockedOn::None;
+
+                // Wake all joiners.
+                let waiters = entry.join_waiters;
+                entry.join_waiters = [];
+                let _ = self.tasks.insert(task_id, entry);
+
+                for w in waiters {
+                    self.enqueue(Runnable::ResumeJoin(w.task_id, w.k, res));
+                };
+                ()
+            }
+        }
+    }
+
+    fn task_remove_from_run_queue(task_id: int) -> unit {
+        let i = 0;
+        while i < self.run_queue.len() {
+            match self.run_queue[i] {
+                Runnable::TaskStart(id, _) => {
+                    if id == task_id {
+                        let _ = self.run_queue.remove(i);
+                        continue;
+                    };
+                    i = i + 1;
+                }
+                Runnable::ResumeUnit(id, _) => {
+                    if id == task_id {
+                        let _ = self.run_queue.remove(i);
+                        continue;
+                    };
+                    i = i + 1;
+                }
+                Runnable::ResumeBytes(id, _, _) => {
+                    if id == task_id {
+                        let _ = self.run_queue.remove(i);
+                        continue;
+                    };
+                    i = i + 1;
+                }
+                Runnable::ResumeJoin(id, _, _) => {
+                    if id == task_id {
+                        let _ = self.run_queue.remove(i);
+                        continue;
+                    };
+                    i = i + 1;
+                }
+                _ => { i = i + 1; }
+            }
+        };
+        ()
+    }
+
+    fn host_tag(b: bytes) -> int {
+        match core::intrinsics::bytes_get(b, 0) {
+            Option::Some(t) => core::intrinsics::byte_to_int(t),
+            Option::None => -1,
+        }
+    }
+
+    fn host_is_pending(b: bytes) -> bool {
+        self.host_tag(b) == 0
+    }
+
+    fn host_complete(op_id: int, result: bytes) -> unit {
+        if self.host_cached.contains_key(op_id) {
+            return ();
+        };
+        let _ = self.host_cached.insert(op_id, result);
+
+        let waiters = match self.host_waiters.remove(op_id) {
+            Option::Some(ws) => ws,
+            Option::None => [],
+        };
+
+        for w in waiters {
+            if w.task_id != 0 {
+                self.task_set_blocked(w.task_id, BlockedOn::None);
+            };
+            self.enqueue(Runnable::ResumeBytes(w.task_id, w.k, result));
+        };
+        ()
+    }
+
+    fn host_remove_waiter(op_id: int, task_id: int) -> unit {
+        match self.host_waiters.remove(op_id) {
+            Option::None => (),
+            Option::Some(ws) => {
+                let keep: [HostWaiter] = [];
+                for w in ws {
+                    if w.task_id != task_id {
+                        keep.push(w);
+                    };
+                };
+                if keep.len() > 0 {
+                    let _ = self.host_waiters.insert(op_id, keep);
+                };
+                ()
+            }
+        }
+    }
+
+    fn task_remove_from_join_waiters(target_task_id: int, joiner_task_id: int) -> unit {
+        match self.tasks.remove(target_task_id) {
+            Option::None => (),
+            Option::Some(entry) => {
+                let keep: [JoinWaiter] = [];
+                for w in entry.join_waiters {
+                    if w.task_id != joiner_task_id {
+                        keep.push(w);
+                    };
+                };
+                entry.join_waiters = keep;
+                let _ = self.tasks.insert(target_task_id, entry);
+                ()
+            }
+        }
+    }
+}
+
+fn _drive<T>(state: State<T>) -> unit {
+    loop {
+        match state.main_result {
+            Option::Some(_) => { return (); }
+            Option::None => ()
+        }
+
+        match state.pop_runnable() {
+            Option::None => {
+                if state.host_waiters.len() == 0 {
+                    panic("std::async: deadlock (no runnable tasks and no pending host ops)");
+                };
+
+                let op_id = @_HostAsync.wait_next();
+                if state.host_cached.contains_key(op_id) {
+                    continue;
+                };
+
+                let bytes = loaf::_std_host_async::op_take(op_id);
+                if state.host_is_pending(bytes) {
+                    continue;
+                };
+                state.host_complete(op_id, bytes);
+                continue;
+            }
+            Option::Some(runnable) => {
+                // Update current task id for handlers.
+                match runnable {
+                    Runnable::Main => state.current_task_id = 0,
+                    Runnable::TaskStart(id, _) => state.current_task_id = id,
+                    Runnable::ResumeUnit(id, _) => state.current_task_id = id,
+                    Runnable::ResumeBytes(id, _, _) => state.current_task_id = id,
+                    Runnable::ResumeJoin(id, _, _) => state.current_task_id = id,
+                };
+
+                let cur = state.current_task_id;
+
+                match _run_runnable(state, runnable) {
+            @ _Scheduler.yield() -> k => {
+                if cur != 0 && state.task_cancel_requested(cur) {
+                    state.task_complete(cur, Result::Err(TaskError::Cancelled));
+                    ()
+                } else {
+                    if cur != 0 {
+                        state.task_set_blocked(cur, BlockedOn::None);
+                    };
+                    state.enqueue(Runnable::ResumeUnit(cur, k));
+                    ()
+                }
+            }
+
+            @ _Scheduler.spawn(f) -> k => {
+                let task_id = state.next_task_id;
+                state.next_task_id = state.next_task_id + 1;
+
+                let _ = state.tasks.insert(task_id, state.task_entry_default());
+                state.enqueue(Runnable::TaskStart(task_id, f));
+
+                // `spawn` is synchronous: return the id immediately to the caller.
+                k(task_id)
+            }
+
+            @ _Scheduler.await_task(task_id) -> k => {
+                if task_id == cur {
+                    // Prevent trivial self-deadlock.
+                    k(Result::Err(TaskError::Cancelled));
+                } else {
+                    match state.task_done(task_id) {
+                        Option::Some(res) => {
+                            if cur != 0 {
+                                state.task_set_blocked(cur, BlockedOn::None);
+                            };
+                            k(res)
+                        }
+                        Option::None => {
+                            let entry_opt = state.tasks.remove(task_id);
+                            match entry_opt {
+                                Option::None => {
+                                    if cur != 0 {
+                                        state.task_set_blocked(cur, BlockedOn::None);
+                                    };
+                                    k(Result::Err(TaskError::Cancelled))
+                                }
+                                Option::Some(entry) => {
+                                    entry.join_waiters.push(JoinWaiter { task_id: cur, k: k });
+                                    let _ = state.tasks.insert(task_id, entry);
+                                    if cur != 0 {
+                                        state.task_set_blocked(cur, BlockedOn::Join(task_id));
+                                    };
+                                    ()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            @ _Scheduler.cancel_task(task_id) -> k => {
+                let entry_opt = state.tasks.remove(task_id);
+                match entry_opt {
+                    Option::None => k(false),
+                    Option::Some(entry) => {
+                        match entry.done {
+                            Option::Some(_) => {
+                                let _ = state.tasks.insert(task_id, entry);
+                                k(false)
+                            }
+                            Option::None => {
+                                entry.cancel_requested = true;
+
+                                if task_id == cur {
+                                    // Cooperative: takes effect at the next scheduler boundary.
+                                    let _ = state.tasks.insert(task_id, entry);
+                                    k(true)
+                                } else {
+                                    // Eager cancellation for non-running tasks.
+                                    match entry.blocked {
+                                        BlockedOn::Host(op_id) => {
+                                            state.host_remove_waiter(op_id, task_id);
+                                        }
+                                        BlockedOn::Join(target) => {
+                                            state.task_remove_from_join_waiters(target, task_id);
+                                        }
+                                        BlockedOn::None => ()
+                                    }
+                                    state.task_remove_from_run_queue(task_id);
+
+                                    // Mark done and wake joiners.
+                                    entry.done = Option::Some(Result::Err(TaskError::Cancelled));
+                                    entry.blocked = BlockedOn::None;
+
+                                    let waiters = entry.join_waiters;
+                                    entry.join_waiters = [];
+                                    let _ = state.tasks.insert(task_id, entry);
+
+                                    for w in waiters {
+                                        state.enqueue(Runnable::ResumeJoin(
+                                            w.task_id,
+                                            w.k,
+                                            Result::Err(TaskError::Cancelled),
+                                        ));
+                                    };
+
+                                    k(true)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            @ _Scheduler.await_host(op_id) -> k => {
+                if state.host_cached.contains_key(op_id) {
+                    let cached = match state.host_cached.get(op_id) {
+                        Option::Some(b) => b,
+                        Option::None => b"", // should be unreachable
+                    };
+                    if cur != 0 {
+                        state.task_set_blocked(cur, BlockedOn::None);
+                    };
+                    k(cached)
+                } else {
+                    let bytes = loaf::_std_host_async::op_take(op_id);
+                    if !state.host_is_pending(bytes) {
+                        state.host_complete(op_id, bytes);
+                        if cur != 0 {
+                            state.task_set_blocked(cur, BlockedOn::None);
+                        };
+                        k(bytes)
+                    } else if cur != 0 && state.task_cancel_requested(cur) {
+                        state.task_complete(cur, Result::Err(TaskError::Cancelled));
+                        ()
+                    } else {
+                        // Park this task until completion.
+                        let ws = match state.host_waiters.remove(op_id) {
+                            Option::Some(ws) => ws,
+                            Option::None => [],
+                        };
+                        ws.push(HostWaiter { task_id: cur, k: k });
+                        let _ = state.host_waiters.insert(op_id, ws);
+                        if cur != 0 {
+                            state.task_set_blocked(cur, BlockedOn::Host(op_id));
+                        };
+                        ()
+                    }
+                }
+            }
+
+            @ _Scheduler.cancel_host(op_id) -> k => {
+                if state.host_cached.contains_key(op_id) {
+                    k(false)
+                } else {
+                    let ok = loaf::_std_host_async::op_cancel(op_id);
+                    if ok {
+                        state.host_complete(op_id, b"\x03");
+                        k(true)
+                    } else {
+                        // If already completed, opportunistically consume and wake waiters.
+                        let bytes = loaf::_std_host_async::op_take(op_id);
+                        if !state.host_is_pending(bytes) {
+                            state.host_complete(op_id, bytes);
+                        };
+                        k(false)
+                    }
+                }
+            }
+
+            _ => {
+                // Runnable returned normally: either the main task completed (result already stored)
+                // or a spawned task finished.
+                if cur != 0 {
+                    state.task_complete(cur, Result::Ok(()));
+                };
+                ()
+            }
+                }
+            }
+        }
+    }
+}
+
+fn _run_runnable<T>(state: State<T>, runnable: Runnable) -> unit {
+    match runnable {
+        Runnable::Main => {
+            match state.main {
+                MainEntry::NoArg(f) => {
+                    let v = f();
+                    state.main_result = Option::Some(v);
+                    ()
+                }
+                MainEntry::Argv(f, argv) => {
+                    let v = f(argv);
+                    state.main_result = Option::Some(v);
+                    ()
+                }
+            }
+        }
+        Runnable::TaskStart(_, f) => f(),
+        Runnable::ResumeUnit(_, k) => k(()),
+        Runnable::ResumeBytes(_, k, b) => k(b),
+        Runnable::ResumeJoin(_, k, res) => k(res),
+    }
+}
+
+pub fn run<T>(main: fn() -> T) -> T {
+    let state: State<T> = State::new(MainEntry::NoArg(main));
+    state.enqueue(Runnable::Main);
+    _drive(state);
+    match state.main_result {
+        Option::Some(v) => v,
+        Option::None => panic("std::async::run: main did not complete"),
+    }
+}
+
+pub fn run_argv<T>(main: fn([string]) -> T, argv: [string]) -> T {
+    let state: State<T> = State::new(MainEntry::Argv(main, argv));
+    state.enqueue(Runnable::Main);
+    _drive(state);
+    match state.main_result {
+        Option::Some(v) => v,
+        Option::None => panic("std::async::run_argv: main did not complete"),
+    }
+}

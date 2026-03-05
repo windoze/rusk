@@ -1,0 +1,23 @@
+// expect: ok int 1
+
+fn main() -> int {
+    let cell = [0];
+
+    let h = std::async::spawn {
+        cell[0] = 1;
+        ()
+    };
+
+    let ok = h.cancel();
+    if !ok {
+        return 0;
+    };
+
+    match h.await() {
+        Result::Err(std::async::TaskError::Cancelled) => {
+            // The task body should never have run.
+            if cell[0] == 0 { 1 } else { 0 }
+        }
+        _ => 0,
+    }
+}

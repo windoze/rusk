@@ -1,0 +1,49 @@
+// Minimal HTTP helpers backed by `_std_host_async`.
+//
+// MVP: `get(url) -> Future<Result<bytes, Error>>`.
+
+pub enum Error {
+    Cancelled,
+    Message(string),
+}
+
+pub struct Get(int);
+
+pub fn get(url: string) -> Get {
+    Get(loaf::_std_host_async::http_get_start(url))
+}
+
+fn decode_get_result(b: bytes) -> Result<bytes, Error> {
+    let tag = match core::intrinsics::bytes_get(b, 0) {
+        Option::Some(t) => core::intrinsics::byte_to_int(t),
+        Option::None => -1,
+    };
+
+    match tag {
+        1 => {
+            // Ok(payload...)
+            let body = core::intrinsics::bytes_slice(b, 1, Option::None);
+            Result::Ok(body)
+        }
+        2 => {
+            let msg_bytes = core::intrinsics::bytes_slice(b, 1, Option::None);
+            Result::Err(Error::Message(core::intrinsics::string_from_utf8(msg_bytes)))
+        }
+        3 => Result::Err(Error::Cancelled),
+        0 => Result::Err(Error::Message("pending")),
+        _ => Result::Err(Error::Message("invalid host op result")),
+    }
+}
+
+impl super::async::Future for Get {
+    type Output = Result<bytes, Error>;
+
+    fn await() -> Self::Output {
+        let b = @super::async::_Scheduler.await_host(self.0);
+        decode_get_result(b)
+    }
+
+    fn cancel() -> bool {
+        @super::async::_Scheduler.cancel_host(self.0)
+    }
+}

@@ -55,11 +55,54 @@ fn std_host_module() -> HostModuleDecl {
     }
 }
 
+fn std_host_async_module() -> HostModuleDecl {
+    HostModuleDecl {
+        visibility: HostVisibility::Public,
+        functions: vec![
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "sleep_start_ms".to_string(),
+                sig: HostFnSig {
+                    params: vec![HostType::Int],
+                    ret: HostType::Int,
+                },
+            },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "http_get_start".to_string(),
+                sig: HostFnSig {
+                    params: vec![HostType::String],
+                    ret: HostType::Int,
+                },
+            },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "op_cancel".to_string(),
+                sig: HostFnSig {
+                    params: vec![HostType::Int],
+                    ret: HostType::Bool,
+                },
+            },
+            HostFunctionDecl {
+                visibility: HostVisibility::Public,
+                name: "op_take".to_string(),
+                sig: HostFnSig {
+                    params: vec![HostType::Int],
+                    ret: HostType::Bytes,
+                },
+            },
+        ],
+    }
+}
+
 #[test]
 fn std_sysroot_is_loaded_when_std_host_is_declared() {
     let mut options = CompileOptions::default();
     options
         .register_host_module("_std_host", std_host_module())
+        .unwrap();
+    options
+        .register_host_module("_std_host_async", std_host_async_module())
         .unwrap();
 
     let module = compile_to_bytecode_with_options(

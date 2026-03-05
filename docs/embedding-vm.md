@@ -452,6 +452,77 @@ For deeper background on how effects and continuations work in Rusk, see:
 
 ---
 
+## Example: Tokio-backed `std::async` (single-VM cooperative multitasking)
+
+The sysroot ships a cooperative single-VM async runtime in `std::async`, plus a minimal timer API
+in `std::time`.
+
+On the Rusk side:
+
+- `std::async::run { ... }` installs an in-language scheduler (effects + delimited continuations).
+- `std::async::spawn { ... }` spawns green tasks inside *one* VM instance.
+- `std::time::sleep_ms(ms)` starts a host timer eagerly and returns a future handle; calling
+  `.await()` may yield the current green task.
+
+On the host side, this design keeps the VM boundary compatible with the bytecode v0 constraints
+(ABI-safe primitives + one outstanding external request per VM) by using:
+
+- synchronous host imports in `_std_host_async` (`sleep_start_ms`, `op_cancel`, `op_take`, ...)
+- a single externalized effect `std::async::_HostAsync.wait_next() -> int` used only when the VM
+  has no runnable tasks
+
+To embed `std::async`:
+
+1. Register `_std_host`, `_std_host_async`, and `std::async::_HostAsync.wait_next` during
+   compilation.
+2. Install the matching host import implementations into the VM at runtime.
+3. Drive the VM on a Tokio current-thread runtime, handling `wait_next` via
+   `rusk_host::std_async::vm_step_with_wait_next`.
+
+Sketch:
+
+```rust
+use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
+use rusk_host::{std_async, std_io};
+use rusk_vm::{StepResult, Vm};
+
+fn run(source: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut options = CompileOptions::default();
+    std_io::register_host_module(&mut options);
+    std_async::register(&mut options);
+
+    let module = compile_to_bytecode_with_options(source, &options)?;
+    let mut vm = Vm::new(module.clone())?;
+    std_io::install_vm(&module, &mut vm);
+
+    let mut host_async = std_async::TokioHostAsync::new();
+    host_async.install_vm(&module, &mut vm);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?;
+    let local = tokio::task::LocalSet::new();
+
+    local.block_on(&rt, async {
+        loop {
+            match std_async::vm_step_with_wait_next(&module, &mut vm, &mut host_async).await {
+                StepResult::Done { .. } => return Ok(()),
+                StepResult::Trap { message } => return Err(message.into()),
+                StepResult::Request { effect_id, .. } => {
+                    return Err(format!("unhandled external effect id {}", effect_id.0).into());
+                }
+                StepResult::Yield { .. } => continue,
+            }
+        }
+    })
+}
+```
+
+Note: when `std` is loaded, the compiler automatically wraps `main` into a synthesized
+`__rusk_async_entry` that calls `std::async::run` (or `run_argv`). This means user code can call
+`.await()` directly inside `main` in the default `rusk` CLI embedding. If you compile without
+`std` (or without `_std_host` declared), this wrapper is not injected.
+
 ## Pinned Continuations: host-storable continuation handles
 
 Rusk supports **first-class, one-shot delimited continuations** as language-level values (type

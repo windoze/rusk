@@ -2,8 +2,8 @@ use rusk_bytecode::from_bytes;
 use rusk_compiler::analysis as compiler_analysis;
 use rusk_compiler::tooling::{diagnostics as tooling_diagnostics, formatter, linter};
 use rusk_compiler::{CompileOptions, compile_file_to_bytecode_with_options};
-use rusk_host::std_io;
-use rusk_vm::{StepResult, Vm, vm_step};
+use rusk_host::{std_async, std_io};
+use rusk_vm::{StepResult, Vm};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -106,6 +106,7 @@ fn main() {
             };
             if load_std {
                 std_io::register_host_module(&mut options);
+                std_async::register(&mut options);
             }
             match compile_file_to_bytecode_with_options(&input_path, &options) {
                 Ok(m) => m,
@@ -140,33 +141,50 @@ fn main() {
         process::exit(1);
     });
     std_io::install_vm(&module, &mut vm);
+    let mut host_async = std_async::TokioHostAsync::new();
+    host_async.install_vm(&module, &mut vm);
 
-    match vm_step(&mut vm, None) {
-        StepResult::Done { value } => {
-            if value != rusk_vm::AbiValue::Unit {
-                // `main` defaults to returning `unit` (explicitly or via omission), but printing a
-                // non-unit return is useful during development.
-                println!("{value:?}");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("tokio runtime");
+    let local = tokio::task::LocalSet::new();
+
+    let exit_code = local.block_on(&rt, async {
+        loop {
+            let step = std_async::vm_step_with_wait_next(&module, &mut vm, &mut host_async).await;
+            match step {
+                StepResult::Done { value } => {
+                    if value != rusk_vm::AbiValue::Unit {
+                        // `main` defaults to returning `unit` (explicitly or via omission), but
+                        // printing a non-unit return is useful during development.
+                        println!("{value:?}");
+                    }
+                    return 0;
+                }
+                StepResult::Trap { message } => {
+                    eprintln!("runtime error: {message}");
+                    return 1;
+                }
+                StepResult::Request {
+                    effect_id, args, ..
+                } => {
+                    let name = module
+                        .external_effect(effect_id)
+                        .map(|d| format!("{}.{}", d.interface, d.method))
+                        .unwrap_or_else(|| format!("<unknown {}>", effect_id.0));
+                    eprintln!("runtime error: external effect request: {name} args={args:?}");
+                    return 1;
+                }
+                StepResult::Yield { .. } => {
+                    // Only possible when stepping with explicit fuel, but handle defensively.
+                    continue;
+                }
             }
         }
-        StepResult::Trap { message } => {
-            eprintln!("runtime error: {message}");
-            process::exit(1);
-        }
-        StepResult::Request {
-            effect_id, args, ..
-        } => {
-            let name = module
-                .external_effect(effect_id)
-                .map(|d| format!("{}.{}", d.interface, d.method))
-                .unwrap_or_else(|| format!("<unknown {}>", effect_id.0));
-            eprintln!("runtime error: external effect request: {name} args={args:?}");
-            process::exit(1);
-        }
-        StepResult::Yield { .. } => {
-            eprintln!("runtime error: unexpected yield");
-            process::exit(1);
-        }
+    });
+    if exit_code != 0 {
+        process::exit(exit_code);
     }
 }
 

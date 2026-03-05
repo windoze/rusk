@@ -87,7 +87,7 @@ StepResult::Request { effect_id, args, ... }
 
 ```rust
 use rusk_compiler::{CompileOptions, compile_file_to_bytecode_with_options};
-use rusk_host::std_io;
+use rusk_host::{std_async, std_io};
 use rusk_vm::{Vm, StepResult, vm_step};
 use std::path::Path;
 
@@ -95,6 +95,7 @@ fn run_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // 1) 编译期：配置 sysroot / std / 宿主模块原型
     let mut options = CompileOptions::default();
     std_io::register_host_module(&mut options); // 提供 std::print/std::println 的“原型”
+    std_async::register(&mut options); // 提供 std::async/std::time 等所需的 `_std_host_async` + `wait_next`
 
     let module = compile_file_to_bytecode_with_options(path, &options)?;
 
@@ -127,6 +128,11 @@ fn run_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 ```
+
+> 注意：如果你希望脚本使用 `std::async` / `std::time::sleep_ms` 等能力，你需要在运行期安装
+> `_std_host_async` 的实现，并用 Tokio（或你自己的等价机制）驱动 `std::async::_HostAsync.wait_next`
+> 这个外部化 effect。一个可直接复用的实现见 `rusk_host::std_async`，更完整的示例见
+> `docs/embedding-vm.zh.md` 的 `std::async` 小节。
 
 > 实际项目里你通常会：
 > - 缓存编译结果（`.rbc`）避免每次都编译

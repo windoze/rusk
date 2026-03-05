@@ -1,0 +1,8 @@
+// expect: ok int 1
+
+fn main() -> int {
+    match std::time::sleep_ms(-1).await() {
+        Result::Ok(_) => 0,
+        Result::Err(_) => 1,
+    }
+}

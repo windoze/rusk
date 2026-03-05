@@ -4,7 +4,7 @@ use rusk_compiler::{
     CompileOptions, compile_file_to_bytecode_with_options, compile_to_bytecode_with_options,
 };
 use rusk_host::{std_async, std_io};
-use rusk_vm::{AbiValue, StepResult, Vm, vm_drop_continuation, vm_step};
+use rusk_vm::{AbiValue, StepResult, Vm, vm_drop_continuation};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -114,7 +114,7 @@ fn parse_expected_value(spec: &str, path: &Path) -> AbiValue {
 
     if let Some(rest) = spec.strip_prefix("string") {
         let mut s = rest.trim();
-        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        if s.starts_with('\"') && s.ends_with('\"') && s.len() >= 2 {
             s = &s[1..s.len() - 1];
         }
         return AbiValue::String(s.to_string());
@@ -195,12 +195,12 @@ fn discover_fixtures(fixture_dir: &Path) -> Vec<FixtureCase> {
 }
 
 #[test]
-fn std_json_fixtures() {
-    let fixture_dir = Path::new("fixtures_std");
+fn std_async_fixtures() {
+    let fixture_dir = Path::new("fixtures_async");
     let cases = discover_fixtures(fixture_dir);
     if cases.is_empty() {
         panic!(
-            "no std-json fixtures found under `{}`",
+            "no std-async fixtures found under `{}`",
             fixture_dir.display()
         );
     }
@@ -241,14 +241,53 @@ fn std_json_fixtures() {
                 let module = module.unwrap_or_else(|e| {
                     panic!("fixture {}: compile failed: {e}", entry_path.display())
                 });
-                let mut vm = Vm::new(module.clone()).unwrap_or_else(|e| {
+
+                let Some(entry_fn) = module.function(module.entry) else {
+                    panic!(
+                        "fixture {}: invalid entry function id {}",
+                        entry_path.display(),
+                        module.entry.0
+                    );
+                };
+
+                let argv = vec![
+                    entry_path.to_string_lossy().into_owned(),
+                    "arg1".to_string(),
+                    "arg2".to_string(),
+                ];
+
+                let mut vm = match entry_fn.param_count {
+                    0 => Vm::new(module.clone()),
+                    1 => Vm::new_with_argv(module.clone(), argv),
+                    n => panic!(
+                        "fixture {}: unsupported entry arity: expected 0 or 1 param, got {n}",
+                        entry_path.display()
+                    ),
+                }
+                .unwrap_or_else(|e| {
                     panic!("fixture {}: vm init failed: {e}", entry_path.display())
                 });
+
                 common::install_core_host_fns_vm(&module, &mut vm);
                 std_io::install_vm(&module, &mut vm);
-                let got = run_to_completion(&module, &mut vm).unwrap_or_else(|e| {
-                    panic!("fixture {}: runtime failed: {e}", entry_path.display())
+
+                let mut host_async = std_async::TokioHostAsync::new();
+                host_async.install_vm(&module, &mut vm);
+
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("tokio runtime");
+                let local = tokio::task::LocalSet::new();
+
+                let got = local.block_on(&rt, async {
+                    run_to_completion(&module, &mut vm, &mut host_async)
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("fixture {}: runtime failed: {e}", entry_path.display())
+                        })
                 });
+
                 assert_eq!(
                     got,
                     want,
@@ -260,12 +299,51 @@ fn std_json_fixtures() {
                 let module = module.unwrap_or_else(|e| {
                     panic!("fixture {}: compile failed: {e}", entry_path.display())
                 });
-                let mut vm = Vm::new(module.clone()).unwrap_or_else(|e| {
+
+                let Some(entry_fn) = module.function(module.entry) else {
+                    panic!(
+                        "fixture {}: invalid entry function id {}",
+                        entry_path.display(),
+                        module.entry.0
+                    );
+                };
+
+                let argv = vec![
+                    entry_path.to_string_lossy().into_owned(),
+                    "arg1".to_string(),
+                    "arg2".to_string(),
+                ];
+
+                let mut vm = match entry_fn.param_count {
+                    0 => Vm::new(module.clone()),
+                    1 => Vm::new_with_argv(module.clone(), argv),
+                    n => panic!(
+                        "fixture {}: unsupported entry arity: expected 0 or 1 param, got {n}",
+                        entry_path.display()
+                    ),
+                }
+                .unwrap_or_else(|e| {
                     panic!("fixture {}: vm init failed: {e}", entry_path.display())
                 });
+
                 common::install_core_host_fns_vm(&module, &mut vm);
                 std_io::install_vm(&module, &mut vm);
-                let err = run_to_completion(&module, &mut vm).expect_err("expected trap");
+
+                let mut host_async = std_async::TokioHostAsync::new();
+                host_async.install_vm(&module, &mut vm);
+
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("tokio runtime");
+                let local = tokio::task::LocalSet::new();
+
+                let err = local
+                    .block_on(&rt, async {
+                        run_to_completion(&module, &mut vm, &mut host_async).await
+                    })
+                    .expect_err("expected trap");
+
                 assert!(
                     err.contains(&contains),
                     "fixture {}: runtime error mismatch\n  want message containing: {contains:?}\n  got: {err}",
@@ -276,21 +354,27 @@ fn std_json_fixtures() {
     }
 }
 
-fn run_to_completion(
+async fn run_to_completion(
     module: &rusk_bytecode::ExecutableModule,
     vm: &mut Vm,
+    host_async: &mut std_async::TokioHostAsync,
 ) -> Result<AbiValue, String> {
-    match vm_step(vm, None) {
-        StepResult::Done { value } => Ok(value),
-        StepResult::Trap { message } => Err(message),
-        StepResult::Yield { .. } => Err("unexpected yield".to_string()),
-        StepResult::Request { effect_id, k, .. } => {
-            let _ = vm_drop_continuation(vm, k);
-            let name = module
-                .external_effect(effect_id)
-                .map(|d| format!("{}.{}", d.interface, d.method))
-                .unwrap_or_else(|| format!("<unknown {}>", effect_id.0));
-            Err(format!("unexpected external effect request: {name}"))
+    loop {
+        let step = std_async::vm_step_with_wait_next(module, vm, host_async).await;
+        match step {
+            StepResult::Done { value } => return Ok(value),
+            StepResult::Trap { message } => return Err(message),
+            StepResult::Yield { .. } => continue,
+            StepResult::Request { effect_id, args, k } => {
+                let _ = vm_drop_continuation(vm, k);
+                let name = module
+                    .external_effect(effect_id)
+                    .map(|d| format!("{}.{}", d.interface, d.method))
+                    .unwrap_or_else(|| format!("<unknown {}>", effect_id.0));
+                return Err(format!(
+                    "unexpected external effect request: {name} args={args:?}"
+                ));
+            }
         }
     }
 }

@@ -1,0 +1,17 @@
+// expect: ok int 1
+
+fn main() -> int {
+    let cell = [0];
+
+    let h = std::async::spawn {
+        cell[0] = 1;
+        ()
+    };
+
+    std::async::yield();
+
+    // Ensure the task completion is observed.
+    let _ = h.await();
+
+    cell[0]
+}

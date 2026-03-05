@@ -1,0 +1,8 @@
+// expect: ok int 1
+
+fn main() -> int {
+    match std::http::get("https://example.com").await() {
+        Result::Ok(_) => 0,
+        Result::Err(_) => 1,
+    }
+}

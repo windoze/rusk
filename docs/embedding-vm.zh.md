@@ -426,6 +426,69 @@ loop {
 
 ---
 
+## 示例：Tokio 驱动的 `std::async`（单 VM 协作式多任务）
+
+sysroot 提供了一个基于 effects + delimited continuations 的协作式异步运行时：
+
+- `std::async`：单 VM 的 green-task 调度器（`run` / `spawn` / `yield` / `JoinHandle.await()`）
+- `std::time`：最小的定时器 Future（`sleep_ms(ms)` + `.await()`）
+
+这个设计的目标是：在保持字节码 v0 ABI 限制（仅基础类型跨边界、每个 VM 只允许一个未完成的外部请求）
+不变的前提下，实现“同一个 VM 内的并发”：
+
+- 绝大多数异步操作通过 `_std_host_async` 的**同步宿主导入**来启动/取消/取结果
+- VM 只在必要时外部化一个效果：`std::async::_HostAsync.wait_next() -> int`（等待任意宿主异步 op 完成）
+
+嵌入侧的最小流程：
+
+1. 编译期注册 `_std_host`、`_std_host_async`，并注册外部化效果 `std::async::_HostAsync.wait_next`。
+2. 运行期把对应的宿主导入实现安装到 VM 上。
+3. 在 Tokio current-thread runtime 下驱动 VM，使用
+   `rusk_host::std_async::vm_step_with_wait_next` 处理 `wait_next`。
+
+示例（伪代码）：
+
+```rust
+use rusk_compiler::{CompileOptions, compile_to_bytecode_with_options};
+use rusk_host::{std_async, std_io};
+use rusk_vm::{StepResult, Vm};
+
+fn run(source: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut options = CompileOptions::default();
+    std_io::register_host_module(&mut options);
+    std_async::register(&mut options);
+
+    let module = compile_to_bytecode_with_options(source, &options)?;
+    let mut vm = Vm::new(module.clone())?;
+    std_io::install_vm(&module, &mut vm);
+
+    let mut host_async = std_async::TokioHostAsync::new();
+    host_async.install_vm(&module, &mut vm);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?;
+    let local = tokio::task::LocalSet::new();
+
+    local.block_on(&rt, async {
+        loop {
+            match std_async::vm_step_with_wait_next(&module, &mut vm, &mut host_async).await {
+                StepResult::Done { .. } => return Ok(()),
+                StepResult::Trap { message } => return Err(message.into()),
+                StepResult::Request { effect_id, .. } => {
+                    return Err(format!("unhandled external effect id {}", effect_id.0).into());
+                }
+                StepResult::Yield { .. } => continue,
+            }
+        }
+    })
+}
+```
+
+注意：当加载了 `std` 时，编译器会自动合成一个 `__rusk_async_entry` 入口包装器，并在其中调用
+`std::async::run`（或 `run_argv`）来安装调度器。因此在默认 `rusk` CLI 的语境里，用户代码可以在
+`main` 里直接调用 `.await()`。如果你在编译期关闭 `std`（或不声明 `_std_host`），则不会注入该入口。
+
 ## 固定延续：宿主可存储的延续句柄
 
 Rusk 支持**一等、一次性的限定延续**作为语言级别的值（类型 `cont(<param>) -> <ret>`）。这些可以在效果处理器中捕获、存储在变量中，并稍后恢复。

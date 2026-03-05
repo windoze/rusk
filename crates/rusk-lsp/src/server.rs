@@ -3,7 +3,7 @@ use crate::text::{byte_offset_to_position, byte_range_to_range, position_to_byte
 use rusk_compiler::analysis as compiler_analysis;
 use rusk_compiler::source_map::SourceName;
 use rusk_compiler::vfs::SourceProvider;
-use rusk_host::std_io;
+use rusk_host::{std_async, std_io};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
@@ -133,6 +133,7 @@ impl RuskLanguageServer {
         };
         if options.load_std {
             std_io::register_host_module(&mut options);
+            std_async::register(&mut options);
         }
         options
     }

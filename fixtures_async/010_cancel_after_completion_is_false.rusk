@@ -1,0 +1,7 @@
+// expect: ok int 1
+
+fn main() -> int {
+    let s = std::time::sleep_ms(0);
+    let _ = s.await();
+    if s.cancel() { 0 } else { 1 }
+}

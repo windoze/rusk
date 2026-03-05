@@ -1,0 +1,28 @@
+// expect: ok int 2
+
+fn main() -> int {
+    let cell = [0];
+
+    // Use a long-enough sleep so both tasks can register as waiters before completion.
+    let s = std::time::sleep_ms(20);
+
+    let h1 = std::async::spawn {
+        let _ = s.await();
+        cell[0] = cell[0] + 1;
+        ()
+    };
+    let h2 = std::async::spawn {
+        let _ = s.await();
+        cell[0] = cell[0] + 1;
+        ()
+    };
+
+    // Give both tasks a chance to run until they block on `await()`.
+    std::async::yield();
+    std::async::yield();
+
+    let _ = h1.await();
+    let _ = h2.await();
+
+    cell[0]
+}

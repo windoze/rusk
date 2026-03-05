@@ -370,7 +370,8 @@ pub fn lower_mir_module_with_options(
     let Some(main_id) = mir.function_id("main") else {
         return Err(LowerError::new("missing required entry function `main`"));
     };
-    out.entry = FunctionId(main_id.0);
+    let entry_id = mir.function_id("__rusk_async_entry").unwrap_or(main_id);
+    out.entry = FunctionId(entry_id.0);
 
     // Populate dynamic dispatch tables + runtime type metadata.
     for ((ty, method), id) in &mir.methods {
