@@ -2200,6 +2200,69 @@ fn eval_core_intrinsic(
             }
             _ => Err(bad_args("core::intrinsics::string_from_utf8_strict")),
         },
+        I::FloatFromStringStrict => match args.as_slice() {
+            [Value::String(s)] => {
+                let float_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Float,
+                    args: Vec::new(),
+                });
+                let text = s.as_str(heap)?;
+                match text.parse::<f64>() {
+                    Ok(v) if v.is_finite() => alloc_option(
+                        module,
+                        heap,
+                        gc_allocations_since_collect,
+                        float_rep,
+                        "Some",
+                        vec![Value::Float(v)],
+                    ),
+                    _ => alloc_option(
+                        module,
+                        heap,
+                        gc_allocations_since_collect,
+                        float_rep,
+                        "None",
+                        Vec::new(),
+                    ),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::float_from_string_strict")),
+        },
+        I::IntFromStringStrict => match args.as_slice() {
+            [Value::String(s)] => {
+                let int_rep = type_reps.intern(TypeRepNode {
+                    ctor: TypeCtor::Int,
+                    args: Vec::new(),
+                });
+                let text = s.as_str(heap)?;
+                match text.parse::<i64>() {
+                    Ok(v) => alloc_option(
+                        module,
+                        heap,
+                        gc_allocations_since_collect,
+                        int_rep,
+                        "Some",
+                        vec![Value::Int(v)],
+                    ),
+                    Err(_) => alloc_option(
+                        module,
+                        heap,
+                        gc_allocations_since_collect,
+                        int_rep,
+                        "None",
+                        Vec::new(),
+                    ),
+                }
+            }
+            _ => Err(bad_args("core::intrinsics::int_from_string_strict")),
+        },
+        I::StringToUtf8Bytes => match args.as_slice() {
+            [Value::String(s)] => {
+                let text = s.as_str(heap)?;
+                alloc_bytes(heap, gc_allocations_since_collect, text.as_bytes().to_vec())
+            }
+            _ => Err(bad_args("core::intrinsics::string_to_utf8_bytes")),
+        },
         I::StringFromUtf16Le | I::StringFromUtf16Be => match args.as_slice() {
             [Value::Ref(arr)] => {
                 let out =

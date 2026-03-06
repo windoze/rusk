@@ -40,29 +40,19 @@ impl Serializer for HashSer {
         Result::Ok(())
     }
 
-    fn struct_begin(_name: string, field_count: int) -> Result<unit, SerdeError> {
+    fn seq_begin(_len: int) -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn seq_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+
+    fn map_begin(field_count: int) -> Result<unit, SerdeError> {
         self.h = self.h * 100 + (1 + field_count);
         Result::Ok(())
     }
-    fn struct_field(_name: string) -> Result<unit, SerdeError> {
+    fn map_key(_k: string) -> Result<unit, SerdeError> {
         self.h = self.h * 100 + 2;
         Result::Ok(())
     }
-    fn struct_end() -> Result<unit, SerdeError> {
+    fn map_end() -> Result<unit, SerdeError> {
         self.h = self.h * 100 + 3;
-        Result::Ok(())
-    }
-
-    fn enum_begin(_name: string, variant_count: int) -> Result<unit, SerdeError> {
-        self.h = self.h * 100 + (4 + variant_count);
-        Result::Ok(())
-    }
-    fn enum_variant(_name: string, index: int, field_count: int) -> Result<unit, SerdeError> {
-        self.h = self.h * 100 + (5 + index * 10 + field_count);
-        Result::Ok(())
-    }
-    fn enum_end() -> Result<unit, SerdeError> {
-        self.h = self.h * 100 + 6;
         Result::Ok(())
     }
 }
@@ -82,4 +72,3 @@ fn main() -> int {
         Result::Err(_) => -2,
     }
 }
-

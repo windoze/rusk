@@ -3,9 +3,22 @@
 pub enum SerdeError {
     Message(string),
     UnknownEnumTag(string, int),
+
+    InvalidUtf8,
+    TrailingCharacters,
+    MissingField(string),
+    Overflow(string),
+    ParseError(string, string, int, int, int), // (format, message, byte_offset, line, col)
 }
 
+// A minimal “serde core” model:
+// - scalars
+// - sequences (ordered)
+// - maps (string-keyed)
+//
+// Formats are free to impose additional restrictions (e.g. JSON object keys are strings).
 pub interface Serializer {
+    // Scalars.
     fn unit() -> core::result::Result<unit, SerdeError>;
     fn bool(v: bool) -> core::result::Result<unit, SerdeError>;
     fn int(v: int) -> core::result::Result<unit, SerdeError>;
@@ -15,20 +28,18 @@ pub interface Serializer {
     fn string(v: string) -> core::result::Result<unit, SerdeError>;
     fn bytes(v: bytes) -> core::result::Result<unit, SerdeError>;
 
-    fn struct_begin(name: string, field_count: int) -> core::result::Result<unit, SerdeError>;
-    fn struct_field(name: string) -> core::result::Result<unit, SerdeError>;
-    fn struct_end() -> core::result::Result<unit, SerdeError>;
+    // Sequences.
+    fn seq_begin(len: int) -> core::result::Result<unit, SerdeError>;
+    fn seq_end() -> core::result::Result<unit, SerdeError>;
 
-    fn enum_begin(name: string, variant_count: int) -> core::result::Result<unit, SerdeError>;
-    fn enum_variant(
-        name: string,
-        index: int,
-        field_count: int,
-    ) -> core::result::Result<unit, SerdeError>;
-    fn enum_end() -> core::result::Result<unit, SerdeError>;
+    // Maps (string keys).
+    fn map_begin(len: int) -> core::result::Result<unit, SerdeError>;
+    fn map_key(k: string) -> core::result::Result<unit, SerdeError>;
+    fn map_end() -> core::result::Result<unit, SerdeError>;
 }
 
 pub interface Deserializer {
+    // Scalars.
     fn unit() -> core::result::Result<unit, SerdeError>;
     fn bool() -> core::result::Result<bool, SerdeError>;
     fn int() -> core::result::Result<int, SerdeError>;
@@ -38,17 +49,18 @@ pub interface Deserializer {
     fn string() -> core::result::Result<string, SerdeError>;
     fn bytes() -> core::result::Result<bytes, SerdeError>;
 
-    fn struct_begin(name: string, field_count: int) -> core::result::Result<unit, SerdeError>;
-    fn struct_field(name: string) -> core::result::Result<unit, SerdeError>;
-    fn struct_end() -> core::result::Result<unit, SerdeError>;
+    // Sequences.
+    fn seq_begin() -> core::result::Result<unit, SerdeError>;
+    fn seq_has_next() -> core::result::Result<bool, SerdeError>;
+    fn seq_end() -> core::result::Result<unit, SerdeError>;
 
-    fn enum_begin(name: string, variant_count: int) -> core::result::Result<int, SerdeError>;
-    fn enum_variant(
-        name: string,
-        index: int,
-        field_count: int,
-    ) -> core::result::Result<unit, SerdeError>;
-    fn enum_end() -> core::result::Result<unit, SerdeError>;
+    // Maps (string keys).
+    fn map_begin() -> core::result::Result<unit, SerdeError>;
+    fn map_next_key() -> core::result::Result<Option<string>, SerdeError>;
+    fn map_end() -> core::result::Result<unit, SerdeError>;
+
+    // Forward-compatibility helper: consume one value of any shape.
+    fn skip_value() -> core::result::Result<unit, SerdeError>;
 }
 
 pub interface Serialize {
@@ -57,6 +69,38 @@ pub interface Serialize {
 
 pub interface Deserialize {
     static fn deserialize(d: Deserializer) -> core::result::Result<Self, SerdeError>;
+}
+
+// -------- Incremental / chunked decoding --------
+
+pub enum DecodePoll<T> {
+    Pending,
+    Ready(T),
+}
+
+pub interface IncrementalDecoder {
+    fn feed_bytes(chunk: bytes) -> core::result::Result<unit, SerdeError>;
+    fn feed_string(chunk: string) -> core::result::Result<unit, SerdeError>;
+
+    // Explicit end-of-input signal.
+    fn complete() -> unit;
+
+    // Attempt to decode a single top-level value.
+    //
+    // - Before `complete()`: may return `Pending` when more input is required.
+    // - After `complete()`: must not return `Pending`; it must return `Ready(v)` or `Err(e)`.
+    fn poll<T: Deserialize>() -> core::result::Result<DecodePoll<T>, SerdeError>;
+
+    fn finish<T: Deserialize>() -> core::result::Result<T, SerdeError> {
+        self.complete();
+        match self.poll::<T>() {
+            Result::Err(e) => Result::Err(e),
+            Result::Ok(p) => match p {
+                DecodePoll::Ready(v) => Result::Ok(v),
+                DecodePoll::Pending => Result::Err(SerdeError::Message("core::serde: decoder returned Pending after complete()")),
+            },
+        }
+    }
 }
 
 // Helper functions used by the compiler's built-in primitive impl wrappers.
@@ -126,4 +170,967 @@ pub fn __deserialize_string(d: Deserializer) -> core::result::Result<string, Ser
 
 pub fn __deserialize_bytes(d: Deserializer) -> core::result::Result<bytes, SerdeError> {
     d.bytes()
+}
+
+// -------- Core container impls --------
+
+// Tagged-enum encoding used by serde derives and by `std::json`:
+// - enums are encoded as a sequence: `[tag, payload...]`
+// - `Result::Ok(_)` has tag 0; `Result::Err(_)` has tag 1
+impl<T: Serialize, E: Serialize> Serialize for Result<T, E> {
+    readonly fn serialize(s: Serializer) -> core::result::Result<unit, SerdeError> {
+        match self {
+            Result::Ok(v) => {
+                match s.seq_begin(2) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                match s.int(0) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                match Serialize::serialize(v, s) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                s.seq_end()
+            }
+            Result::Err(e) => {
+                match s.seq_begin(2) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                match s.int(1) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                match Serialize::serialize(e, s) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                s.seq_end()
+            }
+        }
+    }
+}
+
+impl<T: Deserialize, E: Deserialize> Deserialize for Result<T, E> {
+    static fn deserialize(d: Deserializer) -> core::result::Result<Result<T, E>, SerdeError> {
+        match d.seq_begin() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+
+        let tag = 0;
+        match d.int() {
+            Result::Ok(v) => { tag = v; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+
+        if tag == 0 {
+            match Deserialize::deserialize::<T>(d) {
+                Result::Err(e) => Result::Err(e),
+                Result::Ok(v) => {
+                    match d.seq_has_next() {
+                        Result::Ok(has) => {
+                            if has { return Result::Err(SerdeError::Message("Result: trailing payload")); };
+                        }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    match d.seq_end() {
+                        Result::Ok(_) => Result::Ok(Result::Ok(v)),
+                        Result::Err(e) => Result::Err(e),
+                    }
+                }
+            }
+        } else if tag == 1 {
+            match Deserialize::deserialize::<E>(d) {
+                Result::Err(e) => Result::Err(e),
+                Result::Ok(v) => {
+                    match d.seq_has_next() {
+                        Result::Ok(has) => {
+                            if has { return Result::Err(SerdeError::Message("Result: trailing payload")); };
+                        }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    match d.seq_end() {
+                        Result::Ok(_) => Result::Ok(Result::Err(v)),
+                        Result::Err(e) => Result::Err(e),
+                    }
+                }
+            }
+        } else {
+            Result::Err(SerdeError::UnknownEnumTag("Result", tag))
+        }
+    }
+}
+
+// -------- Built-in composite types --------
+
+// The language currently only allows source-authored `impl` blocks for nominal types
+// (`struct`/`enum`/`interface`). Built-in types like arrays and tuples use compiler-synthesized
+// interface impl wrappers that dispatch to these helper functions.
+
+pub fn __serialize_array<T: Serialize>(xs: readonly [T], s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(xs.len()) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let i = 0;
+    while i < xs.len() {
+        match Serialize::serialize(xs[i], s) {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        i = i + 1;
+    }
+
+    s.seq_end()
+}
+
+pub fn __deserialize_array<T: Deserialize>(d: Deserializer) -> Result<[T], SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let out: [T] = [];
+    while true {
+        let has_next = false;
+        match d.seq_has_next() {
+            Result::Ok(has) => { has_next = has; }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+        if !has_next { break; }
+
+        match Deserialize::deserialize::<T>(d) {
+            Result::Ok(v) => { out.push(v); }
+            Result::Err(e) => { return Result::Err(e); }
+        }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok(out),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple2<A: Serialize, B: Serialize>(t: readonly (A, B), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(2) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple2<A: Deserialize, B: Deserialize>(d: Deserializer) -> Result<(A, B), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple2: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple2: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple2: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple2: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple2: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple3<A: Serialize, B: Serialize, C: Serialize>(t: readonly (A, B, C), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(3) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.2, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple3<A: Deserialize, B: Deserialize, C: Deserialize>(d: Deserializer) -> Result<(A, B, C), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple3: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple3: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple3: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple3: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    let has2 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has2 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has2 { return Result::Err(SerdeError::Message("tuple3: missing element 2")); }
+    let v2_opt: Option<C> = Option::None;
+    match Deserialize::deserialize::<C>(d) {
+        Result::Ok(v) => { v2_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v2_opt.is_none() { return Result::Err(SerdeError::Message("tuple3: missing element 2")); }
+    let v2 = v2_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple3: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1, v2)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple4<A: Serialize, B: Serialize, C: Serialize, D: Serialize>(t: readonly (A, B, C, D), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(4) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.2, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.3, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple4<A: Deserialize, B: Deserialize, C: Deserialize, D: Deserialize>(d: Deserializer) -> Result<(A, B, C, D), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple4: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple4: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple4: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple4: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    let has2 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has2 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has2 { return Result::Err(SerdeError::Message("tuple4: missing element 2")); }
+    let v2_opt: Option<C> = Option::None;
+    match Deserialize::deserialize::<C>(d) {
+        Result::Ok(v) => { v2_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v2_opt.is_none() { return Result::Err(SerdeError::Message("tuple4: missing element 2")); }
+    let v2 = v2_opt.unwrap();
+
+    let has3 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has3 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has3 { return Result::Err(SerdeError::Message("tuple4: missing element 3")); }
+    let v3_opt: Option<D> = Option::None;
+    match Deserialize::deserialize::<D>(d) {
+        Result::Ok(v) => { v3_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v3_opt.is_none() { return Result::Err(SerdeError::Message("tuple4: missing element 3")); }
+    let v3 = v3_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple4: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1, v2, v3)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple5<A: Serialize, B: Serialize, C: Serialize, D: Serialize, E: Serialize>(t: readonly (A, B, C, D, E), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(5) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.2, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.3, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.4, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple5<A: Deserialize, B: Deserialize, C: Deserialize, D: Deserialize, E: Deserialize>(d: Deserializer) -> Result<(A, B, C, D, E), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple5: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple5: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple5: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple5: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    let has2 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has2 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has2 { return Result::Err(SerdeError::Message("tuple5: missing element 2")); }
+    let v2_opt: Option<C> = Option::None;
+    match Deserialize::deserialize::<C>(d) {
+        Result::Ok(v) => { v2_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v2_opt.is_none() { return Result::Err(SerdeError::Message("tuple5: missing element 2")); }
+    let v2 = v2_opt.unwrap();
+
+    let has3 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has3 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has3 { return Result::Err(SerdeError::Message("tuple5: missing element 3")); }
+    let v3_opt: Option<D> = Option::None;
+    match Deserialize::deserialize::<D>(d) {
+        Result::Ok(v) => { v3_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v3_opt.is_none() { return Result::Err(SerdeError::Message("tuple5: missing element 3")); }
+    let v3 = v3_opt.unwrap();
+
+    let has4 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has4 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has4 { return Result::Err(SerdeError::Message("tuple5: missing element 4")); }
+    let v4_opt: Option<E> = Option::None;
+    match Deserialize::deserialize::<E>(d) {
+        Result::Ok(v) => { v4_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v4_opt.is_none() { return Result::Err(SerdeError::Message("tuple5: missing element 4")); }
+    let v4 = v4_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple5: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1, v2, v3, v4)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple6<A: Serialize, B: Serialize, C: Serialize, D: Serialize, E: Serialize, F: Serialize>(t: readonly (A, B, C, D, E, F), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(6) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.2, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.3, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.4, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.5, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple6<A: Deserialize, B: Deserialize, C: Deserialize, D: Deserialize, E: Deserialize, F: Deserialize>(d: Deserializer) -> Result<(A, B, C, D, E, F), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple6: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple6: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple6: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple6: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    let has2 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has2 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has2 { return Result::Err(SerdeError::Message("tuple6: missing element 2")); }
+    let v2_opt: Option<C> = Option::None;
+    match Deserialize::deserialize::<C>(d) {
+        Result::Ok(v) => { v2_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v2_opt.is_none() { return Result::Err(SerdeError::Message("tuple6: missing element 2")); }
+    let v2 = v2_opt.unwrap();
+
+    let has3 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has3 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has3 { return Result::Err(SerdeError::Message("tuple6: missing element 3")); }
+    let v3_opt: Option<D> = Option::None;
+    match Deserialize::deserialize::<D>(d) {
+        Result::Ok(v) => { v3_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v3_opt.is_none() { return Result::Err(SerdeError::Message("tuple6: missing element 3")); }
+    let v3 = v3_opt.unwrap();
+
+    let has4 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has4 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has4 { return Result::Err(SerdeError::Message("tuple6: missing element 4")); }
+    let v4_opt: Option<E> = Option::None;
+    match Deserialize::deserialize::<E>(d) {
+        Result::Ok(v) => { v4_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v4_opt.is_none() { return Result::Err(SerdeError::Message("tuple6: missing element 4")); }
+    let v4 = v4_opt.unwrap();
+
+    let has5 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has5 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has5 { return Result::Err(SerdeError::Message("tuple6: missing element 5")); }
+    let v5_opt: Option<F> = Option::None;
+    match Deserialize::deserialize::<F>(d) {
+        Result::Ok(v) => { v5_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v5_opt.is_none() { return Result::Err(SerdeError::Message("tuple6: missing element 5")); }
+    let v5 = v5_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple6: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1, v2, v3, v4, v5)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple7<A: Serialize, B: Serialize, C: Serialize, D: Serialize, E: Serialize, F: Serialize, G: Serialize>(t: readonly (A, B, C, D, E, F, G), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(7) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.2, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.3, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.4, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.5, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.6, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple7<A: Deserialize, B: Deserialize, C: Deserialize, D: Deserialize, E: Deserialize, F: Deserialize, G: Deserialize>(d: Deserializer) -> Result<(A, B, C, D, E, F, G), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple7: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple7: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    let has2 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has2 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has2 { return Result::Err(SerdeError::Message("tuple7: missing element 2")); }
+    let v2_opt: Option<C> = Option::None;
+    match Deserialize::deserialize::<C>(d) {
+        Result::Ok(v) => { v2_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v2_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 2")); }
+    let v2 = v2_opt.unwrap();
+
+    let has3 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has3 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has3 { return Result::Err(SerdeError::Message("tuple7: missing element 3")); }
+    let v3_opt: Option<D> = Option::None;
+    match Deserialize::deserialize::<D>(d) {
+        Result::Ok(v) => { v3_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v3_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 3")); }
+    let v3 = v3_opt.unwrap();
+
+    let has4 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has4 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has4 { return Result::Err(SerdeError::Message("tuple7: missing element 4")); }
+    let v4_opt: Option<E> = Option::None;
+    match Deserialize::deserialize::<E>(d) {
+        Result::Ok(v) => { v4_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v4_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 4")); }
+    let v4 = v4_opt.unwrap();
+
+    let has5 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has5 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has5 { return Result::Err(SerdeError::Message("tuple7: missing element 5")); }
+    let v5_opt: Option<F> = Option::None;
+    match Deserialize::deserialize::<F>(d) {
+        Result::Ok(v) => { v5_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v5_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 5")); }
+    let v5 = v5_opt.unwrap();
+
+    let has6 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has6 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has6 { return Result::Err(SerdeError::Message("tuple7: missing element 6")); }
+    let v6_opt: Option<G> = Option::None;
+    match Deserialize::deserialize::<G>(d) {
+        Result::Ok(v) => { v6_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v6_opt.is_none() { return Result::Err(SerdeError::Message("tuple7: missing element 6")); }
+    let v6 = v6_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple7: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1, v2, v3, v4, v5, v6)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn __serialize_tuple8<A: Serialize, B: Serialize, C: Serialize, D: Serialize, E: Serialize, F: Serialize, G: Serialize, H: Serialize>(t: readonly (A, B, C, D, E, F, G, H), s: Serializer) -> Result<unit, SerdeError> {
+    match s.seq_begin(8) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.0, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.1, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.2, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.3, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.4, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.5, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.6, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    match Serialize::serialize(t.7, s) {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    s.seq_end()
+}
+
+pub fn __deserialize_tuple8<A: Deserialize, B: Deserialize, C: Deserialize, D: Deserialize, E: Deserialize, F: Deserialize, G: Deserialize, H: Deserialize>(d: Deserializer) -> Result<(A, B, C, D, E, F, G, H), SerdeError> {
+    match d.seq_begin() {
+        Result::Ok(_) => {}
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    let has0 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has0 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has0 { return Result::Err(SerdeError::Message("tuple8: missing element 0")); }
+    let v0_opt: Option<A> = Option::None;
+    match Deserialize::deserialize::<A>(d) {
+        Result::Ok(v) => { v0_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v0_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 0")); }
+    let v0 = v0_opt.unwrap();
+
+    let has1 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has1 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has1 { return Result::Err(SerdeError::Message("tuple8: missing element 1")); }
+    let v1_opt: Option<B> = Option::None;
+    match Deserialize::deserialize::<B>(d) {
+        Result::Ok(v) => { v1_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v1_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 1")); }
+    let v1 = v1_opt.unwrap();
+
+    let has2 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has2 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has2 { return Result::Err(SerdeError::Message("tuple8: missing element 2")); }
+    let v2_opt: Option<C> = Option::None;
+    match Deserialize::deserialize::<C>(d) {
+        Result::Ok(v) => { v2_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v2_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 2")); }
+    let v2 = v2_opt.unwrap();
+
+    let has3 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has3 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has3 { return Result::Err(SerdeError::Message("tuple8: missing element 3")); }
+    let v3_opt: Option<D> = Option::None;
+    match Deserialize::deserialize::<D>(d) {
+        Result::Ok(v) => { v3_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v3_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 3")); }
+    let v3 = v3_opt.unwrap();
+
+    let has4 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has4 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has4 { return Result::Err(SerdeError::Message("tuple8: missing element 4")); }
+    let v4_opt: Option<E> = Option::None;
+    match Deserialize::deserialize::<E>(d) {
+        Result::Ok(v) => { v4_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v4_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 4")); }
+    let v4 = v4_opt.unwrap();
+
+    let has5 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has5 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has5 { return Result::Err(SerdeError::Message("tuple8: missing element 5")); }
+    let v5_opt: Option<F> = Option::None;
+    match Deserialize::deserialize::<F>(d) {
+        Result::Ok(v) => { v5_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v5_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 5")); }
+    let v5 = v5_opt.unwrap();
+
+    let has6 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has6 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has6 { return Result::Err(SerdeError::Message("tuple8: missing element 6")); }
+    let v6_opt: Option<G> = Option::None;
+    match Deserialize::deserialize::<G>(d) {
+        Result::Ok(v) => { v6_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v6_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 6")); }
+    let v6 = v6_opt.unwrap();
+
+    let has7 = false;
+    match d.seq_has_next() {
+        Result::Ok(has) => { has7 = has; }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if !has7 { return Result::Err(SerdeError::Message("tuple8: missing element 7")); }
+    let v7_opt: Option<H> = Option::None;
+    match Deserialize::deserialize::<H>(d) {
+        Result::Ok(v) => { v7_opt = Option::Some(v); }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+    if v7_opt.is_none() { return Result::Err(SerdeError::Message("tuple8: missing element 7")); }
+    let v7 = v7_opt.unwrap();
+
+    match d.seq_has_next() {
+        Result::Ok(has) => {
+            if has { return Result::Err(SerdeError::Message("tuple8: trailing elements")); };
+        }
+        Result::Err(e) => { return Result::Err(e); }
+    }
+
+    match d.seq_end() {
+        Result::Ok(_) => Result::Ok((v0, v1, v2, v3, v4, v5, v6, v7)),
+        Result::Err(e) => Result::Err(e),
+    }
 }

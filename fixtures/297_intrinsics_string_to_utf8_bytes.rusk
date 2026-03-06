@@ -1,0 +1,16 @@
+// expect: ok string ok
+
+fn main() -> string {
+    let bs = core::intrinsics::string_to_utf8_bytes("€");
+    if bs.len() != 3 { return "len_bad"; };
+
+    let b0 = core::intrinsics::byte_to_int(bs[0]);
+    let b1 = core::intrinsics::byte_to_int(bs[1]);
+    let b2 = core::intrinsics::byte_to_int(bs[2]);
+
+    if b0 != 226 { return "b0_bad"; }; // 0xE2
+    if b1 != 130 { return "b1_bad"; }; // 0x82
+    if b2 != 172 { return "b2_bad"; }; // 0xAC
+    "ok"
+}
+

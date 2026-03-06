@@ -2,10 +2,9 @@
 //
 // `intrinsic fn` declarations have no bodies; their implementations live in the VM / bytecode
 // instruction set.
-
-	// f-string helpers.
-	pub intrinsic fn string_concat(a: string, b: string) -> string;
-	pub intrinsic fn to_string<T>(value: T) -> string;
+// f-string helpers.
+pub intrinsic fn string_concat(a: string, b: string) -> string;
+pub intrinsic fn to_string<T> (value: T) -> string;
 
 // Panic.
 pub intrinsic fn panic(msg: string) -> !;
@@ -78,31 +77,34 @@ pub intrinsic fn bytes_ne(a: bytes, b: bytes) -> bool;
 pub intrinsic fn unit_eq(a: unit, b: unit) -> bool;
 pub intrinsic fn unit_ne(a: unit, b: unit) -> bool;
 
-	// `bytes` operations.
-	pub intrinsic fn bytes_get(b: bytes, idx: int) -> Option<byte>;
-	pub intrinsic fn bytes_len(b: bytes) -> int;
-	pub intrinsic fn bytes_slice(b: bytes, start: int, end: Option<int>) -> bytes;
+// `bytes` operations.
+pub intrinsic fn bytes_get(b: bytes, idx: int) -> Option<byte>;
+pub intrinsic fn bytes_len(b: bytes) -> int;
+pub intrinsic fn bytes_slice(b: bytes, start: int, end: Option<int>) -> bytes;
 pub intrinsic fn bytes_to_array(b: bytes) -> [byte];
 pub intrinsic fn bytes_from_array(b: readonly [byte]) -> bytes;
 
-		// `string` operations.
-		// `string_slice` uses Unicode scalar indices (codepoints), not UTF-8 byte offsets.
-		pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
-		// `string_byte_slice` uses UTF-8 byte offsets and returns a `bytes` view.
-		pub intrinsic fn string_byte_slice(s: string, start: int, end: Option<int>) -> bytes;
-		// String iteration primitives (UTF-8 byte indices).
-		//
-		// These are intended for compiler lowering of `for c in s { ... }` and for sysroot iterator
-		// adapters. They operate on UTF-8 byte offsets, not Unicode scalar indices.
-	//
-	// - `string_next_index(s, idx)` returns the next UTF-8 byte index after the codepoint starting
-	//   at `idx`, or `-1` when `idx` is at end-of-string.
-	// - `string_codepoint_at(s, idx)` returns the Unicode scalar value at `idx` as an `int`.
-	pub intrinsic fn string_next_index(s: string, idx: int) -> int;
-	pub intrinsic fn string_codepoint_at(s: string, idx: int) -> int;
-	pub intrinsic fn string_from_chars(chars: readonly [char]) -> string;
-	pub intrinsic fn string_from_utf8(data: bytes) -> string;
-	pub intrinsic fn string_from_utf8_strict(data: bytes) -> Option<string>;
+// `string` operations.
+// `string_slice` uses Unicode scalar indices (codepoints), not UTF-8 byte offsets.
+pub intrinsic fn string_slice(s: string, start: int, end: Option<int>) -> string;
+// `string_byte_slice` uses UTF-8 byte offsets and returns a `bytes` view.
+pub intrinsic fn string_byte_slice(s: string, start: int, end: Option<int>) -> bytes;
+// String iteration primitives (UTF-8 byte indices).
+//
+// These are intended for compiler lowering of `for c in s { ... }` and for sysroot iterator
+// adapters. They operate on UTF-8 byte offsets, not Unicode scalar indices.
+//
+// - `string_next_index(s, idx)` returns the next UTF-8 byte index after the codepoint starting
+//   at `idx`, or `-1` when `idx` is at end-of-string.
+// - `string_codepoint_at(s, idx)` returns the Unicode scalar value at `idx` as an `int`.
+pub intrinsic fn string_next_index(s: string, idx: int) -> int;
+pub intrinsic fn string_codepoint_at(s: string, idx: int) -> int;
+pub intrinsic fn string_from_chars(chars: readonly [char]) -> string;
+pub intrinsic fn string_from_utf8(data: bytes) -> string;
+pub intrinsic fn string_from_utf8_strict(data: bytes) -> Option<string>;
+pub intrinsic fn float_from_string_strict(s: string) -> Option<float>;
+pub intrinsic fn int_from_string_strict(s: string) -> Option<int>;
+pub intrinsic fn string_to_utf8_bytes(s: string) -> bytes;
 pub intrinsic fn string_from_utf16_le(data: readonly [int]) -> string;
 pub intrinsic fn string_from_utf16_le_strict(data: readonly [int]) -> Option<string>;
 pub intrinsic fn string_from_utf16_be(data: readonly [int]) -> string;
@@ -115,16 +117,16 @@ pub intrinsic fn hash_bytes(b: bytes) -> int;
 pub intrinsic fn hash_combine(a: int, b: int) -> int;
 
 // Array operations.
-pub intrinsic fn array_len<T>(a: [T]) -> int;
-pub intrinsic fn array_len_ro<T>(a: readonly [T]) -> int;
-pub intrinsic fn array_push<T>(a: [T], v: T) -> unit;
-pub intrinsic fn array_pop<T>(a: [T]) -> Option<T>;
-pub intrinsic fn array_clear<T>(a: [T]) -> unit;
-pub intrinsic fn array_resize<T>(a: [T], new_len: int, value: T) -> unit;
-pub intrinsic fn array_insert<T>(a: [T], idx: int, v: T) -> unit;
-pub intrinsic fn array_remove<T>(a: [T], idx: int) -> T;
-pub intrinsic fn array_extend<T>(a: [T], b: [T]) -> unit;
-pub intrinsic fn array_concat<T>(a: [T], b: [T]) -> [T];
-pub intrinsic fn array_concat_ro<T>(a: readonly [T], b: readonly [T]) -> [readonly T];
-pub intrinsic fn array_slice<T>(a: [T], start: int, end: int) -> [T];
-pub intrinsic fn array_slice_ro<T>(a: readonly [T], start: int, end: int) -> [readonly T];
+pub intrinsic fn array_len<T> (a: [T]) -> int;
+pub intrinsic fn array_len_ro<T> (a: readonly [T]) -> int;
+pub intrinsic fn array_push<T> (a: [T], v: T) -> unit;
+pub intrinsic fn array_pop<T> (a: [T]) -> Option<T>;
+pub intrinsic fn array_clear<T> (a: [T]) -> unit;
+pub intrinsic fn array_resize<T> (a: [T], new_len: int, value: T) -> unit;
+pub intrinsic fn array_insert<T> (a: [T], idx: int, v: T) -> unit;
+pub intrinsic fn array_remove<T> (a: [T], idx: int) -> T;
+pub intrinsic fn array_extend<T> (a: [T], b: [T]) -> unit;
+pub intrinsic fn array_concat<T> (a: [T], b: [T]) -> [T];
+pub intrinsic fn array_concat_ro<T> (a: readonly [T], b: readonly [T]) -> [readonly T];
+pub intrinsic fn array_slice<T> (a: [T], start: int, end: int) -> [T];
+pub intrinsic fn array_slice_ro<T> (a: readonly [T], start: int, end: int) -> [readonly T];

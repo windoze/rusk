@@ -678,6 +678,283 @@ impl Compiler {
             }
         }
 
+        // `core::serde::{Serialize, Deserialize}` impls for built-in composite types.
+        //
+        // Arrays and tuples are not nominal types, so we synthesize interface impl wrappers
+        // similar to the primitive wrappers above.
+        {
+            let serialize_bound = typeck::Ty::App(
+                typeck::TyCon::Named("core::serde::Serialize".to_string()),
+                Vec::new(),
+            );
+            let deserialize_bound = typeck::Ty::App(
+                typeck::TyCon::Named("core::serde::Deserialize".to_string()),
+                Vec::new(),
+            );
+
+            // Arrays: `array<T>` pseudo-type.
+            {
+                // `Serialize::serialize` for `array<T>`.
+                let name = "impl::core::serde::Serialize::for::array::serialize";
+                if !self.module.function_ids.contains_key(name) {
+                    let generics = vec![typeck::GenericParamInfo {
+                        name: "T".to_string(),
+                        arity: 0,
+                        bounds: vec![serialize_bound.clone()],
+                        span: span0,
+                    }];
+                    let mut lowerer = FunctionLowerer::new(
+                        self,
+                        FnKind::Real,
+                        ModulePath::root(),
+                        name.to_string(),
+                        generics,
+                    );
+                    lowerer.bind_type_rep_params_for_signature();
+
+                    let elem_rep = lowerer
+                        .generic_type_reps
+                        .first()
+                        .and_then(|v| *v)
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                "internal error: missing `array` Serialize<T> TypeRep param",
+                                span0,
+                            )
+                        })?;
+
+                    let recv_local = lowerer.alloc_local();
+                    lowerer.params.push(Param {
+                        local: recv_local,
+                        mutability: Mutability::Readonly,
+                        ty: None,
+                    });
+                    let ser_local = lowerer.alloc_local();
+                    lowerer.params.push(Param {
+                        local: ser_local,
+                        mutability: Mutability::Readonly,
+                        ty: None,
+                    });
+
+                    let out = lowerer.alloc_local();
+                    lowerer.emit(Instruction::Call {
+                        dst: Some(out),
+                        func: "core::serde::__serialize_array".to_string(),
+                        args: vec![
+                            Operand::Local(elem_rep),
+                            Operand::Local(recv_local),
+                            Operand::Local(ser_local),
+                        ],
+                    });
+                    lowerer.set_terminator(Terminator::Return {
+                        value: Operand::Local(out),
+                    })?;
+
+                    let mir_fn = lowerer.finish()?;
+                    self.module.add_function(mir_fn).map_err(|message| {
+                        CompileError::new(format!("internal error: {message}"), span0)
+                    })?;
+                }
+
+                // `Deserialize::deserialize` for `array<T>`.
+                let name = "impl::core::serde::Deserialize::for::array::deserialize";
+                if !self.module.function_ids.contains_key(name) {
+                    let generics = vec![typeck::GenericParamInfo {
+                        name: "T".to_string(),
+                        arity: 0,
+                        bounds: vec![deserialize_bound.clone()],
+                        span: span0,
+                    }];
+                    let mut lowerer = FunctionLowerer::new(
+                        self,
+                        FnKind::Real,
+                        ModulePath::root(),
+                        name.to_string(),
+                        generics,
+                    );
+                    lowerer.bind_type_rep_params_for_signature();
+
+                    let elem_rep = lowerer
+                        .generic_type_reps
+                        .first()
+                        .and_then(|v| *v)
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                "internal error: missing `array` Deserialize<T> TypeRep param",
+                                span0,
+                            )
+                        })?;
+
+                    let de_local = lowerer.alloc_local();
+                    lowerer.params.push(Param {
+                        local: de_local,
+                        mutability: Mutability::Readonly,
+                        ty: None,
+                    });
+
+                    let out = lowerer.alloc_local();
+                    lowerer.emit(Instruction::Call {
+                        dst: Some(out),
+                        func: "core::serde::__deserialize_array".to_string(),
+                        args: vec![Operand::Local(elem_rep), Operand::Local(de_local)],
+                    });
+                    lowerer.set_terminator(Terminator::Return {
+                        value: Operand::Local(out),
+                    })?;
+
+                    let mir_fn = lowerer.finish()?;
+                    self.module.add_function(mir_fn).map_err(|message| {
+                        CompileError::new(format!("internal error: {message}"), span0)
+                    })?;
+                }
+            }
+
+            // Tuples: `tuple2` .. `tuple8` pseudo-types.
+            for arity in 2..=8usize {
+                let names = ["A", "B", "C", "D", "E", "F", "G", "H"];
+                let tuple_name = format!("tuple{arity}");
+
+                // `Serialize::serialize` for `tupleN<...>`.
+                {
+                    let name =
+                        format!("impl::core::serde::Serialize::for::{tuple_name}::serialize");
+                    if !self.module.function_ids.contains_key(&name) {
+                        let mut generics = Vec::with_capacity(arity);
+                        for i in 0..arity {
+                            generics.push(typeck::GenericParamInfo {
+                                name: names[i].to_string(),
+                                arity: 0,
+                                bounds: vec![serialize_bound.clone()],
+                                span: span0,
+                            });
+                        }
+
+                        let mut lowerer = FunctionLowerer::new(
+                            self,
+                            FnKind::Real,
+                            ModulePath::root(),
+                            name.clone(),
+                            generics,
+                        );
+                        lowerer.bind_type_rep_params_for_signature();
+
+                        let mut rep_locals: Vec<Local> =
+                            Vec::with_capacity(lowerer.generic_type_reps.len());
+                        for rep in &lowerer.generic_type_reps {
+                            rep_locals.push(rep.ok_or_else(|| {
+                                CompileError::new(
+                                    "internal error: missing tuple Serialize TypeRep param",
+                                    span0,
+                                )
+                            })?);
+                        }
+
+                        let recv_local = lowerer.alloc_local();
+                        lowerer.params.push(Param {
+                            local: recv_local,
+                            mutability: Mutability::Readonly,
+                            ty: None,
+                        });
+                        let ser_local = lowerer.alloc_local();
+                        lowerer.params.push(Param {
+                            local: ser_local,
+                            mutability: Mutability::Readonly,
+                            ty: None,
+                        });
+
+                        let mut args: Vec<Operand> =
+                            Vec::with_capacity(rep_locals.len() + 2);
+                        for rep in rep_locals {
+                            args.push(Operand::Local(rep));
+                        }
+                        args.push(Operand::Local(recv_local));
+                        args.push(Operand::Local(ser_local));
+
+                        let out = lowerer.alloc_local();
+                        lowerer.emit(Instruction::Call {
+                            dst: Some(out),
+                            func: format!("core::serde::__serialize_tuple{arity}"),
+                            args,
+                        });
+                        lowerer.set_terminator(Terminator::Return {
+                            value: Operand::Local(out),
+                        })?;
+
+                        let mir_fn = lowerer.finish()?;
+                        self.module.add_function(mir_fn).map_err(|message| {
+                            CompileError::new(format!("internal error: {message}"), span0)
+                        })?;
+                    }
+                }
+
+                // `Deserialize::deserialize` for `tupleN<...>`.
+                {
+                    let name =
+                        format!("impl::core::serde::Deserialize::for::{tuple_name}::deserialize");
+                    if !self.module.function_ids.contains_key(&name) {
+                        let mut generics = Vec::with_capacity(arity);
+                        for i in 0..arity {
+                            generics.push(typeck::GenericParamInfo {
+                                name: names[i].to_string(),
+                                arity: 0,
+                                bounds: vec![deserialize_bound.clone()],
+                                span: span0,
+                            });
+                        }
+
+                        let mut lowerer = FunctionLowerer::new(
+                            self,
+                            FnKind::Real,
+                            ModulePath::root(),
+                            name.clone(),
+                            generics,
+                        );
+                        lowerer.bind_type_rep_params_for_signature();
+
+                        let mut rep_locals: Vec<Local> =
+                            Vec::with_capacity(lowerer.generic_type_reps.len());
+                        for rep in &lowerer.generic_type_reps {
+                            rep_locals.push(rep.ok_or_else(|| {
+                                CompileError::new(
+                                    "internal error: missing tuple Deserialize TypeRep param",
+                                    span0,
+                                )
+                            })?);
+                        }
+
+                        let de_local = lowerer.alloc_local();
+                        lowerer.params.push(Param {
+                            local: de_local,
+                            mutability: Mutability::Readonly,
+                            ty: None,
+                        });
+
+                        let mut args: Vec<Operand> =
+                            Vec::with_capacity(rep_locals.len() + 1);
+                        for rep in rep_locals {
+                            args.push(Operand::Local(rep));
+                        }
+                        args.push(Operand::Local(de_local));
+
+                        let out = lowerer.alloc_local();
+                        lowerer.emit(Instruction::Call {
+                            dst: Some(out),
+                            func: format!("core::serde::__deserialize_tuple{arity}"),
+                            args,
+                        });
+                        lowerer.set_terminator(Terminator::Return {
+                            value: Operand::Local(out),
+                        })?;
+
+                        let mir_fn = lowerer.finish()?;
+                        self.module.add_function(mir_fn).map_err(|message| {
+                            CompileError::new(format!("internal error: {message}"), span0)
+                        })?;
+                    }
+                }
+            }
+        }
+
         // `core::ops::*` impls for primitives.
         //
         // These wrappers enable interface-based generic code like:
@@ -1924,6 +2201,38 @@ impl Compiler {
                 ));
             }
         }
+
+        // Also populate `scall` dispatch for instance interface methods.
+        //
+        // This enables generic code to call instance interface methods on built-in/non-vcall
+        // receiver forms (e.g. tuples, arrays, primitives) using `SCall` with a runtime `TypeRep`.
+        for ((type_name, origin_iface, method_name), impl_fn) in &self.env.interface_methods {
+            let method_id = format!("{origin_iface}::{method_name}");
+            let key = (type_name.clone(), method_id);
+            let Some(impl_id) = self.module.function_id(impl_fn.as_str()) else {
+                return Err(CompileError::new(
+                    format!("internal error: missing interface impl function `{impl_fn}`"),
+                    Span::new(0, 0),
+                ));
+            };
+
+            match self.module.static_methods.get(&key).copied() {
+                Some(prev) if prev == impl_id => {}
+                Some(prev) => {
+                    return Err(CompileError::new(
+                        format!(
+                            "internal error: duplicate static dispatch entry for ({}, {}) (prev={:?})",
+                            key.0, key.1, prev
+                        ),
+                        Span::new(0, 0),
+                    ));
+                }
+                None => {
+                    let _ = self.module.static_methods.insert(key, impl_id);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -7482,7 +7791,7 @@ impl<'a> FunctionLowerer<'a> {
                 // Static dispatch is only valid when the static receiver type is a concrete nominal type.
                 //
                 // Note: primitives can have built-in interface impls (e.g. `core::fmt::ToString`), but
-                // they are not `vcall`-dispatchable because `vcall` requires a `ref(struct|enum)` receiver.
+                // some non-nominal built-in forms (arrays/tuples) are not `vcall`-dispatchable.
                 let static_receiver: Option<(String, Vec<Ty>)> = match recv_for_dispatch {
                     Ty::App(typeck::TyCon::Named(type_name), recv_type_args)
                         if !self.compiler.env.interfaces.contains_key(type_name) =>
@@ -7498,6 +7807,10 @@ impl<'a> FunctionLowerer<'a> {
                     Ty::String => Some(("string".to_string(), Vec::new())),
                     Ty::Bytes => Some(("bytes".to_string(), Vec::new())),
                     Ty::Array(elem) => Some(("array".to_string(), vec![*elem.clone()])),
+                    Ty::Tuple(items) => {
+                        let type_name = format!("tuple{}", items.len());
+                        Some((type_name, items.clone()))
+                    }
                     _ => None,
                 };
 
@@ -7557,7 +7870,13 @@ impl<'a> FunctionLowerer<'a> {
                     return Ok(dst);
                 }
 
-                // Otherwise, lower to dynamic dispatch (`vcall`).
+                // Otherwise, lower to dynamic dispatch.
+                //
+                // - If the receiver is already an `interface`-typed value, use `vcall` (object
+                //   dispatch).
+                // - Otherwise (generic receiver / non-nominal built-in forms), dispatch based on
+                //   the runtime `TypeRep` (`scall`). This is required for built-in types like
+                //   tuples and arrays, which are not `vcall`-dispatchable.
                 let recv_local = self.lower_expr(&args[0])?;
                 let recv_local = if receiver_readonly && !matches!(recv_ty, Ty::Readonly(_)) {
                     let ro = self.alloc_local();
@@ -7580,18 +7899,66 @@ impl<'a> FunctionLowerer<'a> {
                 for ty in &method_type_args {
                     method_type_arg_reps.push(self.lower_type_rep_for_ty(ty, span)?);
                 }
-                let mut vcall_args = Vec::with_capacity(args.len().saturating_sub(1));
+                let receiver_is_iface_value = match recv_for_dispatch {
+                    Ty::Iface { .. } => true,
+                    Ty::App(typeck::TyCon::Named(type_name), _) => {
+                        self.compiler.env.interfaces.contains_key(type_name)
+                    }
+                    _ => false,
+                };
+                let iface_has_non_vcall_impls = self
+                    .compiler
+                    .env
+                    .interface_impls
+                    .contains(&("array".to_string(), origin_iface.clone()))
+                    || (2..=8).any(|arity| {
+                        self.compiler.env.interface_impls.contains(&(
+                            format!("tuple{arity}"),
+                            origin_iface.clone(),
+                        ))
+                    });
+
+                let receiver_requires_typerep_dispatch = match recv_for_dispatch {
+                    Ty::Array(_) | Ty::Tuple(_) => true,
+                    Ty::Gen(_) => iface_has_non_vcall_impls,
+                    // Inference variables (if any survive) are conservatively treated as needing
+                    // `typerep` dispatch for the interfaces that support non-vcall receivers.
+                    Ty::Var(_) => iface_has_non_vcall_impls,
+                    Ty::App(typeck::TyCon::Var(_), _) => iface_has_non_vcall_impls,
+                    _ => false,
+                };
+
+                if receiver_is_iface_value || !receiver_requires_typerep_dispatch {
+                    let mut vcall_args = Vec::with_capacity(args.len().saturating_sub(1));
+                    for a in &args[1..] {
+                        let v = self.lower_expr(a)?;
+                        vcall_args.push(Operand::Local(v));
+                    }
+                    let dst = self.alloc_local();
+                    self.emit(Instruction::VCall {
+                        dst: Some(dst),
+                        obj: Operand::Local(recv_local),
+                        method: method_id,
+                        method_type_args: method_type_arg_reps,
+                        args: vcall_args,
+                    });
+                    return Ok(dst);
+                }
+
+                let self_ty_rep = self.lower_type_rep_for_ty(recv_for_dispatch, span)?;
+                let mut value_args = Vec::with_capacity(args.len());
+                value_args.push(Operand::Local(recv_local));
                 for a in &args[1..] {
                     let v = self.lower_expr(a)?;
-                    vcall_args.push(Operand::Local(v));
+                    value_args.push(Operand::Local(v));
                 }
                 let dst = self.alloc_local();
-                self.emit(Instruction::VCall {
+                self.emit(Instruction::SCall {
                     dst: Some(dst),
-                    obj: Operand::Local(recv_local),
+                    self_ty: self_ty_rep,
                     method: method_id,
                     method_type_args: method_type_arg_reps,
-                    args: vcall_args,
+                    args: value_args,
                 });
                 Ok(dst)
             }

@@ -1,0 +1,40 @@
+// expect: ok string ok
+
+use core::serde::DecodePoll;
+
+struct Pair {
+    a: int,
+    b: int,
+}
+
+derive Deserialize for Pair;
+
+fn main() -> string {
+    let dec = std::json::Decoder::new();
+
+    match dec.feed_bytes(b"{\"a\":1") {
+        Result::Ok(_) => {}
+        Result::Err(_) => { return "feed_err"; }
+    }
+
+    match dec.poll::<Pair>() {
+        Result::Err(_) => { return "err"; }
+        Result::Ok(p) => match p {
+            DecodePoll::Pending => {}
+            DecodePoll::Ready(_) => { return "unexpected_ready"; }
+        },
+    }
+
+    match dec.feed_bytes(b",\"b\":2}") {
+        Result::Ok(_) => {}
+        Result::Err(_) => { return "feed_err2"; }
+    }
+
+    match dec.poll::<Pair>() {
+        Result::Err(_) => "err2",
+        Result::Ok(p) => match p {
+            DecodePoll::Pending => "pending",
+            DecodePoll::Ready(p) => if p.a == 1 && p.b == 2 { "ok" } else { "bad" },
+        },
+    }
+}

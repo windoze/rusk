@@ -7,6 +7,11 @@
 //
 // Generic bounds are enforced by the typechecker:
 // - `K` must implement `core::hash::Hash` and `core::ops::Eq`.
+use core::serde::Deserialize;
+use core::serde::Deserializer;
+use core::serde::SerdeError;
+use core::serde::Serialize;
+use core::serde::Serializer;
 
 pub struct Map<K: super::hash::Hash + super::ops::Eq, V> {
     buckets: [Slot<K, V>],
@@ -36,7 +41,9 @@ fn next_pow2(n: int) -> int {
     // Smallest power-of-two >= n (for n >= 1).
     //
     // This uses the classic bit-smearing trick with logical right shifts.
-    if n <= 1 { return 1; };
+    if n <= 1 {
+        return 1;
+    };
 
     let v = n - 1;
     v = v | (v >>> 1);
@@ -49,7 +56,6 @@ fn next_pow2(n: int) -> int {
 }
 
 // Indexing helpers assume `cap` is a power-of-two.
-
 impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     pub static fn new() -> Map<K, V> {
         Map::with_capacity(0)
@@ -57,11 +63,17 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
     // `capacity` is the expected number of elements (not the bucket count).
     pub static fn with_capacity(capacity: int) -> Map<K, V> {
-        if capacity < 0 { panic("Map::with_capacity: negative capacity"); };
+        if capacity < 0 {
+            panic("Map::with_capacity: negative capacity");
+        };
 
         let bucket_count = buckets_for_elems(capacity);
         // Round to a power-of-two bucket count so we can use `& (cap - 1)` indexing.
-        let n0 = if bucket_count < 8 { 8 } else { bucket_count };
+        let n0 = if bucket_count < 8 {
+            8
+        } else {
+            bucket_count
+        };
         let n = next_pow2(n0);
         let buckets: [Slot<K, V>] = [];
         buckets.resize(n, Slot::Empty);
@@ -72,11 +84,17 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
         }
     }
 
-    pub readonly fn len() -> int { self.len }
+    pub readonly fn len() -> int {
+        self.len
+    }
 
-    pub readonly fn is_empty() -> bool { self.len == 0 }
+    pub readonly fn is_empty() -> bool {
+        self.len == 0
+    }
 
-    pub readonly fn capacity() -> int { self.buckets.len() }
+    pub readonly fn capacity() -> int {
+        self.buckets.len()
+    }
 
     pub fn clear() -> unit {
         let cap = self.buckets.len();
@@ -87,16 +105,25 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     }
 
     pub fn reserve(additional: int) -> unit {
-        if additional < 0 { panic("Map::reserve: negative additional"); };
+        if additional < 0 {
+            panic("Map::reserve: negative additional");
+        };
+
         self.ensure_capacity(additional);
         ()
     }
 
     pub readonly fn get(key: K) -> Option<readonly V> {
-        if self.len == 0 { return Option::None; };
+        if self.len == 0 {
+            return Option::None;
+        };
 
         let cap = self.buckets.len();
-        if cap == 0 { return Option::None; };
+
+        if cap == 0 {
+            return Option::None;
+        };
+
         let mask = cap - 1;
 
         let hash = super::hash::Hash::hash(key);
@@ -104,20 +131,30 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         let steps = 0;
         let cur = idx;
+
         loop {
             match self.buckets[cur] {
-                Slot::Empty => { return Option::None; }
-                Slot::Tombstone => { () }
+                Slot::Empty => {
+                    return Option::None;
+                }
+                Slot::Tombstone => {
+                    ()
+                }
                 Slot::Filled(e) => {
                     if e.hash == hash && super::ops::Eq::eq(e.key, key) {
                         return Option::Some(e.value);
                     };
+
                     ()
                 }
             }
 
             steps = steps + 1;
-            if steps >= cap { return Option::None; };
+
+            if steps >= cap {
+                return Option::None;
+            };
+
             cur = (cur + 1) & mask;
         };
         Option::None
@@ -139,10 +176,16 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     }
 
     pub fn remove(key: K) -> Option<V> {
-        if self.len == 0 { return Option::None; };
+        if self.len == 0 {
+            return Option::None;
+        };
 
         let cap = self.buckets.len();
-        if cap == 0 { return Option::None; };
+
+        if cap == 0 {
+            return Option::None;
+        };
+
         let mask = cap - 1;
 
         let hash = super::hash::Hash::hash(key);
@@ -150,10 +193,15 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         let steps = 0;
         let cur = idx;
+
         loop {
             match self.buckets[cur] {
-                Slot::Empty => { return Option::None; }
-                Slot::Tombstone => { () }
+                Slot::Empty => {
+                    return Option::None;
+                }
+                Slot::Tombstone => {
+                    ()
+                }
                 Slot::Filled(e) => {
                     if e.hash == hash && super::ops::Eq::eq(e.key, key) {
                         self.buckets[cur] = Slot::Tombstone;
@@ -164,12 +212,17 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
                         self.maybe_cleanup_tombstones();
                         return Option::Some(e.value);
                     };
+
                     ()
                 }
             }
 
             steps = steps + 1;
-            if steps >= cap { return Option::None; };
+
+            if steps >= cap {
+                return Option::None;
+            };
+
             cur = (cur + 1) & mask;
         };
         Option::None
@@ -178,7 +231,11 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
     fn alloc_buckets(bucket_count: int) -> [Slot<K, V>] {
         // Use a power-of-two bucket count so we can compute indices with `& (cap - 1)`
         // instead of `% cap`.
-        let n0 = if bucket_count < 8 { 8 } else { bucket_count };
+        let n0 = if bucket_count < 8 {
+            8
+        } else {
+            bucket_count
+        };
         let n = next_pow2(n0);
         let out: [Slot<K, V>] = [];
         out.resize(n, Slot::Empty);
@@ -192,7 +249,9 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
         //
         // Using a power-of-two table allows a cheap threshold computation via shifts.
         let occupied = self.len + self.tombstones + additional;
-        let threshold = cap - (cap >>> 2); // cap * 3/4
+        let threshold = cap - (cap >>> 2);
+        // cap * 3/4
+
         if occupied >= threshold {
             self.rehash(cap << 1);
             return ();
@@ -205,12 +264,17 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
     fn maybe_cleanup_tombstones() -> unit {
         let cap = self.buckets.len();
-        if cap <= 8 { return (); };
+
+        if cap <= 8 {
+            return ();
+        };
 
         // Heuristic: if tombstones are more than half of live entries, clean up.
+
         if self.tombstones > self.len {
             self.rehash(cap);
         };
+
         ()
     }
 
@@ -222,7 +286,10 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         for slot in old {
             match slot {
-                Slot::Filled(e) => { self.insert_rehashed(e.hash, e.key, e.value); () }
+                Slot::Filled(e) => {
+                    self.insert_rehashed(e.hash, e.key, e.value);
+                    ()
+                }
                 _ => ()
             }
         };
@@ -237,24 +304,35 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         let steps = 0;
         let cur = idx;
+
         loop {
             match self.buckets[cur] {
                 Slot::Empty => {
-                    self.buckets[cur] = Slot::Filled(Entry { hash: hash, key: key, value: value });
+                    self.buckets[cur] = Slot::Filled(Entry {
+                        hash: hash, key: key, value: value
+                    });
                     self.len = self.len + 1;
                     return ();
                 }
                 Slot::Tombstone => {
-                    self.buckets[cur] = Slot::Filled(Entry { hash: hash, key: key, value: value });
+                    self.buckets[cur] = Slot::Filled(Entry {
+                        hash: hash, key: key, value: value
+                    });
                     self.len = self.len + 1;
                     self.tombstones = self.tombstones - 1;
                     return ();
                 }
-                Slot::Filled(_) => { () }
+                Slot::Filled(_) => {
+                    ()
+                }
             }
 
             steps = steps + 1;
-            if steps >= cap { panic("Map::rehash: table unexpectedly full"); };
+
+            if steps >= cap {
+                panic("Map::rehash: table unexpectedly full");
+            };
+
             cur = (cur + 1) & mask;
         };
         ()
@@ -267,20 +345,32 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
 
         let steps = 0;
         let cur = idx;
-        let first_tombstone = -1;
+        let first_tombstone = - 1;
 
         loop {
             match self.buckets[cur] {
                 Slot::Empty => {
-                    let target = if first_tombstone < 0 { cur } else { first_tombstone };
-                    if first_tombstone >= 0 { self.tombstones = self.tombstones - 1; };
+                    let target = if first_tombstone < 0 {
+                        cur
+                    } else {
+                        first_tombstone
+                    };
 
-                    self.buckets[target] = Slot::Filled(Entry { hash: hash, key: key, value: value });
+                    if first_tombstone >= 0 {
+                        self.tombstones = self.tombstones - 1;
+                    };
+
+                    self.buckets[target] = Slot::Filled(Entry {
+                        hash: hash, key: key, value: value
+                    });
                     self.len = self.len + 1;
                     return Option::None;
                 }
                 Slot::Tombstone => {
-                    if first_tombstone < 0 { first_tombstone = cur; };
+                    if first_tombstone < 0 {
+                        first_tombstone = cur;
+                    };
+
                     ()
                 }
                 Slot::Filled(e) => {
@@ -289,22 +379,137 @@ impl<K: super::hash::Hash + super::ops::Eq, V> Map<K, V> {
                         e.value = value;
                         return Option::Some(old);
                     };
+
                     ()
                 }
             }
 
             steps = steps + 1;
+
             if steps >= cap {
                 // This should be unreachable because `ensure_capacity(1)` keeps spare room.
                 panic("Map::insert: table full");
             };
+
             cur = (cur + 1) & mask;
         };
         Option::None
     }
-
 }
 
 impl<K: super::hash::Hash + super::ops::Eq, V> super::len::Len for Map<K, V> {
-    readonly fn len() -> int { self.len }
+    readonly fn len() -> int {
+        self.len
+    }
+}
+
+// -------- Serde impls --------
+// Generic (format-agnostic) encoding.
+//
+// Note: `core::serde::Deserializer` supports string-keyed maps, but `core::map::Map` is
+// generic over key type `K`. Since impl specialization is not supported yet, we encode maps
+// as a flat sequence of alternating key/value entries:
+//
+// `[k0, v0, k1, v1, ...]`
+//
+// This is round-trippable across formats and works for arbitrary `K: Serialize + Deserialize`.
+impl<K: super::hash::Hash + super::ops::Eq + Serialize, V: Serialize> Serialize for Map<K, V> {
+    readonly fn serialize(s: Serializer) -> Result<unit, SerdeError> {
+        // Flatten as `[k0, v0, k1, v1, ...]`.
+        match s.seq_begin(self.len * 2) {
+            Result::Ok(_) => {}Result::Err(e) => {
+                return Result::Err(e);
+            }
+        }
+
+        let i = 0;
+
+        while i < self.buckets.len() {
+            match self.buckets[i] {
+                Slot::Filled(e) => {
+                    match Serialize::serialize(e.key, s) {
+                        Result::Ok(_) => {}Result::Err(e) => {
+                            return Result::Err(e);
+                        }
+                    }
+
+                    match Serialize::serialize(e.value, s) {
+                        Result::Ok(_) => {}Result::Err(e) => {
+                            return Result::Err(e);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i = i + 1;
+        }
+
+        s.seq_end()
+    }
+}
+
+impl<K: super::hash::Hash + super::ops::Eq + Deserialize, V: Deserialize> Deserialize for Map<K, V> {
+    static fn deserialize(d: Deserializer) -> Result<Map<K, V>, SerdeError> {
+        match d.seq_begin() {
+            Result::Ok(_) => {}Result::Err(e) => {
+                return Result::Err(e);
+            }
+        }
+
+        let out = Map::new();
+
+        while true {
+            let has_key = false;
+
+            match d.seq_has_next() {
+                Result::Ok(has) => {
+                    has_key = has;
+                }
+                Result::Err(e) => {
+                    return Result::Err(e);
+                }
+            }
+
+            if !has_key {
+                break;
+            }
+
+            match Deserialize::deserialize::<K > (d) {
+                Result::Err(e) => {
+                    return Result::Err(e);
+                }
+                Result::Ok(key) => {
+                    // Each key must have a matching value.
+                    let has_val = false;
+
+                    match d.seq_has_next() {
+                        Result::Ok(has) => {
+                            has_val = has;
+                        }
+                        Result::Err(e) => {
+                            return Result::Err(e);
+                        }
+                    }
+
+                    if !has_val {
+                        return Result::Err(SerdeError::Message("Map: missing value for last key"));
+                    }
+
+                    match Deserialize::deserialize::<V > (d) {
+                        Result::Err(e) => {
+                            return Result::Err(e);
+                        }
+                        Result::Ok(val) => {
+                            let _ = out.insert(key, val);
+                        }
+                    }
+                }
+            }
+        }
+
+        match d.seq_end() {
+            Result::Ok(_) => Result::Ok(out),
+            Result::Err(e) => Result::Err(e),
+        }
+    }
 }

@@ -2033,12 +2033,15 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         };
                         (array_id, node.args.clone())
                     }
-                    TypeCtor::Tuple(_) => {
-                        return trap(
-                            vm,
-                            "scall: tuples do not support interface static methods in this stage"
-                                .to_string(),
-                        );
+                    TypeCtor::Tuple(arity) => {
+                        let name = format!("tuple{arity}");
+                        let Some(tuple_id) = vm.module.type_id(name.as_str()) else {
+                            return trap(
+                                vm,
+                                format!("scall: missing required type name `{name}` in module type table"),
+                            );
+                        };
+                        (tuple_id, node.args.clone())
                     }
                     TypeCtor::Struct(type_id)
                     | TypeCtor::Enum(type_id)

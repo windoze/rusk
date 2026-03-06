@@ -15,6 +15,7 @@ fn main() -> string {
         Result::Err(e) => match e {
             SerdeError::UnknownEnumTag(_, tag) => f"{tag}",
             SerdeError::Message(msg) => msg,
+            _ => "unexpected error",
         },
     }
 }

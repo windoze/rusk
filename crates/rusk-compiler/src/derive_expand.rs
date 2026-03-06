@@ -263,41 +263,26 @@ fn derive_serialize_impl_for_struct(s: &StructItem, span: Span) -> Result<ImplIt
     let body = match &s.body {
         StructBody::Named { fields } => {
             let mut ops: Vec<Expr> = Vec::new();
-            ops.push(call_serializer(
-                "struct_begin",
-                vec![
-                    expr_string(&s.name.name, span),
-                    expr_int(fields.len() as i64, span),
-                ],
-                span,
-            ));
+            ops.push(call_serializer("map_begin", vec![expr_int(fields.len() as i64, span)], span));
             for FieldDecl { name, .. } in fields {
-                ops.push(call_serializer(
-                    "struct_field",
-                    vec![expr_string(&name.name, span)],
-                    span,
-                ));
+                ops.push(call_serializer("map_key", vec![expr_string(&name.name, span)], span));
                 ops.push(call_serialize(
                     expr_field(expr_self(span), FieldName::Named(name.clone()), span),
                     span,
                 ));
             }
-            ops.push(call_serializer("struct_end", vec![], span));
+            ops.push(call_serializer("map_end", vec![], span));
             chain_unit_results(ops, span)
         }
         StructBody::NewType { inner: _ } => chain_unit_results(
             vec![
-                call_serializer(
-                    "struct_begin",
-                    vec![expr_string(&s.name.name, span), expr_int(1, span)],
-                    span,
-                ),
-                call_serializer("struct_field", vec![expr_string("0", span)], span),
+                call_serializer("map_begin", vec![expr_int(1, span)], span),
+                call_serializer("map_key", vec![expr_string("0", span)], span),
                 call_serialize(
                     expr_field(expr_self(span), FieldName::Index { index: 0, span }, span),
                     span,
                 ),
-                call_serializer("struct_end", vec![], span),
+                call_serializer("map_end", vec![], span),
             ],
             span,
         ),
@@ -353,41 +338,312 @@ fn derive_deserialize_impl_for_struct(
         span,
     );
 
-    let body = match &s.body {
+    let (stmts, tail) = match &s.body {
         StructBody::Named { fields } => {
-            let mut steps: Vec<DeserializeStep> = Vec::new();
+            let mut stmts: Vec<Stmt> = Vec::new();
 
-            steps.push(DeserializeStep::Unit {
-                expr: call_deserializer(
-                    "struct_begin",
-                    vec![
-                        expr_string(&s.name.name, span),
-                        expr_int(fields.len() as i64, span),
-                    ],
-                    span,
-                ),
-            });
-
-            let mut field_binds: Vec<(Ident, Expr)> = Vec::new();
-            for (idx, FieldDecl { name, ty, .. }) in fields.iter().enumerate() {
-                let bind = ident(&format!("__rusk_serde_f{idx}"), span);
-                steps.push(DeserializeStep::Unit {
-                    expr: call_deserializer(
-                        "struct_field",
-                        vec![expr_string(&name.name, span)],
+            // Field slots (order-insensitive decoding).
+            let mut slot_names: Vec<Ident> = Vec::with_capacity(fields.len());
+            for (idx, FieldDecl { ty, .. }) in fields.iter().enumerate() {
+                let slot = ident(&format!("__rusk_serde_f{idx}_opt"), span);
+                slot_names.push(slot.clone());
+                stmts.push(Stmt::Let {
+                    kind: crate::ast::BindingKind::Let,
+                    pat: Pattern::Bind {
+                        name: slot.clone(),
                         span,
-                    ),
+                    },
+                    ty: Some(option_type(ty.clone(), span)),
+                    init: Some(expr_path(&["Option", "None"], span)),
+                    span,
                 });
-                steps.push(DeserializeStep::Value {
-                    bind: bind.clone(),
-                    expr: call_deserialize(ty.clone(), vec![expr_path(&["d"], span)], span),
-                });
-                field_binds.push((name.clone(), expr_path(&[&bind.name], span)));
             }
 
-            steps.push(DeserializeStep::Unit {
-                expr: call_deserializer("struct_end", vec![], span),
+            // Begin map.
+            stmts.push(Stmt::Expr {
+                expr: unwrap_unit_result_or_return(call_deserializer("map_begin", vec![], span), span),
+                span,
             });
+
+            // while true { match map_next_key() { ... } }
+            let mut key_arms: Vec<MatchArm> = Vec::new();
+            for (idx, FieldDecl { name, ty, .. }) in fields.iter().enumerate() {
+                let v_bind = ident(&format!("__rusk_serde_val_f{idx}"), span);
+                let decode = Expr::Match {
+                    scrutinee: Box::new(call_deserialize(
+                        ty.clone(),
+                        vec![expr_path(&["d"], span)],
+                        span,
+                    )),
+                    arms: vec![
+                        MatchArm {
+                            pat: MatchPat::Value(Pattern::Ctor {
+                                path: result_ctor_path("Err", span),
+                                args: vec![Pattern::Bind {
+                                    name: ident("e", span),
+                                    span,
+                                }],
+                                span,
+                            }),
+                            body: expr_block(vec![Stmt::Return {
+                                value: Some(expr_result_err(expr_path(&["e"], span), span)),
+                                span,
+                            }], None, span),
+                            span,
+                        },
+                        MatchArm {
+                            pat: MatchPat::Value(Pattern::Ctor {
+                                path: result_ctor_path("Ok", span),
+                                args: vec![Pattern::Bind {
+                                    name: v_bind.clone(),
+                                    span,
+                                }],
+                                span,
+                            }),
+                            body: Expr::Assign {
+                                target: Box::new(expr_path(&[&slot_names[idx].name], span)),
+                                value: Box::new(expr_option_some(expr_path(&[&v_bind.name], span), span)),
+                                span,
+                            },
+                            span,
+                        },
+                    ],
+                    span,
+                };
+
+                key_arms.push(MatchArm {
+                    pat: MatchPat::Value(Pattern::Literal {
+                        lit: crate::ast::PatLiteral::String(name.name.clone()),
+                        span,
+                    }),
+                    body: decode,
+                    span,
+                });
+            }
+
+            // Unknown key: skip its value.
+            key_arms.push(MatchArm {
+                pat: MatchPat::Value(Pattern::Wildcard { span }),
+                body: unwrap_unit_result_or_return(call_deserializer("skip_value", vec![], span), span),
+                span,
+            });
+
+            let match_key = Expr::Match {
+                scrutinee: Box::new(expr_path(&["__rusk_serde_key"], span)),
+                arms: key_arms,
+                span,
+            };
+
+            let match_kopt = Expr::Match {
+                scrutinee: Box::new(expr_path(&["__rusk_serde_kopt"], span)),
+                arms: vec![
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: Path {
+                                segments: vec![ident("Option", span), ident("None", span)],
+                                span,
+                            },
+                            args: Vec::new(),
+                            span,
+                        }),
+                        body: expr_block(vec![Stmt::Break { span }], None, span),
+                        span,
+                    },
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: Path {
+                                segments: vec![ident("Option", span), ident("Some", span)],
+                                span,
+                            },
+                            args: vec![Pattern::Bind {
+                                name: ident("__rusk_serde_key", span),
+                                span,
+                            }],
+                            span,
+                        }),
+                        body: match_key,
+                        span,
+                    },
+                ],
+                span,
+            };
+
+            let match_next_key = Expr::Match {
+                scrutinee: Box::new(call_deserializer("map_next_key", vec![], span)),
+                arms: vec![
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: result_ctor_path("Err", span),
+                            args: vec![Pattern::Bind {
+                                name: ident("e", span),
+                                span,
+                            }],
+                            span,
+                        }),
+                        body: expr_block(vec![Stmt::Return {
+                            value: Some(expr_result_err(expr_path(&["e"], span), span)),
+                            span,
+                        }], None, span),
+                        span,
+                    },
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: result_ctor_path("Ok", span),
+                            args: vec![Pattern::Bind {
+                                name: ident("__rusk_serde_kopt", span),
+                                span,
+                            }],
+                            span,
+                        }),
+                        body: match_kopt,
+                        span,
+                    },
+                ],
+                span,
+            };
+
+            let loop_expr = Expr::While {
+                cond: Box::new(Expr::Bool { value: true, span }),
+                body: Block {
+                    stmts: vec![Stmt::Expr {
+                        expr: match_next_key,
+                        span,
+                    }],
+                    tail: None,
+                    span,
+                },
+                span,
+            };
+            stmts.push(Stmt::Expr {
+                expr: loop_expr,
+                span,
+            });
+
+            // End map.
+            stmts.push(Stmt::Expr {
+                expr: unwrap_unit_result_or_return(call_deserializer("map_end", vec![], span), span),
+                span,
+            });
+
+            // Build struct (missing-field handling).
+            //
+            // Important: `return` is a statement in Rusk, so we avoid using it in match-arm value
+            // positions. Instead we emit statement-level checks + unwraps.
+            let mut field_binds: Vec<(Ident, Expr)> = Vec::new();
+            for (idx, FieldDecl { name, ty, .. }) in fields.iter().enumerate() {
+                let slot_name = slot_names[idx].name.clone();
+                let value_name = ident(&format!("__rusk_serde_f{idx}_value"), span);
+
+                if is_std_json_omitor_type(ty) {
+                    // `std::json::OmitOr<T>`: missing field decodes as `OmitOr::Omit`.
+                    let v_ident = ident("__rusk_serde_opt_v", span);
+                    let match_expr = Expr::Match {
+                        scrutinee: Box::new(expr_path(&[&slot_name], span)),
+                        arms: vec![
+                            MatchArm {
+                                pat: MatchPat::Value(Pattern::Ctor {
+                                    path: Path {
+                                        segments: vec![ident("Option", span), ident("Some", span)],
+                                        span,
+                                    },
+                                    args: vec![Pattern::Bind {
+                                        name: v_ident.clone(),
+                                        span,
+                                    }],
+                                    span,
+                                }),
+                                body: expr_path(&[&v_ident.name], span),
+                                span,
+                            },
+                            MatchArm {
+                                pat: MatchPat::Value(Pattern::Ctor {
+                                    path: Path {
+                                        segments: vec![ident("Option", span), ident("None", span)],
+                                        span,
+                                    },
+                                    args: Vec::new(),
+                                    span,
+                                }),
+                                body: expr_path(&["std", "json", "OmitOr", "Omit"], span),
+                                span,
+                            },
+                        ],
+                        span,
+                    };
+
+                    stmts.push(Stmt::Let {
+                        kind: crate::ast::BindingKind::Let,
+                        pat: Pattern::Bind {
+                            name: value_name.clone(),
+                            span,
+                        },
+                        ty: Some(ty.clone()),
+                        init: Some(match_expr),
+                        span,
+                    });
+                } else {
+                    // Required field: if missing, return `Err(MissingField(...))`.
+                    let is_none = Expr::Call {
+                        callee: Box::new(Expr::Field {
+                            base: Box::new(expr_path(&[&slot_name], span)),
+                            name: FieldName::Named(ident("is_none", span)),
+                            span,
+                        }),
+                        type_args: Vec::new(),
+                        args: Vec::new(),
+                        span,
+                    };
+                    let missing_err = Expr::Call {
+                        callee: Box::new(expr_path(
+                            &["core", "serde", "SerdeError", "MissingField"],
+                            span,
+                        )),
+                        type_args: Vec::new(),
+                        args: vec![expr_string(&name.name, span)],
+                        span,
+                    };
+                    let return_err = Stmt::Return {
+                        value: Some(expr_result_err(missing_err, span)),
+                        span,
+                    };
+                    stmts.push(Stmt::Expr {
+                        expr: Expr::If {
+                            cond: Box::new(is_none),
+                            then_block: Block {
+                                stmts: vec![return_err],
+                                tail: None,
+                                span,
+                            },
+                            else_branch: None,
+                            span,
+                        },
+                        span,
+                    });
+
+                    let unwrap_call = Expr::Call {
+                        callee: Box::new(Expr::Field {
+                            base: Box::new(expr_path(&[&slot_name], span)),
+                            name: FieldName::Named(ident("unwrap", span)),
+                            span,
+                        }),
+                        type_args: Vec::new(),
+                        args: Vec::new(),
+                        span,
+                    };
+                    stmts.push(Stmt::Let {
+                        kind: crate::ast::BindingKind::Let,
+                        pat: Pattern::Bind {
+                            name: value_name.clone(),
+                            span,
+                        },
+                        ty: Some(ty.clone()),
+                        init: Some(unwrap_call),
+                        span,
+                    });
+                }
+
+                field_binds.push((name.clone(), expr_path(&[&value_name.name], span)));
+            }
 
             let ok_value = Expr::StructLit {
                 type_path: Path {
@@ -397,37 +653,238 @@ fn derive_deserialize_impl_for_struct(
                 fields: field_binds,
                 span,
             };
-            chain_deserialize_steps(steps, expr_result_ok(ok_value, span), span)
+
+            (stmts, expr_result_ok(ok_value, span))
         }
         StructBody::NewType { inner } => {
-            let mut steps: Vec<DeserializeStep> = Vec::new();
-            steps.push(DeserializeStep::Unit {
-                expr: call_deserializer(
-                    "struct_begin",
-                    vec![expr_string(&s.name.name, span), expr_int(1, span)],
+            let mut stmts: Vec<Stmt> = Vec::new();
+
+            let slot = ident("__rusk_serde_inner_opt", span);
+            stmts.push(Stmt::Let {
+                kind: crate::ast::BindingKind::Let,
+                pat: Pattern::Bind {
+                    name: slot.clone(),
                     span,
-                ),
-            });
-            steps.push(DeserializeStep::Unit {
-                expr: call_deserializer("struct_field", vec![expr_string("0", span)], span),
+                },
+                ty: Some(option_type(inner.clone(), span)),
+                init: Some(expr_path(&["Option", "None"], span)),
+                span,
             });
 
-            let bind = ident("__rusk_serde_inner", span);
-            steps.push(DeserializeStep::Value {
-                bind: bind.clone(),
-                expr: call_deserialize(inner.clone(), vec![expr_path(&["d"], span)], span),
+            stmts.push(Stmt::Expr {
+                expr: unwrap_unit_result_or_return(call_deserializer("map_begin", vec![], span), span),
+                span,
             });
-            steps.push(DeserializeStep::Unit {
-                expr: call_deserializer("struct_end", vec![], span),
+
+            // Consume object entries; look for key "0".
+            let match_next_key = Expr::Match {
+                scrutinee: Box::new(call_deserializer("map_next_key", vec![], span)),
+                arms: vec![
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: result_ctor_path("Err", span),
+                            args: vec![Pattern::Bind {
+                                name: ident("e", span),
+                                span,
+                            }],
+                            span,
+                        }),
+                        body: expr_block(vec![Stmt::Return {
+                            value: Some(expr_result_err(expr_path(&["e"], span), span)),
+                            span,
+                        }], None, span),
+                        span,
+                    },
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: result_ctor_path("Ok", span),
+                            args: vec![Pattern::Bind {
+                                name: ident("__rusk_serde_kopt", span),
+                                span,
+                            }],
+                            span,
+                        }),
+                        body: Expr::Match {
+                            scrutinee: Box::new(expr_path(&["__rusk_serde_kopt"], span)),
+                            arms: vec![
+                                MatchArm {
+                                    pat: MatchPat::Value(Pattern::Ctor {
+                                        path: Path {
+                                            segments: vec![ident("Option", span), ident("None", span)],
+                                            span,
+                                        },
+                                        args: Vec::new(),
+                                        span,
+                                    }),
+                                    body: expr_block(vec![Stmt::Break { span }], None, span),
+                                    span,
+                                },
+                                MatchArm {
+                                    pat: MatchPat::Value(Pattern::Ctor {
+                                        path: Path {
+                                            segments: vec![ident("Option", span), ident("Some", span)],
+                                            span,
+                                        },
+                                        args: vec![Pattern::Bind {
+                                            name: ident("__rusk_serde_key", span),
+                                            span,
+                                        }],
+                                        span,
+                                    }),
+                                    body: Expr::If {
+                                        cond: Box::new(Expr::Binary {
+                                            op: crate::ast::BinaryOp::Eq,
+                                            left: Box::new(expr_path(&["__rusk_serde_key"], span)),
+                                            right: Box::new(expr_string("0", span)),
+                                            span,
+                                        }),
+                                        then_block: Block {
+                                            stmts: vec![Stmt::Expr {
+                                                expr: Expr::Match {
+                                                    scrutinee: Box::new(call_deserialize(
+                                                        inner.clone(),
+                                                        vec![expr_path(&["d"], span)],
+                                                        span,
+                                                    )),
+                                                    arms: vec![
+                                                        MatchArm {
+                                                            pat: MatchPat::Value(Pattern::Ctor {
+                                                                path: result_ctor_path("Err", span),
+                                                                args: vec![Pattern::Bind {
+                                                                    name: ident("e", span),
+                                                                    span,
+                                                                }],
+                                                                span,
+                                                            }),
+                                                            body: expr_block(vec![Stmt::Return {
+                                                                value: Some(expr_result_err(expr_path(&["e"], span), span)),
+                                                                span,
+                                                            }], None, span),
+                                                            span,
+                                                        },
+                                                        MatchArm {
+                                                            pat: MatchPat::Value(Pattern::Ctor {
+                                                                path: result_ctor_path("Ok", span),
+                                                                args: vec![Pattern::Bind {
+                                                                    name: ident("__rusk_serde_inner", span),
+                                                                    span,
+                                                                }],
+                                                                span,
+                                                            }),
+                                                            body: Expr::Assign {
+                                                                target: Box::new(expr_path(&[&slot.name], span)),
+                                                                value: Box::new(expr_option_some(
+                                                                    expr_path(&["__rusk_serde_inner"], span),
+                                                                    span,
+                                                                )),
+                                                                span,
+                                                            },
+                                                            span,
+                                                        },
+                                                    ],
+                                                    span,
+                                                },
+                                                span,
+                                            }],
+                                            tail: None,
+                                            span,
+                                        },
+                                        else_branch: Some(Box::new(
+                                            unwrap_unit_result_or_return(
+                                                call_deserializer("skip_value", vec![], span),
+                                                span,
+                                            ),
+                                        )),
+                                        span,
+                                    },
+                                    span,
+                                },
+                            ],
+                            span,
+                        },
+                        span,
+                    },
+                ],
+                span,
+            };
+
+            stmts.push(Stmt::Expr {
+                expr: Expr::While {
+                    cond: Box::new(Expr::Bool { value: true, span }),
+                    body: Block {
+                        stmts: vec![Stmt::Expr {
+                            expr: match_next_key,
+                            span,
+                        }],
+                        tail: None,
+                        span,
+                    },
+                    span,
+                },
+                span,
             });
+
+            stmts.push(Stmt::Expr {
+                expr: unwrap_unit_result_or_return(call_deserializer("map_end", vec![], span), span),
+                span,
+            });
+
+            // Required newtype field `0`.
+            stmts.push(Stmt::Expr {
+                expr: Expr::If {
+                    cond: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Field {
+                            base: Box::new(expr_path(&[&slot.name], span)),
+                            name: FieldName::Named(ident("is_none", span)),
+                            span,
+                        }),
+                        type_args: Vec::new(),
+                        args: Vec::new(),
+                        span,
+                    }),
+                    then_block: Block {
+                        stmts: vec![Stmt::Return {
+                            value: Some(expr_result_err(
+                                Expr::Call {
+                                    callee: Box::new(expr_path(
+                                        &["core", "serde", "SerdeError", "MissingField"],
+                                        span,
+                                    )),
+                                    type_args: Vec::new(),
+                                    args: vec![expr_string("0", span)],
+                                    span,
+                                },
+                                span,
+                            )),
+                            span,
+                        }],
+                        tail: None,
+                        span,
+                    },
+                    else_branch: None,
+                    span,
+                },
+                span,
+            });
+            let inner_value = Expr::Call {
+                callee: Box::new(Expr::Field {
+                    base: Box::new(expr_path(&[&slot.name], span)),
+                    name: FieldName::Named(ident("unwrap", span)),
+                    span,
+                }),
+                type_args: Vec::new(),
+                args: Vec::new(),
+                span,
+            };
 
             let ok_value = Expr::Call {
                 callee: Box::new(expr_path(&[&s.name.name], span)),
                 type_args: Vec::new(),
-                args: vec![expr_path(&[&bind.name], span)],
+                args: vec![inner_value],
                 span,
             };
-            chain_deserialize_steps(steps, expr_result_ok(ok_value, span), span)
+
+            (stmts, expr_result_ok(ok_value, span))
         }
     };
 
@@ -441,8 +898,8 @@ fn derive_deserialize_impl_for_struct(
         params: vec![param("d", deserializer_ty, span)],
         ret: ret_ty,
         body: Block {
-            stmts: Vec::new(),
-            tail: Some(Box::new(body)),
+            stmts,
+            tail: Some(Box::new(tail)),
             span,
         },
         span,
@@ -482,7 +939,6 @@ fn derive_serialize_impl_for_enum(
     );
 
     let mut arms: Vec<MatchArm> = Vec::new();
-    let variant_count = e.variants.len() as i64;
     for (idx, variant) in e.variants.iter().enumerate() {
         let mut binds: Vec<Ident> = Vec::new();
         let mut pat_fields: Vec<Pattern> = Vec::new();
@@ -502,27 +958,17 @@ fn derive_serialize_impl_for_enum(
         };
 
         let mut ops: Vec<Expr> = Vec::new();
+        // Tagged-enum encoding: `[tag, payload...]`.
         ops.push(call_serializer(
-            "enum_begin",
-            vec![
-                expr_string(&e.name.name, span),
-                expr_int(variant_count, span),
-            ],
+            "seq_begin",
+            vec![expr_int((1 + variant.fields.len()) as i64, span)],
             span,
         ));
-        ops.push(call_serializer(
-            "enum_variant",
-            vec![
-                expr_string(&variant.name.name, span),
-                expr_int(idx as i64, span),
-                expr_int(variant.fields.len() as i64, span),
-            ],
-            span,
-        ));
+        ops.push(call_serializer("int", vec![expr_int(idx as i64, span)], span));
         for b in &binds {
             ops.push(call_serialize(expr_path(&[&b.name], span), span));
         }
-        ops.push(call_serializer("enum_end", vec![], span));
+        ops.push(call_serializer("seq_end", vec![], span));
 
         arms.push(MatchArm {
             pat: MatchPat::Value(pat),
@@ -587,34 +1033,17 @@ fn derive_deserialize_impl_for_enum(
         span,
     );
 
-    let variant_count = e.variants.len() as i64;
-    let tag_expr = call_deserializer(
-        "enum_begin",
-        vec![
-            expr_string(&e.name.name, span),
-            expr_int(variant_count, span),
-        ],
-        span,
-    );
+    // Tagged-enum decoding: `[tag, payload...]`.
+    let begin_expr = call_deserializer("seq_begin", vec![], span);
+    let tag_expr = call_deserializer("int", vec![], span);
 
-    // `match enum_begin(...) { Err(e) => Err(e), Ok(tag) => match tag { ... } }`
+    // `match seq_begin() { Err(e) => Err(e), Ok(_) => match int() { Err(e) => Err(e), Ok(tag) => match tag { ... } } }`
     let err_ident = ident("e", span);
     let tag_ident = ident("__rusk_serde_tag", span);
 
     let mut tag_arms: Vec<MatchArm> = Vec::new();
     for (idx, variant) in e.variants.iter().enumerate() {
         let mut steps: Vec<DeserializeStep> = Vec::new();
-        steps.push(DeserializeStep::Unit {
-            expr: call_deserializer(
-                "enum_variant",
-                vec![
-                    expr_string(&variant.name.name, span),
-                    expr_int(idx as i64, span),
-                    expr_int(variant.fields.len() as i64, span),
-                ],
-                span,
-            ),
-        });
 
         let mut field_exprs: Vec<Expr> = Vec::new();
         for (field_idx, field_ty) in variant.fields.iter().enumerate() {
@@ -626,8 +1055,10 @@ fn derive_deserialize_impl_for_enum(
             field_exprs.push(expr_path(&[&bind.name], span));
         }
 
-        steps.push(DeserializeStep::Unit {
-            expr: call_deserializer("enum_end", vec![], span),
+        let has_next = ident(&format!("__rusk_serde_has_next_v{idx}"), span);
+        steps.push(DeserializeStep::Value {
+            bind: has_next.clone(),
+            expr: call_deserializer("seq_has_next", vec![], span),
         });
 
         let ok_value = Expr::Call {
@@ -637,7 +1068,55 @@ fn derive_deserialize_impl_for_enum(
             span,
         };
 
-        let arm_body = chain_deserialize_steps(steps, expr_result_ok(ok_value, span), span);
+        let done = Expr::If {
+            cond: Box::new(expr_path(&[&has_next.name], span)),
+            then_block: Block {
+                stmts: Vec::new(),
+                tail: Some(Box::new(expr_result_err(
+                    Expr::Call {
+                        callee: Box::new(expr_path(
+                            &["core", "serde", "SerdeError", "Message"],
+                            span,
+                        )),
+                        type_args: Vec::new(),
+                        args: vec![expr_string("serde: trailing enum payload", span)],
+                        span,
+                    },
+                    span,
+                ))),
+                span,
+            },
+            else_branch: Some(Box::new(Expr::Match {
+                scrutinee: Box::new(call_deserializer("seq_end", vec![], span)),
+                arms: vec![
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: result_ctor_path("Err", span),
+                            args: vec![Pattern::Bind {
+                                name: ident("e", span),
+                                span,
+                            }],
+                            span,
+                        }),
+                        body: expr_result_err(expr_path(&["e"], span), span),
+                        span,
+                    },
+                    MatchArm {
+                        pat: MatchPat::Value(Pattern::Ctor {
+                            path: result_ctor_path("Ok", span),
+                            args: vec![Pattern::Wildcard { span }],
+                            span,
+                        }),
+                        body: expr_result_ok(ok_value, span),
+                        span,
+                    },
+                ],
+                span,
+            })),
+            span,
+        };
+
+        let arm_body = chain_deserialize_steps(steps, done, span);
         tag_arms.push(MatchArm {
             pat: MatchPat::Value(Pattern::Literal {
                 lit: crate::ast::PatLiteral::Int(idx as i64),
@@ -676,7 +1155,7 @@ fn derive_deserialize_impl_for_enum(
     };
 
     let body = Expr::Match {
-        scrutinee: Box::new(tag_expr),
+        scrutinee: Box::new(begin_expr),
         arms: vec![
             MatchArm {
                 pat: MatchPat::Value(Pattern::Ctor {
@@ -693,13 +1172,39 @@ fn derive_deserialize_impl_for_enum(
             MatchArm {
                 pat: MatchPat::Value(Pattern::Ctor {
                     path: result_ctor_path("Ok", span),
-                    args: vec![Pattern::Bind {
-                        name: tag_ident.clone(),
-                        span,
-                    }],
+                    args: vec![Pattern::Wildcard { span }],
                     span,
                 }),
-                body: match_tag,
+                body: Expr::Match {
+                    scrutinee: Box::new(tag_expr),
+                    arms: vec![
+                        MatchArm {
+                            pat: MatchPat::Value(Pattern::Ctor {
+                                path: result_ctor_path("Err", span),
+                                args: vec![Pattern::Bind {
+                                    name: err_ident.clone(),
+                                    span,
+                                }],
+                                span,
+                            }),
+                            body: expr_result_err(expr_path(&[&err_ident.name], span), span),
+                            span,
+                        },
+                        MatchArm {
+                            pat: MatchPat::Value(Pattern::Ctor {
+                                path: result_ctor_path("Ok", span),
+                                args: vec![Pattern::Bind {
+                                    name: tag_ident.clone(),
+                                    span,
+                                }],
+                                span,
+                            }),
+                            body: match_tag,
+                            span,
+                        },
+                    ],
+                    span,
+                },
                 span,
             },
         ],
@@ -978,6 +1483,84 @@ fn expr_result_err(value: Expr, span: Span) -> Expr {
     }
 }
 
+fn expr_block(stmts: Vec<Stmt>, tail: Option<Expr>, span: Span) -> Expr {
+    Expr::Block {
+        block: Block {
+            stmts,
+            tail: tail.map(Box::new),
+            span,
+        },
+        span,
+    }
+}
+
+fn unwrap_unit_result_or_return(expr: Expr, span: Span) -> Expr {
+    Expr::Match {
+        scrutinee: Box::new(expr),
+        arms: vec![
+            MatchArm {
+                pat: MatchPat::Value(Pattern::Ctor {
+                    path: result_ctor_path("Err", span),
+                    args: vec![Pattern::Bind {
+                        name: ident("e", span),
+                        span,
+                    }],
+                    span,
+                }),
+                body: expr_block(
+                    vec![Stmt::Return {
+                        value: Some(expr_result_err(expr_path(&["e"], span), span)),
+                        span,
+                    }],
+                    None,
+                    span,
+                ),
+                span,
+            },
+            MatchArm {
+                pat: MatchPat::Value(Pattern::Ctor {
+                    path: result_ctor_path("Ok", span),
+                    args: vec![Pattern::Wildcard { span }],
+                    span,
+                }),
+                body: Expr::Unit { span },
+                span,
+            },
+        ],
+        span,
+    }
+}
+
+fn option_type(inner: TypeExpr, span: Span) -> TypeExpr {
+    TypeExpr::Path(PathType {
+        segments: vec![PathTypeSegment {
+            name: ident("Option", span),
+            args: vec![inner],
+            span,
+        }],
+        assoc_bindings: Vec::new(),
+        span,
+    })
+}
+
+fn expr_option_some(value: Expr, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(expr_path(&["Option", "Some"], span)),
+        type_args: Vec::new(),
+        args: vec![value],
+        span,
+    }
+}
+
+fn is_std_json_omitor_type(ty: &TypeExpr) -> bool {
+    let TypeExpr::Path(p) = ty else { return false; };
+    let Some(last) = p.segments.last() else { return false; };
+    if last.name.name != "OmitOr" {
+        return false;
+    }
+    last.args.len() == 1
+}
+
 fn chain_unit_results(mut ops: Vec<Expr>, span: Span) -> Expr {
     let Some(last) = ops.pop() else {
         return expr_result_ok(Expr::Unit { span }, span);
@@ -1013,39 +1596,11 @@ fn chain_unit_results(mut ops: Vec<Expr>, span: Span) -> Expr {
 
 #[derive(Clone, Debug)]
 enum DeserializeStep {
-    Unit { expr: Expr },
     Value { bind: Ident, expr: Expr },
 }
 
 fn chain_deserialize_steps(steps: Vec<DeserializeStep>, done: Expr, span: Span) -> Expr {
     steps.into_iter().rev().fold(done, |acc, step| match step {
-        DeserializeStep::Unit { expr } => Expr::Match {
-            scrutinee: Box::new(expr),
-            arms: vec![
-                MatchArm {
-                    pat: MatchPat::Value(Pattern::Ctor {
-                        path: result_ctor_path("Err", span),
-                        args: vec![Pattern::Bind {
-                            name: ident("e", span),
-                            span,
-                        }],
-                        span,
-                    }),
-                    body: expr_result_err(expr_path(&["e"], span), span),
-                    span,
-                },
-                MatchArm {
-                    pat: MatchPat::Value(Pattern::Ctor {
-                        path: result_ctor_path("Ok", span),
-                        args: vec![Pattern::Wildcard { span }],
-                        span,
-                    }),
-                    body: acc,
-                    span,
-                },
-            ],
-            span,
-        },
         DeserializeStep::Value { bind, expr } => Expr::Match {
             scrutinee: Box::new(expr),
             arms: vec![

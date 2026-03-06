@@ -4,14 +4,20 @@ use core::serde::SerdeError;
 use core::serde::Serialize;
 use core::serde::Serializer;
 
-struct HashSer { h: int }
+struct HashSer { h: int, seq_len: int, need_enum_tag: bool }
 
 impl Serializer for HashSer {
     fn unit() -> Result<unit, SerdeError> { Result::Ok(()) }
     fn bool(_v: bool) -> Result<unit, SerdeError> { Result::Ok(()) }
     fn int(v: int) -> Result<unit, SerdeError> {
-        self.h = self.h * 100 + (20 + v);
-        Result::Ok(())
+        if self.need_enum_tag {
+            self.need_enum_tag = false;
+            self.h = self.h * 100 + (5 + v * 10 + (self.seq_len - 1));
+            Result::Ok(())
+        } else {
+            self.h = self.h * 100 + (20 + v);
+            Result::Ok(())
+        }
     }
     fn float(_v: float) -> Result<unit, SerdeError> { Result::Ok(()) }
     fn byte(_v: byte) -> Result<unit, SerdeError> { Result::Ok(()) }
@@ -19,22 +25,20 @@ impl Serializer for HashSer {
     fn string(_v: string) -> Result<unit, SerdeError> { Result::Ok(()) }
     fn bytes(_v: bytes) -> Result<unit, SerdeError> { Result::Ok(()) }
 
-    fn struct_begin(_name: string, _field_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn struct_field(_name: string) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn struct_end() -> Result<unit, SerdeError> { Result::Ok(()) }
-
-    fn enum_begin(_name: string, variant_count: int) -> Result<unit, SerdeError> {
-        self.h = self.h * 100 + (4 + variant_count);
+    fn seq_begin(len: int) -> Result<unit, SerdeError> {
+        self.seq_len = len;
+        self.need_enum_tag = true;
+        self.h = self.h * 100 + (4 + len);
         Result::Ok(())
     }
-    fn enum_variant(_name: string, index: int, field_count: int) -> Result<unit, SerdeError> {
-        self.h = self.h * 100 + (5 + index * 10 + field_count);
-        Result::Ok(())
-    }
-    fn enum_end() -> Result<unit, SerdeError> {
+    fn seq_end() -> Result<unit, SerdeError> {
         self.h = self.h * 100 + 6;
         Result::Ok(())
     }
+
+    fn map_begin(_len: int) -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn map_key(_k: string) -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn map_end() -> Result<unit, SerdeError> { Result::Ok(()) }
 }
 
 enum Shape {
@@ -46,7 +50,7 @@ enum Shape {
 derive Serialize for Shape;
 
 fn main() -> int {
-    let s = (HashSer { h: 0 } as Serializer);
+    let s = (HashSer { h: 0, seq_len: 0, need_enum_tag: false } as Serializer);
     let v = Shape::Rect(3, 4);
     match Serialize::serialize(v, s) {
         Result::Ok(_) => match s as? HashSer {
@@ -56,4 +60,3 @@ fn main() -> int {
         Result::Err(_) => -2,
     }
 }
-

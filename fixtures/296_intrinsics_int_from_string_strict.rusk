@@ -1,0 +1,19 @@
+// expect: ok string ok
+
+fn main() -> string {
+    match core::intrinsics::int_from_string_strict("123") {
+        Option::None => "none",
+        Option::Some(n) => {
+            if n != 123 { return "bad"; };
+
+            match core::intrinsics::int_from_string_strict("12x") {
+                Option::Some(_) => "unexpected_some",
+                Option::None => match core::intrinsics::int_from_string_strict("9223372036854775808") {
+                    Option::Some(_) => "unexpected_overflow_some",
+                    Option::None => "ok",
+                },
+            }
+        }
+    }
+}
+

@@ -1,0 +1,16 @@
+// expect: ok string InvalidUtf8
+
+use core::serde::SerdeError;
+
+fn main() -> string {
+    // JSON string with an invalid UTF-8 byte inside.
+    let src: bytes = b"\"\xFF\"";
+    match std::json::from_bytes::<string>(src) {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            SerdeError::InvalidUtf8 => "InvalidUtf8",
+            _ => "unexpected error",
+        },
+    }
+}
+

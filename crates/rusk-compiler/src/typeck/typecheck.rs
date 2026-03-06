@@ -5239,6 +5239,22 @@ impl<'a> FnTypechecker<'a> {
                 Some(Vec::new())
             }
 
+            // Tuples are not nominal types, but can have built-in impls (arity-0 only for now).
+            Ty::Tuple(items) => {
+                if iface_arity != 0 {
+                    return None;
+                }
+                let type_name = format!("tuple{}", items.len());
+                if !self
+                    .env
+                    .interface_impls
+                    .contains(&(type_name, iface.to_string()))
+                {
+                    return None;
+                }
+                Some(Vec::new())
+            }
+
             _ => None,
         }
     }
@@ -5361,6 +5377,17 @@ impl<'a> FnTypechecker<'a> {
                 self.env
                     .interface_impls
                     .contains(&("array".to_string(), iface_name.to_string()))
+            }
+
+            // Tuples are not nominal types, but can have built-in impls (arity-0 only for now).
+            Ty::Tuple(items) => {
+                if !iface_args.is_empty() {
+                    return false;
+                }
+                let type_name = format!("tuple{}", items.len());
+                self.env
+                    .interface_impls
+                    .contains(&(type_name, iface_name.to_string()))
             }
 
             _ => false,

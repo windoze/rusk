@@ -1,0 +1,19 @@
+// expect: ok string ok
+
+struct User {
+    id: int,
+    name: string,
+}
+
+derive Deserialize for User;
+
+fn main() -> string {
+    let src: bytes = b"{\"id\":7,\"name\":\"A\"}";
+    match std::json::from_bytes::<User>(src) {
+        Result::Ok(u) => {
+            if u.id == 7 && u.name == "A" { "ok" } else { "bad" }
+        }
+        Result::Err(_) => "err",
+    }
+}
+

@@ -1,0 +1,15 @@
+// expect: ok string Overflow(int)
+
+use core::serde::SerdeError;
+
+fn main() -> string {
+    // i64::MAX + 1
+    match std::json::from_string::<int>("9223372036854775808") {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            SerdeError::Overflow(name) => f"Overflow({name})",
+            _ => "unexpected error",
+        },
+    }
+}
+

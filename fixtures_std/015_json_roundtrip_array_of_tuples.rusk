@@ -1,0 +1,31 @@
+// expect: ok string ok
+
+struct Headers {
+    hs: [(string, string)],
+}
+
+derive Serialize + Deserialize for Headers;
+
+fn main() -> string {
+    let h = Headers {
+        hs: [("a", "1"), ("b", "2")],
+    };
+
+    let json = "";
+    match std::json::to_string(h) {
+        Result::Ok(s) => { json = s; }
+        Result::Err(_) => { return "serialize_err"; }
+    }
+
+    let h2 = Headers { hs: [] };
+    match std::json::from_string::<Headers>(json) {
+        Result::Ok(v) => { h2 = v; }
+        Result::Err(_) => { return "deserialize_err"; }
+    }
+
+    if h2.hs.len() != 2 { return "len_bad"; }
+    if h2.hs[0].0 != "a" || h2.hs[0].1 != "1" { return "bad0"; }
+    if h2.hs[1].0 != "b" || h2.hs[1].1 != "2" { return "bad1"; }
+    "ok"
+}
+

@@ -1753,11 +1753,23 @@ or `string::byte_slice` for byte-level operations.
 
 Rusk provides a small, format-agnostic serialization interface in `core::serde`:
 
-- `enum core::serde::SerdeError { Message(string), UnknownEnumTag(string, int) }`
+- `enum core::serde::SerdeError { ... }`
+  - `Message(string)`: format-specific error message.
+  - `UnknownEnumTag(string, int)`: enum tag was outside the known variant range.
+  - `InvalidUtf8`: decoded string bytes were not valid UTF-8.
+  - `TrailingCharacters`: trailing non-whitespace remained after decoding a top-level value.
+  - `MissingField(string)`: a required struct field was missing.
+  - `Overflow(string)`: a numeric value overflowed the destination type.
+  - `ParseError(string, string, int, int, int)`: `(format, message, byte_offset, line, col)`.
 - `interface core::serde::Serializer { ... }`
 - `interface core::serde::Deserializer { ... }`
 - `interface core::serde::Serialize { readonly fn serialize(s: Serializer) -> Result<unit, SerdeError>; }`
 - `interface core::serde::Deserialize { static fn deserialize(d: Deserializer) -> Result<Self, SerdeError>; }`
+
+`core::serde` also defines a streaming model for chunked inputs:
+
+- `enum core::serde::DecodePoll<T> { Pending, Ready(T) }`
+- `interface core::serde::IncrementalDecoder { feed_bytes, feed_string, complete, poll, finish }`
 
 The built-in derives `Serialize` and `Deserialize` expand to normal `impl` items that target these
 interfaces (see §3.2.8). There is no runtime reflection.
@@ -1768,6 +1780,8 @@ When `std` is available, the sysroot provides a JSON adapter in `std::json`:
 
 - `pub fn std::json::to_string<T: core::serde::Serialize>(value: T) -> Result<string, SerdeError>`
 - `pub fn std::json::from_string<T: core::serde::Deserialize>(src: string) -> Result<T, SerdeError>`
+- `pub fn std::json::from_bytes<T: core::serde::Deserialize>(src: bytes) -> Result<T, SerdeError>`
+- `pub struct std::json::Decoder` implements `core::serde::IncrementalDecoder`
 
 Encoding rules (current stage, intended for round-tripping derived values):
 
@@ -1795,10 +1809,12 @@ Encoding rules (current stage, intended for round-tripping derived values):
 Decoding rules / limitations:
 
 - Whitespace is allowed between tokens.
-- Struct field order must match the derived order and field names must match.
-- Struct fields are required unless their type is `std::json::OmitOr<_>`.
-- `from_string` rejects trailing non-whitespace characters after the top-level value.
-- Float deserialization is not supported yet in v0 (no `string -> float` conversion primitive).
+- JSON object field order does not matter.
+- Unknown object fields are ignored (skipped) for forward-compatibility.
+- Struct fields are required unless their type is `std::json::OmitOr<_>` (missing → `Omit`).
+- `from_string` / `from_bytes` reject trailing non-whitespace characters after the top-level value (`SerdeError::TrailingCharacters`).
+- JSON strings must decode to valid UTF-8 Rusk `string` values (`SerdeError::InvalidUtf8`).
+- Float deserialization is supported for JSON numbers that parse into a finite `float`.
 
 ## 10. Compilation Pipeline (Normative)
 

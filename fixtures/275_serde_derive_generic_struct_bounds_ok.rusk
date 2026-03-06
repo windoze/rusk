@@ -21,25 +21,24 @@ impl Serializer for HashSer {
     fn string(_v: string) -> Result<unit, SerdeError> { Result::Ok(()) }
     fn bytes(_v: bytes) -> Result<unit, SerdeError> { Result::Ok(()) }
 
-    fn struct_begin(_name: string, field_count: int) -> Result<unit, SerdeError> {
+    fn seq_begin(_len: int) -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn seq_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+
+    fn map_begin(field_count: int) -> Result<unit, SerdeError> {
         self.h = self.h * 100 + (1 + field_count);
         Result::Ok(())
     }
-    fn struct_field(_name: string) -> Result<unit, SerdeError> {
+    fn map_key(_k: string) -> Result<unit, SerdeError> {
         self.h = self.h * 100 + 2;
         Result::Ok(())
     }
-    fn struct_end() -> Result<unit, SerdeError> {
+    fn map_end() -> Result<unit, SerdeError> {
         self.h = self.h * 100 + 3;
         Result::Ok(())
     }
-
-    fn enum_begin(_name: string, _variant_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn enum_variant(_name: string, _index: int, _field_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn enum_end() -> Result<unit, SerdeError> { Result::Ok(()) }
 }
 
-struct SeqDe { next_int: int }
+struct SeqDe { next_int: int, next_key: int }
 
 impl Deserializer for SeqDe {
     fn unit() -> Result<unit, SerdeError> { Result::Ok(()) }
@@ -54,13 +53,25 @@ impl Deserializer for SeqDe {
     fn string() -> Result<string, SerdeError> { Result::Ok("") }
     fn bytes() -> Result<bytes, SerdeError> { Result::Ok(b"") }
 
-    fn struct_begin(_name: string, _field_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn struct_field(_name: string) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn struct_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn seq_begin() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn seq_has_next() -> Result<bool, SerdeError> { Result::Ok(false) }
+    fn seq_end() -> Result<unit, SerdeError> { Result::Ok(()) }
 
-    fn enum_begin(_name: string, _variant_count: int) -> Result<int, SerdeError> { Result::Ok(0) }
-    fn enum_variant(_name: string, _index: int, _field_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn enum_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn map_begin() -> Result<unit, SerdeError> {
+        self.next_key = 0;
+        Result::Ok(())
+    }
+    fn map_next_key() -> Result<Option<string>, SerdeError> {
+        if self.next_key == 0 {
+            self.next_key = 1;
+            Result::Ok(Option::Some("value"))
+        } else {
+            Result::Ok(Option::None)
+        }
+    }
+    fn map_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+
+    fn skip_value() -> Result<unit, SerdeError> { Result::Ok(()) }
 }
 
 struct Box<T> { value: T }
@@ -75,7 +86,7 @@ fn main() -> int {
         Option::None => 0,
     };
 
-    let d = (SeqDe { next_int: 0 } as Deserializer);
+    let d = (SeqDe { next_int: 0, next_key: 0 } as Deserializer);
     match Deserialize::deserialize::<Box<int>>(d) {
         Result::Err(_) => -1,
         Result::Ok(b) => {
@@ -87,4 +98,3 @@ fn main() -> int {
         }
     }
 }
-

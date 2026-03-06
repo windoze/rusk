@@ -1,0 +1,23 @@
+// expect: ok string ok
+
+use core::serde::DecodePoll;
+
+struct Obj {
+    a: int,
+}
+
+derive Deserialize for Obj;
+
+fn main() -> string {
+    let dec = std::json::Decoder::new();
+    let _ = dec.feed_bytes(b"{\"a\":1");
+    dec.complete();
+
+    match dec.poll::<Obj>() {
+        Result::Err(_) => "ok",
+        Result::Ok(p) => match p {
+            DecodePoll::Pending => "pending_after_complete",
+            DecodePoll::Ready(_) => "unexpected_ready",
+        },
+    }
+}

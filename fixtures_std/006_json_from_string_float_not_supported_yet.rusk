@@ -1,4 +1,4 @@
-// expect: ok string std::json: float deserialization is not supported yet
+// expect: ok string ok
 
 use core::serde::SerdeError;
 
@@ -8,6 +8,7 @@ fn main() -> string {
         Result::Err(e) => match e {
             SerdeError::Message(msg) => msg,
             SerdeError::UnknownEnumTag(_, tag) => f"{tag}",
+            _ => "unexpected error",
         },
     }
 }

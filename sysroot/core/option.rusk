@@ -56,20 +56,25 @@ impl<T> Option<T> {
 
 impl<T: Serialize> Serialize for Option<T> {
     readonly fn serialize(s: Serializer) -> Result<unit, SerdeError> {
-        match s.enum_begin("Option", 2) {
-            Result::Ok(_) => {}
-            Result::Err(e) => { return Result::Err(e); }
-        }
-
         match self {
             Option::None => {
-                match s.enum_variant("None", 0, 0) {
+                // Tagged-enum encoding: `[tag, payload...]`.
+                match s.seq_begin(1) {
                     Result::Ok(_) => {}
                     Result::Err(e) => { return Result::Err(e); }
                 }
+                match s.int(0) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                s.seq_end()
             }
             Option::Some(v) => {
-                match s.enum_variant("Some", 1, 1) {
+                match s.seq_begin(2) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => { return Result::Err(e); }
+                }
+                match s.int(1) {
                     Result::Ok(_) => {}
                     Result::Err(e) => { return Result::Err(e); }
                 }
@@ -77,40 +82,51 @@ impl<T: Serialize> Serialize for Option<T> {
                     Result::Ok(_) => {}
                     Result::Err(e) => { return Result::Err(e); }
                 }
+                s.seq_end()
             }
         }
-
-        s.enum_end()
     }
 }
 
 impl<T: Deserialize> Deserialize for Option<T> {
     static fn deserialize(d: Deserializer) -> Result<Option<T>, SerdeError> {
+        match d.seq_begin() {
+            Result::Ok(_) => {}
+            Result::Err(e) => { return Result::Err(e); }
+        }
+
         let tag = 0;
-        match d.enum_begin("Option", 2) {
+        match d.int() {
             Result::Ok(v) => { tag = v; }
             Result::Err(e) => { return Result::Err(e); }
         }
 
         if tag == 0 {
-            match d.enum_variant("None", 0, 0) {
-                Result::Ok(_) => {}
+            // No payload.
+            match d.seq_has_next() {
+                Result::Ok(has) => {
+                    if has { return Result::Err(SerdeError::Message("Option: unexpected payload for None")); };
+                }
                 Result::Err(e) => { return Result::Err(e); }
             }
-            match d.enum_end() {
+            match d.seq_end() {
                 Result::Ok(_) => Result::Ok(Option::None),
                 Result::Err(e) => Result::Err(e),
             }
         } else if tag == 1 {
-            match d.enum_variant("Some", 1, 1) {
-                Result::Ok(_) => {}
-                Result::Err(e) => { return Result::Err(e); }
-            }
             match Deserialize::deserialize::<T>(d) {
                 Result::Err(e) => Result::Err(e),
-                Result::Ok(v) => match d.enum_end() {
-                    Result::Ok(_) => Result::Ok(Option::Some(v)),
-                    Result::Err(e) => Result::Err(e),
+                Result::Ok(v) => {
+                    match d.seq_has_next() {
+                        Result::Ok(has) => {
+                            if has { return Result::Err(SerdeError::Message("Option: trailing payload")); };
+                        }
+                        Result::Err(e) => { return Result::Err(e); }
+                    }
+                    match d.seq_end() {
+                        Result::Ok(_) => Result::Ok(Option::Some(v)),
+                        Result::Err(e) => Result::Err(e),
+                    }
                 }
             }
         } else {

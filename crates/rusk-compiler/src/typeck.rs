@@ -995,6 +995,58 @@ fn add_prelude(env: &mut ProgramEnv) {
         );
     }
 
+    // `core::serde::{Serialize, Deserialize}` for built-in composite types.
+    //
+    // Arrays: `[T]` / `readonly [T]` are treated as a pseudo nominal type `array<T>` for interface
+    // dispatch purposes.
+    env.interface_impls
+        .insert(("array".to_string(), serialize_iface.to_string()));
+    env.interface_methods.insert(
+        (
+            "array".to_string(),
+            serialize_iface.to_string(),
+            "serialize".to_string(),
+        ),
+        format!("impl::{serialize_iface}::for::array::serialize"),
+    );
+    env.interface_impls
+        .insert(("array".to_string(), deserialize_iface.to_string()));
+    env.interface_static_methods.insert(
+        (
+            "array".to_string(),
+            deserialize_iface.to_string(),
+            "deserialize".to_string(),
+        ),
+        format!("impl::{deserialize_iface}::for::array::deserialize"),
+    );
+
+    // Tuples: `(T0, T1, .., Tk)` are treated as pseudo nominal types `tuple2`..=`tuple8`.
+    for arity in 2..=8 {
+        let type_name = format!("tuple{arity}");
+
+        env.interface_impls
+            .insert((type_name.clone(), serialize_iface.to_string()));
+        env.interface_methods.insert(
+            (
+                type_name.clone(),
+                serialize_iface.to_string(),
+                "serialize".to_string(),
+            ),
+            format!("impl::{serialize_iface}::for::{type_name}::serialize"),
+        );
+
+        env.interface_impls
+            .insert((type_name.clone(), deserialize_iface.to_string()));
+        env.interface_static_methods.insert(
+            (
+                type_name.clone(),
+                deserialize_iface.to_string(),
+                "deserialize".to_string(),
+            ),
+            format!("impl::{deserialize_iface}::for::{type_name}::deserialize"),
+        );
+    }
+
     // Built-in `core::ops::*` interface impls for primitives.
     //
     // The language currently does not allow source-authored `impl ... for int`/`bool`/etc, but we
@@ -1755,6 +1807,21 @@ fn expected_core_intrinsic_sig(name: &str) -> Option<ExpectedIntrinsicSig> {
             generic_count: 0,
             params: vec![Ty::Bytes],
             ret: option(Ty::String),
+        },
+        "core::intrinsics::float_from_string_strict" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String],
+            ret: option(Ty::Float),
+        },
+        "core::intrinsics::int_from_string_strict" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String],
+            ret: option(Ty::Int),
+        },
+        "core::intrinsics::string_to_utf8_bytes" => ExpectedIntrinsicSig {
+            generic_count: 0,
+            params: vec![Ty::String],
+            ret: Ty::Bytes,
         },
         "core::intrinsics::string_from_utf16_le" | "core::intrinsics::string_from_utf16_be" => {
             ExpectedIntrinsicSig {

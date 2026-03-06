@@ -4,15 +4,20 @@ use core::serde::Deserialize;
 use core::serde::Deserializer;
 use core::serde::SerdeError;
 
-struct SeqDe { tag: int, next_int: int }
+struct SeqDe { tag: int, next_int: int, tag_consumed: bool }
 
 impl Deserializer for SeqDe {
     fn unit() -> Result<unit, SerdeError> { Result::Ok(()) }
     fn bool() -> Result<bool, SerdeError> { Result::Ok(false) }
     fn int() -> Result<int, SerdeError> {
-        let out = if self.next_int == 0 { 3 } else { 4 };
-        self.next_int = self.next_int + 1;
-        Result::Ok(out)
+        if self.tag_consumed {
+            let out = if self.next_int == 0 { 3 } else { 4 };
+            self.next_int = self.next_int + 1;
+            Result::Ok(out)
+        } else {
+            self.tag_consumed = true;
+            Result::Ok(self.tag)
+        }
     }
     fn float() -> Result<float, SerdeError> { Result::Ok(0.0) }
     fn byte() -> Result<byte, SerdeError> { Result::Ok(0) }
@@ -20,15 +25,15 @@ impl Deserializer for SeqDe {
     fn string() -> Result<string, SerdeError> { Result::Ok("") }
     fn bytes() -> Result<bytes, SerdeError> { Result::Ok(b"") }
 
-    fn struct_begin(_name: string, _field_count: int) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn struct_field(_name: string) -> Result<unit, SerdeError> { Result::Ok(()) }
-    fn struct_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn seq_begin() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn seq_has_next() -> Result<bool, SerdeError> { Result::Ok(false) }
+    fn seq_end() -> Result<unit, SerdeError> { Result::Ok(()) }
 
-    fn enum_begin(_name: string, _variant_count: int) -> Result<int, SerdeError> { Result::Ok(self.tag) }
-    fn enum_variant(_name: string, _index: int, _field_count: int) -> Result<unit, SerdeError> {
-        Result::Ok(())
-    }
-    fn enum_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn map_begin() -> Result<unit, SerdeError> { Result::Ok(()) }
+    fn map_next_key() -> Result<Option<string>, SerdeError> { Result::Ok(Option::None) }
+    fn map_end() -> Result<unit, SerdeError> { Result::Ok(()) }
+
+    fn skip_value() -> Result<unit, SerdeError> { Result::Ok(()) }
 }
 
 enum Shape {
@@ -40,7 +45,7 @@ enum Shape {
 derive Deserialize for Shape;
 
 fn main() -> int {
-    let d = (SeqDe { tag: 1, next_int: 0 } as Deserializer);
+    let d = (SeqDe { tag: 1, next_int: 0, tag_consumed: false } as Deserializer);
     match Deserialize::deserialize::<Shape>(d) {
         Result::Err(_) => -1,
         Result::Ok(v) => {
@@ -55,4 +60,3 @@ fn main() -> int {
         }
     }
 }
-
