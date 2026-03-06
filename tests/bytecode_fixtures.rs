@@ -270,6 +270,7 @@ fn bytecode_fixtures() {
                     panic!("fixture {}: vm init failed: {e}", entry_path.display())
                 });
                 common::install_test_host_fns_vm(&module, &mut vm);
+                common::install_complex_abi_host_fns_vm(&module, &mut vm);
                 common::install_core_host_fns_vm(&module, &mut vm);
                 let err = run_to_completion(&module, &mut vm).expect_err("expected trap");
                 let message = err;

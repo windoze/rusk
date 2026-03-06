@@ -68,6 +68,80 @@ fn main() -> string {
 }
 
 #[test]
+fn extern_fn_generic_nominal_types_record_abi_type_args() {
+    let src = r#"
+enum Result<T, E> { Ok(T), Err(E) }
+struct Box<T> { x: T }
+
+mod host {
+    pub extern fn take(b: super::Box<int>) -> unit;
+    pub extern fn make() -> super::Result<string, int>;
+    pub extern fn roundtrip(r: super::Result<string, int>) -> super::Result<string, int>;
+}
+
+fn main() -> unit {
+    host::take(Box { x: 1 });
+    let r = host::make();
+    host::roundtrip(r);
+    ()
+}
+"#;
+
+    let options = CompileOptions {
+        load_std: false,
+        ..Default::default()
+    };
+    let module = compile_to_bytecode_with_options(src, &options).expect("compile");
+
+    let box_type_id = module.type_id("Box").expect("Box type id");
+    let result_type_id = module.type_id("Result").expect("Result type id");
+
+    let take_id = module.host_import_id("host::take").expect("host::take");
+    let take_sig = &module.host_import(take_id).expect("host import").sig;
+    assert_eq!(
+        take_sig,
+        &HostFnSig {
+            params: vec![AbiType::Struct {
+                type_id: box_type_id,
+                args: vec![AbiType::Int],
+            }],
+            ret: AbiType::Unit,
+        }
+    );
+
+    let make_id = module.host_import_id("host::make").expect("host::make");
+    let make_sig = &module.host_import(make_id).expect("host import").sig;
+    assert_eq!(
+        make_sig,
+        &HostFnSig {
+            params: vec![],
+            ret: AbiType::Enum {
+                type_id: result_type_id,
+                args: vec![AbiType::String, AbiType::Int],
+            },
+        }
+    );
+
+    let roundtrip_id = module
+        .host_import_id("host::roundtrip")
+        .expect("host::roundtrip");
+    let roundtrip_sig = &module.host_import(roundtrip_id).expect("host import").sig;
+    assert_eq!(
+        roundtrip_sig,
+        &HostFnSig {
+            params: vec![AbiType::Enum {
+                type_id: result_type_id,
+                args: vec![AbiType::String, AbiType::Int],
+            }],
+            ret: AbiType::Enum {
+                type_id: result_type_id,
+                args: vec![AbiType::String, AbiType::Int],
+            },
+        }
+    );
+}
+
+#[test]
 fn vm_traps_if_declared_host_import_missing() {
     let src = r#"
 mod host {

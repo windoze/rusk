@@ -1,4 +1,4 @@
-use rusk_bytecode::{AbiSchema, AbiType, TypeId};
+use rusk_bytecode::{AbiSchema, AbiSchemaType, AbiType, TypeId};
 
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +13,7 @@ pub struct HostContext<'vm> {
     heap: &'vm mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &'vm mut usize,
     pinned_continuations: &'vm mut PinnedContinuations,
+    type_reps: &'vm mut TypeReps,
 }
 
 impl<'vm> HostContext<'vm> {
@@ -21,12 +22,14 @@ impl<'vm> HostContext<'vm> {
         heap: &'vm mut ImmixHeap<HeapValue>,
         gc_allocations_since_collect: &'vm mut usize,
         pinned_continuations: &'vm mut PinnedContinuations,
+        type_reps: &'vm mut TypeReps,
     ) -> Self {
         Self {
             module,
             heap,
             gc_allocations_since_collect,
             pinned_continuations,
+            type_reps,
         }
     }
 
@@ -161,6 +164,7 @@ impl<'vm> HostContext<'vm> {
         let type_id = s.type_id();
         let schema = self.schema_for_type_id(type_id)?;
         let AbiSchema::Struct {
+            type_params,
             fields: schema_fields,
         } = schema
         else {
@@ -169,7 +173,17 @@ impl<'vm> HostContext<'vm> {
             });
         };
 
-        let (field_idx, expected_ty) = schema_fields
+        if *type_params as usize != s.type_args().len() {
+            return Err(HostError {
+                message: format!(
+                    "abi struct ref: type arg arity mismatch for `{}`: expected {type_params}, got {}",
+                    self.module.type_name(type_id).unwrap_or("<unknown>"),
+                    s.type_args().len()
+                ),
+            });
+        }
+
+        let (field_idx, expected_schema_ty) = schema_fields
             .iter()
             .enumerate()
             .find_map(|(idx, f)| (f.name == field).then_some((idx, f.ty.clone())))
@@ -180,7 +194,7 @@ impl<'vm> HostContext<'vm> {
                 ),
             })?;
 
-        let v = {
+        let (got_type_args, v) = {
             let HeapValue::Struct {
                 type_id: got_type_id,
                 type_args,
@@ -196,12 +210,8 @@ impl<'vm> HostContext<'vm> {
                     message: "abi struct ref: type id mismatch".to_string(),
                 });
             }
-            if !type_args.is_empty() {
-                return Err(HostError {
-                    message: "generic struct values are not ABI-eligible in v1".to_string(),
-                });
-            }
-            fields.get(field_idx).cloned().ok_or_else(|| HostError {
+            let got_type_args = type_args.clone();
+            let v = fields.get(field_idx).cloned().ok_or_else(|| HostError {
                 message: format!(
                     "struct `{}` field index {} out of range (len {})",
                     self.module.type_name(type_id).unwrap_or("<unknown>"),
@@ -209,8 +219,18 @@ impl<'vm> HostContext<'vm> {
                     fields.len()
                 ),
             })?
+            ;
+            (got_type_args, v)
         };
 
+        self.expect_type_args_match(
+            &got_type_args,
+            s.type_args(),
+            "struct",
+            self.module.type_name(type_id).unwrap_or("<unknown>"),
+        )?;
+
+        let expected_ty = self.instantiate_schema_type(&expected_schema_ty, s.type_args())?;
         self.value_to_abi(&v, &expected_ty)
             .map_err(|message| HostError { message })
     }
@@ -229,6 +249,7 @@ impl<'vm> HostContext<'vm> {
         let type_id = s.type_id();
         let schema = self.schema_for_type_id(type_id)?;
         let AbiSchema::Struct {
+            type_params,
             fields: schema_fields,
         } = schema
         else {
@@ -237,7 +258,17 @@ impl<'vm> HostContext<'vm> {
             });
         };
 
-        let (field_idx, expected_ty) = schema_fields
+        if *type_params as usize != s.type_args().len() {
+            return Err(HostError {
+                message: format!(
+                    "abi struct ref: type arg arity mismatch for `{}`: expected {type_params}, got {}",
+                    self.module.type_name(type_id).unwrap_or("<unknown>"),
+                    s.type_args().len()
+                ),
+            });
+        }
+
+        let (field_idx, expected_schema_ty) = schema_fields
             .iter()
             .enumerate()
             .find_map(|(idx, f)| (f.name == field).then_some((idx, f.ty.clone())))
@@ -248,6 +279,7 @@ impl<'vm> HostContext<'vm> {
                 ),
             })?;
 
+        let expected_ty = self.instantiate_schema_type(&expected_schema_ty, s.type_args())?;
         let got = value.ty();
         if got != expected_ty {
             return Err(HostError {
@@ -264,10 +296,35 @@ impl<'vm> HostContext<'vm> {
             .value_from_abi(&value)
             .map_err(|message| HostError { message })?;
 
+        let got_type_args = {
+            let HeapValue::Struct {
+                type_id: got_type_id,
+                type_args,
+                ..
+            } = self.heap_obj(s.handle())?
+            else {
+                return Err(HostError {
+                    message: "abi struct ref: expected struct object".to_string(),
+                });
+            };
+            if *got_type_id != type_id {
+                return Err(HostError {
+                    message: "abi struct ref: type id mismatch".to_string(),
+                });
+            }
+            type_args.clone()
+        };
+        self.expect_type_args_match(
+            &got_type_args,
+            s.type_args(),
+            "struct",
+            self.module.type_name(type_id).unwrap_or("<unknown>"),
+        )?;
+
         let HeapValue::Struct {
             type_id: got_type_id,
-            type_args,
             fields,
+            ..
         } = self.heap_obj_mut(s.handle())?
         else {
             return Err(HostError {
@@ -277,11 +334,6 @@ impl<'vm> HostContext<'vm> {
         if *got_type_id != type_id {
             return Err(HostError {
                 message: "abi struct ref: type id mismatch".to_string(),
-            });
-        }
-        if !type_args.is_empty() {
-            return Err(HostError {
-                message: "generic struct values are not ABI-eligible in v1".to_string(),
             });
         }
         let Some(slot) = fields.get_mut(field_idx) else {
@@ -314,7 +366,7 @@ impl<'vm> HostContext<'vm> {
 
     pub fn enum_get(&mut self, e: &crate::AbiEnumRef, idx: usize) -> Result<AbiValue, HostError> {
         let type_id = e.type_id();
-        let (variant_name, v) = {
+        let (got_type_args, variant_name, v) = {
             let HeapValue::Enum {
                 type_id: got_type_id,
                 type_args,
@@ -331,26 +383,44 @@ impl<'vm> HostContext<'vm> {
                     message: "abi enum ref: type id mismatch".to_string(),
                 });
             }
-            if !type_args.is_empty() {
-                return Err(HostError {
-                    message: "generic enum values are not ABI-eligible in v1".to_string(),
-                });
-            }
             let v = fields.get(idx).cloned().ok_or_else(|| HostError {
                 message: format!(
                     "abi enum ref: field index {idx} out of range (len {})",
                     fields.len()
                 ),
             })?;
-            (variant.clone(), v)
+            (type_args.clone(), variant.clone(), v)
         };
 
-        let schema = self.schema_for_type_id(type_id)?;
-        let AbiSchema::Enum { variants } = schema else {
-            return Err(HostError {
-                message: "abi enum ref: missing enum ABI schema".to_string(),
-            });
+        let (type_params, variants) = match self.schema_for_type_id(type_id)? {
+            AbiSchema::Enum {
+                type_params,
+                variants,
+            } => (*type_params, variants.clone()),
+            _ => {
+                return Err(HostError {
+                    message: "abi enum ref: missing enum ABI schema".to_string(),
+                });
+            }
         };
+
+        if type_params as usize != e.type_args().len() {
+            return Err(HostError {
+                message: format!(
+                    "abi enum ref: type arg arity mismatch for `{}`: expected {type_params}, got {}",
+                    self.module.type_name(type_id).unwrap_or("<unknown>"),
+                    e.type_args().len()
+                ),
+            });
+        }
+
+        self.expect_type_args_match(
+            &got_type_args,
+            e.type_args(),
+            "enum",
+            self.module.type_name(type_id).unwrap_or("<unknown>"),
+        )?;
+
         let schema_variant = variants
             .iter()
             .find(|v| v.name == variant_name)
@@ -360,7 +430,7 @@ impl<'vm> HostContext<'vm> {
                     self.module.type_name(type_id).unwrap_or("<unknown>")
                 ),
             })?;
-        let expected = schema_variant
+        let expected_schema_ty = schema_variant
             .fields
             .get(idx)
             .cloned()
@@ -372,6 +442,7 @@ impl<'vm> HostContext<'vm> {
                 ),
             })?;
 
+        let expected = self.instantiate_schema_type(&expected_schema_ty, e.type_args())?;
         self.value_to_abi(&v, &expected)
             .map_err(|message| HostError { message })
     }
@@ -457,17 +528,37 @@ impl<'vm> HostContext<'vm> {
         type_name: &str,
         fields: Vec<(&str, AbiValue)>,
     ) -> Result<AbiValue, HostError> {
+        self.alloc_struct_typed(type_name, Vec::new(), fields)
+    }
+
+    pub fn alloc_struct_typed(
+        &mut self,
+        type_name: &str,
+        type_args: Vec<AbiType>,
+        fields: Vec<(&str, AbiValue)>,
+    ) -> Result<AbiValue, HostError> {
         let type_id = self.module.type_id(type_name).ok_or_else(|| HostError {
             message: format!("unknown struct type `{type_name}`"),
         })?;
-        let schema_fields = match self.schema_for_type_id(type_id)? {
-            AbiSchema::Struct { fields } => fields.clone(),
+        let (type_params, schema_fields) = match self.schema_for_type_id(type_id)? {
+            AbiSchema::Struct {
+                type_params,
+                fields,
+            } => (*type_params, fields.clone()),
             _ => {
                 return Err(HostError {
                     message: format!("type `{type_name}` is not a struct ABI schema"),
                 });
             }
         };
+        if type_args.len() != type_params as usize {
+            return Err(HostError {
+                message: format!(
+                    "struct `{type_name}` type arg arity mismatch: expected {type_params}, got {}",
+                    type_args.len()
+                ),
+            });
+        }
 
         let mut provided: HashMap<&str, AbiValue> = HashMap::new();
         for (name, value) in fields {
@@ -485,7 +576,7 @@ impl<'vm> HostContext<'vm> {
                 .ok_or_else(|| HostError {
                     message: format!("missing struct field `{}`", field.name),
                 })?;
-            let expected = field.ty.clone();
+            let expected = self.instantiate_schema_type(&field.ty, &type_args)?;
             let got = value.ty();
             if got != expected {
                 return Err(HostError {
@@ -507,12 +598,20 @@ impl<'vm> HostContext<'vm> {
             });
         }
 
+        let mut type_arg_reps = Vec::with_capacity(type_args.len());
+        for arg in &type_args {
+            type_arg_reps.push(
+                self.type_rep_for_abi_type(arg)
+                    .map_err(|message| HostError { message })?,
+            );
+        }
+
         let v = alloc_ref(
             self.heap,
             self.gc_allocations_since_collect,
             HeapValue::Struct {
                 type_id,
-                type_args: Vec::new(),
+                type_args: type_arg_reps,
                 fields: values,
             },
         );
@@ -523,7 +622,7 @@ impl<'vm> HostContext<'vm> {
         };
 
         Ok(AbiValue::Struct(crate::AbiStructRef::new(
-            r.handle, r.readonly, type_id,
+            r.handle, r.readonly, type_id, type_args,
         )))
     }
 
@@ -533,18 +632,40 @@ impl<'vm> HostContext<'vm> {
         variant: &str,
         fields: Vec<AbiValue>,
     ) -> Result<AbiValue, HostError> {
+        self.alloc_enum_typed(type_name, Vec::new(), variant, fields)
+    }
+
+    pub fn alloc_enum_typed(
+        &mut self,
+        type_name: &str,
+        type_args: Vec<AbiType>,
+        variant: &str,
+        fields: Vec<AbiValue>,
+    ) -> Result<AbiValue, HostError> {
         let type_id = self.module.type_id(type_name).ok_or_else(|| HostError {
             message: format!("unknown enum type `{type_name}`"),
         })?;
-        let variants = match self.schema_for_type_id(type_id)? {
-            AbiSchema::Enum { variants } => variants.clone(),
+        let (type_params, variants) = match self.schema_for_type_id(type_id)? {
+            AbiSchema::Enum {
+                type_params,
+                variants,
+            } => (*type_params, variants.clone()),
             _ => {
                 return Err(HostError {
                     message: format!("type `{type_name}` is not an enum ABI schema"),
                 });
             }
         };
-        let Some(schema_variant) = variants.into_iter().find(|v| v.name == variant) else {
+        if type_args.len() != type_params as usize {
+            return Err(HostError {
+                message: format!(
+                    "enum `{type_name}` type arg arity mismatch: expected {type_params}, got {}",
+                    type_args.len()
+                ),
+            });
+        }
+
+        let Some(schema_variant) = variants.iter().find(|v| v.name == variant) else {
             return Err(HostError {
                 message: format!("unknown enum variant `{variant}` for `{type_name}`"),
             });
@@ -559,12 +680,14 @@ impl<'vm> HostContext<'vm> {
             });
         }
         let mut values = Vec::with_capacity(fields.len());
-        let schema_fields = schema_variant.fields;
-        for (idx, (expected, value)) in schema_fields
-            .into_iter()
+        for (idx, (schema_field_ty, value)) in schema_variant
+            .fields
+            .iter()
+            .cloned()
             .zip(fields.into_iter())
             .enumerate()
         {
+            let expected = self.instantiate_schema_type(&schema_field_ty, &type_args)?;
             let got = value.ty();
             if got != expected {
                 return Err(HostError {
@@ -579,12 +702,20 @@ impl<'vm> HostContext<'vm> {
                     .map_err(|message| HostError { message })?,
             );
         }
+
+        let mut type_arg_reps = Vec::with_capacity(type_args.len());
+        for arg in &type_args {
+            type_arg_reps.push(
+                self.type_rep_for_abi_type(arg)
+                    .map_err(|message| HostError { message })?,
+            );
+        }
         let v = alloc_ref(
             self.heap,
             self.gc_allocations_since_collect,
             HeapValue::Enum {
                 type_id,
-                type_args: Vec::new(),
+                type_args: type_arg_reps,
                 variant: variant.to_string(),
                 fields: values,
             },
@@ -595,7 +726,7 @@ impl<'vm> HostContext<'vm> {
             });
         };
         Ok(AbiValue::Enum(crate::AbiEnumRef::new(
-            r.handle, r.readonly, type_id,
+            r.handle, r.readonly, type_id, type_args,
         )))
     }
 
@@ -645,25 +776,23 @@ impl<'vm> HostContext<'vm> {
                     HeapValue::Struct {
                         type_id, type_args, ..
                     } => {
-                        if !type_args.is_empty() {
-                            return Err(
-                                "generic struct values are not ABI-eligible in v1".to_string()
-                            );
+                        let mut args = Vec::with_capacity(type_args.len());
+                        for arg in type_args {
+                            args.push(self.abi_type_for_type_rep(*arg)?);
                         }
                         Ok(AbiValue::Struct(crate::AbiStructRef::new(
-                            r.handle, r.readonly, *type_id,
+                            r.handle, r.readonly, *type_id, args,
                         )))
                     }
                     HeapValue::Enum {
                         type_id, type_args, ..
                     } => {
-                        if !type_args.is_empty() {
-                            return Err(
-                                "generic enum values are not ABI-eligible in v1".to_string()
-                            );
+                        let mut args = Vec::with_capacity(type_args.len());
+                        for arg in type_args {
+                            args.push(self.abi_type_for_type_rep(*arg)?);
                         }
                         Ok(AbiValue::Enum(crate::AbiEnumRef::new(
-                            r.handle, r.readonly, *type_id,
+                            r.handle, r.readonly, *type_id, args,
                         )))
                     }
                     HeapValue::BytesBuf { .. } | HeapValue::StringBuf { .. } => {
@@ -736,24 +865,40 @@ impl<'vm> HostContext<'vm> {
                     HeapValue::Struct {
                         type_id, type_args, ..
                     } => {
-                        if !type_args.is_empty() {
-                            stack.remove(&r.handle);
-                            return Err(
-                                "generic struct values are not ABI-eligible in v1".to_string()
-                            );
+                        let mut args = Vec::with_capacity(type_args.len());
+                        for arg in type_args {
+                            let abi = match self.abi_type_for_type_rep(*arg) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    stack.remove(&r.handle);
+                                    return Err(e);
+                                }
+                            };
+                            args.push(abi);
                         }
-                        AbiType::Struct(*type_id)
+                        AbiType::Struct {
+                            type_id: *type_id,
+                            args,
+                        }
                     }
                     HeapValue::Enum {
                         type_id, type_args, ..
                     } => {
-                        if !type_args.is_empty() {
-                            stack.remove(&r.handle);
-                            return Err(
-                                "generic enum values are not ABI-eligible in v1".to_string()
-                            );
+                        let mut args = Vec::with_capacity(type_args.len());
+                        for arg in type_args {
+                            let abi = match self.abi_type_for_type_rep(*arg) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    stack.remove(&r.handle);
+                                    return Err(e);
+                                }
+                            };
+                            args.push(abi);
                         }
-                        AbiType::Enum(*type_id)
+                        AbiType::Enum {
+                            type_id: *type_id,
+                            args,
+                        }
                     }
                     HeapValue::BytesBuf { .. } | HeapValue::StringBuf { .. } => {
                         stack.remove(&r.handle);
@@ -822,54 +967,74 @@ impl<'vm> HostContext<'vm> {
                     item_tys.clone(),
                 )))
             }
-            (AbiType::Struct(type_id), Value::Ref(r)) => {
-                let HeapValue::Struct {
-                    type_id: got_type_id,
-                    type_args,
-                    ..
-                } = self.heap_obj(r.handle).map_err(|e| e.message)?
-                else {
-                    return Err(format!(
-                        "abi type mismatch: expected struct, got {}",
-                        self.heap_kind(r.handle)?
-                    ));
+            (AbiType::Struct { type_id, args }, Value::Ref(r)) => {
+                let (got_type_id, got_type_args) = {
+                    let HeapValue::Struct {
+                        type_id: got_type_id,
+                        type_args,
+                        ..
+                    } = self.heap_obj(r.handle).map_err(|e| e.message)?
+                    else {
+                        return Err(format!(
+                            "abi type mismatch: expected struct, got {}",
+                            self.heap_kind(r.handle)?
+                        ));
+                    };
+                    (*got_type_id, type_args.clone())
                 };
-                if got_type_id != type_id {
+                if got_type_id != *type_id {
                     return Err(format!(
                         "abi struct type mismatch: expected {:?}, got {:?}",
                         type_id, got_type_id
                     ));
                 }
-                if !type_args.is_empty() {
-                    return Err("generic struct values are not ABI-eligible in v1".to_string());
-                }
+                self.expect_type_args_match(
+                    &got_type_args,
+                    args,
+                    "struct",
+                    self.module.type_name(*type_id).unwrap_or("<unknown>"),
+                )
+                .map_err(|e| e.message)?;
                 Ok(AbiValue::Struct(crate::AbiStructRef::new(
-                    r.handle, r.readonly, *type_id,
+                    r.handle,
+                    r.readonly,
+                    *type_id,
+                    args.clone(),
                 )))
             }
-            (AbiType::Enum(type_id), Value::Ref(r)) => {
-                let HeapValue::Enum {
-                    type_id: got_type_id,
-                    type_args,
-                    ..
-                } = self.heap_obj(r.handle).map_err(|e| e.message)?
-                else {
-                    return Err(format!(
-                        "abi type mismatch: expected enum, got {}",
-                        self.heap_kind(r.handle)?
-                    ));
+            (AbiType::Enum { type_id, args }, Value::Ref(r)) => {
+                let (got_type_id, got_type_args) = {
+                    let HeapValue::Enum {
+                        type_id: got_type_id,
+                        type_args,
+                        ..
+                    } = self.heap_obj(r.handle).map_err(|e| e.message)?
+                    else {
+                        return Err(format!(
+                            "abi type mismatch: expected enum, got {}",
+                            self.heap_kind(r.handle)?
+                        ));
+                    };
+                    (*got_type_id, type_args.clone())
                 };
-                if got_type_id != type_id {
+                if got_type_id != *type_id {
                     return Err(format!(
                         "abi enum type mismatch: expected {:?}, got {:?}",
                         type_id, got_type_id
                     ));
                 }
-                if !type_args.is_empty() {
-                    return Err("generic enum values are not ABI-eligible in v1".to_string());
-                }
+                self.expect_type_args_match(
+                    &got_type_args,
+                    args,
+                    "enum",
+                    self.module.type_name(*type_id).unwrap_or("<unknown>"),
+                )
+                .map_err(|e| e.message)?;
                 Ok(AbiValue::Enum(crate::AbiEnumRef::new(
-                    r.handle, r.readonly, *type_id,
+                    r.handle,
+                    r.readonly,
+                    *type_id,
+                    args.clone(),
                 )))
             }
             (expected, other) => Err(format!(
@@ -928,54 +1093,255 @@ impl<'vm> HostContext<'vm> {
                 })
             }
             AbiValue::Struct(r) => {
-                let HeapValue::Struct {
-                    type_id, type_args, ..
-                } = self
-                    .heap
-                    .get(r.handle())
-                    .ok_or_else(|| "dangling abi object handle".to_string())?
-                else {
-                    return Err(format!(
-                        "abi ref kind mismatch: expected struct, got {}",
-                        self.heap_kind(r.handle())?
-                    ));
+                let (type_id, type_args) = {
+                    let HeapValue::Struct {
+                        type_id, type_args, ..
+                    } = self
+                        .heap
+                        .get(r.handle())
+                        .ok_or_else(|| "dangling abi object handle".to_string())?
+                    else {
+                        return Err(format!(
+                            "abi ref kind mismatch: expected struct, got {}",
+                            self.heap_kind(r.handle())?
+                        ));
+                    };
+                    (*type_id, type_args.clone())
                 };
-                if *type_id != r.type_id() {
+                if type_id != r.type_id() {
                     return Err("abi struct ref: type id mismatch".to_string());
                 }
-                if !type_args.is_empty() {
-                    return Err("generic struct values are not ABI-eligible in v1".to_string());
-                }
+                self.expect_type_args_match(
+                    &type_args,
+                    r.type_args(),
+                    "struct",
+                    self.module.type_name(type_id).unwrap_or("<unknown>"),
+                )
+                .map_err(|e| e.message)?;
                 Value::Ref(RefValue {
                     readonly: r.readonly(),
                     handle: r.handle(),
                 })
             }
             AbiValue::Enum(r) => {
-                let HeapValue::Enum {
-                    type_id, type_args, ..
-                } = self
-                    .heap
-                    .get(r.handle())
-                    .ok_or_else(|| "dangling abi object handle".to_string())?
-                else {
-                    return Err(format!(
-                        "abi ref kind mismatch: expected enum, got {}",
-                        self.heap_kind(r.handle())?
-                    ));
+                let (type_id, type_args) = {
+                    let HeapValue::Enum {
+                        type_id, type_args, ..
+                    } = self
+                        .heap
+                        .get(r.handle())
+                        .ok_or_else(|| "dangling abi object handle".to_string())?
+                    else {
+                        return Err(format!(
+                            "abi ref kind mismatch: expected enum, got {}",
+                            self.heap_kind(r.handle())?
+                        ));
+                    };
+                    (*type_id, type_args.clone())
                 };
-                if *type_id != r.type_id() {
+                if type_id != r.type_id() {
                     return Err("abi enum ref: type id mismatch".to_string());
                 }
-                if !type_args.is_empty() {
-                    return Err("generic enum values are not ABI-eligible in v1".to_string());
-                }
+                self.expect_type_args_match(
+                    &type_args,
+                    r.type_args(),
+                    "enum",
+                    self.module.type_name(type_id).unwrap_or("<unknown>"),
+                )
+                .map_err(|e| e.message)?;
                 Value::Ref(RefValue {
                     readonly: r.readonly(),
                     handle: r.handle(),
                 })
             }
         })
+    }
+
+    fn instantiate_schema_type(
+        &self,
+        ty: &AbiSchemaType,
+        type_args: &[AbiType],
+    ) -> Result<AbiType, HostError> {
+        Ok(match ty {
+            AbiSchemaType::Unit => AbiType::Unit,
+            AbiSchemaType::Bool => AbiType::Bool,
+            AbiSchemaType::Int => AbiType::Int,
+            AbiSchemaType::Float => AbiType::Float,
+            AbiSchemaType::Byte => AbiType::Byte,
+            AbiSchemaType::Char => AbiType::Char,
+            AbiSchemaType::String => AbiType::String,
+            AbiSchemaType::Bytes => AbiType::Bytes,
+            AbiSchemaType::Continuation => AbiType::Continuation,
+            AbiSchemaType::Array(elem) => AbiType::Array(Box::new(
+                self.instantiate_schema_type(elem, type_args)?,
+            )),
+            AbiSchemaType::Tuple(items) => AbiType::Tuple(
+                items
+                    .iter()
+                    .map(|t| self.instantiate_schema_type(t, type_args))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            AbiSchemaType::Struct { type_id, args } => AbiType::Struct {
+                type_id: *type_id,
+                args: args
+                    .iter()
+                    .map(|t| self.instantiate_schema_type(t, type_args))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            AbiSchemaType::Enum { type_id, args } => AbiType::Enum {
+                type_id: *type_id,
+                args: args
+                    .iter()
+                    .map(|t| self.instantiate_schema_type(t, type_args))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            AbiSchemaType::TypeParam(idx) => type_args
+                .get(*idx as usize)
+                .cloned()
+                .ok_or_else(|| HostError {
+                    message: format!(
+                        "abi schema type param index {} out of bounds (type_args={})",
+                        idx,
+                        type_args.len()
+                    ),
+                })?,
+        })
+    }
+
+    fn type_rep_for_abi_type(&mut self, ty: &AbiType) -> Result<TypeRepId, String> {
+        let (ctor, args) = match ty {
+            AbiType::Unit => (TypeCtor::Unit, Vec::new()),
+            AbiType::Bool => (TypeCtor::Bool, Vec::new()),
+            AbiType::Int => (TypeCtor::Int, Vec::new()),
+            AbiType::Float => (TypeCtor::Float, Vec::new()),
+            AbiType::Byte => (TypeCtor::Byte, Vec::new()),
+            AbiType::Char => (TypeCtor::Char, Vec::new()),
+            AbiType::String => (TypeCtor::String, Vec::new()),
+            AbiType::Bytes => (TypeCtor::Bytes, Vec::new()),
+            AbiType::Continuation => (TypeCtor::Cont, Vec::new()),
+            AbiType::Array(elem) => (
+                TypeCtor::Array,
+                vec![self.type_rep_for_abi_type(elem.as_ref())?],
+            ),
+            AbiType::Tuple(items) => {
+                let mut args = Vec::with_capacity(items.len());
+                for item in items {
+                    args.push(self.type_rep_for_abi_type(item)?);
+                }
+                (TypeCtor::Tuple(items.len()), args)
+            }
+            AbiType::Struct { type_id, args } => {
+                let mut out_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    out_args.push(self.type_rep_for_abi_type(arg)?);
+                }
+                (TypeCtor::Struct(*type_id), out_args)
+            }
+            AbiType::Enum { type_id, args } => {
+                let mut out_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    out_args.push(self.type_rep_for_abi_type(arg)?);
+                }
+                (TypeCtor::Enum(*type_id), out_args)
+            }
+        };
+        Ok(self.type_reps.intern(TypeRepNode { ctor, args }))
+    }
+
+    fn abi_type_for_type_rep(&self, id: TypeRepId) -> Result<AbiType, String> {
+        let node = self.type_reps.node(id).ok_or_else(|| {
+            format!(
+                "internal error: unknown typerep id {} (type rep table len {})",
+                id.0,
+                self.type_reps.nodes.len()
+            )
+        })?;
+        Ok(match &node.ctor {
+            TypeCtor::Unit => AbiType::Unit,
+            TypeCtor::Bool => AbiType::Bool,
+            TypeCtor::Int => AbiType::Int,
+            TypeCtor::Float => AbiType::Float,
+            TypeCtor::Byte => AbiType::Byte,
+            TypeCtor::Char => AbiType::Char,
+            TypeCtor::String => AbiType::String,
+            TypeCtor::Bytes => AbiType::Bytes,
+            TypeCtor::Cont => AbiType::Continuation,
+            TypeCtor::Array => {
+                let [elem] = node.args.as_slice() else {
+                    return Err("typerep array node has invalid arity".to_string());
+                };
+                AbiType::Array(Box::new(self.abi_type_for_type_rep(*elem)?))
+            }
+            TypeCtor::Tuple(arity) => {
+                if node.args.len() != *arity {
+                    return Err("typerep tuple node has invalid arity".to_string());
+                }
+                let mut items = Vec::with_capacity(node.args.len());
+                for arg in &node.args {
+                    items.push(self.abi_type_for_type_rep(*arg)?);
+                }
+                AbiType::Tuple(items)
+            }
+            TypeCtor::Struct(type_id) => {
+                let mut args = Vec::with_capacity(node.args.len());
+                for arg in &node.args {
+                    args.push(self.abi_type_for_type_rep(*arg)?);
+                }
+                AbiType::Struct {
+                    type_id: *type_id,
+                    args,
+                }
+            }
+            TypeCtor::Enum(type_id) => {
+                let mut args = Vec::with_capacity(node.args.len());
+                for arg in &node.args {
+                    args.push(self.abi_type_for_type_rep(*arg)?);
+                }
+                AbiType::Enum {
+                    type_id: *type_id,
+                    args,
+                }
+            }
+            TypeCtor::Never => return Err("non-ABI-safe typerep (`!`)".to_string()),
+            TypeCtor::Interface(_) => return Err("non-ABI-safe typerep (interface)".to_string()),
+            TypeCtor::Fn => return Err("non-ABI-safe typerep (fn)".to_string()),
+        })
+    }
+
+    fn expect_type_args_match(
+        &mut self,
+        got: &[TypeRepId],
+        expected: &[AbiType],
+        kind: &str,
+        type_name: &str,
+    ) -> Result<(), HostError> {
+        if got.len() != expected.len() {
+            return Err(HostError {
+                message: format!(
+                    "abi {kind} `{type_name}` type arg arity mismatch: expected {}, got {}",
+                    expected.len(),
+                    got.len()
+                ),
+            });
+        }
+        for (idx, (got_id, expected_ty)) in got.iter().copied().zip(expected.iter()).enumerate() {
+            let expected_id = self
+                .type_rep_for_abi_type(expected_ty)
+                .map_err(|message| HostError { message })?;
+            if got_id != expected_id {
+                let got_desc = match self.abi_type_for_type_rep(got_id) {
+                    Ok(t) => format!("{t:?}"),
+                    Err(_) => format!("typerep#{}", got_id.0),
+                };
+                return Err(HostError {
+                    message: format!(
+                        "abi {kind} `{type_name}` type arg {idx} mismatch: expected {:?}, got {got_desc}",
+                        expected_ty
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn expect_heap_kind(&self, handle: GcRef, want: &str) -> Result<(), String> {

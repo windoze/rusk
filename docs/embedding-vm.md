@@ -87,7 +87,7 @@ The current bytecode VM ABI supports:
 - composite values (as opaque VM references):
   - `array(T)` / `[T]`
   - `tuple(T0, T1, ...)` / `(T0, T1, ...)`
-  - Rusk-defined `struct`s and `enum`s
+  - Rusk-defined `struct`s and `enum`s (including closed generic instantiations like `Option<bytes>`)
 
 In Rust:
 
@@ -111,7 +111,7 @@ VM state (heap + module metadata) for the duration of a host call or effect disp
 - Composite ABI values are **VM-local handles**: they are only meaningful within the `Vm` instance
   they came from, and must be accessed through `HostContext`.
 - v1 limitations:
-  - nominal ABI types must be monomorphic at the boundary (no generic struct/enum values),
+  - nominal ABI types must be **closed** at the boundary (no unbound type arguments like `Option<T>`),
   - host-defined nominal types are out of scope.
 
 ---
@@ -156,6 +156,18 @@ Rules (v1):
 - `extern fn` is **not generic** in v1.
 - Parameter/return types must be **ABI-eligible** for bytecode.
 
+Closed generic nominal examples (allowed in ABI signatures):
+
+```rusk
+mod env {
+    pub extern fn getenv(key: string) -> Option<string>;
+}
+
+mod fs {
+    pub extern fn read(path: string) -> Result<bytes, string>;
+}
+```
+
 #### ABI eligibility for bytecode
 
 For programs you intend to run on `rusk-vm`, host import signatures must use ABI-eligible types:
@@ -165,7 +177,7 @@ For programs you intend to run on `rusk-vm`, host import signatures must use ABI
 - composites:
   - arrays (`[T]`)
   - tuples (`(T0, T1, ...)`)
-  - monomorphic (non-generic) structs/enums defined in the module/sysroot
+  - structs/enums defined in the module/sysroot, including **closed** generic instantiations (e.g. `Option<bytes>`)
 
 If a program declares a host import with a non-ABI-eligible type, compilation fails while
 producing bytecode with an error like:

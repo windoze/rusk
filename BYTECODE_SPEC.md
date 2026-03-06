@@ -132,17 +132,17 @@ The bytecode-level ABI supports:
 - composite shapes:
   - `array(T)`
   - `tuple(T0, T1, ...)`
-  - `struct(TypeId)` (nominal; Rusk-defined)
-  - `enum(TypeId)` (nominal; Rusk-defined)
+  - `struct(TypeId, args...)` (nominal; Rusk-defined)
+  - `enum(TypeId, args...)` (nominal; Rusk-defined)
 
 Notes:
 
 - `continuation` does not encode parameter/return types at the bytecode ABI level; it is an opaque
   runtime handle only meaningful within the VM instance it came from.
 - Composite ABI values are represented at runtime as **opaque VM references** (handles) plus ABI
-  type information (for arrays/tuples) and `TypeId` (for structs/enums).
-- For v1, nominal ABI types are monomorphic at the boundary: generic structs/enums (values with
-  runtime type arguments) must not cross the boundary.
+  type information (for arrays/tuples) and `(TypeId, args...)` (for structs/enums).
+- Nominal ABI types may include type arguments, but only for **closed instantiations**: all type
+  arguments are fully known at compile time and must themselves be ABI-eligible.
 
 These are the only types allowed in:
 
@@ -659,7 +659,7 @@ The current intrinsic set includes:
 
 ---
 
-## 10. `.rbc` serialization format (v0.14)
+## 10. `.rbc` serialization format (v0.15)
 
 This section specifies the stable `.rbc` binary encoding for `ExecutableModule`.
 
@@ -713,7 +713,7 @@ Header layout:
 Current version:
 
 - major = `0`
-- minor = `14`
+- minor = `15`
 
 The reference decoder requires an **exact** version match.
 
@@ -775,13 +775,15 @@ Encoding:
 
 Struct schema (`kind = 1`):
 
+- `type_params: u32`
 - `fields_len: len`
-- `fields: repeat fields_len times { name: string, ty: AbiType }`
+- `fields: repeat fields_len times { name: string, ty: AbiSchemaType }`
 
 Enum schema (`kind = 2`):
 
+- `type_params: u32`
 - `variants_len: len`
-- `variants: repeat variants_len times { name: string, fields_len: len, fields: [AbiType; fields_len] }`
+- `variants: repeat variants_len times { name: string, fields_len: len, fields: [AbiSchemaType; fields_len] }`
 
 ### 10.5 Tagged enums
 
@@ -791,7 +793,7 @@ This format uses tag bytes/words for enums. The tags are normative.
 
 `AbiType` is a **recursive encoding** (it is no longer a single `u8` tag).
 
-Tags (v0.14):
+Tags (v0.15):
 
 | Tag | Variant | Payload |
 | --- | ------- | ------- |
@@ -806,8 +808,35 @@ Tags (v0.14):
 | 8 | `Char` | — |
 | 9 | `Array` | nested `AbiType` (element type) |
 | 10 | `Tuple` | `len` + repeated `AbiType` |
-| 11 | `Struct` | `TypeId(u32)` |
-| 12 | `Enum` | `TypeId(u32)` |
+| 11 | `Struct` | `TypeId(u32)` + `len` + repeated `AbiType` (type args) |
+| 12 | `Enum` | `TypeId(u32)` + `len` + repeated `AbiType` (type args) |
+
+#### `AbiSchemaType` (`u8`)
+
+`AbiSchemaType` is a schema-level type language used in `abi_schemas`.
+
+It is similar to `AbiType`, but additionally supports referencing a nominal type parameter via
+`TypeParam(i)`. When instantiating a schema for `Struct/Enum(TypeId, args...)`, `TypeParam(i)` is
+substituted with `args[i]`.
+
+Tags (v0.15):
+
+| Tag | Variant | Payload |
+| --- | ------- | ------- |
+| 0 | `Unit` | — |
+| 1 | `Bool` | — |
+| 2 | `Int` | — |
+| 3 | `Float` | — |
+| 4 | `String` | — |
+| 5 | `Bytes` | — |
+| 6 | `Continuation` | — |
+| 7 | `Byte` | — |
+| 8 | `Char` | — |
+| 9 | `Array` | nested `AbiSchemaType` (element type) |
+| 10 | `Tuple` | `len` + repeated `AbiSchemaType` |
+| 11 | `Struct` | `TypeId(u32)` + `len` + repeated `AbiSchemaType` (type args) |
+| 12 | `Enum` | `TypeId(u32)` + `len` + repeated `AbiSchemaType` (type args) |
+| 13 | `TypeParam` | `u32` (type parameter index) |
 
 #### Bytecode `ConstValue` (`u8`)
 
@@ -962,7 +991,7 @@ Intrinsics use `u16` tags `0..=71`:
 
 #### Instructions (`u8`)
 
-Instruction opcodes are normative tags used by the `.rbc` encoding (v0.14):
+Instruction opcodes are normative tags used by the `.rbc` encoding (v0.15):
 
 - `0`: `Const`
 - `1`: `Copy`

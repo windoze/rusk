@@ -55,12 +55,28 @@ fn abi_type_from_host_type(
         H::Char => Some(AbiType::Char),
         H::String => Some(AbiType::String),
         H::Bytes => Some(AbiType::Bytes),
-        H::Struct(name) => Some(AbiType::Struct(
-            out.intern_type(name.clone()).map_err(LowerError::new)?,
-        )),
-        H::Enum(name) => Some(AbiType::Enum(
-            out.intern_type(name.clone()).map_err(LowerError::new)?,
-        )),
+        H::Struct { name, args } => {
+            let type_id = out.intern_type(name.clone()).map_err(LowerError::new)?;
+            let mut out_args = Vec::with_capacity(args.len());
+            for arg in args {
+                let Some(arg) = abi_type_from_host_type(out, arg)? else {
+                    return Ok(None);
+                };
+                out_args.push(arg);
+            }
+            Some(AbiType::Struct { type_id, args: out_args })
+        }
+        H::Enum { name, args } => {
+            let type_id = out.intern_type(name.clone()).map_err(LowerError::new)?;
+            let mut out_args = Vec::with_capacity(args.len());
+            for arg in args {
+                let Some(arg) = abi_type_from_host_type(out, arg)? else {
+                    return Ok(None);
+                };
+                out_args.push(arg);
+            }
+            Some(AbiType::Enum { type_id, args: out_args })
+        }
         H::Cont { .. } => Some(AbiType::Continuation),
         H::Array(elem) => {
             let Some(elem) = abi_type_from_host_type(out, elem)? else {
@@ -79,6 +95,48 @@ fn abi_type_from_host_type(
             Some(AbiType::Tuple(out_items))
         }
         H::Any | H::TypeRep => None,
+    })
+}
+
+fn abi_schema_type_from_mir_schema_type(
+    out: &mut ExecutableModule,
+    ty: &rusk_mir::AbiSchemaType,
+) -> Result<rusk_bytecode::AbiSchemaType, LowerError> {
+    use rusk_bytecode::AbiSchemaType as B;
+    use rusk_mir::AbiSchemaType as M;
+
+    Ok(match ty {
+        M::Unit => B::Unit,
+        M::Bool => B::Bool,
+        M::Int => B::Int,
+        M::Float => B::Float,
+        M::Byte => B::Byte,
+        M::Char => B::Char,
+        M::String => B::String,
+        M::Bytes => B::Bytes,
+        M::Continuation => B::Continuation,
+        M::Array(elem) => B::Array(Box::new(abi_schema_type_from_mir_schema_type(out, elem)?)),
+        M::Tuple(items) => B::Tuple(
+            items
+                .iter()
+                .map(|ty| abi_schema_type_from_mir_schema_type(out, ty))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        M::Struct { name, args } => B::Struct {
+            type_id: out.intern_type(name.clone()).map_err(LowerError::new)?,
+            args: args
+                .iter()
+                .map(|ty| abi_schema_type_from_mir_schema_type(out, ty))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        M::Enum { name, args } => B::Enum {
+            type_id: out.intern_type(name.clone()).map_err(LowerError::new)?,
+            args: args
+                .iter()
+                .map(|ty| abi_schema_type_from_mir_schema_type(out, ty))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        M::TypeParam(idx) => B::TypeParam(*idx),
     })
 }
 
@@ -106,34 +164,29 @@ fn lower_abi_schema(
     use rusk_bytecode::{AbiEnumVariant, AbiSchema, AbiStructField};
 
     Ok(match schema {
-        rusk_mir::AbiSchema::Struct { fields } => {
+        rusk_mir::AbiSchema::Struct { type_params, fields } => {
             let mut out_fields = Vec::with_capacity(fields.len());
             for field in fields {
-                let Some(ty) = abi_type_from_host_type(out, &field.ty)? else {
-                    return Err(LowerError::new(format!(
-                        "abi schema field `{}` is not ABI-safe for bytecode",
-                        field.name
-                    )));
-                };
+                let ty = abi_schema_type_from_mir_schema_type(out, &field.ty)?;
                 out_fields.push(AbiStructField {
                     name: field.name.clone(),
                     ty,
                 });
             }
-            AbiSchema::Struct { fields: out_fields }
+            AbiSchema::Struct {
+                type_params: *type_params,
+                fields: out_fields,
+            }
         }
-        rusk_mir::AbiSchema::Enum { variants } => {
+        rusk_mir::AbiSchema::Enum {
+            type_params,
+            variants,
+        } => {
             let mut out_variants = Vec::with_capacity(variants.len());
             for variant in variants {
                 let mut fields = Vec::with_capacity(variant.fields.len());
-                for (idx, field_ty) in variant.fields.iter().enumerate() {
-                    let Some(ty) = abi_type_from_host_type(out, field_ty)? else {
-                        return Err(LowerError::new(format!(
-                            "abi schema enum variant `{}` field {idx} is not ABI-safe for bytecode",
-                            variant.name
-                        )));
-                    };
-                    fields.push(ty);
+                for field_ty in &variant.fields {
+                    fields.push(abi_schema_type_from_mir_schema_type(out, field_ty)?);
                 }
                 out_variants.push(AbiEnumVariant {
                     name: variant.name.clone(),
@@ -141,6 +194,7 @@ fn lower_abi_schema(
                 });
             }
             AbiSchema::Enum {
+                type_params: *type_params,
                 variants: out_variants,
             }
         }

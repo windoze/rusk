@@ -24,8 +24,14 @@ fn main() -> int {
             "HostFx",
             "swap",
             HostFnSig {
-                params: vec![HostType::Struct("Point".to_string())],
-                ret: HostType::Struct("Point".to_string()),
+                params: vec![HostType::Struct {
+                    name: "Point".to_string(),
+                    args: Vec::new(),
+                }],
+                ret: HostType::Struct {
+                    name: "Point".to_string(),
+                    args: Vec::new(),
+                },
             },
         )
         .expect("register HostFx.swap");
@@ -46,7 +52,13 @@ fn main() -> int {
     };
     assert_eq!(effect_id, swap_id);
     assert_eq!(args.len(), 1);
-    assert_eq!(args[0].ty(), rusk_bytecode::AbiType::Struct(point_id));
+    assert_eq!(
+        args[0].ty(),
+        rusk_bytecode::AbiType::Struct {
+            type_id: point_id,
+            args: Vec::new(),
+        }
+    );
 
     let resume_value = vm
         .with_host_context(|cx| -> Result<AbiValue, HostError> {

@@ -381,8 +381,261 @@ impl HostFn for AbiShapeSum {
     }
 }
 
+fn find_type_name(
+    module: &rusk_bytecode::ExecutableModule,
+    candidates: &[&str],
+    suffix: &str,
+) -> Option<String> {
+    for &candidate in candidates {
+        if module.type_id(candidate).is_some() {
+            return Some(candidate.to_string());
+        }
+    }
+    let suffix = format!("::{suffix}");
+    module
+        .type_names
+        .iter()
+        .find(|name| name.as_str() == suffix.trim_start_matches("::") || name.ends_with(&suffix))
+        .cloned()
+}
+
+struct AbiMakeSomeBytes {
+    option_type: String,
+}
+
+impl HostFn for AbiMakeSomeBytes {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        if !args.is_empty() {
+            return Err(HostError {
+                message: format!("abi::make_some_bytes: expected no args, got {args:?}"),
+            });
+        }
+        cx.alloc_enum_typed(
+            &self.option_type,
+            vec![AbiType::Bytes],
+            "Some",
+            vec![AbiValue::Bytes(b"hi".to_vec())],
+        )
+    }
+}
+
+struct AbiMakeNoneBytes {
+    option_type: String,
+}
+
+impl HostFn for AbiMakeNoneBytes {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        if !args.is_empty() {
+            return Err(HostError {
+                message: format!("abi::make_none_bytes: expected no args, got {args:?}"),
+            });
+        }
+        cx.alloc_enum_typed(&self.option_type, vec![AbiType::Bytes], "None", Vec::new())
+    }
+}
+
+struct AbiOptionBytesLen;
+
+impl HostFn for AbiOptionBytesLen {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        let [AbiValue::Enum(o)] = args else {
+            return Err(HostError {
+                message: format!("abi::option_bytes_len: bad args: {args:?}"),
+            });
+        };
+
+        let expected_args = [AbiType::Bytes];
+        if o.type_args() != expected_args.as_slice() {
+            return Err(HostError {
+                message: format!(
+                    "abi::option_bytes_len: expected Option<bytes>, got type args {:?}",
+                    o.type_args()
+                ),
+            });
+        }
+
+        let (variant, arity) = cx.enum_variant(o)?;
+        match variant {
+            "None" => Ok(AbiValue::Int(0)),
+            "Some" => {
+                if arity != 1 {
+                    return Err(HostError {
+                        message: format!(
+                            "abi::option_bytes_len: Some arity mismatch: expected 1, got {arity}"
+                        ),
+                    });
+                }
+                let AbiValue::Bytes(b) = cx.enum_get(o, 0)? else {
+                    return Err(HostError {
+                        message: "abi::option_bytes_len: Some field 0 is not bytes".to_string(),
+                    });
+                };
+                Ok(AbiValue::Int(b.len() as i64))
+            }
+            other => Err(HostError {
+                message: format!("abi::option_bytes_len: unknown variant `{other}`"),
+            }),
+        }
+    }
+}
+
+struct AbiMakeOkString {
+    result_type: String,
+}
+
+impl HostFn for AbiMakeOkString {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        if !args.is_empty() {
+            return Err(HostError {
+                message: format!("abi::make_ok_string: expected no args, got {args:?}"),
+            });
+        }
+        cx.alloc_enum_typed(
+            &self.result_type,
+            vec![AbiType::String, AbiType::Int],
+            "Ok",
+            vec![AbiValue::String("ok".to_string())],
+        )
+    }
+}
+
+struct AbiMakeErrInt {
+    result_type: String,
+}
+
+impl HostFn for AbiMakeErrInt {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        if !args.is_empty() {
+            return Err(HostError {
+                message: format!("abi::make_err_int: expected no args, got {args:?}"),
+            });
+        }
+        cx.alloc_enum_typed(
+            &self.result_type,
+            vec![AbiType::String, AbiType::Int],
+            "Err",
+            vec![AbiValue::Int(5)],
+        )
+    }
+}
+
+struct AbiResultCode;
+
+impl HostFn for AbiResultCode {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        let [AbiValue::Enum(r)] = args else {
+            return Err(HostError {
+                message: format!("abi::result_code: bad args: {args:?}"),
+            });
+        };
+
+        let expected_args = [AbiType::String, AbiType::Int];
+        if r.type_args() != expected_args.as_slice() {
+            return Err(HostError {
+                message: format!(
+                    "abi::result_code: expected Result<string, int>, got type args {:?}",
+                    r.type_args()
+                ),
+            });
+        }
+
+        let (variant, arity) = cx.enum_variant(r)?;
+        match variant {
+            "Ok" => {
+                if arity != 1 {
+                    return Err(HostError {
+                        message: format!(
+                            "abi::result_code: Ok arity mismatch: expected 1, got {arity}"
+                        ),
+                    });
+                }
+                let AbiValue::String(s) = cx.enum_get(r, 0)? else {
+                    return Err(HostError {
+                        message: "abi::result_code: Ok field 0 is not string".to_string(),
+                    });
+                };
+                if s != "ok" {
+                    return Err(HostError {
+                        message: format!("abi::result_code: unexpected Ok value {s:?}"),
+                    });
+                }
+                Ok(AbiValue::Int(10))
+            }
+            "Err" => {
+                if arity != 1 {
+                    return Err(HostError {
+                        message: format!(
+                            "abi::result_code: Err arity mismatch: expected 1, got {arity}"
+                        ),
+                    });
+                }
+                let AbiValue::Int(e) = cx.enum_get(r, 0)? else {
+                    return Err(HostError {
+                        message: "abi::result_code: Err field 0 is not int".to_string(),
+                    });
+                };
+                if e != 5 {
+                    return Err(HostError {
+                        message: format!("abi::result_code: unexpected Err value {e}"),
+                    });
+                }
+                Ok(AbiValue::Int(20))
+            }
+            other => Err(HostError {
+                message: format!("abi::result_code: unknown variant `{other}`"),
+            }),
+        }
+    }
+}
+
+struct AbiBadResult {
+    result_type: String,
+}
+
+impl HostFn for AbiBadResult {
+    fn call(&mut self, cx: &mut HostContext<'_>, args: &[AbiValue]) -> Result<AbiValue, HostError> {
+        if !args.is_empty() {
+            return Err(HostError {
+                message: format!("abi::bad_result: expected no args, got {args:?}"),
+            });
+        }
+        // Intentionally return `Result<int, string>` (swapped type args) to trigger VM validation.
+        cx.alloc_enum_typed(
+            &self.result_type,
+            vec![AbiType::Int, AbiType::String],
+            "Ok",
+            vec![AbiValue::Int(1)],
+        )
+    }
+}
+
 #[allow(unused)]
 pub fn install_complex_abi_host_fns_vm(module: &rusk_bytecode::ExecutableModule, vm: &mut Vm) {
+    let option_type_name = if module.host_import_id("abi::make_some_bytes").is_some()
+        || module.host_import_id("abi::make_none_bytes").is_some()
+    {
+        Some(
+            find_type_name(module, &["core::option::Option", "Option"], "Option").unwrap_or_else(
+                || panic!("failed to find `Option` type name in module type_names"),
+            ),
+        )
+    } else {
+        None
+    };
+
+    let result_type_name = if module.host_import_id("abi::make_ok_string").is_some()
+        || module.host_import_id("abi::make_err_int").is_some()
+        || module.host_import_id("abi::bad_result").is_some()
+    {
+        Some(
+            find_type_name(module, &["core::result::Result", "Result"], "Result").unwrap_or_else(
+                || panic!("failed to find `Result` type name in module type_names"),
+            ),
+        )
+    } else {
+        None
+    };
+
     if let Some(id) = module.host_import_id("abi::sum_point") {
         vm.register_host_import(id, AbiSumPoint)
             .expect("register abi::sum_point");
@@ -418,6 +671,51 @@ pub fn install_complex_abi_host_fns_vm(module: &rusk_bytecode::ExecutableModule,
     if let Some(id) = module.host_import_id("abi::shape_sum") {
         vm.register_host_import(id, AbiShapeSum)
             .expect("register abi::shape_sum");
+    }
+
+    if let Some(id) = module.host_import_id("abi::make_some_bytes") {
+        let option_type = option_type_name
+            .clone()
+            .expect("Option type name for abi::make_some_bytes");
+        vm.register_host_import(id, AbiMakeSomeBytes { option_type })
+            .expect("register abi::make_some_bytes");
+    }
+    if let Some(id) = module.host_import_id("abi::make_none_bytes") {
+        let option_type = option_type_name
+            .clone()
+            .expect("Option type name for abi::make_none_bytes");
+        vm.register_host_import(id, AbiMakeNoneBytes { option_type })
+            .expect("register abi::make_none_bytes");
+    }
+    if let Some(id) = module.host_import_id("abi::option_bytes_len") {
+        vm.register_host_import(id, AbiOptionBytesLen)
+            .expect("register abi::option_bytes_len");
+    }
+
+    if let Some(id) = module.host_import_id("abi::make_ok_string") {
+        let result_type = result_type_name
+            .clone()
+            .expect("Result type name for abi::make_ok_string");
+        vm.register_host_import(id, AbiMakeOkString { result_type })
+            .expect("register abi::make_ok_string");
+    }
+    if let Some(id) = module.host_import_id("abi::make_err_int") {
+        let result_type = result_type_name
+            .clone()
+            .expect("Result type name for abi::make_err_int");
+        vm.register_host_import(id, AbiMakeErrInt { result_type })
+            .expect("register abi::make_err_int");
+    }
+    if let Some(id) = module.host_import_id("abi::result_code") {
+        vm.register_host_import(id, AbiResultCode)
+            .expect("register abi::result_code");
+    }
+    if let Some(id) = module.host_import_id("abi::bad_result") {
+        let result_type = result_type_name
+            .clone()
+            .expect("Result type name for abi::bad_result");
+        vm.register_host_import(id, AbiBadResult { result_type })
+            .expect("register abi::bad_result");
     }
 
     if let Some(id) = module.host_import_id("abi::xor_byte") {

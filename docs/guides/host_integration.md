@@ -74,7 +74,7 @@ StepResult::Request { effect_id, args, ... }
 - 复合类型：数组/元组/结构体/枚举
   - 这些复合值在 ABI 上是 **VM 句柄/引用**，不会被深拷贝成 Rust 结构体；
   - 宿主需要通过 `rusk_vm::HostContext` 来安全地读取/构造它们；
-  - v1 限制：名义类型（struct/enum）跨边界必须是单态（不能带类型实参的泛型实例）。
+  - 名义类型（struct/enum）跨边界必须是**闭合**的（不能有未绑定的类型实参，如 `Option<T>`）；允许闭合的泛型实例（如 `Option<bytes>` / `Result<string, int>`）。
 
 这意味着：
 

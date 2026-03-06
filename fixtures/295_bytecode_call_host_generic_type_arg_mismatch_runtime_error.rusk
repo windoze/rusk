@@ -1,0 +1,11 @@
+// expect: runtime_error return type mismatch
+
+mod abi {
+    pub extern fn bad_result() -> Result<string, int>;
+}
+
+fn main() -> unit {
+    abi::bad_result();
+    ()
+}
+

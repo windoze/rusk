@@ -35,14 +35,14 @@ pub enum HostType {
     Char,
     String,
     Bytes,
-    /// A nominal struct type defined in the program/sysroot.
+    /// A nominal struct type defined in the program/sysroot, optionally instantiated.
     ///
     /// This is identified by fully-qualified name (e.g. `"foo::Point"`).
-    Struct(String),
-    /// A nominal enum type defined in the program/sysroot.
+    Struct { name: String, args: Vec<HostType> },
+    /// A nominal enum type defined in the program/sysroot, optionally instantiated.
     ///
     /// This is identified by fully-qualified name (e.g. `"core::result::Result"`).
-    Enum(String),
+    Enum { name: String, args: Vec<HostType> },
     /// A one-shot delimited continuation value (`cont(P) -> R`).
     ///
     /// This is typechecked at compile time, but lowers to an opaque ABI handle at the VM/host

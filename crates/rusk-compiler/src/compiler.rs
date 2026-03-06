@@ -762,17 +762,31 @@ fn mir_host_type_from_frontend_host_type(
         H::Char => M::Char,
         H::String => M::String,
         H::Bytes => M::Bytes,
-        H::Struct(name) => {
+        H::Struct { name, args } => {
             if name.is_empty() {
                 return Err("struct type name cannot be empty".to_string());
             }
-            M::Struct(name.clone())
+            let args = args
+                .iter()
+                .map(mir_host_type_from_frontend_host_type)
+                .collect::<Result<Vec<_>, _>>()?;
+            M::Struct {
+                name: name.clone(),
+                args,
+            }
         }
-        H::Enum(name) => {
+        H::Enum { name, args } => {
             if name.is_empty() {
                 return Err("enum type name cannot be empty".to_string());
             }
-            M::Enum(name.clone())
+            let args = args
+                .iter()
+                .map(mir_host_type_from_frontend_host_type)
+                .collect::<Result<Vec<_>, _>>()?;
+            M::Enum {
+                name: name.clone(),
+                args,
+            }
         }
         H::Cont { param, ret } => M::Cont {
             param: Box::new(mir_host_type_from_frontend_host_type(param)?),

@@ -141,7 +141,9 @@ Notes (current / v1):
 - The declared signature must be **ABI-eligible** for VM/host boundaries (see `BYTECODE_SPEC.md` §3):
   - allowed leaves: `unit`, `bool`, `int`, `float`, `byte`, `char`, `string`, `bytes`, `cont(P) -> R`
   - allowed composites: arrays (`[T]`), tuples (`(T0, T1, ...)`), structs, enums
-  - v1 limitation: nominal types must be monomorphic at the boundary (no type arguments on ABI-exposed structs/enums)
+  - nominal types may be generic instantiations at the boundary **only when closed**:
+    - ✅ `Option<bytes>`, `Result<string, int>`
+    - ❌ `Option<T>` (unbound type arguments are not ABI-eligible)
 - The host import name is the function’s fully-qualified path (e.g. `std::println`).
 
 #### 3.2.2 Structs

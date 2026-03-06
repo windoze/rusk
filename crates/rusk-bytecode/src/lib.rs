@@ -60,28 +60,57 @@ pub enum AbiType {
     Continuation,
     Array(Box<AbiType>),
     Tuple(Vec<AbiType>),
-    Struct(TypeId),
-    Enum(TypeId),
+    Struct { type_id: TypeId, args: Vec<AbiType> },
+    Enum { type_id: TypeId, args: Vec<AbiType> },
 }
 
 /// Optional ABI schema metadata for nominal types, used by the host for reflection and by the VM
 /// for validating host-constructed composite values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbiSchema {
-    Struct { fields: Vec<AbiStructField> },
-    Enum { variants: Vec<AbiEnumVariant> },
+    Struct {
+        /// Number of type parameters on the nominal definition.
+        type_params: u32,
+        fields: Vec<AbiStructField>,
+    },
+    Enum {
+        /// Number of type parameters on the nominal definition.
+        type_params: u32,
+        variants: Vec<AbiEnumVariant>,
+    },
+}
+
+/// A schema-level ABI type.
+///
+/// This is similar to [`AbiType`] but additionally supports referencing nominal type parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbiSchemaType {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    Byte,
+    Char,
+    String,
+    Bytes,
+    Continuation,
+    Array(Box<AbiSchemaType>),
+    Tuple(Vec<AbiSchemaType>),
+    Struct { type_id: TypeId, args: Vec<AbiSchemaType> },
+    Enum { type_id: TypeId, args: Vec<AbiSchemaType> },
+    TypeParam(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AbiStructField {
     pub name: String,
-    pub ty: AbiType,
+    pub ty: AbiSchemaType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AbiEnumVariant {
     pub name: String,
-    pub fields: Vec<AbiType>,
+    pub fields: Vec<AbiSchemaType>,
 }
 
 /// A host import signature restricted to [`AbiType`].

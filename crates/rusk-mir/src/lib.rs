@@ -254,10 +254,12 @@ pub enum HostType {
     Char,
     String,
     Bytes,
-    /// A nominal struct type defined in the module (identified by fully-qualified name).
-    Struct(String),
-    /// A nominal enum type defined in the module (identified by fully-qualified name).
-    Enum(String),
+    /// A nominal struct type defined in the module (identified by fully-qualified name),
+    /// optionally instantiated with type arguments.
+    Struct { name: String, args: Vec<HostType> },
+    /// A nominal enum type defined in the module (identified by fully-qualified name),
+    /// optionally instantiated with type arguments.
+    Enum { name: String, args: Vec<HostType> },
     /// A one-shot delimited continuation value (`cont(P) -> R`).
     ///
     /// This is a tooling/typechecking surface and lowers to an opaque ABI handle.
@@ -276,22 +278,53 @@ pub enum HostType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum AbiSchema {
-    Struct { fields: Vec<AbiStructField> },
-    Enum { variants: Vec<AbiEnumVariant> },
+    Struct {
+        /// Number of type parameters on the nominal definition.
+        type_params: u32,
+        fields: Vec<AbiStructField>,
+    },
+    Enum {
+        /// Number of type parameters on the nominal definition.
+        type_params: u32,
+        variants: Vec<AbiEnumVariant>,
+    },
+}
+
+/// A schema-level ABI type.
+///
+/// This mirrors the VM/host ABI surface, but additionally allows referencing nominal type
+/// parameters (e.g. `Option<T>`’s `Some(T)` field).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum AbiSchemaType {
+    Unit,
+    Bool,
+    Int,
+    Float,
+    Byte,
+    Char,
+    String,
+    Bytes,
+    Continuation,
+    Array(Box<AbiSchemaType>),
+    Tuple(Vec<AbiSchemaType>),
+    Struct { name: String, args: Vec<AbiSchemaType> },
+    Enum { name: String, args: Vec<AbiSchemaType> },
+    TypeParam(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct AbiStructField {
     pub name: String,
-    pub ty: HostType,
+    pub ty: AbiSchemaType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct AbiEnumVariant {
     pub name: String,
-    pub fields: Vec<HostType>,
+    pub fields: Vec<AbiSchemaType>,
 }
 
 /// A compile-time type constructor used to build runtime [`Type::TypeRep`] values.

@@ -107,14 +107,21 @@ pub struct AbiStructRef {
     handle: GcRef,
     readonly: bool,
     type_id: TypeId,
+    type_args: Vec<AbiType>,
 }
 
 impl AbiStructRef {
-    pub(crate) fn new(handle: GcRef, readonly: bool, type_id: TypeId) -> Self {
+    pub(crate) fn new(
+        handle: GcRef,
+        readonly: bool,
+        type_id: TypeId,
+        type_args: Vec<AbiType>,
+    ) -> Self {
         Self {
             handle,
             readonly,
             type_id,
+            type_args,
         }
     }
 
@@ -128,6 +135,10 @@ impl AbiStructRef {
 
     pub fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    pub fn type_args(&self) -> &[AbiType] {
+        &self.type_args
     }
 }
 
@@ -137,14 +148,21 @@ pub struct AbiEnumRef {
     handle: GcRef,
     readonly: bool,
     type_id: TypeId,
+    type_args: Vec<AbiType>,
 }
 
 impl AbiEnumRef {
-    pub(crate) fn new(handle: GcRef, readonly: bool, type_id: TypeId) -> Self {
+    pub(crate) fn new(
+        handle: GcRef,
+        readonly: bool,
+        type_id: TypeId,
+        type_args: Vec<AbiType>,
+    ) -> Self {
         Self {
             handle,
             readonly,
             type_id,
+            type_args,
         }
     }
 
@@ -158,6 +176,10 @@ impl AbiEnumRef {
 
     pub fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    pub fn type_args(&self) -> &[AbiType] {
+        &self.type_args
     }
 }
 
@@ -176,8 +198,14 @@ impl AbiValue {
             Self::Continuation(_) => AbiType::Continuation,
             Self::Array(r) => AbiType::Array(Box::new(r.elem_ty.as_ref().clone())),
             Self::Tuple(r) => AbiType::Tuple(r.item_tys.clone()),
-            Self::Struct(r) => AbiType::Struct(r.type_id),
-            Self::Enum(r) => AbiType::Enum(r.type_id),
+            Self::Struct(r) => AbiType::Struct {
+                type_id: r.type_id,
+                args: r.type_args.clone(),
+            },
+            Self::Enum(r) => AbiType::Enum {
+                type_id: r.type_id,
+                args: r.type_args.clone(),
+            },
         }
     }
 

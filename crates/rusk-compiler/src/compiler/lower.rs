@@ -266,23 +266,172 @@ fn host_type_from_ty(env: &ProgramEnv, ty: &Ty) -> Result<rusk_mir::HostType, St
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         Ty::App(TyCon::Named(name), args) => {
-            if !args.is_empty() {
-                return Err(format!(
-                    "unsupported host type: `{name}` with type arguments is not ABI-eligible in v1"
-                ));
+            if let Some(def) = env.structs.get(name) {
+                if def.generics.iter().any(|g| g.arity != 0) {
+                    return Err(format!(
+                        "unsupported host type: higher-kinded generics on struct `{name}` are not ABI-eligible"
+                    ));
+                }
+                if args.len() != def.generics.len() {
+                    return Err(format!(
+                        "unsupported host type: struct `{name}` generic arity mismatch: expected {}, got {}",
+                        def.generics.len(),
+                        args.len()
+                    ));
+                }
+                let args = args
+                    .iter()
+                    .map(|ty| host_type_from_ty(env, ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(HostType::Struct {
+                    name: name.clone(),
+                    args,
+                });
             }
-            if env.structs.contains_key(name) {
-                Ok(HostType::Struct(name.clone()))
-            } else if env.enums.contains_key(name) {
-                Ok(HostType::Enum(name.clone()))
-            } else {
-                Err(format!(
-                    "unsupported host type: `{name}` (expected struct or enum)"
-                ))
+            if let Some(def) = env.enums.get(name) {
+                if def.generics.iter().any(|g| g.arity != 0) {
+                    return Err(format!(
+                        "unsupported host type: higher-kinded generics on enum `{name}` are not ABI-eligible"
+                    ));
+                }
+                if args.len() != def.generics.len() {
+                    return Err(format!(
+                        "unsupported host type: enum `{name}` generic arity mismatch: expected {}, got {}",
+                        def.generics.len(),
+                        args.len()
+                    ));
+                }
+                let args = args
+                    .iter()
+                    .map(|ty| host_type_from_ty(env, ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(HostType::Enum {
+                    name: name.clone(),
+                    args,
+                });
             }
+            Err(format!(
+                "unsupported host type: `{name}` (expected struct or enum)"
+            ))
         }
         other => Err(format!("unsupported host type: {other:?}")),
     }
+}
+
+fn abi_schema_type_from_ty(
+    env: &ProgramEnv,
+    ty: &Ty,
+    type_params: usize,
+) -> Result<rusk_mir::AbiSchemaType, String> {
+    use crate::typeck::TyCon;
+    use rusk_mir::AbiSchemaType;
+
+    Ok(match ty {
+        Ty::Unit => AbiSchemaType::Unit,
+        Ty::Bool => AbiSchemaType::Bool,
+        Ty::Int => AbiSchemaType::Int,
+        Ty::Float => AbiSchemaType::Float,
+        Ty::Byte => AbiSchemaType::Byte,
+        Ty::Char => AbiSchemaType::Char,
+        Ty::String => AbiSchemaType::String,
+        Ty::Bytes => AbiSchemaType::Bytes,
+        Ty::Cont { param, ret } => {
+            // Validate that the continuation’s param/ret types are schema-eligible, but the ABI
+            // surface encodes continuations as opaque handles without those types.
+            let _ = abi_schema_type_from_ty(env, param, type_params)?;
+            let _ = abi_schema_type_from_ty(env, ret, type_params)?;
+            AbiSchemaType::Continuation
+        }
+        Ty::Readonly(inner) => return abi_schema_type_from_ty(env, inner, type_params),
+        Ty::Array(elem) => AbiSchemaType::Array(Box::new(abi_schema_type_from_ty(
+            env, elem, type_params,
+        )?)),
+        Ty::Tuple(items) => AbiSchemaType::Tuple(
+            items
+                .iter()
+                .map(|ty| abi_schema_type_from_ty(env, ty, type_params))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Ty::Gen(id) => {
+            if *id >= type_params {
+                return Err(format!(
+                    "internal error: schema type param index {id} out of bounds (type_params={type_params})"
+                ));
+            }
+            AbiSchemaType::TypeParam(
+                (*id)
+                    .try_into()
+                    .map_err(|_| "schema type param index overflow".to_string())?,
+            )
+        }
+        Ty::App(TyCon::Named(name), args) => {
+            if let Some(def) = env.structs.get(name) {
+                if def.generics.iter().any(|g| g.arity != 0) {
+                    return Err(format!(
+                        "higher-kinded generics on struct `{name}` are not ABI-eligible"
+                    ));
+                }
+                if args.len() != def.generics.len() {
+                    return Err(format!(
+                        "struct `{name}` generic arity mismatch: expected {}, got {}",
+                        def.generics.len(),
+                        args.len()
+                    ));
+                }
+                return Ok(AbiSchemaType::Struct {
+                    name: name.clone(),
+                    args: args
+                        .iter()
+                        .map(|ty| abi_schema_type_from_ty(env, ty, type_params))
+                        .collect::<Result<Vec<_>, _>>()?,
+                });
+            }
+            if let Some(def) = env.enums.get(name) {
+                if def.generics.iter().any(|g| g.arity != 0) {
+                    return Err(format!(
+                        "higher-kinded generics on enum `{name}` are not ABI-eligible"
+                    ));
+                }
+                if args.len() != def.generics.len() {
+                    return Err(format!(
+                        "enum `{name}` generic arity mismatch: expected {}, got {}",
+                        def.generics.len(),
+                        args.len()
+                    ));
+                }
+                return Ok(AbiSchemaType::Enum {
+                    name: name.clone(),
+                    args: args
+                        .iter()
+                        .map(|ty| abi_schema_type_from_ty(env, ty, type_params))
+                        .collect::<Result<Vec<_>, _>>()?,
+                });
+            }
+            return Err(format!(
+                "type `{name}` is not ABI-eligible (expected a struct or enum)"
+            ));
+        }
+        Ty::Never => return Err("type `!` is not ABI-eligible".to_string()),
+        Ty::Fn { .. } => return Err("function types are not ABI-eligible".to_string()),
+        Ty::Iface { .. } => return Err("interface types are not ABI-eligible".to_string()),
+        Ty::AssocProj { .. } => {
+            return Err("associated type projections are not ABI-eligible".to_string())
+        }
+        Ty::SelfType => return Err("type `Self` is not ABI-eligible".to_string()),
+        Ty::Var(id) => {
+            return Err(format!("unresolved inference type <t{id}> is not ABI-eligible"))
+        }
+        Ty::App(TyCon::Gen(id), _) => {
+            return Err(format!(
+                "unbound generic type constructor <gen#{id}> is not ABI-eligible"
+            ))
+        }
+        Ty::App(TyCon::Var(id), _) => {
+            return Err(format!(
+                "unresolved inference type constructor <F{id}> is not ABI-eligible"
+            ))
+        }
+    })
 }
 
 impl Compiler {
@@ -1604,63 +1753,85 @@ impl Compiler {
     }
 
     fn populate_abi_schemas(&mut self) -> Result<(), CompileError> {
-        use crate::typeck::{Ty, TyCon};
         use rusk_mir::{AbiEnumVariant, AbiSchema, AbiStructField};
 
-        let span0 = Span::new(0, 0);
-
         for (type_name, def) in &self.env.structs {
-            let ty = Ty::App(TyCon::Named(type_name.clone()), Vec::new());
-            if crate::typeck::validate_abi_eligible_ty(&self.env, &ty, span0).is_err() {
+            if def.generics.iter().any(|g| g.arity != 0) {
                 continue;
             }
+            let type_params: u32 = match def.generics.len().try_into() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
             let mut fields = Vec::with_capacity(def.fields.len());
+            let mut ok = true;
             for (field_name, field_ty) in &def.fields {
-                let host_ty = host_type_from_ty(&self.env, field_ty).map_err(|message| {
-                    CompileError::new(
-                        format!(
-                            "internal error: ABI schema for struct `{type_name}` field `{field_name}`: {message}"
-                        ),
-                        span0,
-                    )
-                })?;
+                let schema_ty = match abi_schema_type_from_ty(&self.env, field_ty, def.generics.len()) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                };
                 fields.push(AbiStructField {
                     name: field_name.clone(),
-                    ty: host_ty,
+                    ty: schema_ty,
                 });
             }
-            self.module
-                .abi_schemas
-                .insert(type_name.clone(), AbiSchema::Struct { fields });
+            if !ok {
+                continue;
+            }
+
+            self.module.abi_schemas.insert(
+                type_name.clone(),
+                AbiSchema::Struct { type_params, fields },
+            );
         }
 
         for (type_name, def) in &self.env.enums {
-            let ty = Ty::App(TyCon::Named(type_name.clone()), Vec::new());
-            if crate::typeck::validate_abi_eligible_ty(&self.env, &ty, span0).is_err() {
+            if def.generics.iter().any(|g| g.arity != 0) {
                 continue;
             }
+            let type_params: u32 = match def.generics.len().try_into() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
             let mut variants = Vec::with_capacity(def.variants.len());
+            let mut ok = true;
             for (variant_name, field_tys) in &def.variants {
                 let mut fields = Vec::with_capacity(field_tys.len());
-                for (idx, field_ty) in field_tys.iter().enumerate() {
-                    let host_ty = host_type_from_ty(&self.env, field_ty).map_err(|message| {
-                        CompileError::new(
-                            format!(
-                                "internal error: ABI schema for enum `{type_name}` variant `{variant_name}` field {idx}: {message}"
-                            ),
-                            span0,
-                        )
-                    })?;
-                    fields.push(host_ty);
+                for field_ty in field_tys {
+                    let schema_ty =
+                        match abi_schema_type_from_ty(&self.env, field_ty, def.generics.len()) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        };
+                    fields.push(schema_ty);
+                }
+                if !ok {
+                    break;
                 }
                 variants.push(AbiEnumVariant {
                     name: variant_name.clone(),
                     fields,
                 });
             }
-            self.module
-                .abi_schemas
-                .insert(type_name.clone(), AbiSchema::Enum { variants });
+            if !ok {
+                continue;
+            }
+
+            self.module.abi_schemas.insert(
+                type_name.clone(),
+                AbiSchema::Enum {
+                    type_params,
+                    variants,
+                },
+            );
         }
 
         Ok(())

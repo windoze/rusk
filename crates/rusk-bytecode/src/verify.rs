@@ -4,8 +4,8 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 
 use crate::{
-    AbiSchema, AbiType, CallTarget, ConstValue, EffectSpec, ExecutableModule, Function, FunctionId,
-    Instruction, MethodId, Reg, TypeId, TypeRepLit,
+    AbiSchema, AbiSchemaType, AbiType, CallTarget, ConstValue, EffectSpec, ExecutableModule,
+    Function, FunctionId, Instruction, MethodId, Reg, TypeId, TypeRepLit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +216,7 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
         };
         let type_id = TypeId(idx as u32);
         match schema {
-            AbiSchema::Struct { fields } => {
+            AbiSchema::Struct { type_params, fields } => {
                 let Some(Some(layout)) = module.struct_layouts.get(idx) else {
                     let name = module.type_name(type_id).unwrap_or("<unknown>");
                     return Err(VerifyError {
@@ -249,22 +249,29 @@ pub fn verify_module(module: &ExecutableModule) -> Result<(), VerifyError> {
                             ),
                         });
                     }
-                    validate_abi_type(module, &field.ty).map_err(|e| VerifyError {
-                        message: format!(
-                            "abi schema for struct id {} field `{}`: {}",
-                            type_id.0, field.name, e
-                        ),
+                    validate_abi_schema_type(module, &field.ty, *type_params).map_err(|e| {
+                        VerifyError {
+                            message: format!(
+                                "abi schema for struct id {} field `{}`: {}",
+                                type_id.0, field.name, e
+                            ),
+                        }
                     })?;
                 }
             }
-            AbiSchema::Enum { variants } => {
+            AbiSchema::Enum {
+                type_params,
+                variants,
+            } => {
                 for variant in variants {
                     for (field_idx, field_ty) in variant.fields.iter().enumerate() {
-                        validate_abi_type(module, field_ty).map_err(|e| VerifyError {
-                            message: format!(
-                                "abi schema for enum id {} variant `{}` field {field_idx}: {}",
-                                type_id.0, variant.name, e
-                            ),
+                        validate_abi_schema_type(module, field_ty, *type_params).map_err(|e| {
+                            VerifyError {
+                                message: format!(
+                                    "abi schema for enum id {} variant `{}` field {field_idx}: {}",
+                                    type_id.0, variant.name, e
+                                ),
+                            }
                         })?;
                     }
                 }
@@ -488,7 +495,10 @@ fn validate_abi_type(module: &ExecutableModule, ty: &AbiType) -> Result<(), Stri
             }
             Ok(())
         }
-        AbiType::Struct(type_id) => {
+        AbiType::Struct { type_id, args } => {
+            for arg in args {
+                validate_abi_type(module, arg)?;
+            }
             let idx = type_id.0 as usize;
             if idx >= module.type_names.len() {
                 return Err(format!(
@@ -507,15 +517,154 @@ fn validate_abi_type(module: &ExecutableModule, ty: &AbiType) -> Result<(), Stri
                     ));
                 }
             }
+            if let Some(Some(schema)) = module.abi_schemas.get(idx) {
+                let AbiSchema::Struct { type_params, .. } = schema else {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiType::Struct refers to type id {} (`{name}`) but abi schema is not a struct",
+                        type_id.0
+                    ));
+                };
+                if args.len() != *type_params as usize {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiType::Struct `{name}` type arg arity mismatch: expected {type_params}, got {}",
+                        args.len()
+                    ));
+                }
+            }
             Ok(())
         }
-        AbiType::Enum(type_id) => {
+        AbiType::Enum { type_id, args } => {
+            for arg in args {
+                validate_abi_type(module, arg)?;
+            }
             let idx = type_id.0 as usize;
             if idx >= module.type_names.len() {
                 return Err(format!(
                     "invalid enum type id {} (type_names={})",
                     type_id.0,
                     module.type_names.len()
+                ));
+            }
+            if let Some(Some(schema)) = module.abi_schemas.get(idx) {
+                let AbiSchema::Enum { type_params, .. } = schema else {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiType::Enum refers to type id {} (`{name}`) but abi schema is not an enum",
+                        type_id.0
+                    ));
+                };
+                if args.len() != *type_params as usize {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiType::Enum `{name}` type arg arity mismatch: expected {type_params}, got {}",
+                        args.len()
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_abi_schema_type(
+    module: &ExecutableModule,
+    ty: &AbiSchemaType,
+    type_params: u32,
+) -> Result<(), String> {
+    match ty {
+        AbiSchemaType::Unit
+        | AbiSchemaType::Bool
+        | AbiSchemaType::Int
+        | AbiSchemaType::Float
+        | AbiSchemaType::Byte
+        | AbiSchemaType::Char
+        | AbiSchemaType::String
+        | AbiSchemaType::Bytes
+        | AbiSchemaType::Continuation => Ok(()),
+        AbiSchemaType::Array(elem) => validate_abi_schema_type(module, elem, type_params),
+        AbiSchemaType::Tuple(items) => {
+            for item in items {
+                validate_abi_schema_type(module, item, type_params)?;
+            }
+            Ok(())
+        }
+        AbiSchemaType::Struct { type_id, args } => {
+            for arg in args {
+                validate_abi_schema_type(module, arg, type_params)?;
+            }
+            let idx = type_id.0 as usize;
+            if idx >= module.type_names.len() {
+                return Err(format!(
+                    "invalid struct type id {} (type_names={})",
+                    type_id.0,
+                    module.type_names.len()
+                ));
+            }
+            match module.struct_layouts.get(idx) {
+                Some(Some(_layout)) => {}
+                _ => {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiSchemaType::Struct refers to non-struct type id {} (`{name}`)",
+                        type_id.0
+                    ));
+                }
+            }
+            if let Some(Some(schema)) = module.abi_schemas.get(idx) {
+                let AbiSchema::Struct { type_params, .. } = schema else {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiSchemaType::Struct refers to type id {} (`{name}`) but abi schema is not a struct",
+                        type_id.0
+                    ));
+                };
+                if args.len() != *type_params as usize {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiSchemaType::Struct `{name}` type arg arity mismatch: expected {type_params}, got {}",
+                        args.len()
+                    ));
+                }
+            }
+            Ok(())
+        }
+        AbiSchemaType::Enum { type_id, args } => {
+            for arg in args {
+                validate_abi_schema_type(module, arg, type_params)?;
+            }
+            let idx = type_id.0 as usize;
+            if idx >= module.type_names.len() {
+                return Err(format!(
+                    "invalid enum type id {} (type_names={})",
+                    type_id.0,
+                    module.type_names.len()
+                ));
+            }
+            if let Some(Some(schema)) = module.abi_schemas.get(idx) {
+                let AbiSchema::Enum { type_params, .. } = schema else {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiSchemaType::Enum refers to type id {} (`{name}`) but abi schema is not an enum",
+                        type_id.0
+                    ));
+                };
+                if args.len() != *type_params as usize {
+                    let name = module.type_name(*type_id).unwrap_or("<unknown>");
+                    return Err(format!(
+                        "AbiSchemaType::Enum `{name}` type arg arity mismatch: expected {type_params}, got {}",
+                        args.len()
+                    ));
+                }
+            }
+            Ok(())
+        }
+        AbiSchemaType::TypeParam(idx) => {
+            if *idx >= type_params {
+                return Err(format!(
+                    "schema type param index {} out of bounds (type_params={type_params})",
+                    idx
                 ));
             }
             Ok(())

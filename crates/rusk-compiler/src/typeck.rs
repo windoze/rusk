@@ -1409,7 +1409,19 @@ pub(crate) fn validate_abi_eligible_ty(
     ty: &Ty,
     span: Span,
 ) -> Result<(), String> {
-    fn walk(env: &ProgramEnv, ty: &Ty, visiting: &mut HashSet<String>) -> Result<(), String> {
+    fn walk(
+        env: &ProgramEnv,
+        ty: &Ty,
+        visiting: &mut HashSet<Ty>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        if *fuel == 0 {
+            return Err(
+                "ABI eligibility check exceeded recursion limit (possibly recursive generic instantiation)"
+                    .to_string(),
+            );
+        }
+
         use TyCon::Named;
 
         match ty {
@@ -1422,56 +1434,75 @@ pub(crate) fn validate_abi_eligible_ty(
             | Ty::String
             | Ty::Bytes => Ok(()),
             Ty::Cont { param, ret } => {
-                walk(env, param, visiting)?;
-                walk(env, ret, visiting)?;
+                walk(env, param, visiting, fuel)?;
+                walk(env, ret, visiting, fuel)?;
                 Ok(())
             }
-            Ty::Array(elem) => walk(env, elem, visiting),
+            Ty::Array(elem) => walk(env, elem, visiting, fuel),
             Ty::Tuple(items) => {
                 for item in items {
-                    walk(env, item, visiting)?;
+                    walk(env, item, visiting, fuel)?;
                 }
                 Ok(())
             }
-            Ty::Readonly(inner) => walk(env, inner, visiting),
+            Ty::Readonly(inner) => walk(env, inner, visiting, fuel),
             Ty::App(Named(name), args) => {
-                if !args.is_empty() {
+                let (kind, generics, fields_to_check): (&'static str, &[GenericParamInfo], Vec<Ty>) =
+                    if let Some(def) = env.structs.get(name) {
+                        (
+                            "struct",
+                            &def.generics,
+                            def.fields.iter().map(|(_f, ty)| ty.clone()).collect(),
+                        )
+                    } else if let Some(def) = env.enums.get(name) {
+                        (
+                            "enum",
+                            &def.generics,
+                            def.variants
+                                .values()
+                                .flat_map(|fields| fields.iter().cloned())
+                                .collect(),
+                        )
+                    } else {
+                        return Err(format!(
+                            "type `{name}` is not ABI-eligible (expected a struct or enum)"
+                        ));
+                    };
+
+                if generics.iter().any(|g| g.arity != 0) {
                     return Err(format!(
-                        "type `{name}` with type arguments is not ABI-eligible in v1"
+                        "higher-kinded generics on {kind} `{name}` are not ABI-eligible"
                     ));
                 }
-                // Struct and enum types are allowed only when *they* are ABI-eligible.
-                if let Some(def) = env.structs.get(name) {
-                    if !def.generics.is_empty() {
-                        return Err(format!("generic struct `{name}` is not ABI-eligible in v1"));
-                    }
-                    if !visiting.insert(name.clone()) {
-                        return Ok(());
-                    }
-                    for (_field, field_ty) in &def.fields {
-                        walk(env, field_ty, visiting)?;
-                    }
-                    visiting.remove(name);
+
+                if args.len() != generics.len() {
+                    return Err(format!(
+                        "{kind} `{name}` generic arity mismatch: expected {}, got {}",
+                        generics.len(),
+                        args.len()
+                    ));
+                }
+
+                for arg in args {
+                    walk(env, arg, visiting, fuel)?;
+                }
+
+                let key = ty.clone();
+                if !visiting.insert(key.clone()) {
                     return Ok(());
                 }
-                if let Some(def) = env.enums.get(name) {
-                    if !def.generics.is_empty() {
-                        return Err(format!("generic enum `{name}` is not ABI-eligible in v1"));
-                    }
-                    if !visiting.insert(name.clone()) {
-                        return Ok(());
-                    }
-                    for fields in def.variants.values() {
-                        for field_ty in fields {
-                            walk(env, field_ty, visiting)?;
-                        }
-                    }
-                    visiting.remove(name);
-                    return Ok(());
+                *fuel -= 1;
+
+                let ty_subst: HashMap<GenId, Ty> = args.iter().cloned().enumerate().collect();
+                let con_subst: HashMap<GenId, TyCon> = HashMap::new();
+
+                for field_ty in fields_to_check {
+                    let instantiated = subst_ty(field_ty, &ty_subst, &con_subst);
+                    walk(env, &instantiated, visiting, fuel)?;
                 }
-                Err(format!(
-                    "type `{name}` is not ABI-eligible (expected a struct or enum)"
-                ))
+
+                visiting.remove(&key);
+                Ok(())
             }
             Ty::Never => Err("type `!` is not ABI-eligible".to_string()),
             Ty::Fn { .. } => Err("function types are not ABI-eligible".to_string()),
@@ -1480,15 +1511,25 @@ pub(crate) fn validate_abi_eligible_ty(
                 Err("associated type projections are not ABI-eligible".to_string())
             }
             Ty::SelfType => Err("type `Self` is not ABI-eligible".to_string()),
-            Ty::Gen(_) | Ty::Var(_) | Ty::App(TyCon::Gen(_), _) | Ty::App(TyCon::Var(_), _) => {
-                Err("generic/inference types are not ABI-eligible".to_string())
-            }
+            Ty::Gen(id) => Err(format!(
+                "unbound generic type parameter <gen#{id}> is not ABI-eligible"
+            )),
+            Ty::Var(id) => Err(format!(
+                "unresolved inference type <t{id}> is not ABI-eligible"
+            )),
+            Ty::App(TyCon::Gen(id), _) => Err(format!(
+                "unbound generic type constructor <gen#{id}> is not ABI-eligible"
+            )),
+            Ty::App(TyCon::Var(id), _) => Err(format!(
+                "unresolved inference type constructor <F{id}> is not ABI-eligible"
+            )),
         }
     }
 
     let _ = span;
     let mut visiting = HashSet::new();
-    walk(env, ty, &mut visiting)
+    let mut fuel = 1024;
+    walk(env, ty, &mut visiting, &mut fuel)
 }
 
 #[derive(Clone, Debug)]

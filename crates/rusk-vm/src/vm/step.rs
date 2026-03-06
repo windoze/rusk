@@ -1483,6 +1483,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                                     &mut vm.heap,
                                     &mut vm.gc_allocations_since_collect,
                                     &mut vm.pinned_continuations,
+                                    &mut vm.type_reps,
                                     &mut vm.host_fns,
                                     &mut vm.in_host_call,
                                     frame,
@@ -1525,6 +1526,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
                         &mut vm.pinned_continuations,
+                        &mut vm.type_reps,
                         &mut vm.host_fns,
                         &mut vm.in_host_call,
                         frame,
@@ -2431,6 +2433,7 @@ pub fn vm_step(vm: &mut Vm, fuel: Option<u64>) -> StepResult {
                         &mut vm.heap,
                         &mut vm.gc_allocations_since_collect,
                         &mut vm.pinned_continuations,
+                        &mut vm.type_reps,
                     );
                     let mut abi_args = Vec::with_capacity(arg_values.len());
                     for (idx, (v, expected)) in

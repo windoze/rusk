@@ -83,7 +83,7 @@
 - 复合值（以不透明 VM 引用/句柄的形式跨边界）：
   - `array(T)` / `[T]`
   - `tuple(T0, T1, ...)` / `(T0, T1, ...)`
-  - Rusk 定义的 `struct` / `enum`
+  - Rusk 定义的 `struct` / `enum`（包括闭合的泛型实例，如 `Option<bytes>`）
 
 在 Rust 中：
 
@@ -103,7 +103,7 @@ assert_eq!(v.ty(), rusk_bytecode::AbiType::Int);
 - **宿主导入** 与 **外部化 effects** 都可以接受/返回上面的 ABI 类型集合，但签名是严格的：不匹配会 trap。
 - 复合 ABI 值是 **VM 本地句柄**：它们只在产生它们的 `Vm` 实例里有意义，并且必须通过 `HostContext` 访问。
 - v1 限制：
-  - 名义 ABI 类型在边界上必须是单态（不能跨边界传递带类型实参的泛型 struct/enum 值）。
+  - 名义 ABI 类型在边界上必须是**闭合**的（不能有未绑定的类型实参，如 `Option<T>`）；允许闭合的泛型实例（如 `Option<bytes>` / `Result<string, int>`）。
   - 宿主定义名义类型不在范围内。
 
 ---
@@ -146,13 +146,25 @@ fn main() -> unit {
 - v1 不支持泛型 `extern fn`。
 - 参数/返回值类型必须是字节码 ABI 安全的；否则编译为字节码会失败。
 
+闭合的泛型名义类型示例（允许出现在 ABI 签名中）：
+
+```rusk
+mod env {
+    pub extern fn getenv(key: string) -> Option<string>;
+}
+
+mod fs {
+    pub extern fn read(path: string) -> Result<bytes, string>;
+}
+```
+
 #### 字节码的 ABI 安全性
 
 对于你打算在 `rusk-vm` 上运行的程序，宿主导入签名必须使用 ABI 安全的类型集合：
 
 - 基础类型：`unit` / `bool` / `int` / `float` / `byte` / `char` / `string` / `bytes`
 - `continuation`（`cont(P) -> R`，在 ABI 上是句柄）
-- 复合类型：数组/元组/struct/enum（名义类型必须是单态，且由模块/sysroot 定义）
+- 复合类型：数组/元组/struct/enum（名义类型允许闭合的泛型实例；由模块/sysroot 定义；宿主侧通过 `HostContext` 访问/构造）
 
 如果你声明了不 ABI 安全的宿主导入，编译为字节码时会出现类似错误：
 

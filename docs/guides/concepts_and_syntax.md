@@ -370,6 +370,6 @@ match compute() {
 两者都受一个强约束：跨 VM/宿主边界的值必须是 ABI 安全的集合：
 
 - 基础类型：`unit/bool/int/float/byte/char/string/bytes/continuation`
-- 复合类型：`array/tuple/struct/enum`（以 VM 句柄/引用的形式跨边界；宿主侧需要通过 `HostContext` 来读取/构造；名义类型在 v1 仅支持单态/无类型实参）
+- 复合类型：`array/tuple/struct/enum`（以 VM 句柄/引用的形式跨边界；宿主侧需要通过 `HostContext` 来读取/构造；名义类型需闭合：允许 `Option<bytes>` / `Result<string, int>`，不允许 `Option<T>`）
 
 具体做法见 `docs/guides/host_integration.md` 与更完整的 `docs/embedding-vm.zh.md`。

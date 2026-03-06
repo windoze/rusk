@@ -879,6 +879,7 @@ impl Vm {
             &mut self.heap,
             &mut self.gc_allocations_since_collect,
             &mut self.pinned_continuations,
+            &mut self.type_reps,
         );
         f(&mut cx)
     }
@@ -3121,6 +3122,7 @@ fn call_host_import(
     heap: &mut ImmixHeap<HeapValue>,
     gc_allocations_since_collect: &mut usize,
     pinned_continuations: &mut PinnedContinuations,
+    type_reps: &mut TypeReps,
     host_fns: &mut Vec<Option<Box<dyn HostFn>>>,
     in_host_call: &mut bool,
     frame: &mut Frame,
@@ -3154,6 +3156,7 @@ fn call_host_import(
         heap,
         gc_allocations_since_collect,
         pinned_continuations,
+        type_reps,
     );
 
     let mut abi_args = Vec::with_capacity(args.len());

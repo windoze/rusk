@@ -1,0 +1,9 @@
+// expect: compile_error expects 1 type argument
+
+struct Box<T> { x: T }
+
+mod host {
+    pub extern fn take(b: super::Box) -> unit;
+}
+
+fn main() -> unit { () }

@@ -1,0 +1,28 @@
+// expect: ok int 1
+
+mod abi {
+    pub extern fn make_some_bytes() -> Option<bytes>;
+    pub extern fn make_none_bytes() -> Option<bytes>;
+    pub extern fn option_bytes_len(o: Option<bytes>) -> int;
+
+    pub extern fn make_ok_string() -> Result<string, int>;
+    pub extern fn make_err_int() -> Result<string, int>;
+    pub extern fn result_code(r: Result<string, int>) -> int;
+}
+
+fn main() -> int {
+    let a = abi::make_some_bytes();
+    if abi::option_bytes_len(a) != 2 { return 0; }
+
+    let b = abi::make_none_bytes();
+    if abi::option_bytes_len(b) != 0 { return 0; }
+
+    let c = abi::make_ok_string();
+    if abi::result_code(c) != 10 { return 0; }
+
+    let d = abi::make_err_int();
+    if abi::result_code(d) != 20 { return 0; }
+
+    1
+}
+
